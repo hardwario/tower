@@ -1,5 +1,7 @@
 # jolt — STM32L083CZ UART flasher
 
+[![CI](https://github.com/hardwario/jolt/actions/workflows/ci.yml/badge.svg)](https://github.com/hardwario/jolt/actions/workflows/ci.yml)
+
 A small, focused Rust CLI that programs an **STM32L083CZ** over a serial port
 using the STM32 embedded **UART bootloader** (ST AN3155 protocol). It was built
 for the **HARDWARIO TOWER Radio Dongle**, whose USB-UART bridge drives the MCU's
