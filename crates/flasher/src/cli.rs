@@ -63,10 +63,6 @@ pub struct FlashArgs {
     /// Use the bootloader Go command instead of a hardware reset to start the app
     #[arg(long)]
     pub go: bool,
-
-    /// Flash start address (decimal or 0x-prefixed hex)
-    #[arg(long, default_value = "0x08000000", value_parser = parse_u32_maybe_hex)]
-    pub address: u32,
 }
 
 #[derive(Args)]
@@ -78,14 +74,4 @@ pub struct ResetArgs {
     /// Reset into the application (default)
     #[arg(long)]
     pub app: bool,
-}
-
-fn parse_u32_maybe_hex(s: &str) -> Result<u32, String> {
-    let s = s.trim();
-    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u32::from_str_radix(hex, 16)
-    } else {
-        s.parse::<u32>()
-    };
-    parsed.map_err(|e| format!("invalid address '{s}': {e}"))
 }

@@ -2,6 +2,7 @@
 name = "towerf"
 version = "0.1.0"
 edition = "2024"
+description = "TOWER Flasher — program an STM32L083CZ over the UART bootloader"
 
 [dependencies]
 anyhow = "1.0.102"

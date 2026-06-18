@@ -4,8 +4,7 @@
 /// USART bootloader (AN3155 / AN2606); the auto-baud detection tops out here.
 pub const BAUD: u32 = 115_200;
 
-/// Main flash memory base address (default flash target).
-#[allow(dead_code)] // canonical constant; also used in tests
+/// Main flash memory base address — where firmware is written.
 pub const FLASH_BASE: u32 = 0x0800_0000;
 
 /// Main flash size on the STM32L083CZ (192 KiB).

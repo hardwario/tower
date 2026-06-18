@@ -28,6 +28,16 @@ fn open(global: &GlobalOpts) -> Result<Port> {
     Port::open(&path).with_context(|| format!("failed to open serial port {path}"))
 }
 
+/// Enter the bootloader and print the chip id. Leaves the port in the
+/// bootloader, ready for further commands.
+fn enter_and_identify(port: &mut Port, verbose: bool) -> Result<()> {
+    println!("Entering bootloader...");
+    flash::connect(port, verbose).context("entering bootloader")?;
+    let id = Bootloader::new(port).get_id().context("Get ID")?;
+    println!("Chip id : 0x{id:03X} ({})", target::chip_name(id));
+    Ok(())
+}
+
 pub fn list() -> Result<()> {
     let ports = serialport::available_ports().context("listing serial ports")?;
     for p in &ports {
@@ -38,35 +48,11 @@ pub fn list() -> Result<()> {
 
 pub fn info(global: &GlobalOpts) -> Result<()> {
     let mut port = open(global)?;
-    println!("Entering bootloader...");
-    flash::connect(&mut port, 5, global.verbose > 0).context("entering bootloader")?;
-    {
-        let mut bl = Bootloader::new(&mut port);
-        let id = bl.get_id().context("Get ID")?;
-        println!("Chip id : 0x{id:03X} ({})", target::chip_name(id));
-        if let Ok((v, o1, o2)) = bl.get_version() {
-            println!(
-                "GetVer  : {}.{}  (option bytes 0x{o1:02X} 0x{o2:02X})",
-                v >> 4,
-                v & 0x0F
-            );
-        }
-        if let Ok((v, cmds)) = bl.get() {
-            let list: Vec<String> = cmds.iter().map(|c| format!("0x{c:02X}")).collect();
-            println!("Get     : v{}.{}", v >> 4, v & 0x0F);
-            println!("Commands: {}", list.join(" "));
-            let erase = if cmds.contains(&0x44) {
-                "Extended Erase (0x44)"
-            } else if cmds.contains(&0x43) {
-                "Erase (0x43)"
-            } else {
-                "NONE"
-            };
-            println!(
-                "          erase={erase}, write(0x31)={}",
-                cmds.contains(&0x31)
-            );
-        }
+    enter_and_identify(&mut port, global.verbose > 0)?;
+    if let Ok((version, cmds)) = Bootloader::new(&mut port).get() {
+        let list: Vec<String> = cmds.iter().map(|c| format!("0x{c:02X}")).collect();
+        println!("BL ver  : {}.{}", version >> 4, version & 0x0F);
+        println!("Commands: {}", list.join(" "));
     }
     port.reset_into_app()
         .context("resetting into application")?;
@@ -76,14 +62,9 @@ pub fn info(global: &GlobalOpts) -> Result<()> {
 
 pub fn erase(global: &GlobalOpts) -> Result<()> {
     let mut port = open(global)?;
-    println!("Entering bootloader...");
-    flash::connect(&mut port, 5, global.verbose > 0).context("entering bootloader")?;
-    {
-        let mut bl = Bootloader::new(&mut port);
-        let id = bl.get_id().context("Get ID")?;
-        println!("Chip id : 0x{id:03X} ({})", target::chip_name(id));
-        flash::erase_pages(&mut bl, target::PAGE_COUNT).context("erasing flash")?;
-    }
+    enter_and_identify(&mut port, global.verbose > 0)?;
+    flash::erase_pages(&mut Bootloader::new(&mut port), target::PAGE_COUNT)
+        .context("erasing flash")?;
     port.reset_into_app()
         .context("resetting into application")?;
     println!("Erased and reset into application.");
@@ -102,7 +83,6 @@ pub fn flash(global: &GlobalOpts, args: &FlashArgs) -> Result<()> {
     }
     let mut port = open(global)?;
     let opts = FlashOptions {
-        address: args.address,
         erase: !args.no_erase,
         verify: !args.no_verify,
         run: !args.no_run,

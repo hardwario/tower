@@ -13,7 +13,6 @@ const ERASE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_ATTEMPTS: u32 = 5;
 
 pub struct FlashOptions {
-    pub address: u32,
     pub erase: bool,
     pub verify: bool,
     pub run: bool,
@@ -23,7 +22,7 @@ pub struct FlashOptions {
 
 /// Number of flash pages spanning `length` bytes of firmware, clamped to the
 /// chip's page count.
-pub(crate) fn pages_for_length(length: usize) -> usize {
+fn pages_for_length(length: usize) -> usize {
     length.div_ceil(target::PAGE_SIZE).min(target::PAGE_COUNT)
 }
 
@@ -49,7 +48,7 @@ pub fn erase_pages(bl: &mut Bootloader, count: usize) -> Result<()> {
 }
 
 /// Pad `chunk` up to a multiple of `align` with 0xFF (erased-flash value).
-pub(crate) fn pad_block(chunk: &[u8], align: usize) -> Vec<u8> {
+fn pad_block(chunk: &[u8], align: usize) -> Vec<u8> {
     let mut buf = chunk.to_vec();
     while !buf.len().is_multiple_of(align) {
         buf.push(0xFF);
@@ -59,17 +58,19 @@ pub(crate) fn pad_block(chunk: &[u8], align: usize) -> Vec<u8> {
 
 /// Enter the bootloader and complete the 0x7F auto-baud handshake, retrying the
 /// full reset sequence between attempts.
-pub fn connect(port: &mut Port, attempts: u32, verbose: bool) -> Result<()> {
-    for attempt in 1..=attempts {
+pub fn connect(port: &mut Port, verbose: bool) -> Result<()> {
+    for attempt in 1..=CONNECT_ATTEMPTS {
         port.reset_into_bootloader()?;
         let mut bl = Bootloader::new(port);
         match bl.init() {
             Ok(()) => return Ok(()),
-            Err(e) if verbose => eprintln!("  init attempt {attempt}/{attempts}: {e}"),
+            Err(e) if verbose => eprintln!("  init attempt {attempt}/{CONNECT_ATTEMPTS}: {e}"),
             Err(_) => {}
         }
     }
-    Err(Error::BootloaderInit { attempts })
+    Err(Error::BootloaderInit {
+        attempts: CONNECT_ATTEMPTS,
+    })
 }
 
 fn bytes_bar(len: u64, msg: &'static str) -> ProgressBar {
@@ -89,7 +90,7 @@ pub fn flash(port: &mut Port, firmware: &[u8], opts: &FlashOptions) -> Result<()
     let start = Instant::now();
 
     println!("Entering bootloader...");
-    connect(port, CONNECT_ATTEMPTS, opts.verbose)?;
+    connect(port, opts.verbose)?;
 
     {
         let mut bl = Bootloader::new(port);
@@ -111,7 +112,7 @@ pub fn flash(port: &mut Port, firmware: &[u8], opts: &FlashOptions) -> Result<()
 
         // Write
         let bar = bytes_bar(firmware.len() as u64, "Writing");
-        let mut addr = opts.address;
+        let mut addr = target::FLASH_BASE;
         for chunk in firmware.chunks(target::MAX_BLOCK) {
             let buf = pad_block(chunk, target::WRITE_ALIGN);
             bl.write_block(addr, &buf)?;
@@ -123,7 +124,7 @@ pub fn flash(port: &mut Port, firmware: &[u8], opts: &FlashOptions) -> Result<()
         // Verify
         if opts.verify {
             let bar = bytes_bar(firmware.len() as u64, "Verifying");
-            let mut addr = opts.address;
+            let mut addr = target::FLASH_BASE;
             let mut offset = 0usize;
             while offset < firmware.len() {
                 let len = std::cmp::min(target::MAX_BLOCK, firmware.len() - offset);
@@ -146,8 +147,11 @@ pub fn flash(port: &mut Port, firmware: &[u8], opts: &FlashOptions) -> Result<()
         }
 
         if opts.run && opts.go {
-            println!("Jumping to application (Go 0x{:08X})...", opts.address);
-            bl.go(opts.address)?;
+            println!(
+                "Jumping to application (Go 0x{:08X})...",
+                target::FLASH_BASE
+            );
+            bl.go(target::FLASH_BASE)?;
         }
     }
 

@@ -5,12 +5,11 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use crate::port::Port;
 
-pub const ACK: u8 = 0x79;
-pub const NACK: u8 = 0x1F;
-pub const INIT: u8 = 0x7F;
+const ACK: u8 = 0x79;
+const NACK: u8 = 0x1F;
+const INIT: u8 = 0x7F;
 
 const CMD_GET: u8 = 0x00;
-const CMD_GET_VERSION: u8 = 0x01;
 const CMD_GET_ID: u8 = 0x02;
 const CMD_READ_MEMORY: u8 = 0x11;
 const CMD_GO: u8 = 0x21;
@@ -18,19 +17,19 @@ const CMD_WRITE_MEMORY: u8 = 0x31;
 const CMD_EXT_ERASE: u8 = 0x44;
 
 /// AN3155 command frame: the byte followed by its complement.
-pub(crate) fn cmd_frame(cmd: u8) -> [u8; 2] {
+fn cmd_frame(cmd: u8) -> [u8; 2] {
     [cmd, cmd ^ 0xFF]
 }
 
 /// Address frame: 4 bytes MSB-first followed by their XOR checksum.
-pub(crate) fn address_frame(addr: u32) -> [u8; 5] {
+fn address_frame(addr: u32) -> [u8; 5] {
     let b = addr.to_be_bytes();
     [b[0], b[1], b[2], b[3], b[0] ^ b[1] ^ b[2] ^ b[3]]
 }
 
 /// Write-Memory data frame: `N-1`, the data, then the checksum
 /// (initialised to `N-1` and XORed with every data byte).
-pub(crate) fn write_data_frame(data: &[u8]) -> Vec<u8> {
+fn write_data_frame(data: &[u8]) -> Vec<u8> {
     let n = (data.len() - 1) as u8;
     let mut frame = Vec::with_capacity(data.len() + 2);
     frame.push(n);
@@ -47,7 +46,7 @@ pub(crate) fn write_data_frame(data: &[u8]) -> Vec<u8> {
 /// page count (N = pages-1), each page number big-endian, then the XOR checksum.
 /// The STM32L0 bootloader rejects the 0xFFFF mass-erase special code, so erase
 /// is always done with an explicit page list.
-pub(crate) fn erase_frame(pages: &[u16]) -> Vec<u8> {
+fn erase_frame(pages: &[u16]) -> Vec<u8> {
     let count = (pages.len() - 1) as u16;
     let mut f = Vec::with_capacity(2 + pages.len() * 2 + 1);
     f.push((count >> 8) as u8);
@@ -62,7 +61,7 @@ pub(crate) fn erase_frame(pages: &[u16]) -> Vec<u8> {
 }
 
 /// Parse the product id payload of a `Get ID` reply.
-pub(crate) fn parse_chip_id(buf: &[u8]) -> u16 {
+fn parse_chip_id(buf: &[u8]) -> u16 {
     match buf.len() {
         0 => 0,
         1 => buf[0] as u16,
@@ -103,19 +102,13 @@ impl<'a> Bootloader<'a> {
         self.read_ack(context)
     }
 
-    /// Auto-baud init: send a single `0x7F`. A fresh bootloader replies ACK;
-    /// an already-initialised one replies NACK — both mean "talking to BL".
+    /// Auto-baud init: send a single `0x7F` and expect an ACK. Called after a
+    /// fresh reset into the bootloader, so a NACK ("already initialised") means
+    /// something is off — `connect` then retries with another reset.
     pub fn init(&mut self) -> Result<()> {
         self.port.clear_input()?;
         self.port.write_all(&[INIT])?;
-        match self.port.read_byte("bootloader init (0x7F)")? {
-            ACK | NACK => Ok(()),
-            other => Err(Error::UnexpectedByte {
-                context: "bootloader init (0x7F)".to_string(),
-                got: other,
-                expected: ACK,
-            }),
-        }
+        self.read_ack("bootloader init (0x7F)")
     }
 
     /// `Get ID` -> 16-bit product id (0x447 for STM32L0x3).
@@ -126,15 +119,6 @@ impl<'a> Bootloader<'a> {
         self.port.read_exact_buf(&mut buf, "Get ID payload")?;
         self.read_ack("Get ID final ACK")?;
         Ok(parse_chip_id(&buf))
-    }
-
-    /// `Get Version` -> (version byte, option byte 1, option byte 2).
-    pub fn get_version(&mut self) -> Result<(u8, u8, u8)> {
-        self.send_command(CMD_GET_VERSION, "Get Version command")?;
-        let mut buf = [0u8; 3];
-        self.port.read_exact_buf(&mut buf, "Get Version payload")?;
-        self.read_ack("Get Version final ACK")?;
-        Ok((buf[0], buf[1], buf[2]))
     }
 
     /// `Get` -> (bootloader version, supported command bytes).
@@ -159,7 +143,7 @@ impl<'a> Bootloader<'a> {
             .port
             .write_all(&erase_frame(pages))
             .and_then(|()| self.read_ack("Extended Erase pages"));
-        let _ = self.port.set_timeout(Duration::from_millis(1000));
+        let _ = self.port.reset_timeout();
         result
     }
 

@@ -59,6 +59,11 @@ impl Port {
         Ok(())
     }
 
+    /// Restore the default read timeout (after a temporary override).
+    pub fn reset_timeout(&mut self) -> Result<()> {
+        self.set_timeout(DEFAULT_TIMEOUT)
+    }
+
     /// Set the RTS line (`true` = asserted).
     fn set_rts(&mut self, level: bool) -> Result<()> {
         self.inner.write_request_to_send(level)?;
