@@ -1,6 +1,6 @@
 [package]
 name = "jolt"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Flash an STM32L083CZ over the UART bootloader"
 
