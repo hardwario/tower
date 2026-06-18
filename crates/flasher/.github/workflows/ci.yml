@@ -19,7 +19,7 @@ jobs:
     name: Test & lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # serialport links against libudev on Linux.
       - name: Install libudev
@@ -49,7 +49,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install libudev (Linux)
         if: runner.os == 'Linux'

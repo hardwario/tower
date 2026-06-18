@@ -16,7 +16,7 @@ jobs:
     name: Create release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Verify tag matches Cargo.toml
         run: |
@@ -85,7 +85,7 @@ jobs:
             os: windows-latest
             cross: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
