@@ -18,7 +18,7 @@ fn resolve_port(global: &GlobalOpts) -> Result<String> {
     match ports.as_slice() {
         [only] => Ok(only.port_name.clone()),
         [] => anyhow::bail!("no serial ports found; connect the device or pass --port"),
-        _ => anyhow::bail!("multiple serial ports found; pass --port (see `towerf list`)"),
+        _ => anyhow::bail!("multiple serial ports found; pass --port (see `jolt list`)"),
     }
 }
 

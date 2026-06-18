@@ -1,4 +1,4 @@
-# towerf — TOWER Flasher
+# jolt — STM32L083CZ UART flasher
 
 A small, focused Rust CLI that programs an **STM32L083CZ** over a serial port
 using the STM32 embedded **UART bootloader** (ST AN3155 protocol). It was built
@@ -10,7 +10,7 @@ USB with no buttons.
 
 ```sh
 cargo build --release
-# binary at target/release/towerf
+# binary at target/release/jolt
 ```
 
 macOS builds with a plain `cargo build` (the `serialport` crate pulls only
@@ -19,7 +19,7 @@ IOKit deps, no libudev).
 ## Usage
 
 ```
-towerf <COMMAND> [OPTIONS]
+jolt <COMMAND> [OPTIONS]
 
 Commands:
   list     List all serial ports
@@ -39,25 +39,25 @@ ST specifies for the USART bootloader.
 ### Examples
 
 ```sh
-towerf list
-towerf --port /dev/cu.usbserial-112140 info
-towerf -p /dev/cu.usbserial-112140 flash firmware.bin
-towerf -p /dev/cu.usbserial-112140 flash firmware.bin --no-verify   # skip read-back verify
-towerf -p /dev/cu.usbserial-112140 flash firmware.bin --no-run      # leave in bootloader
-towerf -p /dev/cu.usbserial-112140 flash firmware.bin --go          # start via Go, not reset
-towerf -p /dev/cu.usbserial-112140 erase
-towerf -p /dev/cu.usbserial-112140 reset --app                      # or --bootloader
+jolt list
+jolt --port /dev/cu.usbserial-112140 info
+jolt -p /dev/cu.usbserial-112140 flash firmware.bin
+jolt -p /dev/cu.usbserial-112140 flash firmware.bin --no-verify   # skip read-back verify
+jolt -p /dev/cu.usbserial-112140 flash firmware.bin --no-run      # leave in bootloader
+jolt -p /dev/cu.usbserial-112140 flash firmware.bin --go          # start via Go, not reset
+jolt -p /dev/cu.usbserial-112140 erase
+jolt -p /dev/cu.usbserial-112140 reset --app                      # or --bootloader
 ```
 
 `flash` accepts a **raw `.bin`** only (written at `0x08000000`). Convert ELF/HEX
 first, e.g. `arm-none-eabi-objcopy -O binary firmware.elf firmware.bin`.
 
 If exactly one serial port is present, `--port` may be omitted; otherwise pass
-it explicitly (use `towerf list` to find it).
+it explicitly (use `jolt list` to find it).
 
 ## How it works
 
-To enter the bootloader, `towerf` pulses NRST while raising BOOT0, in raw
+To enter the bootloader, `jolt` pulses NRST while raising BOOT0, in raw
 modem-line terms (`true` = line asserted):
 
 ```

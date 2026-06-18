@@ -10,7 +10,7 @@ pub fn load(path: &Path) -> Result<Vec<u8>> {
         let ext = ext.to_ascii_lowercase();
         if ext == "hex" || ext == "elf" {
             bail!(
-                "{} looks like a .{ext} file; towerf flashes raw binaries.\n\
+                "{} looks like a .{ext} file; jolt flashes raw binaries.\n\
                  Convert it first, e.g.: arm-none-eabi-objcopy -O binary in.{ext} out.bin",
                 path.display()
             );
