@@ -28,6 +28,17 @@ jobs:
             exit 1
           fi
 
+      # Gate the release on formatting so a lint failure can't ship in a tag
+      # (the build/publish jobs `need` this one). fmt only parses source, so no
+      # libudev/compile is required here.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
       # Create the release as a draft up front so users never see a
       # half-populated release while the matrix builds are still uploading.
       - name: Create draft release
