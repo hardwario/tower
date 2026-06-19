@@ -1,9 +1,13 @@
 //! Subcommand handlers.
 
+use std::io::Write;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
+use serialport::{DataBits, Parity, StopBits};
 
 use crate::bootloader::Bootloader;
-use crate::cli::{FlashArgs, GlobalOpts, ResetArgs};
+use crate::cli::{FlashArgs, GlobalOpts, MonitorArgs, ParityArg, ResetArgs};
 use crate::flash::{self, FlashOptions};
 use crate::port::Port;
 use crate::{firmware, target};
@@ -103,4 +107,53 @@ pub fn reset(global: &GlobalOpts, args: &ResetArgs) -> Result<()> {
         println!("Reset into application.");
     }
     Ok(())
+}
+
+/// Open the port with the requested frame format and stream incoming bytes to
+/// stdout until interrupted (Ctrl-C). Read-only — nothing is sent to the
+/// device, but `--reset` first pulses NRST into the application.
+pub fn monitor(global: &GlobalOpts, args: &MonitorArgs) -> Result<()> {
+    let path = resolve_port(global)?;
+
+    let data_bits = match args.databits {
+        5 => DataBits::Five,
+        6 => DataBits::Six,
+        7 => DataBits::Seven,
+        _ => DataBits::Eight,
+    };
+    let (parity, parity_letter) = match args.parity {
+        ParityArg::None => (Parity::None, 'N'),
+        ParityArg::Even => (Parity::Even, 'E'),
+        ParityArg::Odd => (Parity::Odd, 'O'),
+    };
+    let stop_bits = match args.stopbits {
+        2 => StopBits::Two,
+        _ => StopBits::One,
+    };
+
+    let mut port = Port::open_with(&path, args.baudrate, data_bits, parity, stop_bits)
+        .with_context(|| format!("failed to open serial port {path}"))?;
+    // Short timeout so the read loop stays responsive on an idle line.
+    port.set_timeout(Duration::from_millis(100))?;
+
+    if args.reset {
+        port.reset_into_app().context("resetting into application")?;
+    }
+
+    // Banner on stderr so `jolt monitor > log.txt` captures only device output.
+    eprintln!(
+        "Monitoring {path} @ {} baud, {}{}{} — press Ctrl-C to exit.",
+        args.baudrate, args.databits, parity_letter, args.stopbits
+    );
+
+    let mut buf = [0u8; 1024];
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    loop {
+        let n = port.read_available(&mut buf).context("reading serial port")?;
+        if n > 0 {
+            out.write_all(&buf[..n]).context("writing to stdout")?;
+            out.flush().context("flushing stdout")?;
+        }
+    }
 }

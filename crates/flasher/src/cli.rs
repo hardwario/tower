@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +41,8 @@ pub enum Command {
     Erase,
     /// Reset the device into the application or the bootloader
     Reset(ResetArgs),
+    /// Open the serial port and print incoming data (serial monitor)
+    Monitor(MonitorArgs),
 }
 
 #[derive(Args)]
@@ -74,4 +76,34 @@ pub struct ResetArgs {
     /// Reset into the application (default)
     #[arg(long)]
     pub app: bool,
+}
+
+#[derive(Args)]
+pub struct MonitorArgs {
+    /// Baud rate
+    #[arg(short, long, default_value_t = 115_200)]
+    pub baudrate: u32,
+
+    /// Data bits per frame (5–8)
+    #[arg(short, long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(5..=8))]
+    pub databits: u8,
+
+    /// Parity
+    #[arg(long, value_enum, default_value = "none")]
+    pub parity: ParityArg,
+
+    /// Stop bits (1 or 2)
+    #[arg(short, long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
+    pub stopbits: u8,
+
+    /// Pulse NRST into the application before monitoring (to catch boot output)
+    #[arg(long)]
+    pub reset: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ParityArg {
+    None,
+    Even,
+    Odd,
 }

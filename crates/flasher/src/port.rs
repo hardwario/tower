@@ -41,10 +41,30 @@ impl Port {
     /// bit, no flow control. RTS/DTR are immediately driven to the run state
     /// because USB-UART bridges assert both lines on open.
     pub fn open(path: &str) -> Result<Self> {
-        let inner = serialport::new(path, target::BAUD)
-            .data_bits(DataBits::Eight)
-            .parity(Parity::Even)
-            .stop_bits(StopBits::One)
+        Self::open_with(
+            path,
+            target::BAUD,
+            DataBits::Eight,
+            Parity::Even,
+            StopBits::One,
+        )
+    }
+
+    /// Open the port with a caller-specified frame format for general serial
+    /// I/O (e.g. the monitor). Like [`open`](Self::open) it drives RTS/DTR to
+    /// the run state `(T,T)` so the application keeps running rather than being
+    /// held in reset by whatever level the bridge asserts on open.
+    pub fn open_with(
+        path: &str,
+        baud: u32,
+        data_bits: DataBits,
+        parity: Parity,
+        stop_bits: StopBits,
+    ) -> Result<Self> {
+        let inner = serialport::new(path, baud)
+            .data_bits(data_bits)
+            .parity(parity)
+            .stop_bits(stop_bits)
             .flow_control(FlowControl::None)
             .timeout(DEFAULT_TIMEOUT)
             .open()?;
@@ -161,5 +181,17 @@ impl Port {
         let mut b = [0u8; 1];
         self.read_exact_buf(&mut b, context)?;
         Ok(b[0])
+    }
+
+    /// Read whatever bytes are currently available, up to `buf.len()`. Returns
+    /// 0 on a read timeout (no data) instead of erroring — for streaming a port
+    /// where idle gaps are normal rather than a failure (e.g. the monitor).
+    pub fn read_available(&mut self, buf: &mut [u8]) -> Result<usize> {
+        match self.inner.read(buf) {
+            Ok(n) => Ok(n),
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => Ok(0),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(0),
+            Err(e) => Err(e.into()),
+        }
     }
 }

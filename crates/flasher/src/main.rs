@@ -19,6 +19,7 @@ fn main() {
         Command::Flash(args) => commands::flash(&cli.global, args),
         Command::Erase => commands::erase(&cli.global),
         Command::Reset(args) => commands::reset(&cli.global, args),
+        Command::Monitor(args) => commands::monitor(&cli.global, args),
     };
     if let Err(e) = result {
         eprintln!("error: {e:#}");
