@@ -1,12 +1,20 @@
-# jolt — STM32L083CZ UART flasher
+# jolt — STM32L0 UART programmer
 
 [![CI](https://github.com/hardwario/jolt/actions/workflows/ci.yml/badge.svg)](https://github.com/hardwario/jolt/actions/workflows/ci.yml)
 
-A small, focused Rust CLI that programs an **STM32L083CZ** over a serial port
-using the STM32 embedded **UART bootloader** (ST AN3155 protocol). It was built
-for the **HARDWARIO TOWER Radio Dongle**, whose USB-UART bridge drives the MCU's
-NRST and BOOT0 pins (with a 1 µF cap on NRST), so the chip can be flashed over
-USB with no buttons.
+A small, focused Rust CLI that programs **STM32L0** microcontrollers
+(STM32L0x1 / L0x2 / L0x3) over a serial port using the STM32 embedded **UART
+bootloader** (ST AN3155 protocol). It flashes, erases, reads device info, and
+includes a serial monitor.
+
+Any board exposing the STM32L0 bootloader UART works. `jolt` can also enter the
+bootloader **automatically** — with no buttons — on boards whose USB-UART bridge
+drives the MCU's NRST and BOOT0 pins, which is how it's been tested on the
+**HARDWARIO TOWER Radio Dongle** and **TOWER Core Module**. On other boards you
+may need to enter the bootloader manually (see [How it works](#how-it-works)).
+
+Flash size is not assumed: a full-chip `erase` adapts to the connected part's
+density automatically, so the whole STM32L0 range (16–192 KiB) is supported.
 
 ## Build
 
@@ -27,7 +35,7 @@ Commands:
   list     List all serial ports
   info     Read bootloader info (chip id, version, commands) — read-only
   flash    Flash a raw firmware .bin file
-  erase    Erase the entire flash
+  erase    Erase the entire flash (adapts to the device's density)
   reset    Reset the device into the application or the bootloader
   monitor  Open the serial port and print incoming data (serial monitor)
 
@@ -72,18 +80,27 @@ it explicitly (use `jolt list` to find it).
 
 ## How it works
 
-To enter the bootloader, `jolt` pulses NRST while raising BOOT0, in raw
-modem-line terms (`true` = line asserted):
+To enter the bootloader automatically, `jolt` pulses NRST while raising BOOT0,
+in raw modem-line terms (`true` = line asserted):
 
 ```
 (rts=T,dtr=T) → (rts=T,dtr=F) → (rts=F,dtr=T) → (rts=F,dtr=F) → send 0x7F
 ```
 
-`(T,F)` asserts RESET; switching to `(F,T)` raises BOOT0 while the 1 µF cap lets
-NRST ramp up slowly, so BOOT0 is high when the chip latches it and boots system
-memory. It then speaks the standard ST protocol (init `0x7F`, ACK `0x79`);
-`Get ID` returns **0x447** for the STM32L0x3. Erase uses an explicit page list
-(the STM32L0 bootloader rejects the 0xFFFF mass-erase code).
+`(T,F)` asserts RESET; switching to `(F,T)` raises BOOT0 while the 1 µF cap on
+the TOWER boards lets NRST ramp up slowly, so BOOT0 is high when the chip
+latches it and boots system memory. This sequence is tuned for that auto-reset
+circuit (FT231X driving NRST/BOOT0 through transistors). **On a board without
+it, pull BOOT0 high and reset the MCU yourself**, then run `jolt` — the protocol
+itself is hardware-independent.
+
+Once in the bootloader, `jolt` speaks the standard ST protocol (init `0x7F`,
+ACK `0x79`). `Get ID` reports the product id (e.g. `0x447` for STM32L0x3);
+any recognized STM32L0 id is accepted, and an unknown id only prints a warning.
+Erase uses an explicit page list (the STM32L0 bootloader rejects the 0xFFFF
+mass-erase code); because the bootloader won't report the flash size, a
+full-chip `erase` walks the page list up to the family maximum and stops as soon
+as the device NACKs an out-of-range page — i.e. once the part's flash is wiped.
 
 ## Tests
 

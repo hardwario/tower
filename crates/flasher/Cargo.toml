@@ -2,7 +2,7 @@
 name = "jolt"
 version = "1.0.0"
 edition = "2024"
-description = "Flash an STM32L083CZ over the UART bootloader"
+description = "Program STM32L0 microcontrollers over the UART bootloader"
 
 [dependencies]
 anyhow = "1.0.102"

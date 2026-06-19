@@ -39,6 +39,9 @@ fn enter_and_identify(port: &mut Port, verbose: bool) -> Result<()> {
     flash::connect(port, verbose).context("entering bootloader")?;
     let id = Bootloader::new(port).get_id().context("Get ID")?;
     println!("Chip id : 0x{id:03X} ({})", target::chip_name(id));
+    if !target::is_known(id) {
+        eprintln!("warning: 0x{id:03X} is not a recognized STM32L0 family id — continuing anyway");
+    }
     Ok(())
 }
 
@@ -67,8 +70,7 @@ pub fn info(global: &GlobalOpts) -> Result<()> {
 pub fn erase(global: &GlobalOpts) -> Result<()> {
     let mut port = open(global)?;
     enter_and_identify(&mut port, global.verbose > 0)?;
-    flash::erase_pages(&mut Bootloader::new(&mut port), target::PAGE_COUNT)
-        .context("erasing flash")?;
+    flash::erase_chip(&mut Bootloader::new(&mut port)).context("erasing flash")?;
     port.reset_into_app()
         .context("resetting into application")?;
     println!("Erased and reset into application.");
@@ -78,11 +80,11 @@ pub fn erase(global: &GlobalOpts) -> Result<()> {
 pub fn flash(global: &GlobalOpts, args: &FlashArgs) -> Result<()> {
     let fw = firmware::load(&args.file)?;
     println!("Firmware: {} ({} bytes)", args.file.display(), fw.len());
-    if fw.len() as u32 > target::FLASH_SIZE {
+    if fw.len() as u32 > target::MAX_FLASH_SIZE {
         anyhow::bail!(
-            "firmware is {} bytes which exceeds the {} byte flash",
+            "firmware is {} bytes, exceeding the {} KiB maximum for any STM32L0 device",
             fw.len(),
-            target::FLASH_SIZE
+            target::MAX_FLASH_SIZE / 1024
         );
     }
     let mut port = open(global)?;

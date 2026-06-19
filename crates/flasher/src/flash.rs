@@ -20,14 +20,13 @@ pub struct FlashOptions {
     pub verbose: bool,
 }
 
-/// Number of flash pages spanning `length` bytes of firmware, clamped to the
-/// chip's page count.
-fn pages_for_length(length: usize) -> usize {
-    length.div_ceil(target::PAGE_SIZE).min(target::PAGE_COUNT)
+/// Number of flash pages spanning `length` bytes of firmware, clamped to
+/// `max_pages` (the connected device's page count).
+fn pages_for_length(length: usize, max_pages: usize) -> usize {
+    length.div_ceil(target::PAGE_SIZE).min(max_pages)
 }
 
-/// Erase pages `0..count` in chunks of ERASE_CHUNK, reporting progress.
-pub fn erase_pages(bl: &mut Bootloader, count: usize) -> Result<()> {
+fn pages_bar(count: usize) -> ProgressBar {
     let bar = ProgressBar::new(count as u64);
     bar.set_style(
         ProgressStyle::with_template("{msg:>9} [{bar:30.cyan/blue}] {pos:>4}/{len} pages")
@@ -35,6 +34,14 @@ pub fn erase_pages(bl: &mut Bootloader, count: usize) -> Result<()> {
             .progress_chars("=>-"),
     );
     bar.set_message("Erasing");
+    bar
+}
+
+/// Erase pages `0..count` in chunks of ERASE_CHUNK, reporting progress. Every
+/// page must be in range; a NACK is a real error (used for the firmware
+/// footprint, which always fits).
+pub fn erase_pages(bl: &mut Bootloader, count: usize) -> Result<()> {
+    let bar = pages_bar(count);
     let mut page = 0usize;
     while page < count {
         let end = (page + target::ERASE_CHUNK).min(count);
@@ -45,6 +52,38 @@ pub fn erase_pages(bl: &mut Bootloader, count: usize) -> Result<()> {
     }
     bar.finish_with_message("Erased");
     Ok(())
+}
+
+/// Erase the entire device without knowing its density. The STM32L0 bootloader
+/// can't report its flash size (Read Memory of the factory region is rejected)
+/// and refuses the 0xFFFF mass-erase code, so erase pages from 0 up to the
+/// family maximum in chunks and stop cleanly the moment the bootloader NACKs a
+/// page as out of range — i.e. once this part's flash has been fully erased.
+/// Returns the number of pages erased.
+pub fn erase_chip(bl: &mut Bootloader) -> Result<usize> {
+    let max_pages = target::pages_in(target::MAX_FLASH_SIZE);
+    let bar = pages_bar(max_pages);
+    let mut page = 0usize;
+    while page < max_pages {
+        let end = (page + target::ERASE_CHUNK).min(max_pages);
+        let list: Vec<u16> = (page..end).map(|p| p as u16).collect();
+        match bl.extended_erase_pages(&list, ERASE_TIMEOUT) {
+            Ok(()) => {
+                page = end;
+                bar.set_position(page as u64);
+            }
+            // A NACK after we've erased at least one chunk means the page list
+            // ran past the end of this part's flash — we're done.
+            Err(Error::Nack { .. }) if page > 0 => break,
+            Err(e) => {
+                bar.abandon_with_message("Erase FAILED");
+                return Err(e);
+            }
+        }
+    }
+    bar.set_length(page as u64);
+    bar.finish_with_message(format!("Erased {} KiB", page * target::PAGE_SIZE / 1024));
+    Ok(page)
 }
 
 /// Pad `chunk` up to a multiple of `align` with 0xFF (erased-flash value).
@@ -96,18 +135,16 @@ pub fn flash(port: &mut Port, firmware: &[u8], opts: &FlashOptions) -> Result<()
         let mut bl = Bootloader::new(port);
 
         let id = bl.get_id()?;
-        if id == target::EXPECTED_CHIP_ID {
-            println!("Chip id : 0x{id:03X} ({})", target::chip_name(id));
-        } else {
+        println!("Chip id : 0x{id:03X} ({})", target::chip_name(id));
+        if !target::is_known(id) {
             eprintln!(
-                "warning: chip id 0x{id:03X} ({}) does not match expected 0x{:03X} — continuing",
-                target::chip_name(id),
-                target::EXPECTED_CHIP_ID
+                "warning: 0x{id:03X} is not a recognized STM32L0 family id — continuing anyway"
             );
         }
 
         if opts.erase {
-            erase_pages(&mut bl, pages_for_length(firmware.len()))?;
+            let pages = pages_for_length(firmware.len(), target::pages_in(target::MAX_FLASH_SIZE));
+            erase_pages(&mut bl, pages)?;
         }
 
         // Write
@@ -174,11 +211,14 @@ mod tests {
 
     #[test]
     fn pages_for_length_rounds_up_and_clamps() {
-        assert_eq!(pages_for_length(1), 1);
-        assert_eq!(pages_for_length(target::PAGE_SIZE), 1);
-        assert_eq!(pages_for_length(target::PAGE_SIZE + 1), 2);
-        assert_eq!(pages_for_length(3 * target::PAGE_SIZE), 3);
-        assert!(pages_for_length(usize::MAX) <= target::PAGE_COUNT);
+        let max_pages = target::pages_in(target::MAX_FLASH_SIZE);
+        assert_eq!(pages_for_length(1, max_pages), 1);
+        assert_eq!(pages_for_length(target::PAGE_SIZE, max_pages), 1);
+        assert_eq!(pages_for_length(target::PAGE_SIZE + 1, max_pages), 2);
+        assert_eq!(pages_for_length(3 * target::PAGE_SIZE, max_pages), 3);
+        // never exceeds the connected device's page count
+        assert_eq!(pages_for_length(usize::MAX, max_pages), max_pages);
+        assert_eq!(pages_for_length(usize::MAX, 256), 256);
     }
 
     #[test]

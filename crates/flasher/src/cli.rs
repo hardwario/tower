@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[command(
     name = "jolt",
     version,
-    about = "jolt — flash an STM32L083CZ over the UART bootloader"
+    about = "jolt — program STM32L0 microcontrollers over the UART bootloader"
 )]
 pub struct Cli {
     #[command(flatten)]
