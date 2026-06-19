@@ -107,3 +107,7 @@ as the device NACKs an out-of-range page — i.e. once the part's flash is wiped
 `cargo test` covers the protocol logic with no hardware: command/address/data
 checksums and framing, the Get-ID reply parse, the Extended-Erase page list,
 write padding, and chunk/address bookkeeping.
+
+## License
+
+Licensed under the [MIT License](LICENSE) — © 2026 HARDWARIO a.s.
