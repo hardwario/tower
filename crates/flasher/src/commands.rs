@@ -139,7 +139,8 @@ pub fn monitor(global: &GlobalOpts, args: &MonitorArgs) -> Result<()> {
     port.set_timeout(Duration::from_millis(100))?;
 
     if args.reset {
-        port.reset_into_app().context("resetting into application")?;
+        port.reset_into_app()
+            .context("resetting into application")?;
     }
 
     // Banner on stderr so `jolt monitor > log.txt` captures only device output.
@@ -152,7 +153,9 @@ pub fn monitor(global: &GlobalOpts, args: &MonitorArgs) -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     loop {
-        let n = port.read_available(&mut buf).context("reading serial port")?;
+        let n = port
+            .read_available(&mut buf)
+            .context("reading serial port")?;
         if n > 0 {
             out.write_all(&buf[..n]).context("writing to stdout")?;
             out.flush().context("flushing stdout")?;
