@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR branch).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test & lint (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The crate is a no_std library; tests (and the `verify` Ed25519 path) run on the host.
+      - name: Clippy (incl. verify + tests)
+        run: cargo clippy --all-targets --features verify -- -D warnings
+
+      - name: Test
+        run: cargo test --features verify
+
+  embedded:
+    name: Build (thumbv6m, no_std)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust (+ Cortex-M0+ target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Guarantee the crate stays no_std / embedded-buildable (the firmware links it on the MCU),
+      # with and without the salty-backed verify feature.
+      - name: Build (default)
+        run: cargo build --target thumbv6m-none-eabi
+      - name: Build (verify)
+        run: cargo build --target thumbv6m-none-eabi --features verify
