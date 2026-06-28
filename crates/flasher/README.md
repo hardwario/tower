@@ -78,6 +78,25 @@ first, e.g. `arm-none-eabi-objcopy -O binary firmware.elf firmware.bin`.
 If exactly one serial port is present, `--port` may be omitted; otherwise pass
 it explicitly (use `jolt list` to find it).
 
+## Library
+
+`jolt` is also a reusable library: the bootloader/flash engine lives in
+`src/lib.rs` and is shared with other HARDWARIO tools (e.g. `tower-cli`), which
+depend on the crate directly instead of shelling out to the binary.
+
+```rust
+use jolt::flash::{self, FlashOptions};
+use jolt::port::Port;
+
+let mut port = Port::open("/dev/ttyUSB0")?;
+let firmware = jolt::firmware::load("app.bin".as_ref())?;
+let opts = FlashOptions { erase: true, verify: true, run: true, go: false, verbose: false };
+flash::flash(&mut port, &firmware, &opts)?;   // or flash::erase(&mut port, false)
+```
+
+The high-level entry points are `flash::flash`, `flash::erase`, and the
+`Port::reset_into_app` / `Port::reset_into_bootloader` reset pulses.
+
 ## How it works
 
 To enter the bootloader automatically, `jolt` pulses NRST while raising BOOT0,

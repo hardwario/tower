@@ -86,6 +86,22 @@ pub fn erase_chip(bl: &mut Bootloader) -> Result<usize> {
     Ok(page)
 }
 
+/// Enter the bootloader, identify the chip, erase the whole device, and reset
+/// back into the application. The high-level counterpart to [`flash`] for a
+/// standalone erase. Returns the number of pages erased.
+pub fn erase(port: &mut Port, verbose: bool) -> Result<usize> {
+    println!("Entering bootloader...");
+    connect(port, verbose)?;
+    let id = Bootloader::new(port).get_id()?;
+    println!("Chip id : 0x{id:03X} ({})", target::chip_name(id));
+    if !target::is_known(id) {
+        eprintln!("warning: 0x{id:03X} is not a recognized STM32L0 family id — continuing anyway");
+    }
+    let pages = erase_chip(&mut Bootloader::new(port))?;
+    port.reset_into_app()?;
+    Ok(pages)
+}
+
 /// Pad `chunk` up to a multiple of `align` with 0xFF (erased-flash value).
 fn pad_block(chunk: &[u8], align: usize) -> Vec<u8> {
     let mut buf = chunk.to_vec();

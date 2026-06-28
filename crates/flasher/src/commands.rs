@@ -6,11 +6,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serialport::{DataBits, Parity, StopBits};
 
-use crate::bootloader::Bootloader;
 use crate::cli::{FlashArgs, GlobalOpts, MonitorArgs, ParityArg, ResetArgs};
-use crate::flash::{self, FlashOptions};
-use crate::port::Port;
-use crate::{firmware, target};
+use jolt::bootloader::Bootloader;
+use jolt::flash::{self, FlashOptions};
+use jolt::port::Port;
+use jolt::{firmware, target};
 
 /// Resolve which serial port to use: explicit `--port`, else the only port
 /// present, otherwise an error asking the user to pick one.
@@ -69,10 +69,7 @@ pub fn info(global: &GlobalOpts) -> Result<()> {
 
 pub fn erase(global: &GlobalOpts) -> Result<()> {
     let mut port = open(global)?;
-    enter_and_identify(&mut port, global.verbose > 0)?;
-    flash::erase_chip(&mut Bootloader::new(&mut port)).context("erasing flash")?;
-    port.reset_into_app()
-        .context("resetting into application")?;
+    flash::erase(&mut port, global.verbose > 0).context("erasing flash")?;
     println!("Erased and reset into application.");
     Ok(())
 }
