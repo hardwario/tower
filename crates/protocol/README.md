@@ -34,9 +34,9 @@ It is consumed as a **pinned git dependency** (no crates.io publish):
 
 ```toml
 [dependencies]
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v0.2.0" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.0.0" }
 # the bootloader/verifier adds:
-# tower-protocol = { git = "...", tag = "v0.2.0", features = ["verify"] }
+# tower-protocol = { git = "...", tag = "v1.0.0", features = ["verify"] }
 ```
 
 Because postcard isn't self-describing, **both ends must build the same version** — pin the same
@@ -60,10 +60,9 @@ paths = ["/absolute/path/to/tower-protocol"]
 console wire compatibility independently of the crate version; a decoder rejects frames whose
 `PROTOCOL_VERSION` or `MsgType` it doesn't know.
 
-| Tag | Adds |
+| Tag | Contents |
 |---|---|
-| `v0.1.0` | console framing + message schema |
-| `v0.2.0` | FOTA `FotaReq`/`FotaData` messages + the signed `Manifest` (+ `verify` feature) |
+| `v1.0.0` | initial standalone release: console framing + message schema, FOTA `FotaReq`/`FotaData` messages, and the signed `Manifest` (+ `verify` feature) |
 
 ## License
 
