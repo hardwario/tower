@@ -169,8 +169,8 @@ const PAYLOAD_BUDGET: usize = MAX_FRAME - 3 - 4;
 /// worst-case uptime) must encode and round-trip — guards the firmware's MAX_MSG.
 #[test]
 fn max_log_fits_and_roundtrips() {
-    let message: String = core::iter::repeat('x').take(192).collect();
-    let module: String = core::iter::repeat('m').take(24).collect();
+    let message: String = "x".repeat(192);
+    let module: String = "m".repeat(24);
     let l = Log { level: Level::Trace, uptime_us: u64::MAX, module: &module, message: &message };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Log, u16::MAX, &l, &mut out).expect("max log must fit the budget");
@@ -189,7 +189,7 @@ fn max_log_fits_and_roundtrips() {
 /// truncated (and thus corrupt) frame.
 #[test]
 fn oversize_payload_is_rejected_not_truncated() {
-    let big: String = core::iter::repeat('z').take(PAYLOAD_BUDGET + 50).collect();
+    let big: String = "z".repeat(PAYLOAD_BUDGET + 50);
     let mut out = [0u8; MAX_WIRE];
     assert_eq!(encode_frame(MsgType::Print, 0, &Print { text: &big }, &mut out), Err(Error::Encode));
 }
@@ -365,7 +365,7 @@ fn fuzz_roundtrip_exact() {
 /// both reframes and matches its stored CRC.
 #[test]
 fn fuzz_single_bit_flip_is_always_detected() {
-    let mut rng = Lcg(0xC0FFEE_1234_5678);
+    let mut rng = Lcg(0x00C0_FFEE_1234_5678);
     let (mut completed, mut no_frame) = (0u64, 0u64);
     for _ in 0..5000 {
         let len = (rng.next_u32() as usize) % 160;
