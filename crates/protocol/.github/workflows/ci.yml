@@ -54,3 +54,37 @@ jobs:
         run: cargo build --target thumbv6m-none-eabi
       - name: Build (verify)
         run: cargo build --target thumbv6m-none-eabi --features verify
+
+  # Single-source the version from Cargo.toml: when a push to main carries a version the repo
+  # isn't tagged for yet, create the matching `vX.Y.Z` tag + a GitHub Release. Idempotent (skips
+  # if the tag already exists), and only after CI is green — so a forgotten `git tag` can never
+  # leave consumers (tower-firmware, tower-cli) pinning a version that has no tag to fetch.
+  release:
+    name: Tag + release on version bump
+    needs: [test, embedded]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Create tag + release if Cargo.toml version is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -1)"
+          if [ -z "$version" ]; then echo "::error::could not read version from Cargo.toml"; exit 1; fi
+          tag="v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already on origin — nothing to release."
+            exit 0
+          fi
+          echo "Releasing ${tag}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" -m "tower-protocol ${version}"
+          git push origin "${tag}"
+          gh release create "${tag}" --title "${tag}" --generate-notes
