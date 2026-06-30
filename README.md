@@ -15,7 +15,7 @@ tower/                ← you are here (the control plane)
 ├── cli/              → github.com/hardwario/tower-cli         (the host tool)
 ├── jolt/             → github.com/hardwario/jolt             (UART flasher, used by cli)
 ├── CLAUDE.md         the operating manual for Claude across all four
-└── .claude/commands/ /bootstrap · /sync · /pin
+└── .claude/commands/ /bootstrap · /build · /sync · /pin
 ```
 
 ## The ecosystem
@@ -63,16 +63,17 @@ Already cloned without `--recurse-submodules`? Just run `/bootstrap` — it will
 
 ## The workflow
 
-Open a Claude Code session **in this directory**. Three slash commands cover the
+Open a Claude Code session **in this directory**. Four slash commands cover the
 day-to-day loop:
 
 | Command | What it does |
 |---------|--------------|
-| **`/bootstrap`** | First-run setup: materialize submodules, check Rust toolchains/targets (and `probe-rs` for firmware), optionally `--build`. |
+| **`/bootstrap`** | First-run setup: materialize submodules, check Rust toolchains/targets (and `probe-rs` for firmware). |
+| **`/build`** | Compile in dependency order (`protocol → jolt → cli → firmware`), or a single repo. Stops at the first failure. |
 | **`/sync`** | Pull each submodule to its upstream `main`, then verify the `tower-protocol` tag is aligned across `firmware` and `cli`. Read-only with `--check`. |
 | **`/pin`** | Freeze the current submodule commits as a committed, known-good snapshot (with safety checks that every pinned commit is pushed). Optionally `--tag`. |
 
-Typical cycle: **`/sync`** → build & test the affected repos → **`/pin`** to record
+Typical cycle: **`/sync`** → **`/build`** the affected repos → **`/pin`** to record
 the new known-good combination.
 
 Beyond the commands, just talk to Claude: *"add a new shell command to the CLI and the

@@ -69,6 +69,6 @@ git -C jolt tag --sort=-v:refname | head -3
 ## 3. Report
 Print a table: repo | old SHA → new SHA | incoming commits | protocol tag pinned .
 End with the lockstep verdict (✅ aligned / ⚠️ drift) and the recommended next step:
-if everything pulled and lockstep holds, suggest building (`/bootstrap --build`) and
+if everything pulled and lockstep holds, suggest building (`/build`) and
 then `/pin` to freeze the new known-good set. Do **not** commit the submodule pointer
 bumps or push anything — `/pin` records the snapshot.

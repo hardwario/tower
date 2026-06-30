@@ -1,6 +1,6 @@
 ---
 description: First-run setup of the TOWER control plane — clone/init submodules, verify toolchains, report ecosystem status
-argument-hint: "[--build] [firmware|cli|protocol|jolt]"
+argument-hint: "[firmware|cli|protocol|jolt]"
 allowed-tools: Bash(git submodule:*), Bash(git -C:*), Bash(git status:*), Bash(git log:*), Bash(rustup:*), Bash(cargo:*), Bash(probe-rs:*), Bash(which:*), Bash(ls:*), Bash(cat:*), Read
 ---
 
@@ -10,9 +10,9 @@ You are setting up a freshly cloned **TOWER control plane** so the user can work
 on the whole ecosystem from this one session. The child repos
 (`firmware`, `cli`, `protocol`, `jolt`) are Git submodules at the repo root.
 
-Optional argument `$ARGUMENTS`:
-- a repo name (`firmware` | `cli` | `protocol` | `jolt`) limits checks to that one repo;
-- `--build` additionally compiles each in-scope repo.
+Optional argument `$ARGUMENTS`: a repo name (`firmware` | `cli` | `protocol` | `jolt`)
+limits checks to that one repo. Bootstrap verifies setup; to compile the code, use
+`/build` afterward.
 
 Work through these steps and report a concise status table at the end. Stop and
 surface any error rather than pushing past it.
@@ -48,17 +48,7 @@ For each in-scope repo, read its toolchain requirements rather than hardcoding:
 - Read each repo's `CLAUDE.md`/`AGENTS.md` if present so you carry its house rules
   into this session; mention any that exist.
 
-## 4. Optional build (`--build`)
-Only if `--build` was passed. Build in dependency order — **protocol → jolt → cli →
-firmware** (`protocol` is the shared crate firmware+cli depend on; `cli` also links
-`jolt`):
-- protocol: `cargo build --manifest-path protocol/Cargo.toml`
-- jolt: `cargo build --manifest-path jolt/Cargo.toml`
-- cli: `cargo build --manifest-path cli/Cargo.toml`
-- firmware: build per its own README/`.cargo/config.toml` (embedded target; do
-  **not** assume a plain `cargo build` — it may need `--target`, a runner, or hardware).
-
-## 5. Report
-Print a table: repo | pinned SHA (short) | last-commit subject | toolchain OK? | built? .
+## 4. Report
+Print a table: repo | pinned SHA (short) | last-commit subject | toolchain OK? .
 Then state in one line whether the ecosystem is ready and what the user should do
-next (`/sync` to pull upstream, `/pin` to freeze a known-good set).
+next (`/build` to compile, `/sync` to pull upstream, `/pin` to freeze a known-good set).

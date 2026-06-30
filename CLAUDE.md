@@ -135,13 +135,15 @@ This has bitten production before.
 
 | Command       | Use it to… |
 |---------------|------------|
-| `/bootstrap`  | Set up a fresh clone: init submodules, verify toolchains, optional build. |
+| `/bootstrap`  | Set up a fresh clone: init submodules, verify toolchains. |
+| `/build`      | Compile in dependency order (`protocol → jolt → cli → firmware`), or one repo. |
 | `/sync`       | Pull each submodule to upstream `main`, then verify protocol lockstep. |
 | `/pin`        | Freeze the current submodule SHAs as a committed known-good snapshot. |
 
-Definitions live in `.claude/commands/`. The mental model: **`/sync` advances** the
-working trees toward upstream; **`/pin` freezes** them into a control-plane commit you
-can return to. Typical loop: `/sync` → build & test → `/pin`.
+Definitions live in `.claude/commands/`. The mental model: **`/bootstrap` provisions**,
+**`/build` compiles**, **`/sync` advances** the working trees toward upstream, and
+**`/pin` freezes** them into a control-plane commit you can return to. Typical loop:
+`/sync` → `/build` → `/pin`.
 
 ---
 
