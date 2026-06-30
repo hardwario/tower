@@ -7,3 +7,6 @@
 [submodule "protocol"]
 	path = protocol
 	url = https://github.com/hardwario/tower-protocol
+[submodule "jolt"]
+	path = jolt
+	url = https://github.com/hardwario/jolt

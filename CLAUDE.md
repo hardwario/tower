@@ -1,7 +1,7 @@
 # CLAUDE.md — TOWER control plane
 
 This repository is the **control plane** for the HARDWARIO TOWER ecosystem. You
-(Claude) are expected to drive work across three child repositories from this one
+(Claude) are expected to drive work across four child repositories from this one
 session. The children are Git **submodules** at the repo root:
 
 | Submodule  | Upstream                                   | Role |
@@ -9,6 +9,7 @@ session. The children are Git **submodules** at the repo root:
 | `protocol` | `github.com/hardwario/tower-protocol`      | Shared `no_std` wire-format crate — the contract |
 | `firmware` | `github.com/hardwario/tower-firmware`      | Rust/Embassy firmware SDK, apps, FOTA bootloader |
 | `cli`      | `github.com/hardwario/tower-cli`           | Host-side `tower` CLI/TUI |
+| `jolt`     | `github.com/hardwario/jolt`                | STM32L0 UART-bootloader flasher (library) used by `cli` |
 
 Each child has its **own `CLAUDE.md`**. When you work inside a child, read and
 obey that file — it is authoritative for that repo. This file governs how the
@@ -101,8 +102,9 @@ This has bitten production before.
 
 ### `cli/` — host tool (`tower` binary, edition 2024, v0.2.0, MIT)
 - Single crate. Stack: clap 4, ratatui, serialport, rustyline. Depends on
-  `tower-protocol` (wire codec) **and `hardwario/jolt` v1.2.0** (STM32L0 UART
-  bootloader engine, used by flash/erase/reset).
+  `tower-protocol` (wire codec) **and the `jolt/` submodule** (`v1.2.0`, the STM32L0
+  UART-bootloader flasher), which it links as a **library** (`jolt::firmware::load`,
+  `jolt::port::Port`, `jolt::flash::FlashOptions`) for `flash`/`erase`/`reset`.
 - Common commands:
   ```bash
   cargo build --manifest-path cli/Cargo.toml --release    # binary: cli/target/release/tower
@@ -114,6 +116,18 @@ This has bitten production before.
   `tower flash <bin>`, `tower reset [--bootloader]`, `tower fota serve <image>`.
 - Linux build needs `libudev-dev` + `pkg-config`. Has CI (test + multi-platform
   release archives on `v*` tags). **Not on crates.io.**
+
+### `jolt/` — UART flasher (lib + `jolt` binary, edition 2024, v1.2.0, MIT)
+- "Tiny Rust CLI that flashes an STM32L083CZ over the UART bootloader." Modules:
+  `bootloader`, `commands`, `firmware`, `flash`, `port`, `target`. `cli` consumes its
+  **library** API; it is also usable standalone as the `jolt` binary.
+- Pinned by `cli` via git tag (`jolt = { git = "…/jolt", tag = "v1.2.0" }`). Unlike the
+  `tower-protocol` lockstep, a tag mismatch here is a **compile error** in `cli`, not a
+  silent failure — so it is a normal dependency bump, not an interop hazard. There is
+  no second consumer to keep in lockstep.
+- Build/test from the root: `cargo build --manifest-path jolt/Cargo.toml` /
+  `cargo test --manifest-path jolt/Cargo.toml`. Linux needs `libudev-dev` + `pkg-config`
+  (same serial-port dependency as `cli`). Has its own CI + tagged releases.
 
 ---
 
@@ -167,7 +181,7 @@ The highest-stakes operation. Do it as one coordinated change-set:
 
 ### Local co-development (no re-tagging)
 
-Because the three repos sit side by side under this root, you can test a local
+Because the repos sit side by side under this root, you can test a local
 `protocol` change against `firmware`/`cli` without tagging, via a cargo `paths`
 override pointing at `protocol/`. Keep such overrides **local and uncommitted**
 (the root `.cargo/config.toml` is git-ignored here for exactly this). Remove the
@@ -177,7 +191,7 @@ override and go back to the pinned tag before you `/pin` or hand off.
 
 ## Conventions (inherited from the children)
 
-- **All three repos develop straight on `main`.** No feature branches unless the
+- **The TOWER repos develop straight on `main`.** No feature branches unless the
   user explicitly asks. **Commit and push only when the user requests it** — this
   applies to the children *and* to this control plane.
 - License is **MIT** across the ecosystem (© 2026 HARDWARIO a.s.).

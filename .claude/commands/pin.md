@@ -6,7 +6,7 @@ allowed-tools: Bash(git -C:*), Bash(git submodule:*), Bash(git add:*), Bash(git 
 
 # Pin the TOWER ecosystem to a known-good snapshot
 
-Record the commits the three submodules currently sit on into THIS control-plane
+Record the commits the four submodules currently sit on into THIS control-plane
 repo as a single coherent snapshot. This is the inverse of `/sync`: sync advances
 the working trees, pin freezes them into a commit you can return to later.
 
@@ -16,7 +16,7 @@ also tags the control-plane commit.
 ## 1. Show the proposed snapshot
 ```bash
 git submodule status
-git diff --submodule=log -- firmware cli protocol
+git diff --submodule=log -- firmware cli protocol jolt
 ```
 For each submodule capture the new short SHA, its one-line subject, and the
 branch/tag it is on:
@@ -24,9 +24,11 @@ branch/tag it is on:
 git -C <repo> log -1 --oneline
 git -C <repo> describe --tags --always
 ```
-Also capture the `tower-protocol` tag the firmware and cli pin (for the message):
+Also capture the dependency tags pinned in `Cargo.toml` (for the message): the
+`tower-protocol` tag firmware and cli share, and the `jolt` tag cli pins:
 ```bash
 grep -h "tower-protocol" firmware/Cargo.toml cli/Cargo.toml
+grep -h "jolt" cli/Cargo.toml
 ```
 
 ## 2. Safety checks — REFUSE to pin unsafe state
@@ -44,18 +46,19 @@ If any check fails, report exactly which repo and why, and do not commit.
 
 ## 3. Stage and commit the gitlink bumps
 ```bash
-git add firmware cli protocol .gitmodules
+git add firmware cli protocol jolt .gitmodules
 git status --short
 ```
 If nothing is staged, report "already pinned — no submodule changes" and stop.
 Otherwise commit. Default message when `-m` is not given:
 ```
-pin: firmware@<sha> · cli@<sha> · protocol@<sha>
+pin: firmware@<sha> · cli@<sha> · protocol@<sha> · jolt@<sha>
 
 firmware  <sha>  <subject>
 cli       <sha>  <subject>
 protocol  <sha>  <subject>  (release <protocol-tag>)
-tower-protocol pinned by firmware & cli: <tag>
+jolt      <sha>  <subject>  (release <jolt-tag>)
+tower-protocol pinned by firmware & cli: <tag>   ·   jolt pinned by cli: <tag>
 ```
 Run the commit, then if `--tag` was supplied:
 ```bash

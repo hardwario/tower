@@ -2,8 +2,8 @@
 
 **Control plane for the HARDWARIO TOWER ecosystem.**
 
-This repository orchestrates the three repos that make up TOWER — the firmware, the
-host CLI, and the shared wire protocol — as Git **submodules**, so you can drive the
+This repository orchestrates the repos behind TOWER — the firmware, the host CLI, the
+shared wire protocol, and the UART flasher — as Git **submodules**, so you can drive the
 whole system from a single [Claude Code](https://claude.com/claude-code) session with
 full cross-repo context. It holds no product code of its own; it holds the *knowledge*
 of how the pieces fit together and the workflow to keep them in sync.
@@ -13,7 +13,8 @@ tower/                ← you are here (the control plane)
 ├── protocol/         → github.com/hardwario/tower-protocol   (the contract)
 ├── firmware/         → github.com/hardwario/tower-firmware    (the device)
 ├── cli/              → github.com/hardwario/tower-cli         (the host tool)
-├── CLAUDE.md         the operating manual for Claude across all three
+├── jolt/             → github.com/hardwario/jolt             (UART flasher, used by cli)
+├── CLAUDE.md         the operating manual for Claude across all four
 └── .claude/commands/ /bootstrap · /sync · /pin
 ```
 
@@ -29,6 +30,7 @@ renders it; firmware updates ship over-the-air as **Ed25519-signed images**.
 | [**tower-protocol**](https://github.com/hardwario/tower-protocol) | Shared `no_std` wire-format crate: COBS+CRC framing, postcard message schema, signed FOTA manifest. The single source of truth both other repos depend on. | Rust | `1.0.0` |
 | [**tower-firmware**](https://github.com/hardwario/tower-firmware) | Embassy-based firmware SDK, ready-made product apps, and the A/B FOTA bootloader for the STM32L0 Core Module. | Rust | `0.1.0` |
 | [**tower-cli**](https://github.com/hardwario/tower-cli) | Host-side `tower` CLI/TUI: streams logs/events, an interactive shell, flashes over UART, and serves FOTA images. | Rust | `0.2.0` |
+| [**jolt**](https://github.com/hardwario/jolt) | STM32L0 UART-bootloader flasher. `tower-cli` links it as a library for `flash`/`erase`/`reset`; also usable standalone. | Rust | `1.2.0` |
 
 ```
                  tower-protocol  (frames + FOTA manifest)
@@ -92,14 +94,18 @@ cargo build --manifest-path cli/Cargo.toml --release
 
 # firmware — embedded; uses `just`, not bare cargo
 cd firmware && just examples && just build example blinky
+
+# jolt — host UART flasher that cli links as a library
+cargo build --manifest-path jolt/Cargo.toml
 ```
 
 Firmware flashing and the console require the `tower` CLI on your `PATH` and a
 physical Core Module. See each child's own `README.md`/`CLAUDE.md` for depth.
 
-> **Note:** `tower-cli` additionally depends on [`hardwario/jolt`](https://github.com/hardwario/jolt)
-> (`v1.2.0`), the STM32L0 UART bootloader engine. It is a dependency, not part of this
-> control plane — add it as a fourth submodule later if it needs co-development here.
+> **Note:** `jolt` is `tower-cli`'s flashing dependency, pinned by git tag (`v1.2.0`)
+> just like `tower-protocol`. But because `cli` links it as a Rust **library**, a tag
+> mismatch is a compile error rather than the *silent* mis-decode that a protocol-tag
+> mismatch causes — so it carries no lockstep hazard between firmware and cli.
 
 ## Repository layout
 
@@ -111,21 +117,22 @@ tower/
 ├── .claude/commands/         /bootstrap, /sync, /pin
 ├── protocol/   (submodule)   github.com/hardwario/tower-protocol
 ├── firmware/   (submodule)   github.com/hardwario/tower-firmware
-└── cli/        (submodule)   github.com/hardwario/tower-cli
+├── cli/        (submodule)   github.com/hardwario/tower-cli
+└── jolt/       (submodule)   github.com/hardwario/jolt
 ```
 
 Submodules are pinned by commit SHA, so a clone of this repo reproduces an exact,
-coherent combination of all three. `/pin` advances those pins; `/sync` brings the
+coherent combination of all four. `/pin` advances those pins; `/sync` brings the
 working trees up to upstream before you pin.
 
 ## Contributing & conventions
 
-- All three repos develop **straight on `main`**; no feature branches unless asked.
+- The TOWER repos develop **straight on `main`**; no feature branches unless asked.
 - Changes to a child are committed **inside that child** and pushed to its own
   upstream — never `git add` a child's files from this root. This repo only records
   the resulting SHAs (that's `/pin`).
-- A wire-format change is a coordinated change-set across all three repos — see the
-  runbook in [`CLAUDE.md`](./CLAUDE.md).
+- A wire-format change is a coordinated change-set across `protocol`, `firmware`, and
+  `cli` — see the runbook in [`CLAUDE.md`](./CLAUDE.md).
 - Licensed **MIT** (© 2026 HARDWARIO a.s.), consistent with the child repos.
 
 ## License

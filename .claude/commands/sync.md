@@ -17,7 +17,8 @@ Argument `$ARGUMENTS`:
 - `--check` makes this read-only: report drift, change nothing.
 
 ## 1. Pull each in-scope submodule to upstream
-For each of `protocol`, `cli`, `firmware` (this order — protocol is the dependency):
+For each of `protocol`, `jolt`, `cli`, `firmware` (this order — protocol and jolt are
+the dependencies):
 ```bash
 git -C <repo> fetch origin --tags --prune
 git -C <repo> log --oneline --decorate HEAD..origin/HEAD   # what's incoming
@@ -54,6 +55,16 @@ Then evaluate and report:
 Do not edit any `Cargo.toml` here — fixing a lockstep break is a deliberate change
 the user drives (and the protocol repo's own `CLAUDE.md` has the bump runbook).
 Surface the exact lines that would need to change and ask before touching them.
+
+## 2b. Check the jolt pin (informational, not a gate)
+`cli` also pins `jolt` by tag. There is only one consumer, so this is **not** a
+lockstep gate — but if the `jolt` submodule advanced past the pinned tag, note that an
+upgrade is available. Unlike protocol, a `jolt` mismatch is a **compile error** in
+`cli`, not a silent failure, so it is safe to just flag:
+```bash
+grep -h "jolt" cli/Cargo.toml
+git -C jolt tag --sort=-v:refname | head -3
+```
 
 ## 3. Report
 Print a table: repo | old SHA → new SHA | incoming commits | protocol tag pinned .
