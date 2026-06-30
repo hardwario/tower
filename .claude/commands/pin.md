@@ -1,0 +1,68 @@
+---
+description: Freeze the current submodule commits as a known-good snapshot — stage the gitlink bumps and commit them in the control plane
+argument-hint: "[-m \"message\"] [--tag vX.Y.Z]"
+allowed-tools: Bash(git -C:*), Bash(git submodule:*), Bash(git add:*), Bash(git status:*), Bash(git diff:*), Bash(git commit:*), Bash(git log:*), Bash(git tag:*), Bash(git branch:*), Bash(grep:*), Read
+---
+
+# Pin the TOWER ecosystem to a known-good snapshot
+
+Record the commits the three submodules currently sit on into THIS control-plane
+repo as a single coherent snapshot. This is the inverse of `/sync`: sync advances
+the working trees, pin freezes them into a commit you can return to later.
+
+Optional `$ARGUMENTS`: `-m "message"` overrides the commit message; `--tag vX.Y.Z`
+also tags the control-plane commit.
+
+## 1. Show the proposed snapshot
+```bash
+git submodule status
+git diff --submodule=log -- firmware cli protocol
+```
+For each submodule capture the new short SHA, its one-line subject, and the
+branch/tag it is on:
+```bash
+git -C <repo> log -1 --oneline
+git -C <repo> describe --tags --always
+```
+Also capture the `tower-protocol` tag the firmware and cli pin (for the message):
+```bash
+grep -h "tower-protocol" firmware/Cargo.toml cli/Cargo.toml
+```
+
+## 2. Safety checks — REFUSE to pin unsafe state
+A pin is only useful if anyone who clones the control plane can resolve these
+exact commits. Before staging anything, verify for EACH submodule:
+- **No uncommitted changes inside the child.** `git -C <repo> status --porcelain`
+  must be empty. If not, the child has work that belongs in a child commit first —
+  stop and tell the user; do not pin over a dirty tree.
+- **The checked-out commit is pushed to its remote.** Check
+  `git -C <repo> branch -r --contains HEAD`. If the commit is on no remote branch,
+  pinning would record a SHA that no fresh clone can fetch. Stop and tell the user
+  to push the child first (commit/push in children is user-driven).
+
+If any check fails, report exactly which repo and why, and do not commit.
+
+## 3. Stage and commit the gitlink bumps
+```bash
+git add firmware cli protocol .gitmodules
+git status --short
+```
+If nothing is staged, report "already pinned — no submodule changes" and stop.
+Otherwise commit. Default message when `-m` is not given:
+```
+pin: firmware@<sha> · cli@<sha> · protocol@<sha>
+
+firmware  <sha>  <subject>
+cli       <sha>  <subject>
+protocol  <sha>  <subject>  (release <protocol-tag>)
+tower-protocol pinned by firmware & cli: <tag>
+```
+Run the commit, then if `--tag` was supplied:
+```bash
+git tag -a <tag> -m "TOWER snapshot <tag>"
+```
+
+## 4. Report
+Show `git log -1 --stat` for the new pin commit and list the frozen SHAs. Do **not**
+push unless the user explicitly asks — then it is `git push` (and `git push --tags`
+if a tag was created).

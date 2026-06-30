@@ -1,0 +1,197 @@
+# CLAUDE.md — TOWER control plane
+
+This repository is the **control plane** for the HARDWARIO TOWER ecosystem. You
+(Claude) are expected to drive work across three child repositories from this one
+session. The children are Git **submodules** at the repo root:
+
+| Submodule  | Upstream                                   | Role |
+|------------|--------------------------------------------|------|
+| `protocol` | `github.com/hardwario/tower-protocol`      | Shared `no_std` wire-format crate — the contract |
+| `firmware` | `github.com/hardwario/tower-firmware`      | Rust/Embassy firmware SDK, apps, FOTA bootloader |
+| `cli`      | `github.com/hardwario/tower-cli`           | Host-side `tower` CLI/TUI |
+
+Each child has its **own `CLAUDE.md`**. When you work inside a child, read and
+obey that file — it is authoritative for that repo. This file governs how the
+pieces fit together and how to change more than one at once.
+
+---
+
+## What TOWER is
+
+TOWER is HARDWARIO's wireless, modular IoT kit. The Core Module is an **STM32L083CZ**
+(Arm Cortex-M0+) with a **SPIRIT1 sub-GHz radio** (EU 868 / US 915 MHz, AES-128-CCM
+secured network with confirmed delivery, replay protection, OTA pairing). The
+firmware streams a **framed serial console** to a host, where the `tower` CLI decodes
+and renders it; firmware updates ship over-the-air (FOTA) as **Ed25519-signed images**.
+
+### Data flow
+
+```
+                 tower-protocol  (COBS + CRC-32 + postcard frames; Ed25519 FOTA manifest)
+                 ▲                                              ▲
+                 │ pins tag                                     │ pins same tag
+   ┌─────────────┴───────────────┐                ┌─────────────┴───────────────┐
+   │  tower-firmware (device)     │   USB serial   │  tower-cli (host)            │
+   │  STM32L083CZ · Embassy       │ ──── frames ──▶ │  decodes logs/events/shell   │
+   │  emits framed console        │ ◀─── shell ──── │  flashes (UART), serves FOTA │
+   └──────────────────────────────┘                └──────────────────────────────┘
+```
+
+The wire format lives in **one place** (`protocol`) and both ends depend on it.
+
+---
+
+## 🔒 The golden rule: protocol lockstep
+
+`firmware` and `cli` each pin `tower-protocol` **by git tag** in their `Cargo.toml`.
+**They must pin the *same* tag.** The wire format is `postcard`, which is **not
+self-describing**: a tag mismatch does not error — it **silently mis-decodes** bytes.
+This has bitten production before.
+
+- Current alignment: **`protocol` = v1.0.0**, pinned as `v1.0.0` by both `firmware`
+  and `cli`. ✅
+- `firmware` references `tower-protocol` in **multiple** manifests: `firmware/Cargo.toml`,
+  `firmware/crates/bootloader/Cargo.toml` (with `features = ["verify"]`),
+  `firmware/crates/tower-kv/Cargo.toml`, and `firmware/tools/fota-sign/Cargo.toml`.
+- `cli` references it in `cli/Cargo.toml` (one place).
+- Any change to the wire format (struct/enum field order, `MsgType` discriminants,
+  frame layout, `Manifest` byte layout) **must** bump `PROTOCOL_VERSION` in
+  `protocol/src/lib.rs`.
+
+**Never bump the protocol tag in one consumer without the other, in the same change-set.**
+`/sync` checks this invariant on every run.
+
+---
+
+## Per-repo cheat sheet
+
+### `protocol/` — the contract (`no_std`, edition 2024, v1.0.0, MIT)
+- Defines: COBS framing + CRC-32 (`src/lib.rs`, `src/crc.rs`), postcard message
+  schema (`src/msg.rs`: `Hello`, `Log`, `Print`, `Event`, `ShellCommand`, …),
+  signed FOTA `Manifest` + Ed25519 verify (`src/fota.rs`, `verify` feature → `salty`).
+- Verify locally:
+  ```bash
+  cargo test --manifest-path protocol/Cargo.toml --features verify
+  cargo clippy --manifest-path protocol/Cargo.toml --all-targets --features verify -- -D warnings
+  cargo build --manifest-path protocol/Cargo.toml --target thumbv6m-none-eabi
+  cargo build --manifest-path protocol/Cargo.toml --target thumbv6m-none-eabi --features verify
+  ```
+- Has CI (`.github/workflows/ci.yml`): host test, embedded build, **auto-tags** a
+  GitHub release when `Cargo.toml` version is new. Tag manually anyway so consumers
+  can be bumped immediately.
+
+### `firmware/` — device SDK (`no_std`, edition 2024, v0.1.0, MIT)
+- Target: **`thumbv6m-none-eabi`** (Cortex-M0+). Uses **`just`** as the task runner.
+- Workspace members: `crates/bootloader` (A/B FOTA bootloader, embassy-boot),
+  `crates/tower-kv` (EEPROM key-value codec). `examples/` = demos, `apps/` = product
+  firmwares, `tools/fota-sign` = host Ed25519 signer (excluded from workspace).
+- Common commands (read `firmware/justfile` for the full set):
+  ```bash
+  just -f firmware/justfile examples            # list example names
+  just -f firmware/justfile build example blinky
+  just -f firmware/justfile flash example blinky   # needs `tower` CLI on PATH + hardware
+  just -f firmware/justfile run   example blinky   # build + flash + stream console
+  just -f firmware/justfile test                # host-side tests (tower-kv, fota-sign)
+  ```
+  Or run inside the dir: `cd firmware && just <recipe>`.
+- **Do NOT** assume a plain `cargo build` for firmware — it is an embedded target with
+  a custom runner and linker scripts. Go through `just`.
+- Flashing/console requires the **`tower` CLI** (the `cli/` submodule) on `PATH` and
+  physical hardware. There is **no CI** in this repo.
+
+### `cli/` — host tool (`tower` binary, edition 2024, v0.2.0, MIT)
+- Single crate. Stack: clap 4, ratatui, serialport, rustyline. Depends on
+  `tower-protocol` (wire codec) **and `hardwario/jolt` v1.2.0** (STM32L0 UART
+  bootloader engine, used by flash/erase/reset).
+- Common commands:
+  ```bash
+  cargo build --manifest-path cli/Cargo.toml --release    # binary: cli/target/release/tower
+  cargo fmt   --manifest-path cli/Cargo.toml --all -- --check
+  cargo clippy --manifest-path cli/Cargo.toml --all-targets -- -D warnings
+  cargo test  --manifest-path cli/Cargo.toml
+  ```
+- Runtime: `tower` (TUI on auto-detected port), `tower logs|events|shell|monitor`,
+  `tower flash <bin>`, `tower reset [--bootloader]`, `tower fota serve <image>`.
+- Linux build needs `libudev-dev` + `pkg-config`. Has CI (test + multi-platform
+  release archives on `v*` tags). **Not on crates.io.**
+
+---
+
+## Slash commands (this repo's workflow)
+
+| Command       | Use it to… |
+|---------------|------------|
+| `/bootstrap`  | Set up a fresh clone: init submodules, verify toolchains, optional build. |
+| `/sync`       | Pull each submodule to upstream `main`, then verify protocol lockstep. |
+| `/pin`        | Freeze the current submodule SHAs as a committed known-good snapshot. |
+
+Definitions live in `.claude/commands/`. The mental model: **`/sync` advances** the
+working trees toward upstream; **`/pin` freezes** them into a control-plane commit you
+can return to. Typical loop: `/sync` → build & test → `/pin`.
+
+---
+
+## Submodule mechanics (handle gitlinks correctly)
+
+- The control plane stores each child as a **gitlink** — a recorded SHA, not the files.
+  `git status` in the root shows a child as modified when its checked-out SHA differs
+  from the recorded one.
+- To record new child SHAs, stage the gitlink: `git add firmware cli protocol`, then
+  commit (this is what `/pin` does). The commit message should list each SHA.
+- **Never** `git add` a child's *file contents* from the root — changes to a child are
+  committed *inside that child* and pushed to its own upstream first.
+- **Never pin a child to a commit that isn't pushed** to its remote — a fresh clone
+  could not fetch it. `/pin` guards against this.
+- Develop a child by `cd`-ing into it (or `git -C <child>`); it is a full clone of the
+  upstream repo on its own branch.
+
+---
+
+## Cross-repo runbook: bumping the wire protocol
+
+The highest-stakes operation. Do it as one coordinated change-set:
+
+1. **In `protocol/`**: make the wire change. If the format changed at all, bump
+   `PROTOCOL_VERSION` in `src/lib.rs`. Bump `version` in `protocol/Cargo.toml`
+   (minor for a wire/behaviour change, patch for a fix). Run the `protocol` test +
+   clippy + embedded builds above. Commit, push `main`, then tag:
+   `git -C protocol tag -a vX.Y.Z -m "…" && git -C protocol push origin main vX.Y.Z`.
+2. **In `firmware/`**: update the tag to `vX.Y.Z` in **all four** manifests listed
+   above, then `cargo update -p tower-protocol`. Rebuild/test via `just`.
+3. **In `cli/`**: update the tag to `vX.Y.Z` in `cli/Cargo.toml`, then
+   `cargo update -p tower-protocol`. Build + test. Note: `cli` may have a local
+   `.cargo/config.toml` `paths` override shadowing the git source — move it aside
+   before `cargo update` so the lockfile re-resolves (see `cli/CLAUDE.md`).
+4. Commit firmware and cli (in their own repos), push.
+5. **Back here**: `/pin` to record the new, aligned SHAs as a snapshot.
+
+### Local co-development (no re-tagging)
+
+Because the three repos sit side by side under this root, you can test a local
+`protocol` change against `firmware`/`cli` without tagging, via a cargo `paths`
+override pointing at `protocol/`. Keep such overrides **local and uncommitted**
+(the root `.cargo/config.toml` is git-ignored here for exactly this). Remove the
+override and go back to the pinned tag before you `/pin` or hand off.
+
+---
+
+## Conventions (inherited from the children)
+
+- **All three repos develop straight on `main`.** No feature branches unless the
+  user explicitly asks. **Commit and push only when the user requests it** — this
+  applies to the children *and* to this control plane.
+- License is **MIT** across the ecosystem (© 2026 HARDWARIO a.s.).
+- Pushes to children use SSH (`git@github.com:hardwario/…`).
+- Regulatory citations in firmware radio code (e.g. FCC §15.247, EU duty-cycle) are
+  real and load-bearing — **never** remove or alter them.
+- `firmware` and `protocol` are hand-formatted in places; respect existing style and
+  the design-rationale comments — don't strip them.
+
+## Don't
+
+- Don't bump `tower-protocol` in one consumer without the other.
+- Don't change the wire format without bumping `PROTOCOL_VERSION`.
+- Don't `git add`/commit a child's files from the control-plane root.
+- Don't `/pin` a child commit that hasn't been pushed upstream.
+- Don't run a bare `cargo build` against `firmware` — use `just`.
+- Don't commit or push anything unless the user asked.

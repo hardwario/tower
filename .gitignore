@@ -1,0 +1,12 @@
+# Local cargo `paths` override for side-by-side protocol co-development.
+# Keep this UNCOMMITTED so the pinned tags stay the source of truth (see CLAUDE.md).
+/.cargo/config.toml
+/.cargo/config
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
