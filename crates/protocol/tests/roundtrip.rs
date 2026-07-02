@@ -1,6 +1,5 @@
-//! Host-side codec round-trip + corruption tests. Run on the host target (the
-//! workspace default is thumbv6m, which can't run tests):
-//!   cargo test -p tower-protocol --target aarch64-apple-darwin
+//! Host-side codec round-trip + corruption tests. In the standalone tower-protocol repo,
+//! `cargo test` runs them directly; add `--features verify` to also run the FOTA-manifest tests.
 
 use tower_protocol::msg::*;
 use tower_protocol::*;
@@ -127,13 +126,18 @@ fn version_mismatch_is_rejected() {
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
     let mut dec = FrameDecoder::new();
     let inner: Vec<u8> = (0..n).find_map(|i| dec.push(out[i]).map(|s| s.to_vec())).unwrap();
-    // Forge a wrong version in ver_type, then fix CRC so only the version check fires.
+    // Forge a wrong version in ver_type, then fix CRC so only the version check fires. Derive the
+    // forged version from PROTOCOL_VERSION (not a hardcoded 2) so this stays a *mismatch* the day
+    // the constant is bumped — otherwise it would become the current version and the test breaks
+    // during exactly the highest-stakes cross-repo operation.
+    let forged = (PROTOCOL_VERSION + 1) & 0x07;
+    assert_ne!(forged, PROTOCOL_VERSION);
     let mut bad = inner.clone();
-    bad[0] = (2 << 5) | (bad[0] & 0x1F); // version 2
+    bad[0] = (forged << 5) | (bad[0] & 0x1F);
     let body = bad.len() - 4;
     let crc = tower_protocol::crc::crc32_ieee(&bad[..body]);
     bad[body..].copy_from_slice(&crc.to_le_bytes());
-    assert_eq!(decode_frame(&bad), Err(Error::BadVersion));
+    assert_eq!(decode_frame(&bad), Err(Error::BadVersion { got: forged }));
 }
 
 #[test]

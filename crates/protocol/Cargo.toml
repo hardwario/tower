@@ -1,6 +1,6 @@
 [package]
 name = "tower-protocol"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 license = "MIT"
 description = "Shared wire protocol for the HARDWARIO TOWER link: COBS framing + CRC + postcard console message schema, the FOTA `FotaReq`/`FotaData` raw messages, and the signed FOTA `Manifest` (Ed25519 verify behind the `verify` feature). no_std; used by both the `tower` firmware and the `tower-cli` host so the two cannot drift."
@@ -28,3 +28,13 @@ salty = { version = "0.3", optional = true }
 [features]
 # Device-side FOTA signature verification: `fota::verify_signed`. Pulls `salty`.
 verify = ["dep:salty"]
+# Bake the built-in DEV vendor public key into `fota::VENDOR_PUBKEY` (bring-up only — the
+# matching private seed is published in tools/fota-sign, so anyone can sign with it). ON by
+# default so the ecosystem builds and self-tests out of the box. A PRODUCTION build MUST turn it
+# off (`default-features = false`) and supply the real key via the `TOWER_VENDOR_PUBKEY` env var,
+# else the crate fails to compile — the mechanical guard against shipping the forgeable dev key.
+dev-key = []
+
+# `dev-key` is a default feature so existing consumers (and `cargo test`) are unchanged; a
+# production firmware opts out with `default-features = false, features = ["verify"]`.
+default = ["dev-key"]

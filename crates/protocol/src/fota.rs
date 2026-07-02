@@ -63,14 +63,66 @@ pub const FOTA_MANIFEST_OFFSET: u32 = u32::MAX;
 /// Lives here (the shared crate) because the **bootloader** verifies (it owns the trust
 /// anchor), and the host signer must match.
 ///
-/// **This is the DEV key** (`fota-sign pubkey`) — anyone can sign with the published dev
-/// seed, so **replace it (and the host key) before shipping**.
+/// # Choosing the key at build time (production vs bring-up)
+///
+/// The key is selected by the `dev-key` cargo feature, which is **on by default**:
+///
+/// * **`dev-key` (default):** the built-in **DEV** key below — the matching private seed is
+///   published in `tools/fota-sign`, so *anyone* can sign an image this key accepts. Fine for
+///   bring-up; **never ship it**.
+/// * **production (`--no-default-features`):** the key is read from the `TOWER_VENDOR_PUBKEY`
+///   environment variable at compile time (a 64-char hex Ed25519 public key, e.g. from
+///   `fota-sign pubkey --hex`). If it is unset, the crate **fails to compile** — a mechanical
+///   guard so a release bootloader can never silently inherit the forgeable dev key.
+///
+/// So a product firmware pins this crate with `default-features = false` and sets
+/// `TOWER_VENDOR_PUBKEY`; the bootloader then verifies against the real vendor key.
+#[cfg(feature = "dev-key")]
 pub const VENDOR_PUBKEY: [u8; 32] = [
     0x88, 0xd1, 0x15, 0xc9, 0x74, 0x21, 0x96, 0xd8, //
     0x74, 0x39, 0xf8, 0xe6, 0xd8, 0x52, 0x5c, 0x0b, //
     0xf0, 0x0f, 0x76, 0x16, 0xed, 0x62, 0x9a, 0xaa, //
     0x79, 0x0b, 0x5d, 0x34, 0x89, 0x39, 0x73, 0xbf, //
 ];
+
+/// Production trust anchor: the vendor public key supplied at compile time via
+/// `TOWER_VENDOR_PUBKEY` (64 hex chars). `env!` makes a missing key a **compile error**, so a
+/// `--no-default-features` (production) build cannot ship without a real key. See the docs above.
+#[cfg(not(feature = "dev-key"))]
+pub const VENDOR_PUBKEY: [u8; 32] = parse_hex32(env!(
+    "TOWER_VENDOR_PUBKEY",
+    "production build (dev-key feature disabled) needs the vendor public key: set the \
+     TOWER_VENDOR_PUBKEY env var to the 64-char hex Ed25519 public key (`fota-sign pubkey --hex`)"
+));
+
+/// Parse a 64-char hex string into a 32-byte array at compile time. Used only for the
+/// production [`VENDOR_PUBKEY`]; a malformed value is a compile error (const-eval panic).
+#[cfg(not(feature = "dev-key"))]
+const fn parse_hex32(s: &str) -> [u8; 32] {
+    let b = s.as_bytes();
+    assert!(
+        b.len() == 64,
+        "TOWER_VENDOR_PUBKEY must be exactly 64 hex characters (32 bytes)"
+    );
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = (hex_nibble(b[2 * i]) << 4) | hex_nibble(b[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
+
+/// One hex nibble → its value; a non-hex byte is a compile error (const panic).
+#[cfg(not(feature = "dev-key"))]
+const fn hex_nibble(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => panic!("TOWER_VENDOR_PUBKEY contains a non-hex character"),
+    }
+}
 
 /// Parsed firmware-image manifest (the signed metadata; see the module docs for the
 /// byte layout). `Copy` and fixed-size — no allocation, no serializer.

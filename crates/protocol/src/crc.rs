@@ -29,3 +29,36 @@ pub fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
 pub fn crc32_ieee(data: &[u8]) -> u32 {
     !crc32_update(0xFFFF_FFFF, data)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The canonical CRC-32/ISO-HDLC ("IEEE") check value: the CRC of the ASCII string
+    /// "123456789" is 0xCBF43926. Pins the polynomial + reflection + init/XOR against the
+    /// standard — a self-consistent round-trip test would pass for the *wrong* CRC too, so this
+    /// reference vector is the guard that the primitive is exactly CRC-32/IEEE. `tower-kv`'s
+    /// deployed EEPROM records depend on this being byte-for-byte stable.
+    #[test]
+    fn standard_check_value() {
+        assert_eq!(crc32_ieee(b"123456789"), 0xCBF4_3926);
+    }
+
+    /// CRC of empty input is the finalized init: `!0xFFFF_FFFF == 0`.
+    #[test]
+    fn empty_input_is_zero() {
+        assert_eq!(crc32_ieee(b""), 0x0000_0000);
+    }
+
+    /// Folding two slices through `crc32_update` (then finalizing) must equal the one-shot over
+    /// the concatenation — the exact contract `storage.rs`'s `entry_crc` relies on to CRC
+    /// `hdr ‖ value` as two calls.
+    #[test]
+    fn multi_slice_fold_matches_contiguous() {
+        let a = b"hello, ";
+        let b = b"tower";
+        let folded = !crc32_update(crc32_update(0xFFFF_FFFF, a), b);
+        let contiguous = crc32_ieee(b"hello, tower");
+        assert_eq!(folded, contiguous);
+    }
+}

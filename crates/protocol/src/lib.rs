@@ -26,6 +26,14 @@ use serde::Serialize;
 /// Protocol version, carried in the top 3 bits of `ver_type` on every frame.
 pub const PROTOCOL_VERSION: u8 = 1;
 
+// The version occupies only the top 3 bits of `ver_type` (`PROTOCOL_VERSION << 5`), so it must
+// fit in 0..=7. Bumping past 7 would silently wrap in release builds and alias an old version —
+// exactly the silent mis-decode this crate exists to prevent — so make it a compile error.
+const _: () = assert!(
+    PROTOCOL_VERSION < 8,
+    "PROTOCOL_VERSION must fit in 3 bits (0..=7); the frame header has no room beyond that"
+);
+
 /// Max inner frame (ver_type + seq + payload + crc), pre-COBS.
 pub const MAX_FRAME: usize = 256;
 /// Max wire frame: COBS worst-case expansion of [`MAX_FRAME`] plus the `0x00`.
@@ -91,13 +99,39 @@ pub enum Error {
     Overflow,
     /// Inner frame shorter than the minimum (`ver_type + seq + crc`).
     TooShort,
-    /// Protocol version in `ver_type` not understood.
-    BadVersion,
+    /// Inner frame longer than [`MAX_FRAME`]. The receive path (a [`FrameDecoder`] buffers up to
+    /// [`MAX_WIRE`], which COBS-decodes to slightly more than `MAX_FRAME`) must reject these so a
+    /// consumer that sizes buffers to the documented `MAX_FRAME`/payload budget can trust it — an
+    /// oversized frame from a peer or an attacker on the wire is dropped, not mis-handled.
+    TooLong,
+    /// Protocol version in `ver_type` not understood; carries the version byte actually seen so a
+    /// consumer can tell the user *which* version the peer speaks (a lockstep mismatch), rather
+    /// than reporting generic "corrupt frame".
+    BadVersion { got: u8 },
     /// Unknown message type.
     BadType,
     /// CRC mismatch (corruption on the wire).
     BadCrc,
 }
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Error::Encode => f.write_str("payload too large or failed to serialize"),
+            Error::Overflow => f.write_str("output buffer too small for the encoded frame"),
+            Error::TooShort => f.write_str("frame shorter than the minimum header+crc"),
+            Error::TooLong => f.write_str("frame longer than MAX_FRAME"),
+            Error::BadVersion { got } => write!(
+                f,
+                "protocol version mismatch: peer speaks v{got}, this build speaks v{PROTOCOL_VERSION}"
+            ),
+            Error::BadType => f.write_str("unknown message type"),
+            Error::BadCrc => f.write_str("CRC mismatch (wire corruption)"),
+        }
+    }
+}
+
+impl core::error::Error for Error {}
 
 /// Build a complete wire frame `COBS(ver_type ‖ seq ‖ postcard(payload) ‖ crc) ‖ 0x00`
 /// into `out`; returns the byte count written. Pure computation — safe from any
@@ -169,9 +203,14 @@ pub fn decode_frame(inner: &[u8]) -> Result<(MsgType, u16, &[u8]), Error> {
     if inner.len() < HDR + CRC_LEN {
         return Err(Error::TooShort);
     }
+    if inner.len() > MAX_FRAME {
+        // The COBS deframer buffers up to MAX_WIRE, which decodes to slightly more than
+        // MAX_FRAME; reject the excess so the encode-side budget is a receive-side guarantee.
+        return Err(Error::TooLong);
+    }
     let ver_type = inner[0];
     if (ver_type >> 5) != PROTOCOL_VERSION {
-        return Err(Error::BadVersion);
+        return Err(Error::BadVersion { got: ver_type >> 5 });
     }
     let msg_type = MsgType::from_u8(ver_type & 0x1F).ok_or(Error::BadType)?;
     let seq = u16::from_le_bytes([inner[1], inner[2]]);
