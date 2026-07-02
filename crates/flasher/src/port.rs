@@ -22,15 +22,26 @@ use crate::target;
 // Reset/BOOT0 timings for the HARDWARIO TOWER Radio Dongle (FT231X driving
 // NRST/BOOT0 through transistors, 1 µF cap on NRST). The (rts, dtr) values in
 // the sequences below are raw modem-line levels (true = line asserted); their
-// order matters because the cap slows the NRST edge.
-const BOOT_PRIME: Duration = Duration::from_millis(10);
-const BOOT_RESET_HOLD: Duration = Duration::from_millis(50);
-const BOOT_RELEASE_HOLD: Duration = Duration::from_millis(50);
-const BOOT_PRE_INIT: Duration = Duration::from_millis(50);
-const RESET_PULSE: Duration = Duration::from_millis(100);
-const APP_BOOT: Duration = Duration::from_millis(150);
-const RUN_SETTLE: Duration = Duration::from_millis(50);
-const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1000);
+// order matters because the cap slows the NRST edge. They are `pub` so callers
+// reconstructing the reset sequence over a foreign handle can reuse the exact
+// tuned delays (see [`Port::from_handle`]).
+
+/// Run-baseline settle before asserting RESET in the bootloader-entry sequence.
+pub const BOOT_PRIME: Duration = Duration::from_millis(10);
+/// How long RESET is held asserted before BOOT0 is raised.
+pub const BOOT_RESET_HOLD: Duration = Duration::from_millis(50);
+/// Settle after raising BOOT0 + releasing RESET (lets the NRST cap ramp up).
+pub const BOOT_RELEASE_HOLD: Duration = Duration::from_millis(50);
+/// Settle after dropping BOOT0, before the `0x7F` init byte.
+pub const BOOT_PRE_INIT: Duration = Duration::from_millis(50);
+/// RESET pulse width for a reset into the application.
+pub const RESET_PULSE: Duration = Duration::from_millis(100);
+/// Post-reset settle so the application has booted before we talk to it.
+pub const APP_BOOT: Duration = Duration::from_millis(150);
+/// Settle after driving the run-state lines on open.
+pub const RUN_SETTLE: Duration = Duration::from_millis(50);
+/// Default read timeout for the bootloader protocol.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1000);
 
 pub struct Port {
     inner: Box<dyn SerialPort>,
@@ -72,6 +83,24 @@ impl Port {
         port.set_lines(true, true)?;
         sleep(RUN_SETTLE);
         Ok(port)
+    }
+
+    /// Wrap an already-open serial handle so callers can drive the tuned
+    /// NRST/BOOT0 reset sequence (and the bootloader engine) without forking it.
+    ///
+    /// The caller is responsible for having opened the handle with the correct
+    /// frame format — the bootloader protocol needs [`target::BAUD`] 8-E-1
+    /// (see [`Port::open`]); a serial monitor picks its own format. Unlike
+    /// [`open`](Self::open) / [`open_with`](Self::open_with) this does **not**
+    /// drive the run-state lines or settle — it takes the handle exactly as
+    /// given.
+    pub fn from_handle(inner: Box<dyn SerialPort>) -> Self {
+        Port { inner }
+    }
+
+    /// Consume the `Port` and return the underlying serial handle.
+    pub fn into_inner(self) -> Box<dyn SerialPort> {
+        self.inner
     }
 
     pub fn set_timeout(&mut self, timeout: Duration) -> Result<()> {
@@ -127,13 +156,31 @@ impl Port {
         Ok(())
     }
 
-    /// Pulse RESET with BOOT0 low so the chip boots the main flash application.
+    /// Pulse RESET with BOOT0 low so the chip boots the main flash application,
+    /// then wait [`APP_BOOT`] for it to come up before returning.
     pub fn reset_into_app(&mut self) -> Result<()> {
+        self.reset_into_app_settle(APP_BOOT)
+    }
+
+    /// Like [`reset_into_app`](Self::reset_into_app) but returns as soon as
+    /// RESET is released, with no post-boot settle. Use when the caller manages
+    /// the wait itself (e.g. it immediately starts streaming the app's output
+    /// and wants the boot banner) — this is the reason tower-cli previously
+    /// forked the reset sequence.
+    pub fn reset_into_app_no_settle(&mut self) -> Result<()> {
+        self.reset_into_app_settle(Duration::ZERO)
+    }
+
+    /// Pulse RESET with BOOT0 low so the chip boots the main flash application,
+    /// waiting `settle` after releasing RESET.
+    pub fn reset_into_app_settle(&mut self, settle: Duration) -> Result<()> {
         self.set_rts(true)?;
         self.set_dtr(false)?; // RESET asserted, BOOT0 low
         sleep(RESET_PULSE);
         self.set_rts(false)?; // RESET released -> boot main flash
-        sleep(APP_BOOT);
+        if !settle.is_zero() {
+            sleep(settle);
+        }
         Ok(())
     }
 
@@ -186,12 +233,65 @@ impl Port {
     /// Read whatever bytes are currently available, up to `buf.len()`. Returns
     /// 0 on a read timeout (no data) instead of erroring — for streaming a port
     /// where idle gaps are normal rather than a failure (e.g. the monitor).
+    ///
+    /// Note: a genuine `Ok(0)` from the OS (EOF / device unplugged) is reported
+    /// as [`Error::Disconnected`], not `Ok(0)` — otherwise a caller looping on
+    /// this would busy-spin at 100% CPU after a USB disconnect. Only a *timeout*
+    /// (the line is idle but still present) yields `Ok(0)`. See
+    /// [`read_stream`](Self::read_stream) for the monitor's read loop.
     pub fn read_available(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.read_stream(buf, "reading serial port")
+    }
+
+    /// Streaming read for a serial monitor: `Ok(n>0)` for data, `Ok(0)` on an
+    /// idle-line timeout, and [`Error::Disconnected`] when the OS reports EOF
+    /// (an instantly-returning zero-byte read — the device was unplugged). This
+    /// last case is what stops the read loop from spinning after a disconnect.
+    pub fn read_stream(&mut self, buf: &mut [u8], context: &'static str) -> Result<usize> {
         match self.inner.read(buf) {
+            Ok(0) => Err(Error::Disconnected { context }),
             Ok(n) => Ok(n),
             Err(e) if e.kind() == io::ErrorKind::TimedOut => Ok(0),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(0),
+            // A closed/unplugged device surfaces as one of these on some
+            // platforms rather than a bare Ok(0).
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::NotConnected
+                        | io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                Err(Error::Disconnected { context })
+            }
             Err(e) => Err(e.into()),
         }
+    }
+}
+
+impl crate::bootloader::Transport for Port {
+    fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+        Port::write_all(self, buf)
+    }
+
+    fn read_exact_buf(&mut self, buf: &mut [u8], context: &str) -> Result<()> {
+        Port::read_exact_buf(self, buf, context)
+    }
+
+    fn clear_input(&mut self) -> Result<()> {
+        Port::clear_input(self)
+    }
+
+    fn set_timeout(&mut self, timeout: Duration) -> Result<()> {
+        Port::set_timeout(self, timeout)
+    }
+
+    fn reset_timeout(&mut self) -> Result<()> {
+        Port::reset_timeout(self)
+    }
+
+    fn read_byte(&mut self, context: &str) -> Result<u8> {
+        Port::read_byte(self, context)
     }
 }

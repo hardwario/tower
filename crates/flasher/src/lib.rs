@@ -5,21 +5,29 @@
 //! flash/erase/reset directly instead of shelling out to the `jolt` binary:
 //!
 //! ```no_run
-//! use jolt::flash::{self, FlashOptions};
+//! use jolt::flash::{self, FlashOptions, Progress};
 //! use jolt::port::Port;
 //!
 //! let mut port = Port::open("/dev/ttyUSB0")?;
 //! let firmware = jolt::firmware::load("app.bin".as_ref())?;
-//! let opts = FlashOptions { erase: true, verify: true, run: true, go: false, verbose: false };
-//! flash::flash(&mut port, &firmware, &opts)?;
-//! # Ok::<(), anyhow::Error>(())
+//! let opts = FlashOptions::default(); // erase + verify + run, no `go`
+//! // The engine is UI-free: it emits `Progress` events through this callback
+//! // instead of printing, so callers render progress however they like.
+//! flash::flash(&mut port, &firmware, &opts, &mut |p: Progress| {
+//!     if let Progress::Write { bytes_done, bytes_total } = p {
+//!         eprintln!("{bytes_done}/{bytes_total}");
+//!     }
+//! })?;
+//! // Or discard progress entirely: `flash::flash(&mut port, &firmware, &opts, &mut flash::no_progress)`.
+//! # Ok::<(), jolt::error::Error>(())
 //! ```
 //!
 //! The high-level entry points are [`flash::flash`], [`flash::erase`], and the
 //! [`Port::reset_into_app`](port::Port::reset_into_app) /
 //! [`Port::reset_into_bootloader`](port::Port::reset_into_bootloader) reset
 //! pulses. The lower layers ([`bootloader`], [`port`]) are public for callers
-//! that need finer control.
+//! that need finer control. Every library entry point returns
+//! [`error::Error`](error::Error) — no `anyhow` in the public surface.
 
 pub mod bootloader;
 pub mod error;

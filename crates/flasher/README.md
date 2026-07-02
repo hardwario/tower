@@ -54,6 +54,7 @@ jolt list
 jolt --port /dev/cu.usbserial-112140 info
 jolt -p /dev/cu.usbserial-112140 flash firmware.bin
 jolt -p /dev/cu.usbserial-112140 flash firmware.bin --no-verify   # skip read-back verify
+jolt -p /dev/cu.usbserial-112140 flash firmware.bin --no-erase    # skip erase (see note below)
 jolt -p /dev/cu.usbserial-112140 flash firmware.bin --no-run      # leave in bootloader
 jolt -p /dev/cu.usbserial-112140 flash firmware.bin --go          # start via Go, not reset
 jolt -p /dev/cu.usbserial-112140 erase
@@ -63,6 +64,13 @@ jolt -p /dev/cu.usbserial-112140 monitor -b 9600 --parity even    # 9600 8E1
 jolt -p /dev/cu.usbserial-112140 monitor --reset                  # reset into app first, catch boot logs
 jolt -p /dev/cu.usbserial-112140 monitor > log.txt                # banner on stderr, device bytes only
 ```
+
+By default `flash` erases before writing, but only the pages the **image
+footprint** spans — not the whole device (a full-chip wipe is the `erase`
+command). `--no-erase` skips even that: use it only when the target pages are
+already erased. Writing STM32L0 flash that has *not* been erased corrupts the
+affected 64-bit words, so `--no-erase` over a non-blank region produces a broken
+image (and a verify failure if `--no-verify` isn't also set).
 
 `monitor` is read-only: it streams whatever the device sends to stdout until
 you press Ctrl-C. The frame format defaults to **115200 8N1** (the application
@@ -85,17 +93,30 @@ it explicitly (use `jolt list` to find it).
 depend on the crate directly instead of shelling out to the binary.
 
 ```rust
-use jolt::flash::{self, FlashOptions};
+use jolt::flash::{self, FlashOptions, Progress};
 use jolt::port::Port;
 
 let mut port = Port::open("/dev/ttyUSB0")?;
 let firmware = jolt::firmware::load("app.bin".as_ref())?;
-let opts = FlashOptions { erase: true, verify: true, run: true, go: false, verbose: false };
-flash::flash(&mut port, &firmware, &opts)?;   // or flash::erase(&mut port, false)
+let opts = FlashOptions::default();   // erase + verify + run, no `go`
+
+// The engine is UI-free: it reports progress through a callback instead of
+// printing, so a TUI or machine-readable frontend stays uncorrupted.
+flash::flash(&mut port, &firmware, &opts, &mut |p: Progress| {
+    if let Progress::Write { bytes_done, bytes_total } = p {
+        eprintln!("{bytes_done}/{bytes_total}");
+    }
+})?;
+// …or discard progress: flash::flash(&mut port, &firmware, &opts, &mut flash::no_progress)
+// …or a full-chip wipe:  flash::erase(&mut port, &mut flash::no_progress)
 ```
 
 The high-level entry points are `flash::flash`, `flash::erase`, and the
-`Port::reset_into_app` / `Port::reset_into_bootloader` reset pulses.
+`Port::reset_into_app` / `Port::reset_into_bootloader` reset pulses. Every
+library entry point returns `jolt::error::Error` (no `anyhow` in the public
+API). For callers that already hold an open serial handle, `Port::from_handle`
+/ `Port::into_inner` and the `pub` reset-timing constants let you drive the
+tuned NRST/BOOT0 sequence without re-implementing it.
 
 ## How it works
 
@@ -118,8 +139,13 @@ ACK `0x79`). `Get ID` reports the product id (e.g. `0x447` for STM32L0x3);
 any recognized STM32L0 id is accepted, and an unknown id only prints a warning.
 Erase uses an explicit page list (the STM32L0 bootloader rejects the 0xFFFF
 mass-erase code); because the bootloader won't report the flash size, a
-full-chip `erase` walks the page list up to the family maximum and stops as soon
-as the device NACKs an out-of-range page — i.e. once the part's flash is wiped.
+full-chip `erase` walks the page list up to the family maximum in 80-page
+chunks. When a chunk is NACKed the page list has run past the end of this
+part's flash — AN3155 rejects the *whole* chunk if any page is out of range, so
+`jolt` then bisects that boundary chunk to find the exact density limit and
+erases every valid page below it (rather than dropping the whole chunk and
+leaving up to 79 pages un-erased). A NACK to the erase *command byte* itself
+(line corruption) is treated as an error, not as the flash boundary.
 
 ## Tests
 
