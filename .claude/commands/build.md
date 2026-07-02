@@ -26,9 +26,8 @@ and `cli` will almost certainly fail downstream, so don't bother building them.
 ```bash
 cargo build --manifest-path protocol/Cargo.toml
 ```
-For a fuller check (the signing path both ends rely on), also:
+For a fuller check (the crate must stay embedded-buildable), also:
 ```bash
-cargo build --manifest-path protocol/Cargo.toml --features verify
 cargo build --manifest-path protocol/Cargo.toml --target thumbv6m-none-eabi
 ```
 

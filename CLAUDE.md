@@ -7,7 +7,7 @@ session. The children are Git **submodules** at the repo root:
 | Submodule  | Upstream                                   | Role |
 |------------|--------------------------------------------|------|
 | `protocol` | `github.com/hardwario/tower-protocol`      | Shared `no_std` wire-format crate — the contract |
-| `firmware` | `github.com/hardwario/tower-firmware`      | Rust/Embassy firmware SDK, apps, FOTA bootloader |
+| `firmware` | `github.com/hardwario/tower-firmware`      | Rust/Embassy firmware SDK and product apps |
 | `cli`      | `github.com/hardwario/tower-cli`           | Host-side `tower` CLI/TUI |
 | `jolt`     | `github.com/hardwario/jolt`                | STM32L0 UART-bootloader flasher (library) used by `cli` |
 
@@ -23,18 +23,18 @@ TOWER is HARDWARIO's wireless, modular IoT kit. The Core Module is an **STM32L08
 (Arm Cortex-M0+) with a **SPIRIT1 sub-GHz radio** (EU 868 / US 915 MHz, AES-128-CCM
 secured network with confirmed delivery, replay protection, OTA pairing). The
 firmware streams a **framed serial console** to a host, where the `tower` CLI decodes
-and renders it; firmware updates ship over-the-air (FOTA) as **Ed25519-signed images**.
+and renders it.
 
 ### Data flow
 
 ```
-                 tower-protocol  (COBS + CRC-32 + postcard frames; Ed25519 FOTA manifest)
+                 tower-protocol  (COBS + CRC-32 + postcard frames)
                  ▲                                              ▲
                  │ pins tag                                     │ pins same tag
    ┌─────────────┴───────────────┐                ┌─────────────┴───────────────┐
    │  tower-firmware (device)     │   USB serial   │  tower-cli (host)            │
    │  STM32L083CZ · Embassy       │ ──── frames ──▶ │  decodes logs/events/shell   │
-   │  emits framed console        │ ◀─── shell ──── │  flashes (UART), serves FOTA │
+   │  emits framed console        │ ◀─── shell ──── │  flashes (UART)              │
    └──────────────────────────────┘                └──────────────────────────────┘
 ```
 
@@ -51,13 +51,12 @@ This has bitten production before.
 
 - Current alignment: **`protocol` = v1.0.0**, pinned as `v1.0.0` by both `firmware`
   and `cli`. ✅
-- `firmware` references `tower-protocol` in **multiple** manifests: `firmware/Cargo.toml`,
-  `firmware/crates/bootloader/Cargo.toml` (with `features = ["verify"]`),
-  `firmware/crates/tower-kv/Cargo.toml`, and `firmware/tools/fota-sign/Cargo.toml`.
+- `firmware` references `tower-protocol` in **three** manifests: `firmware/Cargo.toml`,
+  `firmware/crates/tower-kv/Cargo.toml`, and `firmware/tools/hil/Cargo.toml` (the
+  out-of-workspace HIL harness).
 - `cli` references it in `cli/Cargo.toml` (one place).
 - Any change to the wire format (struct/enum field order, `MsgType` discriminants,
-  frame layout, `Manifest` byte layout) **must** bump `PROTOCOL_VERSION` in
-  `protocol/src/lib.rs`.
+  frame layout) **must** bump `PROTOCOL_VERSION` in `protocol/src/lib.rs`.
 
 **Never bump the protocol tag in one consumer without the other, in the same change-set.**
 `/sync` checks this invariant on every run.
@@ -67,15 +66,13 @@ This has bitten production before.
 ## Per-repo cheat sheet
 
 ### `protocol/` — the contract (`no_std`, edition 2024, v1.0.0, MIT)
-- Defines: COBS framing + CRC-32 (`src/lib.rs`, `src/crc.rs`), postcard message
-  schema (`src/msg.rs`: `Hello`, `Log`, `Print`, `Event`, `ShellCommand`, …),
-  signed FOTA `Manifest` + Ed25519 verify (`src/fota.rs`, `verify` feature → `salty`).
+- Defines: COBS framing + CRC-32 (`src/lib.rs`, `src/crc.rs`) and the postcard message
+  schema (`src/msg.rs`: `Hello`, `Log`, `Print`, `Event`, `ShellCommand`, …).
 - Verify locally:
   ```bash
-  cargo test --manifest-path protocol/Cargo.toml --features verify
-  cargo clippy --manifest-path protocol/Cargo.toml --all-targets --features verify -- -D warnings
+  cargo test --manifest-path protocol/Cargo.toml
+  cargo clippy --manifest-path protocol/Cargo.toml --all-targets -- -D warnings
   cargo build --manifest-path protocol/Cargo.toml --target thumbv6m-none-eabi
-  cargo build --manifest-path protocol/Cargo.toml --target thumbv6m-none-eabi --features verify
   ```
 - Has CI (`.github/workflows/ci.yml`): host test, embedded build, **auto-tags** a
   GitHub release when `Cargo.toml` version is new. Tag manually anyway so consumers
@@ -83,16 +80,16 @@ This has bitten production before.
 
 ### `firmware/` — device SDK (`no_std`, edition 2024, v0.1.0, MIT)
 - Target: **`thumbv6m-none-eabi`** (Cortex-M0+). Uses **`just`** as the task runner.
-- Workspace members: `crates/bootloader` (A/B FOTA bootloader, embassy-boot),
-  `crates/tower-kv` (EEPROM key-value codec). `examples/` = demos, `apps/` = product
-  firmwares, `tools/fota-sign` = host Ed25519 signer (excluded from workspace).
+- Workspace members: `crates/tower-kv` (EEPROM key-value codec), `crates/tower-radio-core`
+  (host-testable radio-timing/compliance math). `examples/` = demos, `apps/` = product
+  firmwares, `tools/hil` = hardware-in-the-loop harness (excluded from workspace).
 - Common commands (read `firmware/justfile` for the full set):
   ```bash
   just -f firmware/justfile examples            # list example names
   just -f firmware/justfile build example blinky
   just -f firmware/justfile flash example blinky   # needs `tower` CLI on PATH + hardware
   just -f firmware/justfile run   example blinky   # build + flash + stream console
-  just -f firmware/justfile test                # host-side tests (tower-kv, fota-sign)
+  just -f firmware/justfile test                # host-side tests (tower-kv, tower-radio-core)
   ```
   Or run inside the dir: `cd firmware && just <recipe>`.
 - **Do NOT** assume a plain `cargo build` for firmware — it is an embedded target with
@@ -113,15 +110,15 @@ This has bitten production before.
   cargo test  --manifest-path cli/Cargo.toml
   ```
 - Runtime: `tower` (TUI on auto-detected port), `tower logs|events|shell|monitor`,
-  `tower flash <bin>`, `tower reset [--bootloader]`, `tower fota serve <image>`.
+  `tower flash <bin>`, `tower reset [--bootloader]`.
 - Linux build needs `libudev-dev` + `pkg-config`. Has CI (test + multi-platform
   release archives on `v*` tags). **Not on crates.io.**
 
-### `jolt/` — UART flasher (lib + `jolt` binary, edition 2024, v1.2.0, MIT)
+### `jolt/` — UART flasher (lib + `jolt` binary, edition 2024, v1.3.0, MIT)
 - "Tiny Rust CLI that flashes an STM32L083CZ over the UART bootloader." Modules:
   `bootloader`, `commands`, `firmware`, `flash`, `port`, `target`. `cli` consumes its
   **library** API; it is also usable standalone as the `jolt` binary.
-- Pinned by `cli` via git tag (`jolt = { git = "…/jolt", tag = "v1.2.0" }`). Unlike the
+- Pinned by `cli` via git tag (`jolt = { git = "…/jolt", tag = "v1.3.0" }`). Unlike the
   `tower-protocol` lockstep, a tag mismatch here is a **compile error** in `cli`, not a
   silent failure — so it is a normal dependency bump, not an interop hazard. There is
   no second consumer to keep in lockstep.
@@ -172,7 +169,7 @@ The highest-stakes operation. Do it as one coordinated change-set:
    (minor for a wire/behaviour change, patch for a fix). Run the `protocol` test +
    clippy + embedded builds above. Commit, push `main`, then tag:
    `git -C protocol tag -a vX.Y.Z -m "…" && git -C protocol push origin main vX.Y.Z`.
-2. **In `firmware/`**: update the tag to `vX.Y.Z` in **all four** manifests listed
+2. **In `firmware/`**: update the tag to `vX.Y.Z` in **both** manifests listed
    above, then `cargo update -p tower-protocol`. Rebuild/test via `just`.
 3. **In `cli/`**: update the tag to `vX.Y.Z` in `cli/Cargo.toml`, then
    `cargo update -p tower-protocol`. Build + test. Note: `cli` may have a local

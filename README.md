@@ -23,23 +23,23 @@ tower/                ← you are here (the control plane)
 TOWER is HARDWARIO's wireless, modular IoT kit. The Core Module is an **STM32L083CZ**
 (Arm Cortex-M0+) with a **SPIRIT1 sub-GHz radio** (EU 868 / US 915 MHz, AES-128-CCM
 secured). The firmware emits a **framed serial console**; the `tower` CLI decodes and
-renders it; firmware updates ship over-the-air as **Ed25519-signed images**.
+renders it.
 
 | Repo | Role | Lang | Version |
 |------|------|------|---------|
-| [**tower-protocol**](https://github.com/hardwario/tower-protocol) | Shared `no_std` wire-format crate: COBS+CRC framing, postcard message schema, signed FOTA manifest. The single source of truth both other repos depend on. | Rust | `1.0.0` |
-| [**tower-firmware**](https://github.com/hardwario/tower-firmware) | Embassy-based firmware SDK, ready-made product apps, and the A/B FOTA bootloader for the STM32L0 Core Module. | Rust | `0.1.0` |
-| [**tower-cli**](https://github.com/hardwario/tower-cli) | Host-side `tower` CLI/TUI: streams logs/events, an interactive shell, flashes over UART, and serves FOTA images. | Rust | `0.2.0` |
-| [**jolt**](https://github.com/hardwario/jolt) | STM32L0 UART-bootloader flasher. `tower-cli` links it as a library for `flash`/`erase`/`reset`; also usable standalone. | Rust | `1.2.0` |
+| [**tower-protocol**](https://github.com/hardwario/tower-protocol) | Shared `no_std` wire-format crate: COBS+CRC framing, postcard message schema. The single source of truth both other repos depend on. | Rust | `1.0.0` |
+| [**tower-firmware**](https://github.com/hardwario/tower-firmware) | Embassy-based firmware SDK and ready-made product apps for the STM32L0 Core Module. | Rust | `0.1.0` |
+| [**tower-cli**](https://github.com/hardwario/tower-cli) | Host-side `tower` CLI/TUI: streams logs/events, an interactive shell, flashes over UART. | Rust | `0.2.0` |
+| [**jolt**](https://github.com/hardwario/jolt) | STM32L0 UART-bootloader flasher. `tower-cli` links it as a library for `flash`/`erase`/`reset`; also usable standalone. | Rust | `1.3.0` |
 
 ```
-                 tower-protocol  (frames + FOTA manifest)
+                 tower-protocol  (COBS + CRC + postcard frames)
                  ▲                                        ▲
                  │ same git tag                           │ same git tag
    ┌─────────────┴──────────────┐            ┌────────────┴───────────────┐
    │  tower-firmware (device)    │  USB/UART  │  tower-cli (host)           │
    │  STM32L083CZ · Embassy      │ ── frames ▶│  decode logs/events/shell   │
-   │  framed console + FOTA      │ ◀── shell ─│  flash · reset · fota serve │
+   │  framed console             │ ◀── shell ─│  flash · reset              │
    └─────────────────────────────┘            └─────────────────────────────┘
 ```
 
@@ -88,7 +88,7 @@ each from the control-plane root:
 
 ```bash
 # protocol — the shared crate
-cargo test  --manifest-path protocol/Cargo.toml --features verify
+cargo test  --manifest-path protocol/Cargo.toml
 
 # cli — the host tool (binary: cli/target/release/tower)
 cargo build --manifest-path cli/Cargo.toml --release
@@ -103,7 +103,7 @@ cargo build --manifest-path jolt/Cargo.toml
 Firmware flashing and the console require the `tower` CLI on your `PATH` and a
 physical Core Module. See each child's own `README.md`/`CLAUDE.md` for depth.
 
-> **Note:** `jolt` is `tower-cli`'s flashing dependency, pinned by git tag (`v1.2.0`)
+> **Note:** `jolt` is `tower-cli`'s flashing dependency, pinned by git tag (`v1.3.0`)
 > just like `tower-protocol`. But because `cli` links it as a Rust **library**, a tag
 > mismatch is a compile error rather than the *silent* mis-decode that a protocol-tag
 > mismatch causes — so it carries no lockstep hazard between firmware and cli.
