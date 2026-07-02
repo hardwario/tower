@@ -28,12 +28,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The crate is a no_std library; tests (and the `verify` Ed25519 path) run on the host.
-      - name: Clippy (incl. verify + tests)
-        run: cargo clippy --all-targets --features verify -- -D warnings
+      # The crate is a no_std library; the tests run on the host.
+      - name: Clippy (incl. tests)
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --features verify
+        run: cargo test
 
   embedded:
     name: Build (thumbv6m, no_std)
@@ -48,12 +48,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Guarantee the crate stays no_std / embedded-buildable (the firmware links it on the MCU),
-      # with and without the salty-backed verify feature.
-      - name: Build (default)
+      # Guarantee the crate stays no_std / embedded-buildable (the firmware links it on the MCU).
+      - name: Build
         run: cargo build --target thumbv6m-none-eabi
-      - name: Build (verify)
-        run: cargo build --target thumbv6m-none-eabi --features verify
 
   # Single-source the version from Cargo.toml: when a push to main carries a version the repo
   # isn't tagged for yet, create the matching `vX.Y.Z` tag + a GitHub Release. Idempotent (skips

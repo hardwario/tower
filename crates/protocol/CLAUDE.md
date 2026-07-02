@@ -4,7 +4,8 @@ The shared wire-format crate. It is consumed **by git tag** (not a path, not cra
 repos that MUST stay in lockstep with it:
 
 - **`tower-firmware`** (github.com/hardwario/tower-firmware) — the `tower` lib, the
-  `tower-bootloader` crate (`features = ["verify"]`), and `tools/fota-sign` (`["verify"]`).
+  `tower-kv` crate (`crates/tower-kv`, which shares the CRC primitive), and the
+  `tools/hil` bench harness (decodes frames natively).
 - **`tower-cli`** (github.com/hardwario/tower-cli) — the host CLI.
 
 **Cardinal rule:** postcard is *not* self-describing — a producer and a consumer built against
@@ -14,8 +15,7 @@ bit once (a consumer pinned a tag that didn't exist yet); don't let it drift.
 ## Releasing a change — do this whenever you change anything that ships
 
 1. **If the wire format changed** — any postcard struct/enum (field *or* variant **order** counts),
-   the framing, a `MsgType` discriminant, or the FOTA `Manifest` byte layout — bump
-   `PROTOCOL_VERSION` in `src/lib.rs`.
+   the framing, or a `MsgType` discriminant — bump `PROTOCOL_VERSION` in `src/lib.rs`.
 2. **Bump `version` in `Cargo.toml`** (semver: wire/behaviour change → minor; fix → patch).
 3. **Commit, push `main`, tag, push the tag:**
    ```sh
@@ -25,11 +25,10 @@ bit once (a consumer pinned a tag that didn't exist yet); don't let it drift.
    (CI auto-creates the tag from the `Cargo.toml` version as a backstop if you forget — but tag it
    yourself so the consumers can be bumped right away. Pushes need **SSH**: `git@github.com:…`.)
 4. **Propagate to BOTH consumers in the same change-set** — never bump one without the other:
-   - **tower-firmware:** set `tag = "vX.Y.Z"` in `Cargo.toml`, `crates/bootloader/Cargo.toml`, and
-     `tools/fota-sign/Cargo.toml`; then
-     `cargo update -p tower-protocol` **and**
-     `cargo update --manifest-path tools/fota-sign/Cargo.toml -p tower-protocol`;
-     `just test` + build a FOTA example; commit + push.
+   - **tower-firmware:** set `tag = "vX.Y.Z"` in `Cargo.toml`, `crates/tower-kv/Cargo.toml`,
+     and `tools/hil/Cargo.toml`; then `cargo update -p tower-protocol` (covers the
+     workspace) **and** `cargo update --manifest-path tools/hil/Cargo.toml -p tower-protocol`;
+     `just test` + build an example; commit + push.
    - **tower-cli:** set `tag = "vX.Y.Z"` in `Cargo.toml`; `cargo update -p tower-protocol`; build;
      commit + push. ⚠️ tower-cli has a **gitignored `.cargo/config.toml` `paths` override** that
      shadows the git source — move it aside before `cargo update` (else the lock won't re-resolve
@@ -37,7 +36,7 @@ bit once (a consumer pinned a tag that didn't exist yet); don't let it drift.
 
 ## Tests / checks
 
-`cargo test --features verify` and `cargo clippy --all-targets --features verify -- -D warnings`
+`cargo test` and `cargo clippy --all-targets -- -D warnings`
 (both in CI, plus a `thumbv6m-none-eabi` no_std build). The crate is **hand-formatted** — there is
 no `rustfmt` gate; do **not** bulk-reformat.
 

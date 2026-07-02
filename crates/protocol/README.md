@@ -17,16 +17,6 @@ can never drift on the bytes they exchange.
   interactive-shell messages (`ShellCommand` / `ShellResponse` / `ShellComplete` /
   `ShellCompletions`). Serialized with **postcard**, which is *not* self-describing — which is
   the whole reason this crate is shared: both ends must hold the exact same struct definitions.
-- **FOTA transport messages** (`FotaReq` / `FotaData`, raw payloads via `encode_frame_raw`) —
-  the host-proxy image link used by `tower fota serve`.
-- **Signed FOTA manifest** (`fota.rs`, `Manifest`) — a fixed 52-byte little-endian layout +
-  64-byte Ed25519 signature (116-byte signed blob), plus `verify_signed` (Ed25519 via
-  [`salty`](https://crates.io/crates/salty)) behind the **`verify`** feature. The device
-  verifies a signed manifest in the bootloader before arming an A/B swap; the matching host
-  signer is `tools/fota-sign` in the firmware repo.
-
-The `verify` feature is **off by default** so pure-wire consumers (the host CLI's parsing path,
-the firmware app) take no crypto dependency; the bootloader turns it on.
 
 ## Use it
 
@@ -35,8 +25,6 @@ It is consumed as a **pinned git dependency** (no crates.io publish):
 ```toml
 [dependencies]
 tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.0.0" }
-# the bootloader/verifier adds:
-# tower-protocol = { git = "...", tag = "v1.0.0", features = ["verify"] }
 ```
 
 Because postcard isn't self-describing, **both ends must build the same version** — pin the same
@@ -62,7 +50,7 @@ console wire compatibility independently of the crate version; a decoder rejects
 
 | Tag | Contents |
 |---|---|
-| `v1.0.0` | initial standalone release: console framing + message schema, FOTA `FotaReq`/`FotaData` messages, and the signed `Manifest` (+ `verify` feature) |
+| `v1.0.0` | initial release: console framing (COBS + CRC-32) + the postcard message schema |
 
 ## License
 

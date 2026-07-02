@@ -1,9 +1,9 @@
 [package]
 name = "tower-protocol"
-version = "1.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
-description = "Shared wire protocol for the HARDWARIO TOWER link: COBS framing + CRC + postcard console message schema, the FOTA `FotaReq`/`FotaData` raw messages, and the signed FOTA `Manifest` (Ed25519 verify behind the `verify` feature). no_std; used by both the `tower` firmware and the `tower-cli` host so the two cannot drift."
+description = "Shared wire protocol for the HARDWARIO TOWER link: COBS framing + CRC + postcard console message schema. no_std; used by both the `tower` firmware and the `tower-cli` host so the two cannot drift."
 repository = "https://github.com/hardwario/tower-protocol"
 readme = "README.md"
 keywords = ["hardwario", "tower", "embedded", "no-std", "protocol"]
@@ -19,22 +19,3 @@ postcard = { version = "1.0", default-features = false }
 cobs = { version = "0.3", default-features = false }
 # Bounded collections for the candidate/field lists; `serde` feature for (de)ser.
 heapless = { version = "0.9", default-features = false, features = ["serde"] }
-# Embedded Ed25519 (Cortex-M-friendly; the same crate embassy-boot uses for its
-# ed25519-salty verify). Only pulled in by the `verify` feature, so pure-wire consumers
-# (e.g. the host CLI's parsing) don't take a crypto dependency. The firmware enables it
-# to verify a signed FOTA `Manifest` before arming a swap (docs/fota.md).
-salty = { version = "0.3", optional = true }
-
-[features]
-# Device-side FOTA signature verification: `fota::verify_signed`. Pulls `salty`.
-verify = ["dep:salty"]
-# Bake the built-in DEV vendor public key into `fota::VENDOR_PUBKEY` (bring-up only — the
-# matching private seed is published in tools/fota-sign, so anyone can sign with it). ON by
-# default so the ecosystem builds and self-tests out of the box. A PRODUCTION build MUST turn it
-# off (`default-features = false`) and supply the real key via the `TOWER_VENDOR_PUBKEY` env var,
-# else the crate fails to compile — the mechanical guard against shipping the forgeable dev key.
-dev-key = []
-
-# `dev-key` is a default feature so existing consumers (and `cargo test`) are unchanged; a
-# production firmware opts out with `default-features = false, features = ["verify"]`.
-default = ["dev-key"]
