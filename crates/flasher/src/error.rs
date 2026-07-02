@@ -54,7 +54,7 @@ pub enum Error {
     },
 
     #[error(
-        "could not enter the bootloader after {attempts} attempt(s) (no ACK to 0x7F init) — check the --port and the cable"
+        "could not enter the bootloader after {attempts} attempt(s) (no ACK to 0x7F init) — check the --device and the cable"
     )]
     BootloaderInit { attempts: u32 },
 

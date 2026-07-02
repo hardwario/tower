@@ -13,7 +13,7 @@ use cli::{Cli, Command};
 fn main() {
     let cli = Cli::parse();
     let result = match &cli.command {
-        Command::List => commands::list(),
+        Command::Devices => commands::devices(),
         Command::Info => commands::info(&cli.global),
         Command::Flash(args) => commands::flash(&cli.global, args),
         Command::Erase => commands::erase(&cli.global),

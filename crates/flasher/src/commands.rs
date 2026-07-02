@@ -139,8 +139,8 @@ impl Reporter {
     }
 }
 
-/// Resolve which serial port to use: explicit `--port`, else the only port
-/// present, otherwise an error asking the user to pick one.
+/// Resolve which serial-port path to use: explicit `--device`, else the only
+/// device present, otherwise an error asking the user to pick one.
 fn resolve_port(global: &GlobalOpts) -> Result<String> {
     if let Some(p) = &global.port {
         return Ok(p.clone());
@@ -148,14 +148,14 @@ fn resolve_port(global: &GlobalOpts) -> Result<String> {
     let ports = serialport::available_ports().context("listing serial ports")?;
     match ports.as_slice() {
         [only] => Ok(only.port_name.clone()),
-        [] => anyhow::bail!("no serial ports found; connect the device or pass --port"),
-        _ => anyhow::bail!("multiple serial ports found; pass --port (see `jolt list`)"),
+        [] => anyhow::bail!("no serial devices found; connect the device or pass --device"),
+        _ => anyhow::bail!("multiple serial devices found; pass --device (see `jolt devices`)"),
     }
 }
 
 fn open(global: &GlobalOpts) -> Result<Port> {
     let path = resolve_port(global)?;
-    println!("Port    : {path} @ {} baud, 8E1", target::BAUD);
+    println!("Device  : {path} @ {} baud, 8E1", target::BAUD);
     Port::open(&path).with_context(|| format!("failed to open serial port {path}"))
 }
 
@@ -169,7 +169,7 @@ fn enter_and_identify(port: &mut Port, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn list() -> Result<()> {
+pub fn devices() -> Result<()> {
     let ports = serialport::available_ports().context("listing serial ports")?;
     for p in &ports {
         println!("{}", p.port_name);

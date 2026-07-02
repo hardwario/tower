@@ -32,16 +32,16 @@ IOKit deps, no libudev).
 jolt <COMMAND> [OPTIONS]
 
 Commands:
-  list     List all serial ports
+  devices  List connected serial devices
   info     Read bootloader info (chip id, version, commands) — read-only
   flash    Flash a raw firmware .bin file
   erase    Erase the entire flash (adapts to the device's density)
   reset    Reset the device into the application or the bootloader
-  monitor  Open the serial port and print incoming data (serial monitor)
+  monitor  Open the serial device and print incoming data (serial monitor)
 
 Global options:
-  -p, --port <PATH>   Serial port (default: the only port present, else required)
-  -v, --verbose       Verbose output (e.g. per-attempt bootloader-entry errors)
+  -d, --device <DEVICE>   Serial device (default: the only one present, else required)
+  -v, --verbose           Verbose output (e.g. per-attempt bootloader-entry errors)
 ```
 
 The bootloader runs at **115200 baud, 8-E-1** — 115200 is the maximum baud rate
@@ -50,19 +50,19 @@ ST specifies for the USART bootloader.
 ### Examples
 
 ```sh
-jolt list
-jolt --port /dev/cu.usbserial-112140 info
-jolt -p /dev/cu.usbserial-112140 flash firmware.bin
-jolt -p /dev/cu.usbserial-112140 flash firmware.bin --no-verify   # skip read-back verify
-jolt -p /dev/cu.usbserial-112140 flash firmware.bin --no-erase    # skip erase (see note below)
-jolt -p /dev/cu.usbserial-112140 flash firmware.bin --no-run      # leave in bootloader
-jolt -p /dev/cu.usbserial-112140 flash firmware.bin --go          # start via Go, not reset
-jolt -p /dev/cu.usbserial-112140 erase
-jolt -p /dev/cu.usbserial-112140 reset --app                      # or --bootloader
-jolt -p /dev/cu.usbserial-112140 monitor                          # 115200 8N1, Ctrl-C to exit
-jolt -p /dev/cu.usbserial-112140 monitor -b 9600 --parity even    # 9600 8E1
-jolt -p /dev/cu.usbserial-112140 monitor --reset                  # reset into app first, catch boot logs
-jolt -p /dev/cu.usbserial-112140 monitor > log.txt                # banner on stderr, device bytes only
+jolt devices
+jolt --device /dev/cu.usbserial-112140 info
+jolt -d /dev/cu.usbserial-112140 flash firmware.bin
+jolt -d /dev/cu.usbserial-112140 flash firmware.bin --no-verify   # skip read-back verify
+jolt -d /dev/cu.usbserial-112140 flash firmware.bin --no-erase    # skip erase (see note below)
+jolt -d /dev/cu.usbserial-112140 flash firmware.bin --no-run      # leave in bootloader
+jolt -d /dev/cu.usbserial-112140 flash firmware.bin --go          # start via Go, not reset
+jolt -d /dev/cu.usbserial-112140 erase
+jolt -d /dev/cu.usbserial-112140 reset --app                      # or --bootloader
+jolt -d /dev/cu.usbserial-112140 monitor                          # 115200 8N1, Ctrl-C to exit
+jolt -d /dev/cu.usbserial-112140 monitor -b 9600 --parity even    # 9600 8E1
+jolt -d /dev/cu.usbserial-112140 monitor --reset                  # reset into app first, catch boot logs
+jolt -d /dev/cu.usbserial-112140 monitor > log.txt                # banner on stderr, device bytes only
 ```
 
 By default `flash` erases before writing, but only the pages the **image
@@ -75,16 +75,16 @@ image (and a verify failure if `--no-verify` isn't also set).
 `monitor` is read-only: it streams whatever the device sends to stdout until
 you press Ctrl-C. The frame format defaults to **115200 8N1** (the application
 console; note this differs from the bootloader's 8-E-1) and is configurable via
-`-b/--baudrate`, `-d/--databits` (5–8), `--parity` (none/even/odd), and
-`-s/--stopbits` (1–2). Opening the port drives the bridge to the run state so
+`-b/--baudrate`, `--databits` (5–8), `--parity` (none/even/odd), and
+`-s/--stopbits` (1–2). Opening the device drives the bridge to the run state so
 the application keeps running; `--reset` additionally pulses NRST into the
 application so you catch its boot output.
 
 `flash` accepts a **raw `.bin`** only (written at `0x08000000`). Convert ELF/HEX
 first, e.g. `arm-none-eabi-objcopy -O binary firmware.elf firmware.bin`.
 
-If exactly one serial port is present, `--port` may be omitted; otherwise pass
-it explicitly (use `jolt list` to find it).
+If exactly one serial device is present, `--device` may be omitted; otherwise pass
+it explicitly (use `jolt devices` to find it).
 
 ## Library
 
