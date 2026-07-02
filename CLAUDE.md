@@ -97,9 +97,9 @@ This has bitten production before.
 - Flashing/console requires the **`tower` CLI** (the `cli/` submodule) on `PATH` and
   physical hardware. There is **no CI** in this repo.
 
-### `cli/` — host tool (`tower` binary, edition 2024, v0.2.0, MIT)
+### `cli/` — host tool (`tower` binary, edition 2024, v0.3.0, MIT)
 - Single crate. Stack: clap 4, ratatui, serialport, rustyline. Depends on
-  `tower-protocol` (wire codec) **and the `jolt/` submodule** (`v1.2.0`, the STM32L0
+  `tower-protocol` (wire codec) **and the `jolt/` submodule** (`v1.3.0`, the STM32L0
   UART-bootloader flasher), which it links as a **library** (`jolt::firmware::load`,
   `jolt::port::Port`, `jolt::flash::FlashOptions`) for `flash`/`erase`/`reset`.
 - Common commands:

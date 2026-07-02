@@ -23,13 +23,14 @@ tower/                ← you are here (the control plane)
 TOWER is HARDWARIO's wireless, modular IoT kit. The Core Module is an **STM32L083CZ**
 (Arm Cortex-M0+) with a **SPIRIT1 sub-GHz radio** (EU 868 / US 915 MHz, AES-128-CCM
 secured). The firmware emits a **framed serial console**; the `tower` CLI decodes and
-renders it.
+renders it. Firmware is loaded **over the wire** (USB UART bootloader via `tower
+flash`, or SWD) — there is no over-the-air update path, by design.
 
 | Repo | Role | Lang | Version |
 |------|------|------|---------|
 | [**tower-protocol**](https://github.com/hardwario/tower-protocol) | Shared `no_std` wire-format crate: COBS+CRC framing, postcard message schema. The single source of truth both other repos depend on. | Rust | `1.0.0` |
 | [**tower-firmware**](https://github.com/hardwario/tower-firmware) | Embassy-based firmware SDK and ready-made product apps for the STM32L0 Core Module. | Rust | `0.1.0` |
-| [**tower-cli**](https://github.com/hardwario/tower-cli) | Host-side `tower` CLI/TUI: streams logs/events, an interactive shell, flashes over UART. | Rust | `0.2.0` |
+| [**tower-cli**](https://github.com/hardwario/tower-cli) | Host-side `tower` CLI/TUI: streams logs/events, an interactive shell, flashes over UART. | Rust | `0.3.0` |
 | [**jolt**](https://github.com/hardwario/jolt) | STM32L0 UART-bootloader flasher. `tower-cli` links it as a library for `flash`/`erase`/`reset`; also usable standalone. | Rust | `1.3.0` |
 
 ```
