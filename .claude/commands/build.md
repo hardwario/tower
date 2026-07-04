@@ -47,9 +47,13 @@ Firmware is `no_std` for `thumbv6m-none-eabi` with a custom runner — **do not*
 bare `cargo build` expecting a flashable image. Building does **not** need hardware
 (only flashing/running does).
 - **Default (no `example`/`app` given):** compile-check the library for the embedded
-  target — fast, deterministic, hardware-free:
+  target — fast, deterministic, hardware-free. Pass `--target` **explicitly**: cargo discovers
+  `.cargo/config.toml` by walking up from the CURRENT directory, not from `--manifest-path`, so
+  from the control-plane root `firmware/.cargo/config.toml` (which sets `target = thumbv6m`) is
+  NOT read — a bare `cargo build --manifest-path firmware/Cargo.toml` would build the HOST triple
+  and report a misleading green that never touched thumbv6m:
   ```bash
-  cargo build --manifest-path firmware/Cargo.toml
+  cargo build --manifest-path firmware/Cargo.toml --target thumbv6m-none-eabi
   ```
 - **A flashable artifact:** use the repo's task runner (it links + objcopies to a
   `.bin`). List names first if unsure:

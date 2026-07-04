@@ -41,6 +41,16 @@ exact commits. Before staging anything, verify for EACH submodule:
   `git -C <repo> branch -r --contains HEAD`. If the commit is on no remote branch,
   pinning would record a SHA that no fresh clone can fetch. Stop and tell the user
   to push the child first (commit/push in children is user-driven).
+- **The protocol lockstep holds.** A "known-good" snapshot with a mismatched
+  `tower-protocol` pin silently mis-decodes the wire. Run
+  `python3 firmware/tools/protocol_pin_check.py --cli-url https://raw.githubusercontent.com/hardwario/tower-cli/main/Cargo.toml`
+  — it now also cross-checks the RESOLVED `Cargo.lock` SHAs, so a re-cut tag (same string,
+  different commit) is caught too. Refuse to pin on any mismatch. (`/sync` runs this, but `/pin`
+  must not assume `/sync` ran.)
+- **No local `paths` override is shadowing the pinned sources.** If a git-ignored root
+  `.cargo/config.toml` exists, builds validated LOCAL (possibly unpushed) sources, not the pinned
+  tags — a fresh clone would build different code. Refuse to pin while one is present
+  (`test -f .cargo/config.toml` → stop and tell the user to remove the co-dev override first).
 
 If any check fails, report exactly which repo and why, and do not commit.
 

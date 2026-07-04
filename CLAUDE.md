@@ -95,7 +95,12 @@ This has bitten production before.
 - **Do NOT** assume a plain `cargo build` for firmware — it is an embedded target with
   a custom runner and linker scripts. Go through `just`.
 - Flashing/console requires the **`tower` CLI** (the `cli/` submodule) on `PATH` and
-  physical hardware. There is **no CI** in this repo.
+  physical hardware. CI (`.github/workflows/ci.yml`) runs the embedded build (incl. role-gated
+  example variants), host tests, clippy, a HIL-harness compile-check, and the **tower-protocol
+  lockstep** job (which also fetches `tower-cli`'s pin). The gap is that the lockstep gate is
+  **firmware-side only** — `tower-cli` has no mirror job, so a cli-only pin bump isn't caught
+  until the next firmware push. The HIL bench tests themselves are `#[ignore]`d and never run in
+  CI (no hardware).
 
 ### `cli/` — host tool (`tower` binary, edition 2024, v1.0.0, MIT)
 - Single crate. Stack: clap 4, ratatui, serialport, rustyline. Depends on
