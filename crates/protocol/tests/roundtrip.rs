@@ -30,7 +30,7 @@ fn roundtrip<T: serde::Serialize>(mt: MsgType, seq: u16, payload: &T) -> (Vec<u8
 
 #[test]
 fn hello_roundtrip() {
-    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_version: "tower 0.1.0" };
+    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_name: "demo", firmware_version: "tower 0.1.0", session_id: 0xABCD };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 7, &h, &mut out).unwrap();
     let mut dec = FrameDecoder::new();
@@ -42,11 +42,36 @@ fn hello_roundtrip() {
             assert_eq!(seq, 7);
             let h2: Hello = postcard::from_bytes(payload).unwrap();
             assert_eq!(h2.protocol_version, PROTOCOL_VERSION);
+            assert_eq!(h2.firmware_name, "demo");
             assert_eq!(h2.firmware_version, "tower 0.1.0");
+            assert_eq!(h2.session_id, 0xABCD);
             decoded = true;
         }
     }
     assert!(decoded);
+}
+
+#[test]
+fn decode_msg_typed_hello() {
+    // decode_msg does version+CRC (decode_frame) then deserializes into the typed Msg.
+    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_name: "blinky", firmware_version: "v0.1.0", session_id: 42 };
+    let mut out = [0u8; MAX_WIRE];
+    let n = encode_frame(MsgType::Hello, 3, &h, &mut out).unwrap();
+    let mut dec = FrameDecoder::new();
+    let inner: Vec<u8> = out[..n]
+        .iter()
+        .find_map(|&b| dec.push(b).map(|s| s.to_vec()))
+        .expect("one frame");
+    let (seq, msg) = decode_msg(&inner).unwrap();
+    assert_eq!(seq, 3);
+    match msg {
+        Msg::Hello(h) => {
+            assert_eq!(h.firmware_name, "blinky");
+            assert_eq!(h.firmware_version, "v0.1.0");
+            assert_eq!(h.session_id, 42);
+        }
+        other => panic!("expected Msg::Hello, got {other:?}"),
+    }
 }
 
 #[test]
@@ -98,7 +123,7 @@ fn host_to_target_shell_command() {
 
 #[test]
 fn crc_corruption_is_rejected() {
-    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_version: "x" };
+    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_name: "a", firmware_version: "x", session_id: 1 };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
     // Flip a bit in the middle of the encoded frame (not the delimiter).
@@ -121,7 +146,7 @@ fn crc_corruption_is_rejected() {
 
 #[test]
 fn version_mismatch_is_rejected() {
-    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_version: "x" };
+    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_name: "a", firmware_version: "x", session_id: 1 };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
     let mut dec = FrameDecoder::new();
@@ -143,7 +168,7 @@ fn version_mismatch_is_rejected() {
 #[test]
 fn resync_after_garbage() {
     // Leading garbage (no 0x00) then a clean frame must still decode.
-    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_version: "ok" };
+    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_name: "a", firmware_version: "ok", session_id: 1 };
     let mut frame = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 5, &h, &mut frame).unwrap();
     let mut dec = FrameDecoder::new();
@@ -201,7 +226,7 @@ fn oversize_payload_is_rejected_not_truncated() {
 /// An output buffer too small for the COBS frame must return `Err(Overflow)`.
 #[test]
 fn small_output_buffer_overflows() {
-    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_version: "tower 0.1.0" };
+    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_name: "demo", firmware_version: "tower 0.1.0", session_id: 0xABCD };
     let mut tiny = [0u8; 4];
     assert_eq!(encode_frame(MsgType::Hello, 0, &h, &mut tiny), Err(Error::Overflow));
 }
@@ -225,7 +250,7 @@ fn decoder_drops_oversize_then_resyncs() {
     }
     assert!(dec.push(0x00).is_none(), "oversize frame must be dropped");
 
-    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_version: "ok" };
+    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_name: "a", firmware_version: "ok", session_id: 1 };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 3, &h, &mut out).unwrap();
     let inner: Vec<u8> = (0..n).find_map(|i| dec.push(out[i]).map(|s| s.to_vec())).unwrap();
@@ -239,7 +264,7 @@ fn decoder_reset_discards_partial() {
     assert!(dec.push(0x05).is_none());
     assert!(dec.push(0x06).is_none());
     dec.reset();
-    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_version: "ok" };
+    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_name: "a", firmware_version: "ok", session_id: 1 };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
     let inner: Vec<u8> = (0..n).find_map(|i| dec.push(out[i]).map(|s| s.to_vec())).unwrap();
@@ -274,7 +299,7 @@ fn msg_type_from_u8_is_exhaustive() {
 #[test]
 fn unknown_type_is_rejected() {
     // Forge a frame with a valid version but type 15 (unused), fixing the CRC.
-    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_version: "x" };
+    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_name: "a", firmware_version: "x", session_id: 1 };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
     let mut dec = FrameDecoder::new();

@@ -18,11 +18,19 @@ pub enum Level {
 }
 
 /// Target → host: one-time announcement on boot / VBUS-present edge. The per-frame
-/// `ver_type` is the real version guard; this carries the firmware string for display.
+/// `ver_type` is the real version guard; these fields carry the firmware identity for
+/// display. `firmware_name` is the baked-in app/example name; `firmware_version` its
+/// version string (e.g. `"v0.1.0"`). `session_id` is a per-boot id (a persisted boot
+/// counter) so the host can tell a device **reboot** from a continuous link.
+///
+/// Field order is load-bearing (postcard encodes positionally); changing it is a wire
+/// break — bump [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION).
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Hello<'a> {
     pub protocol_version: u8,
+    pub firmware_name: &'a str,
     pub firmware_version: &'a str,
+    pub session_id: u32,
 }
 
 /// Target → host: a structured log record. The host prepends local time + colorizes.

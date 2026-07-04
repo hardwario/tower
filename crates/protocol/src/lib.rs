@@ -23,7 +23,11 @@ pub use msg::*;
 use serde::Serialize;
 
 /// Protocol version, carried in the top 3 bits of `ver_type` on every frame.
-pub const PROTOCOL_VERSION: u8 = 1;
+///
+/// v2 (crate 1.1.0): [`Hello`] gained `firmware_name` and a per-boot `session_id`
+/// (and `firmware_version` became a real version string). Field order is positional
+/// under postcard, so this was a wire break.
+pub const PROTOCOL_VERSION: u8 = 2;
 
 // The version occupies only the top 3 bits of `ver_type` (`PROTOCOL_VERSION << 5`), so it must
 // fit in 0..=7. Bumping past 7 would silently wrap in release builds and alias an old version —
@@ -100,6 +104,10 @@ pub enum Error {
     BadType,
     /// CRC mismatch (corruption on the wire).
     BadCrc,
+    /// The frame passed version + CRC but its postcard payload did not deserialize into the
+    /// expected type for its [`MsgType`] — a truncated or corrupt-but-CRC-valid body, or a
+    /// producer bug. Only [`decode_msg`] returns this (it owns the deserialize step).
+    Malformed,
 }
 
 impl core::fmt::Display for Error {
@@ -115,6 +123,7 @@ impl core::fmt::Display for Error {
             ),
             Error::BadType => f.write_str("unknown message type"),
             Error::BadCrc => f.write_str("CRC mismatch (wire corruption)"),
+            Error::Malformed => f.write_str("payload failed to deserialize"),
         }
     }
 }
@@ -176,6 +185,48 @@ pub fn decode_frame(inner: &[u8]) -> Result<(MsgType, u16, &[u8]), Error> {
         return Err(Error::BadCrc);
     }
     Ok((msg_type, seq, &inner[HDR..body]))
+}
+
+/// A decoded frame's payload, deserialized into its concrete type. The variant set mirrors
+/// [`MsgType`]; borrowed fields point into the buffer passed to [`decode_msg`].
+#[derive(Debug)]
+pub enum Msg<'a> {
+    // target -> host
+    Hello(Hello<'a>),
+    Log(Log<'a>),
+    Print(Print<'a>),
+    Event(Event<'a>),
+    ShellResponse(ShellResponse<'a>),
+    ShellCompletions(ShellCompletions<'a>),
+    Dropped(Dropped),
+    // host -> target
+    ShellCommand(ShellCommand<'a>),
+    ShellComplete(ShellComplete<'a>),
+}
+
+/// Decode a deframed inner buffer all the way into `(seq, Msg)`: validate version + CRC via
+/// [`decode_frame`], then deserialize the postcard payload into the type for its [`MsgType`].
+/// One call instead of `decode_frame` + a hand-written `match` + `from_bytes` at every
+/// consumer — the borrow ties `Msg` to `inner`. Payloads that pass CRC but fail to
+/// deserialize return [`Error::Malformed`].
+pub fn decode_msg(inner: &[u8]) -> Result<(u16, Msg<'_>), Error> {
+    let (msg_type, seq, payload) = decode_frame(inner)?;
+    // Generic (not a closure): each arm deserializes into a different type.
+    fn de<'a, T: serde::Deserialize<'a>>(p: &'a [u8]) -> Result<T, Error> {
+        postcard::from_bytes(p).map_err(|_| Error::Malformed)
+    }
+    let msg = match msg_type {
+        MsgType::Hello => Msg::Hello(de(payload)?),
+        MsgType::Log => Msg::Log(de(payload)?),
+        MsgType::Print => Msg::Print(de(payload)?),
+        MsgType::Event => Msg::Event(de(payload)?),
+        MsgType::ShellResponse => Msg::ShellResponse(de(payload)?),
+        MsgType::ShellCompletions => Msg::ShellCompletions(de(payload)?),
+        MsgType::Dropped => Msg::Dropped(de(payload)?),
+        MsgType::ShellCommand => Msg::ShellCommand(de(payload)?),
+        MsgType::ShellComplete => Msg::ShellComplete(de(payload)?),
+    };
+    Ok((seq, msg))
 }
 
 /// Byte-fed COBS deframer. Feed received bytes one at a time; on the `0x00`
