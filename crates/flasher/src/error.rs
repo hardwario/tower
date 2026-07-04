@@ -61,6 +61,11 @@ pub enum Error {
     #[error("verify mismatch at 0x{address:08X}: flash=0x{got:02X}, firmware=0x{expected:02X}")]
     VerifyMismatch { address: u32, got: u8, expected: u8 },
 
+    #[error(
+        "erase truncated after {erased} page(s) ({kib} KiB) on chip 0x{id:03X}: not a valid STM32L0 flash density — the remaining pages are likely write-protected, so the device is only partly erased"
+    )]
+    PartialErase { erased: usize, kib: usize, id: u16 },
+
     #[error("invalid argument: {context}")]
     InvalidArgument { context: &'static str },
 

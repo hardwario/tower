@@ -33,8 +33,45 @@ pub const PAGE_SIZE: usize = 128;
 pub const ERASE_CHUNK: usize = 80;
 
 /// Number of 128-byte flash pages spanning `bytes` of flash.
-pub fn pages_in(bytes: u32) -> usize {
+pub const fn pages_in(bytes: u32) -> usize {
     bytes as usize / PAGE_SIZE
+}
+
+/// The flash densities shipped across the STM32L0 family, in 128-byte pages
+/// (16 / 32 / 64 / 128 / 192 KiB). The UART bootloader can't report the exact
+/// flash size, so a full-chip erase walks toward [`MAX_FLASH_SIZE`] and stops
+/// when the device NACKs an out-of-range page — but the bootloader returns the
+/// *same* payload NACK for a write-protected (WRP) page. A truncated erase can
+/// therefore be told apart from a genuine end-of-flash only by checking that the
+/// stop point lands on one of these real densities.
+pub const FLASH_DENSITIES_PAGES: [usize; 5] = [
+    pages_in(16 * 1024),
+    pages_in(32 * 1024),
+    pages_in(64 * 1024),
+    pages_in(128 * 1024),
+    pages_in(192 * 1024),
+];
+
+/// Whether `pages` equals a real STM32L0 flash density (see
+/// [`FLASH_DENSITIES_PAGES`]). A full-chip erase that stops on any other page
+/// count was truncated by something other than the end of flash.
+pub fn is_valid_density_pages(pages: usize) -> bool {
+    FLASH_DENSITIES_PAGES.contains(&pages)
+}
+
+/// Maximum flash size in bytes for a recognized STM32L0 product id (`Get ID`),
+/// or `None` if the id isn't recognized. The bootloader can't report the flash
+/// size, but the product id pins the family, which bounds it: Cat-1 (0x457)
+/// 16 KiB, Cat-2 (0x425) 32 KiB, Cat-3 (0x417) 64 KiB, Cat-5 (0x447) 192 KiB.
+/// Used to sanity-check a discovered erase boundary against the identified chip.
+pub fn max_flash_size(id: u16) -> Option<u32> {
+    Some(match id {
+        0x457 => 16 * 1024,
+        0x425 => 32 * 1024,
+        0x417 => 64 * 1024,
+        0x447 => 192 * 1024,
+        _ => return None,
+    })
 }
 
 /// Friendly name for an STM32L0 bootloader chip id (`Get ID` value). These are

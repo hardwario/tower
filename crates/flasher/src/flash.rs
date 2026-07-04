@@ -85,6 +85,30 @@ fn pages_for_length(length: usize, max_pages: usize) -> usize {
     length.div_ceil(target::PAGE_SIZE).min(max_pages)
 }
 
+/// Validate the image length before touching the device.
+///
+/// Rejects an **empty** image up front: erase/write/verify would each be a
+/// no-op, so [`flash`] would reset the chip and return `Ok(())` having flashed
+/// nothing — a library consumer could "successfully flash" an empty file
+/// without noticing. Also rejects an image larger than the family maximum
+/// [`target::MAX_FLASH_SIZE`] (the real per-part flash is smaller and is
+/// enforced later by an out-of-range NACK).
+fn check_firmware_len(len: usize) -> Result<()> {
+    if len == 0 {
+        return Err(Error::InvalidArgument {
+            context: "firmware image is empty (nothing to flash)",
+        });
+    }
+    if len as u32 > target::MAX_FLASH_SIZE {
+        return Err(Error::FirmwareTooLarge {
+            size: len,
+            max: target::MAX_FLASH_SIZE,
+            max_kib: target::MAX_FLASH_SIZE / 1024,
+        });
+    }
+    Ok(())
+}
+
 /// Erase pages `0..count` in chunks of ERASE_CHUNK, reporting progress. Every
 /// page must be in range; a NACK is a real error (used for the firmware
 /// footprint, which always fits).
@@ -169,12 +193,23 @@ fn bisect_erase_boundary<T: Transport>(
 /// the flash boundary; a NACK to the Extended Erase *command* byte
 /// ([`NackStage::Command`]) is line corruption and propagates as an error rather
 /// than being mistaken for successful completion.
+///
+/// A payload NACK is ambiguous, though: AN3155 returns it both for an
+/// out-of-range page (the end of flash — the intended stop) *and* for a
+/// write-protected (WRP) page (a truncated erase). To tell them apart, the
+/// discovered boundary is cross-checked — using the `id` from `Get ID` — against
+/// the known STM32L0 densities ([`target::FLASH_DENSITIES_PAGES`]) and the
+/// identified chip's flash size. If the stop point isn't a plausible full-flash
+/// density, the erase left pages behind and [`Error::PartialErase`] is returned
+/// rather than a silent `Ok` reporting fewer pages than were requested.
 pub fn erase_chip<T: Transport>(
     bl: &mut Bootloader<T>,
+    id: u16,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<usize> {
     let max_pages = target::pages_in(target::MAX_FLASH_SIZE);
     let mut page = 0usize;
+    let mut hit_boundary = false;
     progress(Progress::Erase {
         pages_done: 0,
         pages_total: max_pages,
@@ -198,6 +233,7 @@ pub fn erase_chip<T: Transport>(
                 ..
             }) if page > 0 => {
                 page = bisect_erase_boundary(bl, page, end)?;
+                hit_boundary = true;
                 progress(Progress::Erase {
                     pages_done: page,
                     pages_total: page,
@@ -207,6 +243,24 @@ pub fn erase_chip<T: Transport>(
             Err(e) => return Err(e),
         }
     }
+
+    // If a payload NACK ended the erase before the family maximum, that NACK
+    // could equally be a write-protected (WRP) page rather than the end of
+    // flash. Cross-check the stop point: it must be a real STM32L0 flash density
+    // and fit the identified chip. Anything else is a truncated erase with pages
+    // still un-erased — surface it instead of reporting a silent, partial Ok.
+    if hit_boundary {
+        let fits_family =
+            target::max_flash_size(id).is_none_or(|max| page <= target::pages_in(max));
+        if !target::is_valid_density_pages(page) || !fits_family {
+            return Err(Error::PartialErase {
+                erased: page,
+                kib: page * target::PAGE_SIZE / 1024,
+                id,
+            });
+        }
+    }
+
     Ok(page)
 }
 
@@ -224,7 +278,7 @@ pub fn erase(port: &mut Port, progress: &mut dyn FnMut(Progress)) -> Result<usiz
         let _ = port.reset_into_app();
     })?;
     progress(Progress::ChipIdentified { id });
-    let pages = erase_chip(&mut Bootloader::new(port), progress)?;
+    let pages = erase_chip(&mut Bootloader::new(port), id, progress)?;
     port.reset_into_app()?;
     Ok(pages)
 }
@@ -285,10 +339,14 @@ where
 /// optional read-back verify → optional start (reset into app, or `Go` when
 /// [`FlashOptions::go`] is set).
 ///
-/// The image is bounds-checked against [`target::MAX_FLASH_SIZE`] up front
-/// ([`Error::FirmwareTooLarge`]). That is the family *maximum*; an image that
-/// fits the maximum but exceeds the connected part's real flash still passes
-/// this check and instead fails mid-erase/write with an out-of-range page NACK.
+/// The image length is validated up front ([`check_firmware_len`]): an **empty**
+/// image is rejected ([`Error::InvalidArgument`]) — erase/write/verify would all
+/// be vacuous, so without this check `flash` would reset the chip and return
+/// `Ok(())` having programmed nothing — and an image larger than
+/// [`target::MAX_FLASH_SIZE`] is rejected ([`Error::FirmwareTooLarge`]). The
+/// latter is the family *maximum*; an image that fits the maximum but exceeds
+/// the connected part's real flash still passes this check and instead fails
+/// mid-erase/write with an out-of-range page NACK.
 ///
 /// Failure behaviour: on an error *before* the first erase/write (Get ID, or the
 /// footprint bounds check) the device is reset back into the application so the
@@ -301,13 +359,7 @@ pub fn flash(
     opts: &FlashOptions,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<()> {
-    if firmware.len() as u32 > target::MAX_FLASH_SIZE {
-        return Err(Error::FirmwareTooLarge {
-            size: firmware.len(),
-            max: target::MAX_FLASH_SIZE,
-            max_kib: target::MAX_FLASH_SIZE / 1024,
-        });
-    }
+    check_firmware_len(firmware.len())?;
 
     connect(port, progress)?;
 
@@ -468,8 +520,10 @@ mod tests {
         // the highest page in the list it was sent.
         t.set_erase_boundary(boundary);
 
+        // id 0x457 is the Cat-1 (16 KiB) part, whose full density is 128 pages —
+        // so this boundary is a valid full-flash stop, not a truncated erase.
         let mut bl = Bootloader::new(&mut t);
-        let pages = erase_chip(&mut bl, &mut no_progress).unwrap();
+        let pages = erase_chip(&mut bl, 0x457, &mut no_progress).unwrap();
         assert_eq!(pages, boundary, "all in-range pages erased, none dropped");
 
         // The very first bytes on the wire are the Extended Erase command frame.
@@ -495,7 +549,7 @@ mod tests {
         t.push_erase_chunk_ack(); // chunk 0 ok
         t.push_command_nack(); // chunk 1 command frame corrupted
         let mut bl = Bootloader::new(&mut t);
-        let err = erase_chip(&mut bl, &mut no_progress).unwrap_err();
+        let err = erase_chip(&mut bl, 0x447, &mut no_progress).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -506,6 +560,71 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    /// A payload NACK also means a write-protected page, not just the end of
+    /// flash. If the erase stops on a page count that is not a real STM32L0
+    /// density, that is a truncated (partial) erase and must surface as an error
+    /// rather than a silent Ok reporting fewer pages than were requested.
+    #[test]
+    fn erase_chip_partial_erase_on_non_density_boundary() {
+        // Boundary at page 200 (25 KiB) — not any STM32L0 density. Models a WRP
+        // page at 200 on a part whose real flash is larger.
+        let mut t = ScriptedTransport::new();
+        t.set_erase_boundary(200);
+        let mut bl = Bootloader::new(&mut t);
+        let err = erase_chip(&mut bl, 0x447, &mut no_progress).unwrap_err();
+        match err {
+            Error::PartialErase { erased, id, .. } => {
+                assert_eq!(erased, 200, "erase stopped at the WRP boundary");
+                assert_eq!(id, 0x447);
+            }
+            other => panic!("expected PartialErase, got {other:?}"),
+        }
+    }
+
+    /// A boundary that is a valid density but is larger than the identified
+    /// chip's flash (e.g. a 64 KiB stop reported for a 16 KiB part) is also a
+    /// truncated erase — the family cross-check must catch it.
+    #[test]
+    fn erase_chip_partial_erase_when_boundary_exceeds_chip_family() {
+        // 512 pages == 64 KiB (a valid density), but chip 0x457 is a 16 KiB part.
+        let mut t = ScriptedTransport::new();
+        t.set_erase_boundary(512);
+        let mut bl = Bootloader::new(&mut t);
+        let err = erase_chip(&mut bl, 0x457, &mut no_progress).unwrap_err();
+        assert!(
+            matches!(err, Error::PartialErase { erased: 512, .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// A full-density part (192 KiB, 1536 pages) never NACKs a page-list — the
+    /// erase walks to the family maximum and returns it, no PartialErase.
+    #[test]
+    fn erase_chip_full_density_reaches_maximum() {
+        let max_pages = target::pages_in(target::MAX_FLASH_SIZE);
+        let mut t = ScriptedTransport::new();
+        t.set_erase_boundary(max_pages);
+        let mut bl = Bootloader::new(&mut t);
+        let pages = erase_chip(&mut bl, 0x447, &mut no_progress).unwrap();
+        assert_eq!(pages, max_pages);
+    }
+
+    /// check_firmware_len rejects an empty image (nothing to flash) and one
+    /// larger than the family maximum, and accepts a normal image.
+    #[test]
+    fn check_firmware_len_rejects_empty_and_oversize() {
+        assert!(matches!(
+            check_firmware_len(0),
+            Err(Error::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            check_firmware_len(target::MAX_FLASH_SIZE as usize + 1),
+            Err(Error::FirmwareTooLarge { .. })
+        ));
+        assert!(check_firmware_len(1).is_ok());
+        assert!(check_firmware_len(target::MAX_FLASH_SIZE as usize).is_ok());
     }
 
     /// R20(6): write_image verify reports VerifyMismatch at the correct absolute
