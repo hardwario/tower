@@ -27,7 +27,7 @@ It is consumed as a **pinned git dependency** (no crates.io publish):
 
 ```toml
 [dependencies]
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.2.0" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.2.1" }
 ```
 
 Because postcard isn't self-describing, **all ends must build the same version** — pin the same
@@ -71,6 +71,7 @@ decoder rejects frames whose `PROTOCOL_VERSION` or `MsgType` it doesn't know.
 
 | Tag | `PROTOCOL_VERSION` | Contents |
 |---|---|---|
+| `v1.2.1` | 2 | deps: cobs 0.5, MSRV declared (wire byte-identical) |
 | `v1.2.0` | 2 | crate API: exported `MAX_PAYLOAD`, non_exhaustive `Error`, doc'd evolution rules (frames byte-identical to v1.1.0) |
 | `v1.1.0` | 2 | `Hello` carries `firmware_name` / `firmware_version` / `session_id`; adds typed one-call `decode_msg` + `Error::Malformed` |
 | `v1.0.0` | 1 | initial release: console framing (COBS + CRC-32) + the postcard message schema |

@@ -1,7 +1,8 @@
 [package]
 name = "tower-protocol"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "Shared wire protocol for the HARDWARIO TOWER link: COBS framing + CRC + postcard console message schema. no_std; used by both the `tower` firmware and the `tower-cli` host so the two cannot drift."
 repository = "https://github.com/hardwario/tower-protocol"
@@ -16,6 +17,6 @@ serde = { version = "1.0", default-features = false, features = ["derive"] }
 postcard = { version = "1.0", default-features = false }
 # COBS frame sync (0x00 delimiter). Used directly, not via postcard's accumulator,
 # because our inner frame carries a trailing CRC after the postcard payload.
-cobs = { version = "0.3", default-features = false }
+cobs = { version = "0.5", default-features = false }
 # Bounded collections for the candidate/field lists; `serde` feature for (de)ser.
 heapless = { version = "0.9", default-features = false, features = ["serde"] }

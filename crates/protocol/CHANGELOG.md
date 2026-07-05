@@ -5,6 +5,15 @@ All notable changes to the wire format and the crate API. The wire format is pos
 bump and a coordinated re-pin of all three consumers (`tower-firmware`, `tower-cli`,
 `tower-hil`).
 
+## v1.2.1 — 2026-07-05
+
+**No wire change** — dependency + metadata freshening (patch):
+
+- `cobs` 0.3 → 0.5 (latest): drop-in; the golden vectors and the corruption/arbitrary-byte
+  fuzz suites verify the wire stays byte-identical.
+- Declared `rust-version = "1.85"` (edition 2024 floor) and pinned the toolchain channel
+  (`rust-toolchain.toml`, stable + thumbv6m target).
+
 ## v1.2.0 — 2026-07-05
 
 **No wire change** — `PROTOCOL_VERSION` stays 2; frames are byte-identical to v1.1.0.
