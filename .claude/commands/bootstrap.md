@@ -1,6 +1,6 @@
 ---
 description: First-run setup of the TOWER control plane — clone/init submodules, verify toolchains, report ecosystem status
-argument-hint: "[firmware|cli|protocol|jolt]"
+argument-hint: "[firmware|cli|protocol|jolt|hil]"
 allowed-tools: Bash(git submodule:*), Bash(git -C:*), Bash(git status:*), Bash(git log:*), Bash(rustup:*), Bash(cargo:*), Bash(probe-rs:*), Bash(which:*), Bash(ls:*), Bash(cat:*), Read
 ---
 

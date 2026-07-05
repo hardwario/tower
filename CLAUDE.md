@@ -52,7 +52,7 @@ frames, and builds the images it flashes from the `firmware/` checkout next door
 self-describing**: a tag mismatch does not error — it **silently mis-decodes** bytes.
 This has bitten production before.
 
-- Current alignment: **`protocol` = v1.1.0**, pinned as `v1.1.0` by `firmware`, `cli`,
+- Current alignment: **`protocol` = v1.2.1**, pinned as `v1.2.1` by `firmware`, `cli`,
   and `hil`. ✅
 - `firmware` references `tower-protocol` in **two** manifests: `firmware/Cargo.toml` and
   `firmware/crates/tower-kv/Cargo.toml`.
@@ -68,7 +68,7 @@ lockfile SHAs, so a re-cut tag is caught too); `/sync` and `/pin` run it as thei
 
 ## Per-repo cheat sheet
 
-### `protocol/` — the contract (`no_std`, edition 2024, v1.1.0, MIT)
+### `protocol/` — the contract (`no_std`, edition 2024, v1.2.1, MIT)
 - Defines: COBS framing + CRC-32 (`src/lib.rs`, `src/crc.rs`) and the postcard message
   schema (`src/msg.rs`: `Hello`, `Log`, `Print`, `Event`, `ShellCommand`, …).
 - Verify locally:
@@ -84,7 +84,9 @@ lockfile SHAs, so a re-cut tag is caught too); `/sync` and `/pin` run it as thei
 ### `firmware/` — device SDK (`no_std`, edition 2024, v0.1.0, MIT)
 - Target: **`thumbv6m-none-eabi`** (Cortex-M0+). Uses **`just`** as the task runner.
 - Workspace members: `crates/tower-kv` (EEPROM key-value codec), `crates/tower-radio-core`
-  (host-testable radio-timing/compliance math). `examples/` = demos, `apps/` = product
+  (host-testable radio-timing/compliance math), `crates/tower-net-core` (host-testable
+  security decision kernels: replay rule, TX-counter watermark/fail-closed, ACK dedup,
+  FHSS epoch gate, nonce construction). `examples/` = demos, `apps/` = product
   firmwares. (The HIL harness lives in the `hil/` submodule, its own repo.)
 - Common commands (read `firmware/justfile` for the full set):
   ```bash
@@ -92,7 +94,7 @@ lockfile SHAs, so a re-cut tag is caught too); `/sync` and `/pin` run it as thei
   just -f firmware/justfile build example blinky
   just -f firmware/justfile flash example blinky   # needs `tower` CLI on PATH + hardware
   just -f firmware/justfile run   example blinky   # build + flash + stream console
-  just -f firmware/justfile test                # host-side tests (tower-kv, tower-radio-core)
+  just -f firmware/justfile test                # host tests (tower-kv, tower-net-core, tower-radio-core)
   ```
   Or run inside the dir: `cd firmware && just <recipe>`.
 - **Do NOT** assume a plain `cargo build` for firmware — it is an embedded target with
@@ -100,13 +102,12 @@ lockfile SHAs, so a re-cut tag is caught too); `/sync` and `/pin` run it as thei
 - Flashing/console requires the **`tower` CLI** (the `cli/` submodule) on `PATH` and
   physical hardware. CI (`.github/workflows/ci.yml`) runs the embedded build (incl. role-gated
   example variants), host tests, clippy, and the **tower-protocol lockstep** job (which fetches
-  the `tower-cli` **and** `tower-hil` pins). The gap is that the lockstep gate is
-  **firmware-side only** — `cli`/`hil` have no mirror job, so a pin bump in only one of them
-  isn't caught until the next firmware push (or locally, by `/lockstep`).
+  the `tower-cli` **and** `tower-hil` pins). `cli` mirrors the gate (a `lockstep` CI job plus
+  a release-workflow gate); `hil` mirrors it too (added 2026-07-05). Local check: `/lockstep`.
 
 ### `cli/` — host tool (`tower` binary, edition 2024, v1.0.0, MIT)
 - Single crate. Stack: clap 4, ratatui, serialport, rustyline. Depends on
-  `tower-protocol` (wire codec) **and the `jolt/` submodule** (`v1.3.0`, the STM32L0
+  `tower-protocol` (wire codec) **and the `jolt/` submodule** (`v1.4.0`, the STM32L0
   UART-bootloader flasher), which it links as a **library** (`jolt::firmware::load`,
   `jolt::port::Port`, `jolt::flash::FlashOptions`) for `flash`/`erase`/`reset`.
 - Common commands:
@@ -121,11 +122,11 @@ lockfile SHAs, so a re-cut tag is caught too); `/sync` and `/pin` run it as thei
 - Linux build needs `libudev-dev` + `pkg-config`. Has CI (test + multi-platform
   release archives on `v*` tags). **Not on crates.io.**
 
-### `jolt/` — UART flasher (lib + `jolt` binary, edition 2024, v1.3.0, MIT)
+### `jolt/` — UART flasher (lib + `jolt` binary, edition 2024, v1.4.0, MIT)
 - "Tiny Rust CLI that flashes an STM32L083CZ over the UART bootloader." Modules:
   `bootloader`, `commands`, `firmware`, `flash`, `port`, `target`. `cli` consumes its
   **library** API; it is also usable standalone as the `jolt` binary.
-- Pinned by `cli` **and `hil`** via git tag (`jolt = { git = "…/jolt", tag = "v1.3.0" }`).
+- Pinned by `cli` **and `hil`** via git tag (`jolt = { git = "…/jolt", tag = "v1.4.0" }`).
   Unlike the `tower-protocol` lockstep, a tag mismatch here is a **compile error** in the
   consumer, not a silent failure — so it is a normal dependency bump, not an interop
   hazard. Keep the two consumers' tags equal anyway (`/lockstep` flags a divergence,
@@ -221,8 +222,10 @@ override and go back to the pinned tag before you `/pin` or hand off.
 - Pushes to children use SSH (`git@github.com:hardwario/…`).
 - Regulatory citations in firmware radio code (e.g. FCC §15.247, EU duty-cycle) are
   real and load-bearing — **never** remove or alter them.
-- `firmware` and `protocol` are hand-formatted in places; respect existing style and
-  the design-rationale comments — don't strip them.
+- `protocol` and `hil` are hand-formatted (no fmt gate) — respect existing style;
+  `firmware`, `cli`, and `jolt` are rustfmt-gated in CI (firmware at 110 cols per its
+  `rustfmt.toml`). Everywhere: the design-rationale comments are load-bearing — don't
+  strip them.
 
 ## Don't
 
