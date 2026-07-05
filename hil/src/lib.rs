@@ -1,5 +1,6 @@
-//! Hardware-in-the-loop harness library for the TOWER firmware SDK (see tower-firmware's
-//! docs/test-plan.md).
+//! Hardware-in-the-loop harness library for the TOWER firmware SDK. Bench inventory,
+//! cabling, and setup: `docs/bench.md` (in this repo); the test catalogue is
+//! tower-firmware's docs/test-plan.md.
 //!
 //! The bench (see `hil.toml`):
 //!

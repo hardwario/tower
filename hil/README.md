@@ -7,7 +7,9 @@ smoke, radio, extended, and power behaviour against the firmware's **framed cons
 natively** with [`tower-protocol`](https://github.com/hardwario/tower-protocol): tests match on
 typed `Log`/`Event` frames and on sequence gaps, not `strings | grep`.
 
-The test catalogue and bench wiring are documented in tower-firmware's `docs/test-plan.md`.
+**Bench inventory, cabling, and setup live in [`docs/bench.md`](docs/bench.md)** — start there
+to assemble the bench from scratch. The test *catalogue* (what each firmware example asserts,
+the example×role matrix) is documented in tower-firmware's `docs/test-plan.md`.
 
 ## Layout: where the firmware comes from
 
