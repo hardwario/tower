@@ -1,0 +1,40 @@
+# CI for the TOWER HIL harness. There is NO hardware in CI: the bench tests are #[ignore]d, so
+# `cargo test --no-run` proves the harness (all groups, incl. the feature-gated power group)
+# stays compilable against the tower-protocol / jolt tags it pins — the same compile-check
+# tower-firmware ran while the harness lived in its tools/hil.
+#
+# The tower-protocol lockstep gate (this repo must pin the same tag as tower-firmware and
+# tower-cli) runs in tower-firmware's CI, which fetches this repo's manifest.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  compile:
+    name: harness compiles (no hardware)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust (stable) + clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install libudev (serialport dep)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile every test group (incl. power) without running
+        run: cargo test --no-run --features power
+      - name: clippy (-D warnings)
+        run: cargo clippy --all-targets --features power -- -D warnings
