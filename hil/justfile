@@ -19,19 +19,21 @@ default:
 
 # Run the smoke + radio + extended HIL groups on the bench (needs the Dongle + Core; NOT run in
 # CI). The `power` group is compiled out (no `power` feature), so this never touches the PPK2.
+# `--no-fail-fast`: one red test binary must not skip the remaining groups — a 2026-07-05 run
+# lost the whole smoke+radio pass to a single RF flake in extended.
 hil *args:
-    cargo test -- --ignored --test-threads=1 {{args}}
+    cargo test --no-fail-fast -- --ignored --test-threads=1 {{args}}
 
 # Run ONLY the feature-gated power HIL group (needs the Core on J-Link + PPK2, FTDI UNPLUGGED).
 # The `power_` name filter is load-bearing: `--features power` merely ADDS power.rs — without the
 # filter, `--ignored` would ALSO run the smoke/radio/extended groups, whose `tower flash` of the
 # FTDI-detached Core times out on a power bench. `hil-full` is the unfiltered "everything" run.
 hil-power *args:
-    cargo test --features power -- --ignored --test-threads=1 power_ {{args}}
+    cargo test --no-fail-fast --features power -- --ignored --test-threads=1 power_ {{args}}
 
 # Run every HIL group (smoke + radio + extended + power) on the fully-cabled bench.
 hil-full *args:
-    cargo test --features power -- --ignored --test-threads=1 {{args}}
+    cargo test --no-fail-fast --features power -- --ignored --test-threads=1 {{args}}
 
 # Compile the harness + every test group (incl. power) without touching hardware — what CI runs.
 check:

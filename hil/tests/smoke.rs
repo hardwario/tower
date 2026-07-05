@@ -102,10 +102,26 @@ fn smoke_hello_banner_decodes() {
     console.resync();
     console.reset_into_app().expect("reset the Dongle into the app");
 
-    let hello = console
-        .wait_for(Duration::from_secs(5), |f| matches!(f, Frame::Hello { .. }))
-        .expect("console read")
-        .expect("no Hello banner within 5 s");
+    // Boot/attach timing tolerance (no RF involved): the Hello can miss a short window when
+    // the reset pulse races the port attach (observed once on 2026-07-05, clean on retry).
+    // 10 s window + one re-pulse keeps a real regression loud — two consecutive silent boots
+    // is not a flake.
+    let mut hello = None;
+    for attempt in 0..2 {
+        if attempt > 0 {
+            eprintln!("HIL: no Hello on attempt 1 — re-pulsing reset for one retry");
+            console.resync();
+            console.reset_into_app().expect("reset the Dongle into the app (retry)");
+        }
+        if let Some(f) = console
+            .wait_for(Duration::from_secs(10), |f| matches!(f, Frame::Hello { .. }))
+            .expect("console read")
+        {
+            hello = Some(f);
+            break;
+        }
+    }
+    let hello = hello.expect("no Hello banner within 10 s, even after a reset retry");
     if let Frame::Hello { protocol_version, firmware_name, firmware_version, session_id } = hello {
         assert_eq!(protocol_version, tower_protocol::PROTOCOL_VERSION, "protocol version drift");
         assert!(!firmware_name.is_empty(), "empty firmware name in Hello");
