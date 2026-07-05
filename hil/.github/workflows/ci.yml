@@ -3,8 +3,9 @@
 # stays compilable against the tower-protocol / jolt tags it pins — the same compile-check
 # tower-firmware ran while the harness lived in its tools/hil.
 #
-# The tower-protocol lockstep gate (this repo must pin the same tag as tower-firmware and
-# tower-cli) runs in tower-firmware's CI, which fetches this repo's manifest.
+# The tower-protocol lockstep gate is mirrored HERE (the `lockstep` job) as well as in
+# tower-firmware's and tower-cli's CI — each repo verifies its own pushes, so a pin bump made
+# in any one of the three fails fast in that repo instead of waiting for a peer's next push.
 
 name: CI
 
@@ -22,6 +23,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The golden rule, mirrored on the harness side: tower-protocol is pinned by git tag here AND
+  # in tower-firmware / tower-cli, and postcard is not self-describing — a tag mismatch silently
+  # mis-decodes the very frames the bench asserts on. Without this job, a hil-only pin bump
+  # would compile green here and only be caught by the next firmware push.
+  lockstep:
+    name: tower-protocol lockstep (vs firmware + cli)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify tower-protocol pin matches tower-firmware and tower-cli
+        run: |
+          python3 - <<'PY'
+          import re, sys, urllib.request
+          PIN = re.compile(r'tower-protocol\s*=\s*\{[^}]*?\btag\s*=\s*"([^"]+)"')
+          def tag(text, where):
+              m = PIN.search(text)
+              if not m:
+                  sys.exit(f"lockstep: no tower-protocol tag found in {where}")
+              return m.group(1)
+          with open("Cargo.toml", encoding="utf-8") as f:
+              hil = tag(f.read(), "hil/Cargo.toml")
+          def fetch(repo):
+              url = f"https://raw.githubusercontent.com/hardwario/{repo}/main/Cargo.toml"
+              return tag(urllib.request.urlopen(url, timeout=30).read().decode("utf-8"), f"{repo} Cargo.toml")
+          fw, cli = fetch("tower-firmware"), fetch("tower-cli")
+          print(f"hil pins {hil}; tower-firmware pins {fw}; tower-cli pins {cli}")
+          if not (hil == fw == cli):
+              sys.exit(f"ERROR: tower-protocol LOCKSTEP BROKEN — hil={hil} firmware={fw} cli={cli}. "
+                       "All three consumers MUST move together (silent mis-decode otherwise).")
+          print(f"lockstep OK: all three consumers pin {hil}")
+          PY
+
   compile:
     name: harness compiles (no hardware)
     runs-on: ubuntu-latest
