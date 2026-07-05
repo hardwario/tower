@@ -2,7 +2,9 @@
 name = "tower-hil"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
+repository = "https://github.com/hardwario/tower-hil"
 description = "Hardware-in-the-loop (HIL) test harness for the HARDWARIO TOWER firmware SDK: drives a bench of a TOWER Core Module (J-Link SWD + Nordic PPK2) and a TOWER Radio Dongle (USB) — flashes via probe-rs / `tower flash`, decodes the framed console NATIVELY (tower-protocol, so tests assert on typed Log/Event + seq-gaps, not `strings | grep`), and asserts smoke / radio / power behaviour. The hardware tests are `#[ignore]`d so `cargo test` still COMPILES them without a bench. See tower-firmware's docs/test-plan.md."
 
 # Standalone HOST crate in its own repo (extracted from tower-firmware's tools/hil), so a plain
@@ -16,7 +18,7 @@ description = "Hardware-in-the-loop (HIL) test harness for the HARDWARIO TOWER f
 # tower-protocol tag tower-firmware + tower-cli pin (golden-rule lockstep — verified by the TOWER
 # control plane's /lockstep and by tower-firmware's CI): a mismatch here would silently mis-decode
 # exactly the frames we assert on. `alloc`/`std` come for free on the host.
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.1.0" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.2.1" }
 # Deserialize the decoded postcard payloads (Log/Event/Hello/…). Same major as tower-protocol's,
 # with std/alloc on the host (the harness owns copies of the borrowed message fields).
 postcard = { version = "1", features = ["use-std"] }
