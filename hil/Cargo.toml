@@ -26,7 +26,7 @@ serialport = "4.9"
 # the tuned NRST/BOOT0 pulses (reset-into-app / reset-into-bootloader) we use to reset the Core.
 jolt = { git = "https://github.com/hardwario/jolt", tag = "v1.4.0", default-features = false }
 # Parse the hil.toml bench fixture (core/dongle serials, ppk2 supply). Tiny, std-only.
-toml = "0.8"
+toml = "1"
 serde = { version = "1", features = ["derive"] }
 
 [features]
