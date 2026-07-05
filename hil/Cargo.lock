@@ -155,8 +155,8 @@ dependencies = [
 
 [[package]]
 name = "jolt"
-version = "1.3.0"
-source = "git+https://github.com/hardwario/jolt?tag=v1.3.0#9d50f2d61cce6321d806183432cc24aa3c55d402"
+version = "1.4.0"
+source = "git+https://github.com/hardwario/jolt?tag=v1.4.0#6ccf5e5fd02375e671bc587310d80707bda88d3c"
 dependencies = [
  "serialport",
  "thiserror",
