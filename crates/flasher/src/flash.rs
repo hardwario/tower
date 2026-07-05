@@ -31,11 +31,20 @@ pub enum Progress {
     /// The chip reported product id `id` (via `Get ID`).
     ChipIdentified { id: u16 },
     /// Erase progress: `pages_done` of `pages_total` pages erased.
-    Erase { pages_done: usize, pages_total: usize },
+    Erase {
+        pages_done: usize,
+        pages_total: usize,
+    },
     /// Write progress: `bytes_done` of `bytes_total` bytes written.
-    Write { bytes_done: usize, bytes_total: usize },
+    Write {
+        bytes_done: usize,
+        bytes_total: usize,
+    },
     /// Verify progress: `bytes_done` of `bytes_total` bytes verified.
-    Verify { bytes_done: usize, bytes_total: usize },
+    Verify {
+        bytes_done: usize,
+        bytes_total: usize,
+    },
     /// Starting the application (reset into app or `Go`).
     Starting,
 }

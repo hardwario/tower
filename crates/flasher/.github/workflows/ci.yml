@@ -41,8 +41,35 @@ jobs:
       - name: Test
         run: cargo test
 
+  # tower-cli and tower-hil consume jolt with `default-features = false` (no clap/anyhow/
+  # indicatif). Build+test that exact configuration so a CLI-only dependency leaking into the
+  # library fails HERE, not in a downstream repo's CI.
+  library:
+    name: Library only (no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: no-default-features
+
+      - name: Clippy (library config)
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+
+      - name: Test (library config)
+        run: cargo test --no-default-features
+
   build:
-    name: Build (${{ matrix.os }})
+    name: Build & test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -62,3 +89,8 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+      # The lint job tests on Linux only; run the behavioural tests on every OS the
+      # release ships for (timeout/port logic is the platform-sensitive part).
+      - name: Test
+        run: cargo test

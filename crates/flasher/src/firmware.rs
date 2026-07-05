@@ -74,7 +74,10 @@ mod tests {
     #[test]
     fn elf_rejected() {
         let p = temp_file("x.elf", b"\x7fELF");
-        assert!(matches!(load(&p).unwrap_err(), Error::FirmwareFormat { .. }));
+        assert!(matches!(
+            load(&p).unwrap_err(),
+            Error::FirmwareFormat { .. }
+        ));
         let _ = std::fs::remove_file(&p);
     }
 
@@ -88,7 +91,10 @@ mod tests {
     #[test]
     fn missing_path_error_mentions_the_path() {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("jolt-test-{}-does-not-exist.bin", std::process::id()));
+        dir.push(format!(
+            "jolt-test-{}-does-not-exist.bin",
+            std::process::id()
+        ));
         let err = load(&dir).unwrap_err();
         assert!(matches!(err, Error::Io(_)));
         assert!(err.to_string().contains(&dir.display().to_string()));

@@ -28,16 +28,24 @@ jobs:
             exit 1
           fi
 
-      # Gate the release on formatting so a lint failure can't ship in a tag
-      # (the build/publish jobs `need` this one). fmt only parses source, so no
-      # libudev/compile is required here.
+      # Gate the release on fmt + clippy + tests so a red commit can't ship just
+      # because someone pushed a tag (the build/publish jobs `need` this one).
+      - name: Install libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Format
         run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
 
       # Create the release as a draft up front so users never see a
       # half-populated release while the matrix builds are still uploading.
@@ -49,7 +57,9 @@ jobs:
           body: |
             ## jolt ${{ github.ref_name }}
 
-            STM32L083CZ UART bootloader flasher for the HARDWARIO TOWER Radio Dongle.
+            STM32L0 (L0x1/L0x2/L0x3, 16–192 KiB) UART-bootloader flasher — the flashing
+            engine of the HARDWARIO TOWER ecosystem (used as a library by `tower-cli` and
+            `tower-hil`, and standalone as the `jolt` binary).
 
             ### Install
             Download the archive for your platform, extract it, and put `jolt` on your `PATH`:

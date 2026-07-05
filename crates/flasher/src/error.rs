@@ -72,11 +72,7 @@ pub enum Error {
     #[error(
         "firmware is {size} bytes, exceeding the {max} byte ({max_kib} KiB) maximum for any STM32L0 device"
     )]
-    FirmwareTooLarge {
-        size: usize,
-        max: u32,
-        max_kib: u32,
-    },
+    FirmwareTooLarge { size: usize, max: u32, max_kib: u32 },
 
     #[error(
         "{path} looks like a .{ext} file; jolt flashes raw binaries. \
