@@ -52,13 +52,28 @@ jobs:
       - name: Build
         run: cargo build --target thumbv6m-none-eabi
 
+  # The golden vectors are the byte-level wire definition; the `test` job pins them to the
+  # code. This job pins them to PROTOCOL_VERSION: goldens that changed since the latest tag
+  # without a version bump fail the build — the "wire change => bump" rule made mechanical.
+  wire-bump-guard:
+    name: Wire-bump guard (goldens vs PROTOCOL_VERSION)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # the guard diffs against the latest v* tag
+
+      - name: Golden vectors changed => PROTOCOL_VERSION bumped
+        run: python3 tools/check_wire_bump.py
+
   # Single-source the version from Cargo.toml: when a push to main carries a version the repo
   # isn't tagged for yet, create the matching `vX.Y.Z` tag + a GitHub Release. Idempotent (skips
   # if the tag already exists), and only after CI is green — so a forgotten `git tag` can never
-  # leave consumers (tower-firmware, tower-cli) pinning a version that has no tag to fetch.
+  # leave consumers (tower-firmware, tower-cli, tower-hil) pinning a version that has no tag
+  # to fetch.
   release:
     name: Tag + release on version bump
-    needs: [test, embedded]
+    needs: [test, embedded, wire-bump-guard]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
