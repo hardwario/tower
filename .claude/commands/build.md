@@ -1,18 +1,18 @@
 ---
-description: Compile the TOWER ecosystem in dependency order (protocol → jolt → cli → firmware), or a single repo
-argument-hint: "[firmware|cli|protocol|jolt] [--release] [example <name> | app <name>]"
+description: Compile the TOWER ecosystem in dependency order (protocol → jolt → cli → firmware → hil), or a single repo
+argument-hint: "[firmware|cli|protocol|jolt|hil] [--release] [example <name> | app <name>]"
 allowed-tools: Bash(cargo:*), Bash(just:*), Bash(git -C:*), Bash(ls:*), Read
 ---
 
 # Build the TOWER ecosystem
 
 Compile the submodules in **dependency order** so a failure points at the real
-culprit: **protocol → jolt → cli → firmware** (`protocol` is the shared crate
-`firmware`+`cli` depend on; `cli` also links `jolt`). Assumes submodules are already
-checked out — if not, run `/bootstrap` first.
+culprit: **protocol → jolt → cli → firmware → hil** (`protocol` is the shared crate
+`firmware`+`cli`+`hil` depend on; `cli` and `hil` also link `jolt`). Assumes submodules
+are already checked out — if not, run `/bootstrap` first.
 
 Argument `$ARGUMENTS`:
-- a repo name (`protocol` | `jolt` | `cli` | `firmware`) builds **only** that repo
+- a repo name (`protocol` | `jolt` | `cli` | `firmware` | `hil`) builds **only** that repo
   (its in-tree dependencies still come from the pinned git tags, not the sibling
   submodules, unless a local `paths` override is active);
 - `--release` builds optimized;
@@ -62,6 +62,14 @@ bare `cargo build` expecting a flashable image. Building does **not** need hardw
   just -f firmware/justfile build example <name>
   just -f firmware/justfile build app <name>
   ```
+
+## hil — HIL bench harness (host crate)
+Compile-check only — the hardware tests are `#[ignore]`d and MUST NOT run here (they
+flash the bench):
+```bash
+cargo test --manifest-path hil/Cargo.toml --no-run
+```
+(Linux: needs `libudev-dev` + `pkg-config`, like `cli`/`jolt`.)
 
 Apply `--release` to the cargo invocations when requested (the `just build` recipes
 already produce release binaries).

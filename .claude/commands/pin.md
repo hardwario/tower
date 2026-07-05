@@ -6,7 +6,7 @@ allowed-tools: Bash(git -C:*), Bash(git submodule:*), Bash(git add:*), Bash(git 
 
 # Pin the TOWER ecosystem to a known-good snapshot
 
-Record the commits the four submodules currently sit on into THIS control-plane
+Record the commits the five submodules currently sit on into THIS control-plane
 repo as a single coherent snapshot. This is the inverse of `/sync`: sync advances
 the working trees, pin freezes them into a commit you can return to later.
 
@@ -16,7 +16,7 @@ also tags the control-plane commit.
 ## 1. Show the proposed snapshot
 ```bash
 git submodule status
-git diff --submodule=log -- firmware cli protocol jolt
+git diff --submodule=log -- firmware cli protocol jolt hil
 ```
 For each submodule capture the new short SHA, its one-line subject, and the
 branch/tag it is on:
@@ -25,10 +25,10 @@ git -C <repo> log -1 --oneline
 git -C <repo> describe --tags --always
 ```
 Also capture the dependency tags pinned in `Cargo.toml` (for the message): the
-`tower-protocol` tag firmware and cli share, and the `jolt` tag cli pins:
+`tower-protocol` tag firmware, cli, and hil share, and the `jolt` tag cli and hil pin:
 ```bash
-grep -h "tower-protocol" firmware/Cargo.toml cli/Cargo.toml
-grep -h "jolt" cli/Cargo.toml
+grep -h "tower-protocol" firmware/Cargo.toml cli/Cargo.toml hil/Cargo.toml
+grep -h "jolt" cli/Cargo.toml hil/Cargo.toml
 ```
 
 ## 2. Safety checks — REFUSE to pin unsafe state
@@ -43,10 +43,10 @@ exact commits. Before staging anything, verify for EACH submodule:
   to push the child first (commit/push in children is user-driven).
 - **The protocol lockstep holds.** A "known-good" snapshot with a mismatched
   `tower-protocol` pin silently mis-decodes the wire. Run
-  `python3 firmware/tools/protocol_pin_check.py --cli-url https://raw.githubusercontent.com/hardwario/tower-cli/main/Cargo.toml`
-  — it now also cross-checks the RESOLVED `Cargo.lock` SHAs, so a re-cut tag (same string,
-  different commit) is caught too. Refuse to pin on any mismatch. (`/sync` runs this, but `/pin`
-  must not assume `/sync` ran.)
+  `python3 tools/check_lockstep.py` — it checks the tag pins across the LOCAL trees
+  (firmware ×2, cli, hil — exactly what is being pinned) and cross-checks the RESOLVED
+  `Cargo.lock` SHAs, so a re-cut tag (same string, different commit) is caught too.
+  Refuse to pin on any mismatch. (`/sync` runs this, but `/pin` must not assume `/sync` ran.)
 - **No local `paths` override is shadowing the pinned sources.** If a git-ignored root
   `.cargo/config.toml` exists, builds validated LOCAL (possibly unpushed) sources, not the pinned
   tags — a fresh clone would build different code. Refuse to pin while one is present
@@ -56,19 +56,20 @@ If any check fails, report exactly which repo and why, and do not commit.
 
 ## 3. Stage and commit the gitlink bumps
 ```bash
-git add firmware cli protocol jolt .gitmodules
+git add firmware cli protocol jolt hil .gitmodules
 git status --short
 ```
 If nothing is staged, report "already pinned — no submodule changes" and stop.
 Otherwise commit. Default message when `-m` is not given:
 ```
-pin: firmware@<sha> · cli@<sha> · protocol@<sha> · jolt@<sha>
+pin: firmware@<sha> · cli@<sha> · protocol@<sha> · jolt@<sha> · hil@<sha>
 
 firmware  <sha>  <subject>
 cli       <sha>  <subject>
 protocol  <sha>  <subject>  (release <protocol-tag>)
 jolt      <sha>  <subject>  (release <jolt-tag>)
-tower-protocol pinned by firmware & cli: <tag>   ·   jolt pinned by cli: <tag>
+hil       <sha>  <subject>
+tower-protocol pinned by firmware & cli & hil: <tag>   ·   jolt pinned by cli & hil: <tag>
 ```
 Run the commit, then if `--tag` was supplied:
 ```bash

@@ -8,9 +8,9 @@ allowed-tools: Bash(git submodule:*), Bash(git -C:*), Bash(git status:*), Bash(g
 
 You are setting up a freshly cloned **TOWER control plane** so the user can work
 on the whole ecosystem from this one session. The child repos
-(`firmware`, `cli`, `protocol`, `jolt`) are Git submodules at the repo root.
+(`firmware`, `cli`, `protocol`, `jolt`, `hil`) are Git submodules at the repo root.
 
-Optional argument `$ARGUMENTS`: a repo name (`firmware` | `cli` | `protocol` | `jolt`)
+Optional argument `$ARGUMENTS`: a repo name (`firmware` | `cli` | `protocol` | `jolt` | `hil`)
 limits checks to that one repo. Bootstrap verifies setup; to compile the code, use
 `/build` afterward.
 
@@ -39,12 +39,12 @@ For each in-scope repo, read its toolchain requirements rather than hardcoding:
   toolchain is present: `which probe-rs` (or read `firmware/Embed.toml` /
   `.cargo/config.toml` to learn what the repo actually uses) and report if absent
   with the install hint `cargo install probe-rs-tools`.
-- For **cli** and **jolt** on Linux: both link `serialport`, which needs `libudev`
+- For **cli**, **jolt**, and **hil** on Linux: all link `serialport`, which needs `libudev`
   dev headers — if a build fails there, the hint is `libudev-dev` + `pkg-config`.
 
 ## 3. Sanity-check the workspace
-- `git -C protocol log -1 --oneline`, same for `cli`, `firmware`, and `jolt`, to show
-  the exact commit each repo sits on.
+- `git -C protocol log -1 --oneline`, same for `cli`, `firmware`, `jolt`, and `hil`, to
+  show the exact commit each repo sits on.
 - Read each repo's `CLAUDE.md`/`AGENTS.md` if present so you carry its house rules
   into this session; mention any that exist.
 

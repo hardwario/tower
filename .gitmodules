@@ -10,3 +10,6 @@
 [submodule "jolt"]
 	path = jolt
 	url = https://github.com/hardwario/jolt
+[submodule "hil"]
+	path = hil
+	url = https://github.com/hardwario/tower-hil
