@@ -12,7 +12,30 @@
 //! [`encode_frame`] builds the whole wire frame (used by every producer, including
 //! the panic path). On receive, feed bytes to a [`FrameDecoder`] until it yields a
 //! deframed inner buffer, then [`decode_frame`] checks version + CRC and returns the
-//! `(MsgType, seq, payload)`; deserialize the payload with `postcard::from_bytes`.
+//! `(MsgType, seq, payload)`; deserialize the payload with `postcard::from_bytes` —
+//! or use [`decode_msg`] for the typed one-call decode.
+//!
+//! ## `seq` semantics
+//!
+//! `seq` is a per-frame `u16` assigned by the **sender's writer** at transmit time: it
+//! increments once per frame actually put on the wire (dropped-before-transmit messages
+//! never consume a number) and wraps at `u16::MAX`. A receiver uses gaps to detect and
+//! *count* wire loss — nothing more. It is not a dedup key, not an ordering guarantee,
+//! and carries no meaning across a link reset (each side restarts at 0).
+//!
+//! ## Evolving the schema (the rules)
+//!
+//! postcard encodes structs by **field order** and enums by **variant index** — names
+//! never reach the wire. Therefore:
+//!
+//! 1. Never reorder or remove existing fields / variants.
+//! 2. Appending a field, a variant, or a new [`MsgType`] is **still a wire change** —
+//!    old decoders cannot read the new bytes.
+//! 3. Any wire change bumps [`PROTOCOL_VERSION`] and regenerates the golden vectors
+//!    (`tests/golden.rs`); decoders hard-reject other versions ([`Error::BadVersion`]),
+//!    so a mismatch is a visible error, never a silent mis-decode.
+//! 4. Ship it in lockstep: all three consumers (`tower-firmware` — two manifests —
+//!    `tower-cli`, `tower-hil`) re-pin the new tag in the same change-set.
 
 #![no_std]
 
@@ -45,6 +68,13 @@ pub const MAX_WIRE: usize = 272;
 
 const HDR: usize = 3; // ver_type(1) + seq(2)
 const CRC_LEN: usize = 4;
+
+/// Max **postcard payload** bytes one frame can carry: [`MAX_FRAME`] minus the header
+/// (`ver_type` + `seq`) and the trailing CRC. This is the number consumers should size
+/// owned message buffers against — [`encode_frame`] rejects anything larger with
+/// [`Error::Encode`], and the decode path guarantees ([`Error::TooLong`]) that no larger
+/// payload is ever surfaced. Previously every consumer re-derived this by hand.
+pub const MAX_PAYLOAD: usize = MAX_FRAME - HDR - CRC_LEN;
 
 /// Console message types — the low 5 bits of `ver_type`. Target→host are 0..=15,
 /// host→target are 16+. postcard never sees this enum (it's the raw `ver_type`
@@ -83,6 +113,12 @@ impl MsgType {
 }
 
 /// Codec errors. All are "drop the frame" conditions on the receive side.
+///
+/// `#[non_exhaustive]`: new failure modes may be added without a wire change, so consumers
+/// must keep a catch-all arm. (The message enums — [`Msg`], [`MsgType`], and the payload
+/// types — are deliberately **exhaustive**: under the lockstep model a new message variant
+/// SHOULD break consumer matches at compile time, so every consumer consciously handles it.)
+#[non_exhaustive]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Error {
     /// The payload didn't fit / failed to serialize.

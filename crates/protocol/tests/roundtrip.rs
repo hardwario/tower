@@ -190,9 +190,14 @@ fn resync_after_garbage() {
 
 // ---- boundary sizes & the inner-frame budget --------------------------------
 
-/// Bytes a payload may occupy: MAX_FRAME minus ver_type(1) + seq(2) + crc32(4).
-/// Every producer's owned buffers must keep their postcard encoding within this.
+/// Bytes a payload may occupy — since 1.2.0 exported as [`MAX_PAYLOAD`]; keep the
+/// independent arithmetic here so a drive-by change to the exported const fails a test.
 const PAYLOAD_BUDGET: usize = MAX_FRAME - 3 - 4;
+
+#[test]
+fn exported_payload_budget_matches_the_frame_layout() {
+    assert_eq!(MAX_PAYLOAD, PAYLOAD_BUDGET);
+}
 
 /// The largest `Log` the firmware can produce (192-char message, 24-char module,
 /// worst-case uptime) must encode and round-trip — guards the firmware's MAX_MSG.
@@ -366,6 +371,47 @@ fn fuzz_roundtrip_exact() {
         assert_eq!(rseq, seq);
         assert_eq!(postcard::from_bytes::<Print>(payload).unwrap().text, text);
     }
+}
+
+/// A frame that passes version + CRC but whose postcard body does not deserialize into
+/// the type for its `MsgType` must surface as `Error::Malformed` from `decode_msg` — the
+/// one `Error` variant no other test exercises. Built by hand: a `Hello` payload cut to a
+/// single byte (`protocol_version` parses; the `firmware_name` string is missing).
+#[test]
+fn crc_valid_but_undeserializable_body_is_malformed() {
+    let payload = [PROTOCOL_VERSION]; // truncated Hello body
+    let mut inner = Vec::new();
+    inner.push((PROTOCOL_VERSION << 5) | (MsgType::Hello as u8));
+    inner.extend_from_slice(&7u16.to_le_bytes());
+    inner.extend_from_slice(&payload);
+    let crc = tower_protocol::crc::crc32_ieee(&inner);
+    inner.extend_from_slice(&crc.to_le_bytes());
+
+    // decode_frame is happy (version + CRC check out) …
+    let (mt, seq, body) = decode_frame(&inner).unwrap();
+    assert_eq!((mt, seq, body), (MsgType::Hello, 7, &payload[..]));
+    // … decode_msg owns the deserialize step and must report Malformed.
+    assert!(matches!(decode_msg(&inner), Err(Error::Malformed)));
+}
+
+/// Decoder-under-attack: feed pure random bytes (arbitrary content, arbitrary lengths,
+/// generous zero density so frames complete often) through the full FrameDecoder +
+/// decode_msg path. The assertion is implicit — no panic, no out-of-bounds — plus a
+/// sanity count that some byte-salads DO complete frames (so the path is exercised).
+#[test]
+fn fuzz_arbitrary_bytes_never_panic_the_decoder() {
+    let mut rng = Lcg(0x5EED_5EED_5EED_5EED);
+    let mut dec = FrameDecoder::new();
+    let mut frames = 0u64;
+    for _ in 0..200_000 {
+        // ~1/32 zeros keeps frame boundaries frequent without starving content bytes.
+        let b = if rng.next_u32().is_multiple_of(32) { 0 } else { (rng.next_u32() >> 8) as u8 };
+        if let Some(inner) = dec.push(b) {
+            frames += 1;
+            let _ = decode_msg(inner); // any Err is fine; a panic/OOB is the failure
+        }
+    }
+    assert!(frames > 0, "the byte-salad never completed a frame — fuzz not exercising decode");
 }
 
 /// Any single-bit corruption (outside the trailing delimiter) must be detected:

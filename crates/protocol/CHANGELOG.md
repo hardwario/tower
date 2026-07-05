@@ -5,6 +5,24 @@ All notable changes to the wire format and the crate API. The wire format is pos
 bump and a coordinated re-pin of all three consumers (`tower-firmware`, `tower-cli`,
 `tower-hil`).
 
+## v1.2.0 — 2026-07-05
+
+**No wire change** — `PROTOCOL_VERSION` stays 2; frames are byte-identical to v1.1.0.
+API + hardening release (source-breaking for `Error` matches, hence the minor bump):
+
+- Exported `MAX_PAYLOAD` — the per-frame postcard payload budget
+  (`MAX_FRAME − header − CRC`) every consumer previously re-derived by hand.
+- `Error` is now `#[non_exhaustive]` (add a `_` arm): new failure modes can land
+  without a source break. The message enums stay exhaustive on purpose — under
+  lockstep, a new message variant *should* break consumer matches at compile time.
+- Documented the `seq` semantics and the schema-evolution rules in the crate rustdoc
+  (previously only in dev-internal notes).
+- Tests: `Error::Malformed` path covered; `Level` variant order pinned (all five
+  indices); a 200k-byte arbitrary-input decoder fuzz (no-panic guarantee for
+  `FrameDecoder` + `decode_msg` under attacker-controlled bytes).
+- `tools/check_wire_bump.py` accepts additive golden coverage (subsequence rule)
+  while still failing any change to existing vectors without a version bump.
+
 ## v1.1.0 — 2026-07-04
 
 **Wire change** — `PROTOCOL_VERSION` 1 → 2.

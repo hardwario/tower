@@ -65,8 +65,18 @@ def main() -> int:
     old_bytes, new_bytes = golden_bytes(old_golden), golden_bytes(new_golden)
     old_ver, new_ver = protocol_version(old_lib), protocol_version(new_lib)
 
-    if old_bytes == new_bytes:
-        print(f"wire-bump guard: golden vectors unchanged since {base} (PROTOCOL_VERSION {new_ver}) — ok")
+    # Additive-coverage friendly: NEW golden tests may append hex literals, so the rule is
+    # "every old byte still present, in order" (subsequence), not strict equality. Any change
+    # to an EXISTING vector still trips this: content changes move that frame's CRC bytes,
+    # so a modified vector cannot preserve the old token sequence.
+    def is_subsequence(needle: list[str], hay: list[str]) -> bool:
+        it = iter(hay)
+        return all(tok in it for tok in needle)
+
+    if is_subsequence(old_bytes, new_bytes):
+        extra = len(new_bytes) - len(old_bytes)
+        note = f" (+{extra} new literal(s) — additive coverage)" if extra else ""
+        print(f"wire-bump guard: golden vectors intact since {base} (PROTOCOL_VERSION {new_ver}){note} — ok")
         return 0
     if new_ver != old_ver:
         print(

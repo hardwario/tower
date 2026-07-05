@@ -127,6 +127,21 @@ fn shell_complete_roundtrips() {
 }
 
 #[test]
+fn level_variant_order_is_stable() {
+    // golden_log implicitly pins Warn = 1; this pins ALL five indices, so reordering the
+    // tail variants (Debug/Trace) — which no byte-vector covers — still fails loudly.
+    for (i, level) in [Level::Error, Level::Warn, Level::Info, Level::Debug, Level::Trace]
+        .into_iter()
+        .enumerate()
+    {
+        let mut buf = [0u8; 4];
+        let n = postcard::to_slice(&level, &mut buf).unwrap().len();
+        assert_eq!(n, 1);
+        assert_eq!(buf[0], i as u8, "Level variant order changed — wire break");
+    }
+}
+
+#[test]
 fn candidate_kind_variant_order_is_stable() {
     // postcard encodes an enum by variant index; pin the four kinds' indices.
     for (i, kind) in [
