@@ -4,8 +4,9 @@
 //! `Frame::Uplink` with a decodable `radio::NodeMsg`), the downlink queue with the
 //! ACK-pending delivery window (remote shell round-trip), and the RadioStat stream.
 //!
-//! The node's "finger" is its `/button sim` shell command — the bench has no
-//! actuator, and simulated events run the exact count/radio path a real press does.
+//! The node's "finger" is its `/button simulate <ms>` shell command — the bench has no
+//! actuator, and a simulated press runs the exact recognition + count/radio path a real
+//! press does (a 100 ms press = a click: > debounce, < click-timeout).
 //!
 //! Sequential flash, sequential per-step captures. `#[ignore]`d: needs the bench +
 //! two boards in RF range; run with `just hil` (`--test-threads=1`, exclusive ports).
@@ -114,7 +115,7 @@ fn gateway_bridges_push_button_end_to_end() {
     std::thread::sleep(Duration::from_millis(500));
 
     // --- uplink bridge: a simulated click must surface as a typed Uplink on the gateway ---
-    node.send_shell(10, "/button sim click").expect("sim click");
+    node.send_shell(10, "/button simulate 100").expect("sim click");
     let uplink = gw
         .wait_for(Duration::from_secs(10), |f| {
             matches!(f, Frame::Uplink { src, data, .. }
@@ -140,7 +141,7 @@ fn gateway_bridges_push_button_end_to_end() {
 
     // Wake the node: another simulated click. Its uplink's ACK carries the pending
     // flag; the gateway delivers; the node executes and streams the reply back.
-    node.send_shell(11, "/button sim click").expect("sim click #2");
+    node.send_shell(11, "/button simulate 100").expect("sim click #2");
     let delivered = gw
         .wait_for(Duration::from_secs(10), |f| {
             matches!(f, Frame::Stat(tower_protocol::msg::RadioStat::Tx { item: i, outcome, .. })
