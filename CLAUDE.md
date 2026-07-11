@@ -12,9 +12,10 @@ session. The children are Git **submodules** at the repo root:
 | `jolt`     | `github.com/hardwario/jolt`                | STM32L0 UART-bootloader flasher (library) used by `cli` + `hil` |
 | `hil`      | `github.com/hardwario/tower-hil`           | HIL bench harness (std host crate; builds images from `firmware/`) |
 
-Each child has its **own `CLAUDE.md`**. When you work inside a child, read and
-obey that file — it is authoritative for that repo. This file governs how the
-pieces fit together and how to change more than one at once.
+Each child has its **own `CLAUDE.md`** (except `jolt`, whose per-repo notes live in its
+`README.md`). When you work inside a child, read and obey that file — it is authoritative
+for that repo. This file governs how the pieces fit together and how to change more than
+one at once.
 
 ---
 
@@ -52,7 +53,7 @@ frames, and builds the images it flashes from the `firmware/` checkout next door
 self-describing**: a tag mismatch does not error — it **silently mis-decodes** bytes.
 This has bitten production before.
 
-- Current alignment: **`protocol` = v1.2.1**, pinned as `v1.2.1` by `firmware`, `cli`,
+- Current alignment: **`protocol` = v1.3.0**, pinned as `v1.3.0` by `firmware`, `cli`,
   and `hil`. ✅
 - `firmware` references `tower-protocol` in **two** manifests: `firmware/Cargo.toml` and
   `firmware/crates/tower-kv/Cargo.toml`.
@@ -68,7 +69,7 @@ lockfile SHAs, so a re-cut tag is caught too); `/sync` and `/pin` run it as thei
 
 ## Per-repo cheat sheet
 
-### `protocol/` — the contract (`no_std`, edition 2024, v1.2.1, MIT)
+### `protocol/` — the contract (`no_std`, edition 2024, v1.3.0, MIT)
 - Defines: COBS framing + CRC-32 (`src/lib.rs`, `src/crc.rs`) and the postcard message
   schema (`src/msg.rs`: `Hello`, `Log`, `Print`, `Event`, `ShellCommand`, …).
 - Verify locally:
@@ -86,15 +87,17 @@ lockfile SHAs, so a re-cut tag is caught too); `/sync` and `/pin` run it as thei
 - Workspace members: `crates/tower-kv` (EEPROM key-value codec), `crates/tower-radio-core`
   (host-testable radio-timing/compliance math), `crates/tower-net-core` (host-testable
   security decision kernels: replay rule, TX-counter watermark/fail-closed, ACK dedup,
-  FHSS epoch gate, nonce construction). `examples/` = demos, `apps/` = product
-  firmwares. (The HIL harness lives in the `hil/` submodule, its own repo.)
+  FHSS epoch gate, nonce construction), `crates/tower-gw-core` (host-testable gateway
+  decision core: EEPROM node-registry bucket codec + RAM downlink-queue policy).
+  `examples/` = demos, `apps/` = product firmwares. (The HIL harness lives in the `hil/`
+  submodule, its own repo.)
 - Common commands (read `firmware/justfile` for the full set):
   ```bash
   just -f firmware/justfile examples            # list example names
   just -f firmware/justfile build example blinky
   just -f firmware/justfile flash example blinky   # needs `tower` CLI on PATH + hardware
   just -f firmware/justfile run   example blinky   # build + flash + stream console
-  just -f firmware/justfile test                # host tests (tower-kv, tower-net-core, tower-radio-core)
+  just -f firmware/justfile test                # host tests (tower-kv, tower-net-core, tower-radio-core, tower-gw-core)
   ```
   Or run inside the dir: `cd firmware && just <recipe>`.
 - **Do NOT** assume a plain `cargo build` for firmware — it is an embedded target with
@@ -106,10 +109,12 @@ lockfile SHAs, so a re-cut tag is caught too); `/sync` and `/pin` run it as thei
   a release-workflow gate); `hil` mirrors it too (added 2026-07-05). Local check: `/lockstep`.
 
 ### `cli/` — host tool (`tower` binary, edition 2024, v1.0.0, MIT)
-- Single crate. Stack: clap 4, ratatui, serialport, rustyline. Depends on
-  `tower-protocol` (wire codec) **and the `jolt/` submodule** (`v1.4.0`, the STM32L0
-  UART-bootloader flasher), which it links as a **library** (`jolt::firmware::load`,
-  `jolt::port::Port`, `jolt::flash::FlashOptions`) for `flash`/`erase`/`reset`.
+- Single crate. Stack: clap 4, ratatui, serialport, rustyline; plus the gateway/MQTT
+  stack — `rumqttc` (sync client) and `rumqttd` (embedded broker, behind the default-on
+  `embedded-broker` feature), `serde_json`, `uuid`. Depends on `tower-protocol` (wire
+  codec) **and the `jolt/` submodule** (`v1.4.0`, the STM32L0 UART-bootloader flasher),
+  which it links as a **library** (`jolt::firmware::load`, `jolt::port::Port`,
+  `jolt::flash::FlashOptions`) for `flash`/`erase`/`reset`.
 - Common commands:
   ```bash
   cargo build --manifest-path cli/Cargo.toml --release    # binary: cli/target/release/tower
@@ -117,8 +122,10 @@ lockfile SHAs, so a re-cut tag is caught too); `/sync` and `/pin` run it as thei
   cargo clippy --manifest-path cli/Cargo.toml --all-targets -- -D warnings
   cargo test  --manifest-path cli/Cargo.toml
   ```
-- Runtime: `tower` (TUI on auto-detected port), `tower logs|events|shell|monitor`,
-  `tower flash <bin>`, `tower reset [--bootloader]`.
+- Runtime: `tower` (TUI on auto-detected port), `tower devices|logs|events|shell|monitor`,
+  `tower flash <bin>`, `tower erase`, `tower reset [--bootloader]`. Gateway product surface:
+  `tower gateway` (radio↔MQTT bridge, TUI + `--service`), `tower nodes` (list/add/remove/
+  rename/shell/…), `tower net` (network status) — the MQTT client commands.
 - Linux build needs `libudev-dev` + `pkg-config`. Has CI (test + multi-platform
   release archives on `v*` tags). **Not on crates.io.**
 
