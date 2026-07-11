@@ -27,7 +27,7 @@ It is consumed as a **pinned git dependency** (no crates.io publish):
 
 ```toml
 [dependencies]
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.2.1" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.3.0" }
 ```
 
 Because postcard isn't self-describing, **all ends must build the same version** — pin the same

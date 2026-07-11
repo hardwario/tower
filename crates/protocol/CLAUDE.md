@@ -19,10 +19,13 @@ bit once (a consumer pinned a tag that didn't exist yet); don't let it drift.
 
 1. **If the wire format changed** — any postcard struct/enum (field *or* variant **order**
    counts), the framing, or a `MsgType` discriminant — bump `PROTOCOL_VERSION` in `src/lib.rs`
-   and regenerate the golden vectors (`tests/golden.rs`). CI enforces the pairing both ways:
-   the `test` job fails if the goldens no longer match the code, and the `wire-bump-guard` job
-   fails if the golden bytes changed relative to the latest tag while `PROTOCOL_VERSION` did not
-   (`tools/check_wire_bump.py`).
+   and regenerate the golden vectors (`tests/golden.rs`). **The radio application schema
+   (`src/radio.rs`) is a second, independently-versioned surface**: a change there bumps
+   `RADIO_SCHEMA_VERSION` (not `PROTOCOL_VERSION`) and regenerates `tests/radio_golden.rs`.
+   CI enforces both pairings: the `test` job fails if the goldens no longer match the code,
+   and the `wire-bump-guard` job (`tools/check_wire_bump.py`) checks each golden file against
+   its own version constant — failing if its bytes changed relative to the latest tag while
+   that constant did not.
 2. **Bump `version` in `Cargo.toml`** (semver: wire/behaviour change → minor; fix → patch), and
    add a `CHANGELOG.md` entry.
 3. **Commit, push `main`, tag, push the tag:**
