@@ -28,8 +28,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use tower_protocol::msg::{Event, Hello, Level, Log, Print};
-use tower_protocol::{FrameDecoder, MsgType, decode_frame};
+use tower_protocol::mgmt::MgmtOp;
+use tower_protocol::msg::{Event, Hello, Level, Log, MgmtRequest, MgmtResponse, Print, RadioStat, Uplink};
+use tower_protocol::{FrameDecoder, MsgType, decode_frame, encode_frame};
 
 /// The framed-console baud rate (USART1, 115200 8N1) — the rate `tower logs` / the SDK use.
 pub const CONSOLE_BAUD: u32 = 115_200;
@@ -181,6 +182,14 @@ pub enum Frame {
     Event { name: String, fields: Vec<(String, String)> },
     /// The writer's dropped-frame marker (queue overflow / unplugged drain).
     Dropped { count: u32 },
+    /// A forwarded radio uplink from the gateway firmware (wire v3): the decrypted,
+    /// authenticated payload verbatim, plus reception metadata.
+    Uplink { src: u32, counter: u32, rssi_dbm: i16, lqi: u8, data: Vec<u8> },
+    /// One chunk of a management reply (wire v3) — reassemble by `req_id` (see
+    /// [`Console::mgmt_roundtrip`]).
+    Mgmt { req_id: u16, result: u8, chunk: u16, last: bool, data: Vec<u8> },
+    /// A radio-diagnostics sample (wire v3): ambient channel RSSI or a TX report.
+    Stat(RadioStat),
     /// A frame whose `MsgType` we don't model here (e.g. shell traffic) — kept so seq accounting
     /// stays exact.
     Other(MsgType),
@@ -200,6 +209,9 @@ pub struct Console {
     decoder: FrameDecoder,
     last_seq: Option<u16>,
     seq_gaps: u32,
+    /// Host→device frame counter for the writer helpers (wire v3 gateway tests) —
+    /// per-link, restarting at 0 like every sender's.
+    tx_seq: u16,
 }
 
 impl Console {
@@ -224,7 +236,55 @@ impl Console {
             decoder: FrameDecoder::new(),
             last_seq: None,
             seq_gaps: 0,
+            tx_seq: 0,
         })
+    }
+
+    /// Write one host→device frame (the harness's first TX path — until wire v3 it only
+    /// ever read). Used to drive the management channel and the shell from tests.
+    pub fn send_frame<T: serde::Serialize>(&mut self, msg_type: MsgType, payload: &T) -> Result<(), String> {
+        let mut buf = [0u8; tower_protocol::MAX_WIRE];
+        let n = encode_frame(msg_type, self.tx_seq, payload, &mut buf)
+            .map_err(|e| format!("HIL: encode {msg_type:?}: {e}"))?;
+        self.tx_seq = self.tx_seq.wrapping_add(1);
+        let port = self.port.as_mut().ok_or("HIL: console handle loaned out")?;
+        port.write_all(&buf[..n]).map_err(|e| format!("HIL: write: {e}"))?;
+        port.flush().map_err(|e| format!("HIL: flush: {e}"))
+    }
+
+    /// Send a `ShellCommand` (the console shell, not the radio remote shell).
+    pub fn send_shell(&mut self, cmd_id: u16, line: &str) -> Result<(), String> {
+        self.send_frame(MsgType::ShellCommand, &tower_protocol::msg::ShellCommand { cmd_id, line })
+    }
+
+    /// One management round-trip: send `op`, reassemble the chunked reply for `req_id`.
+    /// Returns `(result_code, concatenated record bytes)`. `timeout` is an idle deadline
+    /// (reset per matching chunk). Frames for other req_ids / other types pass through
+    /// the normal seq accounting and are otherwise ignored.
+    pub fn mgmt_roundtrip(
+        &mut self,
+        req_id: u16,
+        op: &MgmtOp<'_>,
+        timeout: Duration,
+    ) -> Result<(u8, Vec<u8>), String> {
+        self.send_frame(MsgType::MgmtRequest, &MgmtRequest { req_id, op: op.clone() })?;
+        let mut data = Vec::new();
+        let mut deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.next(remaining)? {
+                Some(Frame::Mgmt { req_id: r, result, data: d, last, .. }) if r == req_id => {
+                    deadline = Instant::now() + timeout;
+                    data.extend_from_slice(&d);
+                    if last {
+                        return Ok((result, data));
+                    }
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        Err(format!("HIL: mgmt req {req_id} got no complete reply"))
     }
 
     /// Pulse NRST so the board reboots into its application, WITHOUT re-opening the tty: the
@@ -369,6 +429,30 @@ fn to_frame(msg_type: MsgType, payload: &[u8]) -> Frame {
         },
         MsgType::Dropped => match postcard::from_bytes::<tower_protocol::msg::Dropped>(payload) {
             Ok(d) => Frame::Dropped { count: d.count },
+            Err(_) => Frame::Other(msg_type),
+        },
+        MsgType::Uplink => match postcard::from_bytes::<Uplink>(payload) {
+            Ok(u) => Frame::Uplink {
+                src: u.src,
+                counter: u.counter,
+                rssi_dbm: u.rssi_dbm,
+                lqi: u.lqi,
+                data: u.data.to_vec(),
+            },
+            Err(_) => Frame::Other(msg_type),
+        },
+        MsgType::MgmtResponse => match postcard::from_bytes::<MgmtResponse>(payload) {
+            Ok(m) => Frame::Mgmt {
+                req_id: m.req_id,
+                result: m.result,
+                chunk: m.chunk,
+                last: m.last,
+                data: m.data.to_vec(),
+            },
+            Err(_) => Frame::Other(msg_type),
+        },
+        MsgType::RadioStat => match postcard::from_bytes::<RadioStat>(payload) {
+            Ok(s) => Frame::Stat(s),
             Err(_) => Frame::Other(msg_type),
         },
         other => Frame::Other(other),
