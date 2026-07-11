@@ -88,7 +88,8 @@ lockfile SHAs, so a re-cut tag is caught too); `/sync` and `/pin` run it as thei
   (host-testable radio-timing/compliance math), `crates/tower-net-core` (host-testable
   security decision kernels: replay rule, TX-counter watermark/fail-closed, ACK dedup,
   FHSS epoch gate, nonce construction), `crates/tower-gw-core` (host-testable gateway
-  decision core: EEPROM node-registry bucket codec + RAM downlink-queue policy).
+  decision core: EEPROM node-registry bucket codec + RAM downlink-queue policy), and
+  `crates/tower-shell-core` (host-testable `address`-setting parser + PRNG kernels).
   `examples/` = demos, `apps/` = product firmwares. (The HIL harness lives in the `hil/`
   submodule, its own repo.)
 - Common commands (read `firmware/justfile` for the full set):
@@ -97,7 +98,7 @@ lockfile SHAs, so a re-cut tag is caught too); `/sync` and `/pin` run it as thei
   just -f firmware/justfile build example blinky
   just -f firmware/justfile flash example blinky   # needs `tower` CLI on PATH + hardware
   just -f firmware/justfile run   example blinky   # build + flash + stream console
-  just -f firmware/justfile test                # host tests (tower-kv, tower-net-core, tower-radio-core, tower-gw-core)
+  just -f firmware/justfile test                # host tests (tower-kv, tower-net-core, tower-radio-core, tower-gw-core, tower-shell-core)
   ```
   Or run inside the dir: `cd firmware && just <recipe>`.
 - **Do NOT** assume a plain `cargo build` for firmware — it is an embedded target with
