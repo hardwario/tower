@@ -40,7 +40,9 @@
 #![no_std]
 
 pub mod crc;
+pub mod mgmt;
 pub mod msg;
+pub mod radio;
 
 pub use msg::*;
 use serde::Serialize;
@@ -50,7 +52,13 @@ use serde::Serialize;
 /// v2 (crate 1.1.0): [`Hello`] gained `firmware_name` and a per-boot `session_id`
 /// (and `firmware_version` became a real version string). Field order is positional
 /// under postcard, so this was a wire break.
-pub const PROTOCOL_VERSION: u8 = 2;
+///
+/// v3 (crate 1.3.0): the gateway link — [`MgmtResponse`], [`Uplink`], [`RadioStat`]
+/// (target→host) and [`MgmtRequest`] (host→target), plus the [`mgmt`] op/record
+/// schema they carry. (The [`radio`] application schema added alongside is versioned
+/// separately — its [`radio::RADIO_SCHEMA_VERSION`] byte rides *inside* `Uplink`
+/// payloads and does not affect the console framing.)
+pub const PROTOCOL_VERSION: u8 = 3;
 
 // The version occupies only the top 3 bits of `ver_type` (`PROTOCOL_VERSION << 5`), so it must
 // fit in 0..=7. Bumping past 7 would silently wrap in release builds and alias an old version —
@@ -90,9 +98,13 @@ pub enum MsgType {
     ShellResponse = 4,
     ShellCompletions = 5,
     Dropped = 6,
+    MgmtResponse = 7,
+    Uplink = 8,
+    RadioStat = 9,
     // host -> target
     ShellCommand = 16,
     ShellComplete = 17,
+    MgmtRequest = 18,
 }
 
 impl MsgType {
@@ -105,8 +117,12 @@ impl MsgType {
             4 => Self::ShellResponse,
             5 => Self::ShellCompletions,
             6 => Self::Dropped,
+            7 => Self::MgmtResponse,
+            8 => Self::Uplink,
+            9 => Self::RadioStat,
             16 => Self::ShellCommand,
             17 => Self::ShellComplete,
+            18 => Self::MgmtRequest,
             _ => return None,
         })
     }
@@ -235,9 +251,13 @@ pub enum Msg<'a> {
     ShellResponse(ShellResponse<'a>),
     ShellCompletions(ShellCompletions<'a>),
     Dropped(Dropped),
+    MgmtResponse(MgmtResponse<'a>),
+    Uplink(Uplink<'a>),
+    RadioStat(RadioStat),
     // host -> target
     ShellCommand(ShellCommand<'a>),
     ShellComplete(ShellComplete<'a>),
+    MgmtRequest(MgmtRequest<'a>),
 }
 
 /// Decode a deframed inner buffer all the way into `(seq, Msg)`: validate version + CRC via
@@ -259,8 +279,12 @@ pub fn decode_msg(inner: &[u8]) -> Result<(u16, Msg<'_>), Error> {
         MsgType::ShellResponse => Msg::ShellResponse(de(payload)?),
         MsgType::ShellCompletions => Msg::ShellCompletions(de(payload)?),
         MsgType::Dropped => Msg::Dropped(de(payload)?),
+        MsgType::MgmtResponse => Msg::MgmtResponse(de(payload)?),
+        MsgType::Uplink => Msg::Uplink(de(payload)?),
+        MsgType::RadioStat => Msg::RadioStat(de(payload)?),
         MsgType::ShellCommand => Msg::ShellCommand(de(payload)?),
         MsgType::ShellComplete => Msg::ShellComplete(de(payload)?),
+        MsgType::MgmtRequest => Msg::MgmtRequest(de(payload)?),
     };
     Ok((seq, msg))
 }

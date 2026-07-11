@@ -5,6 +5,31 @@ All notable changes to the wire format and the crate API. The wire format is pos
 bump and a coordinated re-pin of all three consumers (`tower-firmware`, `tower-cli`,
 `tower-hil`).
 
+## v1.3.0 — 2026-07-11
+
+**Wire change** — `PROTOCOL_VERSION` 2 → 3: the gateway link.
+
+- New frame types: `Uplink` (a decrypted radio uplink forwarded verbatim by the
+  gateway — src, counter, rssi/lqi, opaque payload), `MgmtRequest` / `MgmtResponse`
+  (req_id-correlated management ops with `ShellResponse`-style chunked replies),
+  and `RadioStat` (ambient channel-RSSI samples + per-TX outcome reports).
+- New `mgmt` module: the complete management op/record schema — device describe
+  (role probing), registry CRUD + key reveal, OTA pairing window, downlink queue
+  (push/list/drop), stats cadence, node provisioning over the cable, and the
+  result/TX-outcome code sets. Designed complete for the gateway feature set;
+  appending an op later is a wire change by the usual rules.
+- New `radio` module: the **radio application schema** node apps put inside
+  encrypted radio frames (`NodeMsg`: info/button/temperature/accel/shell-chunk;
+  `NodeCmd`: shell) with its own leading version byte
+  (`RADIO_SCHEMA_VERSION = 1`). Versioned independently of the console framing —
+  it rides opaquely through the gateway, so only node firmware + the host CLI
+  re-pin on a radio-schema change. Golden vectors live in
+  `tests/radio_golden.rs`; `tools/check_wire_bump.py` now guards both surfaces,
+  each against its own version constant.
+- Golden vectors regenerated for wire v3 (header version bits changed); new
+  vectors + variant-order pins + MTU/frame-budget capacity tests for every new
+  type.
+
 ## v1.2.1 — 2026-07-05
 
 **No wire change** — dependency + metadata freshening (patch):

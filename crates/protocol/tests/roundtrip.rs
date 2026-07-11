@@ -292,11 +292,11 @@ fn empty_payload_roundtrips() {
 
 #[test]
 fn msg_type_from_u8_is_exhaustive() {
-    for v in [0u8, 1, 2, 3, 4, 5, 6, 16, 17] {
+    for v in [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 17, 18] {
         assert!(MsgType::from_u8(v).is_some(), "type {v} should be known");
         assert_eq!(MsgType::from_u8(v).unwrap() as u8, v, "round-trip discriminant");
     }
-    for v in [7u8, 8, 9, 14, 15, 18, 19, 20, 31, 100, 255] {
+    for v in [10u8, 11, 14, 15, 19, 20, 31, 100, 255] {
         assert!(MsgType::from_u8(v).is_none(), "type {v} should be unknown");
     }
 }

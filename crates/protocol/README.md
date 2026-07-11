@@ -71,6 +71,7 @@ decoder rejects frames whose `PROTOCOL_VERSION` or `MsgType` it doesn't know.
 
 | Tag | `PROTOCOL_VERSION` | Contents |
 |---|---|---|
+| `v1.3.0` | 3 | the gateway link: `Uplink` / `MgmtRequest` / `MgmtResponse` / `RadioStat` + the `mgmt` op schema; new `radio` application schema (own `RADIO_SCHEMA_VERSION = 1`, guarded independently by `tests/radio_golden.rs`) |
 | `v1.2.1` | 2 | deps: cobs 0.5, MSRV declared (wire byte-identical) |
 | `v1.2.0` | 2 | crate API: exported `MAX_PAYLOAD`, non_exhaustive `Error`, doc'd evolution rules (frames byte-identical to v1.1.0) |
 | `v1.1.0` | 2 | `Hello` carries `firmware_name` / `firmware_version` / `session_id`; adds typed one-call `decode_msg` + `Error::Malformed` |
