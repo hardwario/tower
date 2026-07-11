@@ -27,7 +27,7 @@
 //! [`Port::reset_into_bootloader`](port::Port::reset_into_bootloader) reset
 //! pulses. The lower layers ([`bootloader`], [`port`]) are public for callers
 //! that need finer control. Every library entry point returns
-//! [`error::Error`](error::Error) — no `anyhow` in the public surface.
+//! [`error::Error`] — no `anyhow` in the public surface.
 
 pub mod bootloader;
 pub mod error;

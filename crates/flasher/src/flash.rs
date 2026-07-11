@@ -194,7 +194,7 @@ fn bisect_erase_boundary<T: Transport>(
 /// can't report its flash size (Read Memory of the factory region is rejected)
 /// and refuses the 0xFFFF mass-erase code, so erase pages from 0 up to the
 /// family maximum in chunks. When a chunk is NACKed *after* at least one chunk
-/// succeeded, the page list has run past this part's flash — [`bisect_erase_boundary`]
+/// succeeded, the page list has run past this part's flash — `bisect_erase_boundary`
 /// then finds the exact density boundary and erases the valid pages below it, so
 /// no in-range page is left un-erased. Returns the number of pages erased.
 ///
@@ -348,7 +348,7 @@ where
 /// optional read-back verify → optional start (reset into app, or `Go` when
 /// [`FlashOptions::go`] is set).
 ///
-/// The image length is validated up front ([`check_firmware_len`]): an **empty**
+/// The image length is validated up front (`check_firmware_len`): an **empty**
 /// image is rejected ([`Error::InvalidArgument`]) — erase/write/verify would all
 /// be vacuous, so without this check `flash` would reset the chip and return
 /// `Ok(())` having programmed nothing — and an image larger than
