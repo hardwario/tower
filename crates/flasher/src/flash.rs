@@ -517,9 +517,9 @@ mod tests {
 
     /// erase_chip on a part whose flash ends part-way through a chunk (not on a
     /// chunk boundary): chunk 0 (pages 0..80) ACKs, chunk 1 (80..160) is NACKed
-    /// because page 96 (12 KiB into a 12 KiB density is out of range, say the
-    /// boundary is page 128 for a 16 KiB part). The C8 fix must bisect and erase
-    /// the valid pages of the boundary chunk instead of dropping them.
+    /// because it runs past page 128 — the end of this test's 16 KiB part, so
+    /// pages 128..160 are out of range. The C8 fix must bisect and erase the
+    /// valid pages of the boundary chunk instead of dropping them.
     #[test]
     fn erase_chip_bisects_boundary_chunk() {
         // Simulate a part with 128 pages (16 KiB). Pages 0..128 erase; >=128 NACK.
