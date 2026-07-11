@@ -154,6 +154,148 @@ fn golden_radio_stat_tx() {
     );
 }
 
+// --- wire v3: the mgmt *reply records* (MgmtResponse.data payloads) --------------
+//
+// These are postcard-encoded bare (not framed) and streamed inside `MgmtResponse.data`,
+// typed per op. The enum *variants* are order-pinned above; these pin each RECORD's field
+// layout — a `DeviceInfo`/`NodeEntry`/… field reorder is otherwise a silent mis-decode with
+// no failing test (exactly the drift the golden.rs discipline guards). Each pins the bytes
+// AND decodes back, so a reorder trips the vector and a decode regression trips the fields.
+
+/// Encode a bare mgmt record (an `MgmtResponse.data` payload) to its wire bytes.
+fn rec<T: serde::Serialize>(p: &T) -> Vec<u8> {
+    let mut out = [0u8; 128];
+    let n = postcard::to_slice(p, &mut out).unwrap().len();
+    out[..n].to_vec()
+}
+
+#[test]
+fn golden_mgmt_device_info() {
+    use tower_protocol::mgmt::*;
+    // Distinct net_id (0x11223344) vs gw_id (0x55667788) so swapping the two u32s is caught.
+    let d = DeviceInfo {
+        role: DeviceRole::Gateway,
+        radio_schema_version: 1,
+        net_id: 0x1122_3344,
+        band: BAND_US915,
+        channel: 2,
+        node_capacity: 16,
+        node_count: 3,
+        provisioned: true,
+        gw_id: 0x5566_7788,
+        firmware_name: "gw",
+    };
+    let bytes = rec(&d);
+    assert_eq!(
+        bytes,
+        [
+            0x00, 0x01, 0xc4, 0xe6, 0x88, 0x89, 0x01, 0x01, 0x02, 0x10, 0x03, 0x01, 0x88, 0xef,
+            0x99, 0xab, 0x05, 0x02, 0x67, 0x77
+        ]
+    );
+    let back: DeviceInfo = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!((back.role, back.net_id, back.gw_id), (DeviceRole::Gateway, 0x1122_3344, 0x5566_7788));
+    assert_eq!((back.node_capacity, back.node_count, back.provisioned), (16, 3, true));
+    assert_eq!(back.firmware_name, "gw");
+}
+
+#[test]
+fn golden_mgmt_node_entry() {
+    use tower_protocol::mgmt::*;
+    let e = NodeEntry { id: 0x0000_AB12, name: "kitchen", flags: 0x03, last_seen_s: 42, rssi_dbm: -70, uplinks: 7, queued: 2 };
+    let bytes = rec(&e);
+    assert_eq!(
+        bytes,
+        [0x92, 0xd6, 0x02, 0x07, 0x6b, 0x69, 0x74, 0x63, 0x68, 0x65, 0x6e, 0x03, 0x2a, 0xba, 0x07, 0x02]
+    );
+    let back: NodeEntry = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!((back.id, back.name, back.flags), (0x0000_AB12, "kitchen", 0x03));
+    assert_eq!((back.last_seen_s, back.rssi_dbm, back.uplinks, back.queued), (42, -70, 7, 2));
+}
+
+#[test]
+fn golden_mgmt_node_key() {
+    use tower_protocol::mgmt::*;
+    let k = NodeKey {
+        id: 0x0000_AB12,
+        key: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf],
+    };
+    let bytes = rec(&k);
+    assert_eq!(
+        bytes,
+        [
+            0x92, 0xd6, 0x02, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa,
+            0xab, 0xac, 0xad, 0xae, 0xaf
+        ]
+    );
+    let back: NodeKey = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(back.id, 0x0000_AB12);
+    assert_eq!(back.key[15], 0xaf);
+}
+
+#[test]
+fn golden_mgmt_small_records() {
+    use tower_protocol::mgmt::*;
+    assert_eq!(rec(&Paired { node_id: 0x0000_AB12 }), [0x92, 0xd6, 0x02]);
+    assert_eq!(rec(&QueueId { item: 5 }), [0x05]);
+    assert_eq!(rec(&ProvisionAck { id: 0x88a4_e90d }), [0x8d, 0xd2, 0x93, 0xc5, 0x08]);
+    assert_eq!(rec(&Joined { gw_id: 0x1122_3344 }), [0xc4, 0xe6, 0x88, 0x89, 0x01]);
+    // Decode back (these are the delayed-pairing / provisioning acks the host waits on).
+    let p: Paired = postcard::from_bytes(&rec(&Paired { node_id: 0x0000_AB12 })).unwrap();
+    assert_eq!(p.node_id, 0x0000_AB12);
+    let j: Joined = postcard::from_bytes(&rec(&Joined { gw_id: 0x1122_3344 })).unwrap();
+    assert_eq!(j.gw_id, 0x1122_3344);
+    let a: ProvisionAck = postcard::from_bytes(&rec(&ProvisionAck { id: 0x88a4_e90d })).unwrap();
+    assert_eq!(a.id, 0x88a4_e90d);
+}
+
+#[test]
+fn golden_mgmt_queue_entry() {
+    use tower_protocol::mgmt::*;
+    let q = QueueEntry { node: 0x0000_AB12, item: 5, age_s: 10, ttl_s: 3600, data: &[0x01, 0x02] };
+    let bytes = rec(&q);
+    assert_eq!(bytes, [0x92, 0xd6, 0x02, 0x05, 0x0a, 0x90, 0x1c, 0x02, 0x01, 0x02]);
+    let back: QueueEntry = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!((back.node, back.item, back.age_s, back.ttl_s), (0x0000_AB12, 5, 10, 3600));
+    assert_eq!(back.data, &[0x01, 0x02]);
+}
+
+/// The documented `MgmtResponse.data` stream contract: reply records concatenate across
+/// chunks and decode back with repeated `take_from_bytes`. Exercises the real host
+/// consumption path (a `NodeList` split over two frames) end to end.
+#[test]
+fn mgmt_response_record_stream_reassembles() {
+    use tower_protocol::mgmt::{LAST_SEEN_NEVER, NodeEntry};
+    let entries = [
+        NodeEntry { id: 1, name: "a", flags: 0, last_seen_s: 0, rssi_dbm: -50, uplinks: 1, queued: 0 },
+        NodeEntry { id: 2, name: "bb", flags: 1, last_seen_s: LAST_SEEN_NEVER, rssi_dbm: -70, uplinks: 9, queued: 2 },
+        NodeEntry { id: 3, name: "ccc", flags: 3, last_seen_s: 5, rssi_dbm: -90, uplinks: 0, queued: 1 },
+    ];
+    let mut stream = Vec::new();
+    for e in &entries {
+        stream.extend_from_slice(&rec(e));
+    }
+    // Split the record stream across two MgmtResponse chunks (chunk 0 not-last, 1 last),
+    // each riding the real frame codec, then reassemble the payloads.
+    let mid = stream.len() / 2;
+    let mut reassembled = Vec::new();
+    for (i, part) in [&stream[..mid], &stream[mid..]].into_iter().enumerate() {
+        let r = MgmtResponse { req_id: 9, result: 0, chunk: i as u16, last: i == 1, data: part };
+        let (_, _, payload) = redecode(MsgType::MgmtResponse, i as u16, &r);
+        let back: MgmtResponse = postcard::from_bytes(&payload).unwrap();
+        reassembled.extend_from_slice(back.data);
+    }
+    // Decode the reassembled stream record by record.
+    let mut rest: &[u8] = &reassembled;
+    let mut decoded = Vec::new();
+    while !rest.is_empty() {
+        let (e, tail) = postcard::take_from_bytes::<NodeEntry>(rest).unwrap();
+        decoded.push((e.id, e.uplinks, e.queued));
+        rest = tail;
+    }
+    assert_eq!(decoded, vec![(1, 1, 0), (2, 9, 2), (3, 0, 1)]);
+}
+
 // --- round-trip coverage for the message types the roundtrip suite doesn't exercise ---
 
 /// Encode then deframe+decode, returning (msg_type, seq, payload bytes) for reserialization.
