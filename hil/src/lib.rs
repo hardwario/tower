@@ -392,6 +392,14 @@ impl Console {
         }
         self.last_seq = Some(seq);
     }
+
+    /// Test-only: a `Console` with no serial port, so the pure seq-accounting path
+    /// (`account_seq` / [`seq_gaps`](Self::seq_gaps)) can be exercised on the SHIPPED code — not
+    /// an inline copy — without opening a tty. Never compiled into a non-test build.
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self { port: None, decoder: FrameDecoder::new(), last_seq: None, seq_gaps: 0, tx_seq: 0 }
+    }
 }
 
 /// Decode a `(MsgType, payload)` into an owned [`Frame`]. Unknown/unmodelled types become
@@ -607,24 +615,222 @@ mod tests {
     }
 
     #[test]
-    fn seq_gap_accounting_wraps() {
-        // Build a Console-like seq accountant directly (no port needed).
-        let mut last: Option<u16> = None;
-        let mut gaps: u32 = 0;
-        let feed = |seq: u16, last: &mut Option<u16>, gaps: &mut u32| {
-            if let Some(prev) = *last {
-                *gaps += seq.wrapping_sub(prev).wrapping_sub(1) as u32;
-            }
-            *last = Some(seq);
-        };
+    fn seq_gap_accounting_uses_real_console() {
+        // Exercises the SHIPPED Console::account_seq + seq_gaps() (not an inline copy). The first
+        // frame only establishes the baseline — no gap.
+        let mut c = Console::for_test();
         for s in [10u16, 11, 12] {
-            feed(s, &mut last, &mut gaps);
+            c.account_seq(s);
         }
-        assert_eq!(gaps, 0, "contiguous frames = no gaps");
-        feed(15, &mut last, &mut gaps); // skipped 13,14
-        assert_eq!(gaps, 2);
-        feed(0, &mut last, &mut gaps); // wrap from 15: skipped 16..=65535 (65520)
-        assert_eq!(gaps, 2 + 65_535 - 15);
+        assert_eq!(c.seq_gaps(), 0, "contiguous frames = no gaps");
+        c.account_seq(15); // skipped 13, 14
+        assert_eq!(c.seq_gaps(), 2);
+        c.account_seq(0); // u16 wrap from 15: skipped 16..=65535 (65520)
+        assert_eq!(c.seq_gaps(), 2 + 65_535 - 15);
+
+        // A lone first frame is a baseline, never a gap.
+        let mut first = Console::for_test();
+        first.account_seq(5);
+        assert_eq!(first.seq_gaps(), 0);
+    }
+
+    // --- Native decode: to_frame + the receive seam --------------------------------------
+
+    /// Encode `payload` as a REAL wire frame (`encode_frame`) and run it back through the exact
+    /// receive path `Console::next` uses — `FrameDecoder` → `decode_frame` → `to_frame` — returning
+    /// the `(seq, Frame)` it produces. Exercises the shipped decode, not a re-implementation.
+    fn decode_via_wire<T: serde::Serialize>(msg_type: MsgType, seq: u16, payload: &T) -> (u16, Frame) {
+        let mut wire = [0u8; tower_protocol::MAX_WIRE];
+        let n = encode_frame(msg_type, seq, payload, &mut wire).expect("encode_frame");
+        let mut decoder = FrameDecoder::new();
+        let mut decoded = None;
+        for &b in &wire[..n] {
+            if let Some(inner) = decoder.push(b) {
+                let (mt, s, pl) = decode_frame(inner).expect("decode_frame");
+                decoded = Some((s, to_frame(mt, pl)));
+            }
+        }
+        decoded.expect("one full frame decoded from the wire")
+    }
+
+    #[test]
+    fn to_frame_maps_hello() {
+        let (seq, frame) = decode_via_wire(
+            MsgType::Hello,
+            1,
+            &Hello {
+                protocol_version: 3,
+                firmware_name: "blinky",
+                firmware_version: "v0.1.0",
+                session_id: 0xDEAD_BEEF,
+            },
+        );
+        assert_eq!(seq, 1, "seq is carried through decode");
+        assert_eq!(
+            frame,
+            Frame::Hello {
+                protocol_version: 3,
+                firmware_name: "blinky".to_string(),
+                firmware_version: "v0.1.0".to_string(),
+                session_id: 0xDEAD_BEEF,
+            }
+        );
+    }
+
+    #[test]
+    fn to_frame_maps_log() {
+        let (_, frame) = decode_via_wire(
+            MsgType::Log,
+            2,
+            &Log { level: Level::Warn, uptime_us: 1_234_567, module: "radio", message: "carrier lost" },
+        );
+        assert_eq!(
+            frame,
+            Frame::Log {
+                level: Level::Warn,
+                uptime_us: 1_234_567,
+                module: "radio".to_string(),
+                message: "carrier lost".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn to_frame_maps_print() {
+        let (_, frame) = decode_via_wire(MsgType::Print, 3, &Print { text: "hello world" });
+        assert_eq!(frame, Frame::Print { text: "hello world".to_string() });
+    }
+
+    #[test]
+    fn to_frame_maps_event() {
+        // `Event.fields` is a heapless Vec; build it via Default + push so the test needs no
+        // direct heapless dep (the type is inferred from the field).
+        let mut ev = Event { name: "boot", fields: Default::default() };
+        ev.fields.push(("phase", "init")).unwrap();
+        ev.fields.push(("rc", "0")).unwrap();
+        let (_, frame) = decode_via_wire(MsgType::Event, 4, &ev);
+        assert_eq!(
+            frame,
+            Frame::Event {
+                name: "boot".to_string(),
+                fields: vec![("phase".to_string(), "init".to_string()), ("rc".to_string(), "0".to_string())],
+            }
+        );
+    }
+
+    #[test]
+    fn to_frame_maps_dropped() {
+        let (_, frame) = decode_via_wire(MsgType::Dropped, 5, &tower_protocol::msg::Dropped { count: 42 });
+        assert_eq!(frame, Frame::Dropped { count: 42 });
+    }
+
+    #[test]
+    fn to_frame_maps_uplink() {
+        // wire-v3 gateway frame.
+        let (_, frame) = decode_via_wire(
+            MsgType::Uplink,
+            6,
+            &Uplink { src: 0x1122_3344, counter: 7, rssi_dbm: -80, lqi: 12, data: &[1, 2, 3, 4] },
+        );
+        assert_eq!(
+            frame,
+            Frame::Uplink { src: 0x1122_3344, counter: 7, rssi_dbm: -80, lqi: 12, data: vec![1, 2, 3, 4] }
+        );
+    }
+
+    #[test]
+    fn to_frame_maps_mgmt_response() {
+        // wire-v3 gateway frame.
+        let (_, frame) = decode_via_wire(
+            MsgType::MgmtResponse,
+            7,
+            &MgmtResponse { req_id: 5, result: 0, chunk: 1, last: true, data: &[9, 8, 7] },
+        );
+        assert_eq!(frame, Frame::Mgmt { req_id: 5, result: 0, chunk: 1, last: true, data: vec![9, 8, 7] });
+    }
+
+    #[test]
+    fn to_frame_maps_radio_stat() {
+        // wire-v3 gateway frame — both RadioStat variants map verbatim into Frame::Stat.
+        let (_, ch) = decode_via_wire(MsgType::RadioStat, 8, &RadioStat::Channel { channel: 4, rssi_dbm: -95 });
+        assert_eq!(ch, Frame::Stat(RadioStat::Channel { channel: 4, rssi_dbm: -95 }));
+
+        let tx = RadioStat::Tx { dest: 0x00AA_BB00, item: 3, outcome: 1, ack_rssi_dbm: Some(-70) };
+        let (_, txf) = decode_via_wire(MsgType::RadioStat, 9, &tx);
+        assert_eq!(txf, Frame::Stat(tx));
+    }
+
+    #[test]
+    fn to_frame_unknown_type_and_truncated_fall_to_other() {
+        // An unmodelled MsgType (shell traffic) is kept as Frame::Other so seq accounting stays
+        // exact — `to_frame`'s catch-all arm. Empty payload is fine: the Other arm never decodes.
+        let (seq_unknown, unknown) = decode_via_wire(MsgType::ShellResponse, 7, &());
+        assert_eq!(unknown, Frame::Other(MsgType::ShellResponse));
+        assert_eq!(seq_unknown, 7);
+
+        // A CRC-valid but truncated/undeserializable payload for a MODELLED type also falls to
+        // Frame::Other (postcard::from_bytes fails) rather than the frame being dropped.
+        let (seq_trunc, truncated) = decode_via_wire(MsgType::Hello, 8, &());
+        assert_eq!(truncated, Frame::Other(MsgType::Hello));
+        assert_eq!(seq_trunc, 8);
+
+        // `Console::next` accounts seq for EVERY decoded frame, Other included, before returning it
+        // — so an unknown/truncated frame still advances the counter. Verify on the real accountant.
+        let mut console = Console::for_test();
+        console.account_seq(seq_unknown);
+        console.account_seq(seq_trunc);
+        assert_eq!(console.seq_gaps(), 0, "consecutive Other frames advance seq with no gap");
+    }
+
+    #[test]
+    fn firmware_dir_discovery() {
+        // firmware_dir() reads the process-global TOWER_FIRMWARE_DIR. Keep ALL of this env mutation
+        // inside ONE test (the crate has no serial_test dep) so it can't race a sibling, and restore
+        // the prior value BEFORE asserting so a failed assertion can't leak into other tests.
+        const NAME: &str = "TOWER_FIRMWARE_DIR";
+        let saved = std::env::var_os(NAME);
+
+        let base = std::env::temp_dir().join(format!("tower-hil-fwdir-{}", std::process::id()));
+        let with = base.join("with");
+        let without = base.join("without");
+        std::fs::create_dir_all(&with).expect("mk with dir");
+        std::fs::create_dir_all(&without).expect("mk without dir");
+        std::fs::write(with.join("justfile"), "# hil test fixture\n").expect("write justfile");
+
+        // SAFETY: single-threaded within this one test; no other test reads/writes the var.
+        unsafe { std::env::remove_var(NAME) };
+        let default_res = firmware_dir();
+        unsafe { std::env::set_var(NAME, &with) };
+        let with_res = firmware_dir();
+        unsafe { std::env::set_var(NAME, &without) };
+        let without_res = firmware_dir();
+
+        // Restore the environment before any assertion can unwind.
+        // SAFETY: same single-threaded justification as above.
+        match &saved {
+            Some(v) => unsafe { std::env::set_var(NAME, v) },
+            None => unsafe { std::env::remove_var(NAME) },
+        }
+        let _ = std::fs::remove_dir_all(&base);
+
+        // Default (no override) is the sibling `../firmware` checkout (the control-plane layout),
+        // whether or not it exists on this machine: Ok carries that path, Err names it.
+        let expected_default = Path::new(env!("CARGO_MANIFEST_DIR")).join("../firmware");
+        match default_res {
+            Ok(p) => assert_eq!(p, expected_default),
+            Err(e) => assert!(
+                e.contains(&expected_default.display().to_string()),
+                "default-path error should name ../firmware, got: {e}"
+            ),
+        }
+
+        // Override → a dir WITH a justfile resolves Ok to exactly that dir.
+        assert_eq!(with_res.expect("dir with a justfile resolves"), with);
+
+        // Override → a dir WITHOUT a justfile is an Err naming the path and the missing justfile.
+        let err = without_res.expect_err("dir without a justfile must fail");
+        assert!(err.contains(&without.display().to_string()), "err names the bad path: {err}");
+        assert!(err.contains("justfile"), "err mentions the missing justfile: {err}");
     }
 
     #[test]
