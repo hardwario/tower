@@ -14,7 +14,8 @@ unless the user asks and the bench is cabled.
   the FTDI-detached Core times out on a power bench.
 - **Firmware checkout discovery** (`firmware_dir()` in src/lib.rs): default `../firmware`
   (the control-plane layout), `TOWER_FIRMWARE_DIR` overrides. The harness builds images via
-  the firmware repo's `just build example <name>`.
+  the firmware repo's `just build example <name>` (and `just build app <name>` for the gateway
+  group's product firmwares; the power group builds `lowpower` via `cargo … --example`).
 - **hil.toml** is bench-local operator config (port serials re-enumerate); don't assert on
   its concrete values in tests.
 

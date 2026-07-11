@@ -26,7 +26,7 @@ TOWER_FIRMWARE_DIR=/path/to/tower-firmware just hil
 
 ```sh
 cargo test        # no hardware: compiles every #[ignore]d bench test, runs only host unit tests
-just hil          # bench: smoke + radio + extended groups (Dongle + Core over UART bootloader)
+just hil          # bench: smoke + radio + extended + gateway groups (Dongle + Core over UART bootloader)
 just hil-power    # bench: STOP-floor current measurement (J-Link + PPK2, FTDI UNPLUGGED)
 just hil-full     # bench: everything, on the fully-cabled bench
 ```

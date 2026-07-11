@@ -17,8 +17,9 @@
 default:
     @just --list
 
-# Run the smoke + radio + extended HIL groups on the bench (needs the Dongle + Core; NOT run in
-# CI). The `power` group is compiled out (no `power` feature), so this never touches the PPK2.
+# Run the smoke + radio + extended + gateway HIL groups on the bench (needs the Dongle + Core;
+# NOT run in CI). The `power` group is compiled out (no `power` feature), so this never touches
+# the PPK2.
 # `--no-fail-fast`: one red test binary must not skip the remaining groups — a 2026-07-05 run
 # lost the whole smoke+radio pass to a single RF flake in extended.
 hil *args:
@@ -31,7 +32,7 @@ hil *args:
 hil-power *args:
     cargo test --no-fail-fast --features power -- --ignored --test-threads=1 power_ {{args}}
 
-# Run every HIL group (smoke + radio + extended + power) on the fully-cabled bench.
+# Run every HIL group (smoke + radio + extended + gateway + power) on the fully-cabled bench.
 hil-full *args:
     cargo test --no-fail-fast --features power -- --ignored --test-threads=1 {{args}}
 
