@@ -169,3 +169,89 @@ fn gateway_bridges_push_button_end_to_end() {
 
     assert_eq!(gw.seq_gaps(), 0, "no frames lost on the gateway console");
 }
+
+/// The byte count from a `/system stack print` line beginning with `prefix` (e.g. `"used:"` in
+/// `"used: 7480 B (45.6%) peak high-water"` → `7480`). The number is the token after the prefix.
+fn stack_bytes(text: &str, prefix: &str) -> Option<u32> {
+    let line = text.lines().find(|l| l.trim_start().starts_with(prefix))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Measured gateway stack **high-water** on its console-reachable deep paths, replacing the
+/// ~7.5 KB estimate in the budget (docs/gateway.md) with a bench number. Fills the node registry
+/// across all EEPROM buckets (each `NodeAdd` loads/rewrites one ~270 B bucket stack-local — the
+/// deepest registry-codec path — and can trigger a KV compaction flip), pushes downlink-queue
+/// items, and lists the whole registry (the mgmt-response chunking path over many entries), then
+/// reads `/system stack print` (painted at boot by `stack::paint`) and asserts the peak stays
+/// under the 8 KB budget floor. Single board (the Dongle in the gateway role) so it is
+/// deterministic; the radio-bridge path is separately exercised by
+/// `gateway_bridges_push_button_end_to_end` (which reaches `net.send` on the same firmware).
+#[test]
+#[ignore = "requires the HIL bench (Dongle in the gateway role)"]
+fn gateway_stack_high_water_within_budget() {
+    let bench = bench_or_fail();
+    build_and_flash_app(&bench.dongle.serial, "radio_dongle_gateway").expect("flash gateway");
+
+    let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
+    gw.reset_into_app().expect("reset gateway");
+    gw.resync();
+    let _ = gw.wait_for(Duration::from_secs(10), |f| matches!(f, Frame::Hello { .. }));
+    std::thread::sleep(Duration::from_millis(300)); // post-Hello boot-burst guard
+
+    // Confirm the role (only a gateway answers Describe with role = Gateway).
+    let (role, _addr, _band, _channel) = describe_full(&mut gw, 1);
+    assert_eq!(role, DeviceRole::Gateway);
+
+    // Fill the registry across all three buckets (6 records each): 14 > 2 buckets, so the bucket
+    // pack/unpack codec runs repeatedly and the KV store fills enough to flip.
+    let key = [0x5Au8; 16];
+    let n = 14u32;
+    let mut req = 10u16;
+    for i in 0..n {
+        let (result, _) = gw
+            .mgmt_roundtrip(
+                req,
+                &MgmtOp::NodeAdd { addr: 0x1000_0000 + i, key, name: "n", flags: mgmt::NODE_FLAG_SLEEPING },
+                Duration::from_secs(6),
+            )
+            .expect("NodeAdd reply");
+        assert_eq!(result, mgmt::MGMT_OK, "NodeAdd {i} failed (capacity?)");
+        req += 1;
+    }
+
+    // Push a few downlink-queue items (the RAM queue-policy path).
+    let env = [0u8; 8];
+    for i in 0..4u32 {
+        let (result, _) = gw
+            .mgmt_roundtrip(
+                req,
+                &MgmtOp::QueuePush { node_addr: 0x1000_0000 + i, ttl: 60, data: &env },
+                Duration::from_secs(6),
+            )
+            .expect("QueuePush reply");
+        assert_eq!(result, mgmt::MGMT_OK, "QueuePush {i} failed");
+        req += 1;
+    }
+
+    // List the whole registry — mgmt-response chunking over all N entries.
+    let (result, list) = gw
+        .mgmt_roundtrip(req, &MgmtOp::NodeList, Duration::from_secs(6))
+        .expect("NodeList reply");
+    assert_eq!(result, mgmt::MGMT_OK);
+    assert!(!list.is_empty(), "NodeList returned records");
+
+    // Read the measured stack high-water and hold it to the 8 KB budget floor.
+    let (result, text) = gw
+        .shell_roundtrip(200, "/system stack print", Duration::from_secs(6))
+        .expect("stack print reply");
+    assert_eq!(result, 0, "stack print result code");
+    let used = stack_bytes(&text, "used:").unwrap_or_else(|| panic!("no 'used:' line in:\n{text}"));
+    let total = stack_bytes(&text, "stack:").unwrap_or(0);
+
+    eprintln!("gateway stack high-water: {used} B used / {total} B total (after {n} NodeAdd + queue + NodeList)");
+    assert!(
+        used < 8192,
+        "gateway stack high-water {used} B ≥ 8 KB budget floor — deep-path regression (total {total} B)"
+    );
+    assert_eq!(gw.seq_gaps(), 0, "no frames lost on the gateway console");
+}

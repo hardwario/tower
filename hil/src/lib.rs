@@ -188,6 +188,9 @@ pub enum Frame {
     /// One chunk of a management reply (wire v3) — reassemble by `req_id` (see
     /// [`Console::mgmt_roundtrip`]).
     Mgmt { req_id: u16, result: u8, chunk: u16, last: bool, data: Vec<u8> },
+    /// One chunk of a shell-command reply — reassemble by `cmd_id` (see
+    /// [`Console::shell_roundtrip`]). `text` chunks concatenate; `result` is authoritative on `last`.
+    Shell { cmd_id: u16, result: u8, chunk: u16, last: bool, text: String },
     /// A radio-diagnostics sample (wire v3): ambient channel RSSI or a TX report.
     Stat(RadioStat),
     /// A frame whose `MsgType` we don't model here (e.g. shell traffic) — kept so seq accounting
@@ -255,6 +258,35 @@ impl Console {
     /// Send a `ShellCommand` (the console shell, not the radio remote shell).
     pub fn send_shell(&mut self, cmd_id: u16, line: &str) -> Result<(), String> {
         self.send_frame(MsgType::ShellCommand, &tower_protocol::msg::ShellCommand { cmd_id, line })
+    }
+
+    /// One shell round-trip: send `line` as a `ShellCommand`, reassemble the chunked
+    /// `ShellResponse` for `cmd_id`. Returns `(result_code, concatenated text)`. `timeout` is an
+    /// idle deadline (reset per matching chunk). Non-matching frames pass through seq accounting.
+    pub fn shell_roundtrip(
+        &mut self,
+        cmd_id: u16,
+        line: &str,
+        timeout: Duration,
+    ) -> Result<(u8, String), String> {
+        self.send_shell(cmd_id, line)?;
+        let mut text = String::new();
+        let mut deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.next(remaining)? {
+                Some(Frame::Shell { cmd_id: c, result, text: t, last, .. }) if c == cmd_id => {
+                    deadline = Instant::now() + timeout;
+                    text.push_str(&t);
+                    if last {
+                        return Ok((result, text));
+                    }
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        Err(format!("HIL: shell cmd {cmd_id} got no complete reply"))
     }
 
     /// One management round-trip: send `op`, reassemble the chunked reply for `req_id`.
@@ -446,6 +478,16 @@ fn to_frame(msg_type: MsgType, payload: &[u8]) -> Frame {
                 rssi: u.rssi,
                 lqi: u.lqi,
                 data: u.data.to_vec(),
+            },
+            Err(_) => Frame::Other(msg_type),
+        },
+        MsgType::ShellResponse => match postcard::from_bytes::<tower_protocol::msg::ShellResponse>(payload) {
+            Ok(s) => Frame::Shell {
+                cmd_id: s.cmd_id,
+                result: s.result,
+                chunk: s.chunk,
+                last: s.last,
+                text: s.text.to_string(),
             },
             Err(_) => Frame::Other(msg_type),
         },

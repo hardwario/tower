@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ppk2d — Nordic PPK2 current-measurement sidecar for the HIL harness (STUB).
+"""ppk2d — Nordic PPK2 current-measurement sidecar for the HIL harness.
 
 Protocol: **line-JSON over stdio**. Read one JSON command per line on stdin, write one JSON reply
 per line on stdout. The Rust harness (`src/lib.rs`, `Ppk2`) drives this.
@@ -29,12 +29,20 @@ The three known confounders this sidecar is responsible for (see the low-power m
     desync and report bursts of tens of mA of garbage. So this sidecar NEVER samples mid-flash and
     REJECTS any averaged reading above 50 mA as noise (the Rust side enforces the same ceiling).
 
-THIS IS A STUB: it does not open a real PPK2. It models the protocol + the confounder *policy* so
-the harness compiles and its plumbing can be unit-tested; wire in `ppk2-api` where marked to drive
-real hardware. The hardware HIL tests are `#[ignore]`d, so nothing here runs in CI.
+Backend selection (transparent): if a real PPK2 is reachable and `ppk2-api` is importable, this
+drives the hardware; otherwise it falls back to a modelled **stub** so the harness still compiles
+and its plumbing unit-tests (the hardware HIL tests are `#[ignore]`d, so CI always takes the stub).
+The confounder *policy* above is enforced identically on both paths — it lives in `Ppk2Base`, and
+each backend only supplies the three raw hardware hooks.
+
+To use real hardware: `python3 -m venv hil/.venv && hil/.venv/bin/pip install ppk2-api pyserial`.
+The harness spawns plain `python3 ppk2d.py`; if `ppk2_api` isn't in that interpreter, this script
+re-execs into a sibling `./.venv` automatically (see `_ensure_deps`). Override the device port with
+`TOWER_PPK2_PORT` if auto-detection picks the wrong Nordic CDC.
 """
 
 import json
+import os
 import sys
 import time
 
@@ -46,26 +54,42 @@ MAX_SUPPLY_MV = 3600    # never source above the board's abs-max; the bench uses
 # discharges before a measurement is taken.
 CYCLE_SETTLE_S = 0.30
 
+# Nordic PPK2 USB identity (VID 0x1915 / PID 0xC00A) — the fallback port detector matches on it.
+PPK2_VID = 0x1915
+PPK2_PID = 0xC00A
 
-class Ppk2Stub:
-    """Stand-in for a real PPK2 (via ppk2-api). Tracks whether the supply is on and enforces the
-    confounder policy; returns a plausible deep-sleep floor for `avg`."""
+
+class Ppk2Base:
+    """The confounder policy, backend-independent. Subclasses supply only the three hardware hooks
+    (`_hw_on` / `_hw_off` / `_hw_sample_mean_ua`); `set_on`/`set_off`/`cycle`/`avg_ua` enforce the
+    supply ceiling, the cycle-before-measure rule, and the CDC-desync rejection identically for the
+    real PPK2 and the stub."""
 
     def __init__(self):
         self.on = False
         self.mv = 0
         self.cycled_since_measure = False
 
+    # --- hardware hooks (overridden per backend) ---
+    def _hw_on(self, mv):
+        raise NotImplementedError
+
+    def _hw_off(self):
+        raise NotImplementedError
+
+    def _hw_sample_mean_ua(self, ms):
+        raise NotImplementedError
+
+    # --- policy (shared) ---
     def set_on(self, mv):
         if mv <= 0 or mv > MAX_SUPPLY_MV:
             raise ValueError(f"supply {mv} mV out of range (0, {MAX_SUPPLY_MV}] — see confounder #2")
-        # TODO(real hw): ppk2.set_source_voltage(mv); ppk2.toggle_DUT_power("ON");
-        #                ppk2.start_measuring()
+        self._hw_on(mv)
         self.on = True
         self.mv = mv
 
     def set_off(self):
-        # TODO(real hw): ppk2.toggle_DUT_power("OFF"); ppk2.stop_measuring()
+        self._hw_off()
         self.on = False
 
     def cycle(self, mv):
@@ -83,11 +107,9 @@ class Ppk2Stub:
             # Enforce confounder #1: refuse a measurement that wasn't preceded by a power cycle.
             raise RuntimeError("avg requested without a prior power-cycle (confounder #1: debug "
                                "domain adds ~200 µA until cycled) — call `cycle` first")
-        # TODO(real hw): samples = ppk2.get_samples() collected over `ms`; return their mean in µA.
-        # Stub value: a believable Core-Module STOP floor at 1.8 V with the FTDI unplugged.
-        ua = 12.0
-        # Guard mirrors the Rust ceiling: a real desynced read would exceed this and must be
-        # rejected as noise rather than reported (confounder #3).
+        ua = self._hw_sample_mean_ua(ms)
+        # Guard mirrors the Rust ceiling: a real desynced read exceeds this and must be rejected as
+        # noise rather than reported (confounder #3).
         if ua > SANE_MAX_UA:
             raise RuntimeError(f"averaged {ua} µA > {SANE_MAX_UA} µA — CDC desync mid-flash (#3)")
         # A fresh measurement "consumes" the cycle: the next avg must cycle again.
@@ -95,8 +117,137 @@ class Ppk2Stub:
         return ua
 
 
+class Ppk2Stub(Ppk2Base):
+    """No hardware: returns a believable Core-Module STOP floor at 1.8 V with the FTDI unplugged.
+    Keeps the harness plumbing testable and CI hardware-free."""
+
+    def _hw_on(self, mv):
+        pass
+
+    def _hw_off(self):
+        pass
+
+    def _hw_sample_mean_ua(self, ms):
+        return 12.0
+
+
+class Ppk2Real(Ppk2Base):
+    """Drives a physical PPK2 via `ppk2-api` in source-measure mode (the PPK2 both supplies the DUT
+    and measures its current)."""
+
+    def __init__(self, port):
+        from ppk2_api.ppk2_api import PPK2_API
+
+        self.ppk2 = PPK2_API(port)
+        self.ppk2.get_modifiers()      # load per-unit calibration — REQUIRED before measuring
+        self.ppk2.use_source_meter()   # source-measure: PPK2 powers the DUT and meters it
+        self._measuring = False
+        super().__init__()
+
+    def _hw_on(self, mv):
+        self.ppk2.set_source_voltage(int(mv))
+        self.ppk2.toggle_DUT_power("ON")
+        self.ppk2.start_measuring()
+        self._measuring = True
+
+    def _hw_off(self):
+        try:
+            if self._measuring:
+                self.ppk2.stop_measuring()
+                self._measuring = False
+        finally:
+            self.ppk2.toggle_DUT_power("OFF")
+
+    def _hw_sample_mean_ua(self, ms):
+        # Drop the first buffered chunk (a partial/misaligned read the parser can turn into a
+        # spike), then drain get_data() for `ms` and mean every calibrated sample. PPK2 free-runs
+        # at ~100 kHz, so even a short window is thousands of samples; a short poll sleep keeps the
+        # USB reads efficient without missing the window. A desync spike is caught by the sane
+        # ceiling in `avg_ua` (confounder #3), not here — so the raw mean is returned unclamped.
+        self.ppk2.get_data()
+        acc = []
+        deadline = time.monotonic() + ms / 1000.0
+        while time.monotonic() < deadline:
+            data = self.ppk2.get_data()
+            if data:
+                samples, _ = self.ppk2.get_samples(data)
+                acc.extend(samples)
+            time.sleep(0.005)
+        if not acc:
+            raise RuntimeError("no PPK2 samples collected over the window (CDC stall?)")
+        return sum(acc) / len(acc)
+
+
+def _ppk2_candidates():
+    """Ordered candidate serial devices for the PPK2. A PPK2 exposes **two** CDC endpoints (both
+    carry its Nordic VID) but only one speaks the measurement protocol, so this returns every match
+    and the caller tries each until one initialises. Order: an explicit `TOWER_PPK2_PORT` first,
+    then a pyserial scan filtered to the Nordic VID/PID (precise — never returns a J-Link), then
+    ppk2-api's own (unfiltered) enumerator as a last resort. De-duplicated, order preserved."""
+    out = []
+    env = os.environ.get("TOWER_PPK2_PORT")
+    if env:
+        out.append(env)
+    try:
+        import serial.tools.list_ports as list_ports
+        for p in list_ports.comports():
+            if (p.vid, p.pid) == (PPK2_VID, PPK2_PID):
+                out.append(p.device)
+    except Exception:
+        pass
+    try:
+        from ppk2_api.ppk2_api import PPK2_API
+        for f in PPK2_API.list_devices() or []:
+            out.append(f[0] if isinstance(f, (list, tuple)) else f)
+    except Exception:
+        pass
+    seen = set()
+    return [p for p in out if not (p in seen or seen.add(p))]
+
+
+def _ensure_deps():
+    """If `ppk2_api` isn't importable in this interpreter but a sibling `./.venv` has it, re-exec
+    into that venv's python. This lets the Rust harness keep spawning plain `python3 ppk2d.py`
+    while the real-hardware deps live in an uncommitted, gitignored venv. No-op (falls through to
+    the stub) when neither is present.
+
+    A `_PPK2D_REEXEC` sentinel — not a path comparison — guards against an exec loop: a venv's
+    `bin/python3` symlinks to the base interpreter, so `realpath(sys.executable)` equals the venv
+    python's realpath and can't distinguish "already in the venv"."""
+    try:
+        import ppk2_api  # noqa: F401
+        return
+    except ImportError:
+        pass
+    if os.environ.get("_PPK2D_REEXEC"):
+        return  # already re-exec'd once — the venv still lacks the dep; make_device() → stub
+    here = os.path.dirname(os.path.abspath(__file__))
+    venv_py = os.path.join(here, ".venv", "bin", "python3")
+    if os.path.exists(venv_py):
+        os.environ["_PPK2D_REEXEC"] = "1"
+        os.execv(venv_py, [venv_py, os.path.abspath(__file__), *sys.argv[1:]])
+
+
+def make_device():
+    """Pick the backend: a real PPK2 if one is reachable and `ppk2-api` loads, else the stub. Tries
+    each candidate CDC endpoint (a PPK2 presents two) until one initialises. The choice is logged to
+    stderr so a power run makes clear whether it measured real silicon."""
+    candidates = _ppk2_candidates()
+    for port in candidates:
+        try:
+            dev = Ppk2Real(port)
+            print(f"ppk2d: real PPK2 on {port}", file=sys.stderr, flush=True)
+            return dev
+        except Exception as e:
+            print(f"ppk2d: {port} not a live PPK2 ({e})", file=sys.stderr, flush=True)
+    print(f"ppk2d: no PPK2 initialised ({len(candidates)} candidate(s)); using stub",
+          file=sys.stderr, flush=True)
+    return Ppk2Stub()
+
+
 def main():
-    dev = Ppk2Stub()
+    _ensure_deps()
+    dev = make_device()
     for line in sys.stdin:
         line = line.strip()
         if not line:
