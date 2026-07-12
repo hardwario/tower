@@ -81,10 +81,13 @@ The firmware images are built from a `tower-firmware` checkout — default `../f
 
 > **PPK2 sidecar status:** `ppk2d.py` speaks line-JSON to the harness and encodes the
 > measurement *policy* (power-cycle before every average, 1.8 V ceiling, reject >50 mA
-> desync garbage). As committed it is a **stub** — it does not open a real PPK2. To measure
-> real hardware, install Nordic's `ppk2-api` (`pip install ppk2-api`) and wire it in at the
-> marked spot in `ppk2d.py`. Everything else about the bench (guards, skips, roster) behaves
-> identically either way.
+> desync garbage). It drives a **real PPK2** via Nordic's `ppk2-api` (source-measure,
+> per-unit calibration), and falls back to a modelled stub when no PPK2 / `ppk2-api` is
+> present — so CI stays hardware-free while a cabled bench measures real silicon. The
+> confounder policy is enforced identically on both paths. To enable real measurement,
+> create the sibling venv the sidecar auto-execs into:
+> `python3 -m venv .venv && .venv/bin/pip install ppk2-api pyserial` (in `hil/`; it's
+> gitignored). Everything else about the bench (guards, skips, roster) behaves identically.
 
 ## Roster (`hil.toml`)
 
