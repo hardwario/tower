@@ -55,7 +55,7 @@ fn describe_full(console: &mut Console, req_id: u16) -> (DeviceRole, u32, u8, u8
         .expect("Describe reply");
     assert_eq!(result, mgmt::MGMT_OK);
     let info = postcard::from_bytes::<DeviceInfo>(&data).expect("DeviceInfo record");
-    (info.role, info.net_id, info.band, info.channel)
+    (info.role, info.addr, info.band, info.channel)
 }
 
 /// The whole product story, one flow: provision over the cable, bridge a simulated
@@ -80,9 +80,9 @@ fn gateway_bridges_push_button_end_to_end() {
     std::thread::sleep(Duration::from_millis(300)); // post-Hello boot-burst guard
 
     // --- role probes (the same check `tower gateway` / `nodes add --port` gate on) ---
-    let (gw_role, gw_id, band, channel) = describe_full(&mut gw, 1);
+    let (gw_role, gw_addr, band, channel) = describe_full(&mut gw, 1);
     assert_eq!(gw_role, DeviceRole::Gateway);
-    let (node_role, node_id, _, _) = describe_full(&mut node, 1);
+    let (node_role, node_addr, _, _) = describe_full(&mut node, 1);
     assert_eq!(node_role, DeviceRole::Node);
 
     // --- cable pairing: host-minted key, gateway-first registration, then Provision ---
@@ -90,7 +90,7 @@ fn gateway_bridges_push_button_end_to_end() {
     let (result, _) = gw
         .mgmt_roundtrip(
             2,
-            &MgmtOp::NodeAdd { id: node_id, key, name: "bench", flags: mgmt::NODE_FLAG_SLEEPING },
+            &MgmtOp::NodeAdd { addr: node_addr, key, name: "bench", flags: mgmt::NODE_FLAG_SLEEPING },
             Duration::from_secs(4),
         )
         .expect("NodeAdd reply");
@@ -99,7 +99,7 @@ fn gateway_bridges_push_button_end_to_end() {
     let (result, data) = node
         .mgmt_roundtrip(
             2,
-            &MgmtOp::Provision(Provision { my_id: None, gw_id, key, band, channel }),
+            &MgmtOp::Provision(Provision { addr: None, gw_addr, key, band, channel }),
             Duration::from_secs(4),
         )
         .expect("Provision reply");
@@ -119,7 +119,7 @@ fn gateway_bridges_push_button_end_to_end() {
     let uplink = gw
         .wait_for(Duration::from_secs(10), |f| {
             matches!(f, Frame::Uplink { src, data, .. }
-                if *src == node_id
+                if *src == node_addr
                 && matches!(radio::decode_node_msg(data), Ok(NodeMsg::Button { kind: radio::ButtonKind::Click, count: 1 })))
         })
         .expect("gateway console read");
@@ -133,7 +133,7 @@ fn gateway_bridges_push_button_end_to_end() {
     )
     .expect("encode NodeCmd");
     let (result, data) = gw
-        .mgmt_roundtrip(3, &MgmtOp::QueuePush { node: node_id, ttl_s: 120, data: &env[..n] }, Duration::from_secs(4))
+        .mgmt_roundtrip(3, &MgmtOp::QueuePush { node_addr, ttl_s: 120, data: &env[..n] }, Duration::from_secs(4))
         .expect("QueuePush reply");
     assert_eq!(result, mgmt::MGMT_OK);
     let item = postcard::from_bytes::<QueueId>(&data).expect("QueueId").item;
@@ -153,7 +153,7 @@ fn gateway_bridges_push_button_end_to_end() {
     let reply = gw
         .wait_for(Duration::from_secs(10), |f| {
             matches!(f, Frame::Uplink { src, data, .. }
-                if *src == node_id
+                if *src == node_addr
                 && matches!(radio::decode_node_msg(data), Ok(NodeMsg::Shell(c)) if c.cmd_id == 77 && c.last))
         })
         .expect("gateway console read");
