@@ -178,15 +178,29 @@ class Ppk2Real(Ppk2Base):
                 if ser is not None and getattr(ser, "in_waiting", 0):
                     ser.read(ser.in_waiting)
         if not loaded:
+            # Release the port before giving up: a PPK2 presents two CDC endpoints on ONE physical
+            # device, and leaving the dead endpoint's handle open disturbs the good endpoint so its
+            # calibration read then also fails — auto-detect would flake to the stub (a fake ~12 µA
+            # that masquerades as a real STOP floor). Close so `make_device`'s next candidate opens
+            # cleanly, and settle briefly for the shared device to quiesce.
+            if ser is not None:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+            time.sleep(0.3)
             raise RuntimeError(f"{port}: PPK2 calibration read failed (not the control CDC endpoint?)")
         self.ppk2.use_source_meter()   # source-measure: PPK2 powers the DUT and meters it
         super().__init__()
 
     def _hw_on(self, mv):
+        # Power the DUT but do NOT start the measurement stream here. The caller settles (lets the
+        # firmware reach STOP) for seconds after `on`/`cycle`, and if the PPK2 were streaming during
+        # that gap the un-drained OS serial buffer would overflow — permanently desyncing the 4-byte
+        # sample parser into garbage. The stream is started fresh, and read continuously, only inside
+        # `_hw_sample_mean_ua`. Power vs. measurement-streaming are independent on the PPK2.
         self.ppk2.set_source_voltage(int(mv))
         self.ppk2.toggle_DUT_power("ON")
-        self.ppk2.start_measuring()
-        self._measuring = True
 
     def _hw_off(self):
         try:
@@ -197,24 +211,43 @@ class Ppk2Real(Ppk2Base):
             self.ppk2.toggle_DUT_power("OFF")
 
     def _hw_sample_mean_ua(self, ms):
-        # Drop the first buffered chunk (a partial/misaligned read the parser can turn into a
-        # spike), then drain get_data() for `ms`. PPK2 free-runs at ~100 kHz, so even a short window
-        # is thousands of samples; a short poll sleep keeps the USB reads efficient.
-        #
-        # Return the **median** of the physically-plausible samples, not the raw mean:
-        #  - get_samples occasionally emits non-physical spikes (misaligned parse / CDC desync —
-        #    seen up to ~10 A), which a raw mean would let dominate. Filter them out (0..sane max).
-        #  - the STOP *floor* is the quiescent current; a plain mean is skewed upward by the brief
-        #    periodic wake spikes (the ~500 ms console VBUS poll), so the median reports the floor.
-        self.ppk2.get_data()
-        raw = []
-        deadline = time.monotonic() + ms / 1000.0
-        while time.monotonic() < deadline:
-            data = self.ppk2.get_data()
-            if data:
-                samples, _ = self.ppk2.get_samples(data)
-                raw.extend(samples)
-            time.sleep(0.005)
+        # Start a FRESH measurement stream and read it CONTINUOUSLY — this is the whole ballgame.
+        # Two hard-won rules, both learned by watching a live ~20 µA board read as garbage:
+        #  (1) NEVER let the stream run un-drained. If start_measuring() is left running across the
+        #      caller's multi-second settle sleep, the OS serial buffer overflows and the 4-byte
+        #      sample parser can never realign → garbage (tens of A + ~50 % zeros). So the stream is
+        #      OFF during settle (see _hw_on) and started here, then drained tightly.
+        #  (2) NEVER discard raw get_data() bytes mid-stream. get_samples keeps an internal
+        #      byte-remainder to reassemble 4-byte samples across calls; dropping even one chunk
+        #      desyncs it. So every get_data() goes through get_samples(); only the VALUES are
+        #      dropped (during the short stabilize), never the bytes.
+        # Pre-start flush is fine (those bytes precede the stream); mid-stream discard is not.
+        # Return the MEDIAN of physically-plausible samples (0..sane max): the STOP *floor* is the
+        # quiescent current, and a mean is skewed upward by the brief periodic wake spikes (the
+        # ~500 ms console VBUS poll), whereas the median reports the floor.
+        ser = getattr(self.ppk2, "ser", None)
+        if ser is not None and getattr(ser, "in_waiting", 0):
+            ser.read(ser.in_waiting)          # clear residue BEFORE the stream starts (raw ok here)
+        self.ppk2.start_measuring()
+        self._measuring = True
+        try:
+            stabilize = time.monotonic() + 0.2   # drop the first partial frame; keep alignment
+            while time.monotonic() < stabilize:
+                data = self.ppk2.get_data()
+                if data:
+                    self.ppk2.get_samples(data)
+                time.sleep(0.002)
+            raw = []
+            deadline = time.monotonic() + ms / 1000.0
+            while time.monotonic() < deadline:
+                data = self.ppk2.get_data()
+                if data:
+                    samples, _ = self.ppk2.get_samples(data)
+                    raw.extend(samples)
+                time.sleep(0.002)
+        finally:
+            self.ppk2.stop_measuring()
+            self._measuring = False
         clean = [x for x in raw if 0.0 <= x <= SANE_MAX_UA]
         if not clean:
             raise RuntimeError(f"no plausible PPK2 samples over the window ({len(raw)} raw, all rejected)")

@@ -115,9 +115,10 @@ fn power_stop_floor_under_50ua() {
     // and measures at the knee — confounder #2), let the app settle into STOP, then average. The
     // sidecar / harness reject a >50 mA read as a CDC desync (confounder #3).
     ppk2.cycle(bench.ppk2.supply_mv).expect("PPK2 power-cycle");
-    // > 3 s: lowpower runs the app! boot indicator (500 ms + 2 s LED + 500 ms) before its run loop
-    // drops into STOP, so a shorter settle would average the active boot current, not the floor.
-    std::thread::sleep(Duration::from_secs(4));
+    // 5 s settle: lowpower runs the app! boot indicator (500 ms + 2 s LED + 500 ms ≈ 3 s) before its
+    // run loop drops into STOP, so a shorter settle would average the active boot current, not the
+    // floor. 5 s leaves a comfortable margin past the ~3 s boot for the rail + STOP entry to settle.
+    std::thread::sleep(Duration::from_secs(5));
     let ua = ppk2.avg_ua(1000).expect("PPK2 average");
 
     eprintln!("Core STOP floor: {ua:.1} µA @ {} mV", bench.ppk2.supply_mv);
