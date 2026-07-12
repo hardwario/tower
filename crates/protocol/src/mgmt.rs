@@ -32,7 +32,7 @@
 //!
 //! **Delayed responses.** `PairingOpen` / `JoinOpen` reply when their radio window
 //! *resolves* — a join commits, the window expires ([`MGMT_TIMEOUT`]), or it is
-//! cancelled — which may be up to `window_s` seconds after the request. The `req_id`
+//! cancelled — which may be up to `window` seconds after the request. The `req_id`
 //! correlation makes this safe; a second open while one runs answers [`MGMT_BUSY`].
 //!
 //! **Who mints AES keys: the host.** Device PRNGs here are deterministic and
@@ -88,9 +88,9 @@ pub const NODE_FLAG_SLEEPING: u8 = 1 << 0;
 /// first `NodeInfo` uplink (see the `radio` module) via [`MgmtOp::NodeUpdate`].
 pub const NODE_FLAG_UNNAMED: u8 = 1 << 1;
 
-/// `NodeEntry.last_seen_s` when the node has not been heard since gateway boot.
+/// `NodeEntry.last_seen` when the node has not been heard since gateway boot.
 pub const LAST_SEEN_NEVER: u32 = u32::MAX;
-/// `NodeEntry.rssi_dbm` when no uplink RSSI has been captured yet.
+/// `NodeEntry.rssi` when no uplink RSSI has been captured yet.
 pub const RSSI_NONE: i8 = i8::MAX;
 
 /// `Provision.band` / `DeviceInfo.band` values.
@@ -121,14 +121,14 @@ pub enum MgmtOp<'a> {
     /// Return the node's AES key as a [`NodeKey`] record — the only path that ever
     /// discloses a stored key. Gateway.
     NodeRevealKey { addr: u32 },
-    /// Open the OTA pairing window for `window_s` seconds with the host-minted key
+    /// Open the OTA pairing window for `window` seconds with the host-minted key
     /// to hand out. Replies (delayed) [`Paired`] or [`MGMT_TIMEOUT`]. Gateway.
-    PairingOpen { window_s: u16, key: [u8; 16] },
+    PairingOpen { window: u16, key: [u8; 16] },
     /// Close an open pairing window; its pending response resolves [`MGMT_TIMEOUT`].
     PairingCancel,
     /// Enqueue an opaque downlink (a `radio::NodeCmd` envelope built by the host)
     /// for delivery on the node's next uplink. Replies [`QueueId`]. Gateway.
-    QueuePush { node_addr: u32, ttl_s: u16, data: &'a [u8] },
+    QueuePush { node_addr: u32, ttl: u16, data: &'a [u8] },
     /// Stream pending downlinks as [`QueueEntry`] records; `node_addr = 0` = all. Gateway.
     QueueList { node_addr: u32 },
     /// Drop one queued item (`Some(item)`) or a node's whole queue (`None`). Gateway.
@@ -139,9 +139,9 @@ pub enum MgmtOp<'a> {
     /// Over-the-cable provisioning: persist the network credentials on a node.
     /// Node (served only while on USB — which is exactly the cable-pairing case).
     Provision(Provision),
-    /// Ask a node to run its OTA join for `window_s` seconds. Replies (delayed)
+    /// Ask a node to run its OTA join for `window` seconds. Replies (delayed)
     /// [`Joined`] or [`MGMT_TIMEOUT`]. Node.
-    JoinOpen { window_s: u16 },
+    JoinOpen { window: u16 },
 }
 
 /// Network credentials installed on a node by [`MgmtOp::Provision`].
@@ -194,9 +194,9 @@ pub struct NodeEntry<'a> {
     pub flags: u8,
     /// Seconds since the last uplink; [`LAST_SEEN_NEVER`] = not since gateway boot.
     /// RAM-only on the device (per-uplink EEPROM writes would burn the part).
-    pub last_seen_s: u32,
+    pub last_seen: u32,
     /// Last uplink RSSI; [`RSSI_NONE`] = none captured yet.
-    pub rssi_dbm: i8,
+    pub rssi: i8,
     /// Uplinks since gateway boot.
     pub uplinks: u32,
     /// Downlink items currently queued for this node.
@@ -228,8 +228,8 @@ pub struct QueueId {
 pub struct QueueEntry<'a> {
     pub node_addr: u32,
     pub item: u16,
-    pub age_s: u16,
-    pub ttl_s: u16,
+    pub age: u16,
+    pub ttl: u16,
     pub data: &'a [u8],
 }
 

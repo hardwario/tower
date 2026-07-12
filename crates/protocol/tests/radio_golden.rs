@@ -34,7 +34,7 @@ fn golden_node_info() {
     assert_eq!(
         got,
         [
-            0x01, 0x00, 0x11, 0x72, 0x61, 0x64, 0x69, 0x6f, 0x5f, 0x70, 0x75, 0x73, 0x68, 0x5f,
+            0x02, 0x00, 0x11, 0x72, 0x61, 0x64, 0x69, 0x6f, 0x5f, 0x70, 0x75, 0x73, 0x68, 0x5f,
             0x62, 0x75, 0x74, 0x74, 0x6f, 0x6e, 0x06, 0x76, 0x30, 0x2e, 0x31, 0x2e, 0x30, 0x03,
             0x01, 0x00
         ]
@@ -44,19 +44,19 @@ fn golden_node_info() {
 #[test]
 fn golden_node_button() {
     let got = enc_msg(&NodeMsg::Button { kind: ButtonKind::Click, count: 42 });
-    assert_eq!(got, [0x01, 0x01, 0x02, 0x2a]);
+    assert_eq!(got, [0x02, 0x01, 0x02, 0x2a]);
 }
 
 #[test]
 fn golden_node_temperature() {
     let got = enc_msg(&NodeMsg::Temperature { millic: 21_375 });
-    assert_eq!(got, [0x01, 0x02, 0xfe, 0xcd, 0x02]);
+    assert_eq!(got, [0x02, 0x02, 0xfe, 0xcd, 0x02]);
 }
 
 #[test]
 fn golden_node_accel() {
     let got = enc_msg(&NodeMsg::Accel { kind: AccelKind::Orientation, face: 3 });
-    assert_eq!(got, [0x01, 0x03, 0x01, 0x03]);
+    assert_eq!(got, [0x02, 0x03, 0x01, 0x03]);
 }
 
 #[test]
@@ -68,17 +68,17 @@ fn golden_node_shell() {
         last: true,
         text: "ok",
     }));
-    assert_eq!(got, [0x01, 0x04, 0x09, 0x00, 0x00, 0x01, 0x02, 0x6f, 0x6b]);
+    assert_eq!(got, [0x02, 0x04, 0x09, 0x00, 0x00, 0x01, 0x02, 0x6f, 0x6b]);
 }
 
 #[test]
 fn golden_node_cmd_shell() {
-    let got = enc_cmd(&NodeCmd::Shell { cmd_id: 9, line: "/system reboot" });
+    let got = enc_cmd(&NodeCmd::Shell { epoch: 7, cmd_id: 9, line: "/system reboot" });
     assert_eq!(
         got,
         [
-            0x01, 0x00, 0x09, 0x0e, 0x2f, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x20, 0x72, 0x65,
-            0x62, 0x6f, 0x6f, 0x74
+            0x02, 0x00, 0x07, 0x09, 0x0e, 0x2f, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x20, 0x72,
+            0x65, 0x62, 0x6f, 0x6f, 0x74
         ]
     );
 }
@@ -130,7 +130,7 @@ fn node_msg_variant_order_is_stable() {
         assert_eq!(bytes[0], RADIO_SCHEMA_VERSION);
         assert_eq!(bytes[1], i as u8, "NodeMsg variant order changed — schema break");
     }
-    let cmd = enc_cmd(&NodeCmd::Shell { cmd_id: 0, line: "" });
+    let cmd = enc_cmd(&NodeCmd::Shell { epoch: 0, cmd_id: 0, line: "" });
     assert_eq!(cmd[1], 0, "NodeCmd variant order changed — schema break");
 }
 
@@ -155,7 +155,7 @@ fn max_shell_chunk_fits_the_mtu() {
 #[test]
 fn max_shell_line_fits_the_mtu() {
     let line: String = "y".repeat(RADIO_SHELL_CHUNK);
-    let c = NodeCmd::Shell { cmd_id: u16::MAX, line: &line };
+    let c = NodeCmd::Shell { epoch: u32::MAX, cmd_id: u16::MAX, line: &line };
     let mut buf = [0u8; MAX_RADIO_PAYLOAD];
     encode_node_cmd(&c, &mut buf).expect("max shell line must fit the radio MTU");
 }
@@ -213,7 +213,7 @@ fn node_msgs_roundtrip() {
         let n = encode_node_msg(m, &mut buf).unwrap();
         assert_eq!(&decode_node_msg(&buf[..n]).unwrap(), m);
     }
-    let c = NodeCmd::Shell { cmd_id: 3, line: "/led on" };
+    let c = NodeCmd::Shell { epoch: 42, cmd_id: 3, line: "/led on" };
     let mut buf = [0u8; MAX_RADIO_PAYLOAD];
     let n = encode_node_cmd(&c, &mut buf).unwrap();
     assert_eq!(decode_node_cmd(&buf[..n]).unwrap(), c);

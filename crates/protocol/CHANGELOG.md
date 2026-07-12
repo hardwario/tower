@@ -5,6 +5,34 @@ All notable changes to the wire format and the crate API. The wire format is pos
 bump and a coordinated re-pin of all three consumers (`tower-firmware`, `tower-cli`,
 `tower-hil`).
 
+## v1.5.0 — 2026-07-12
+
+**API rename — wire UNCHANGED** (postcard positional; `PROTOCOL_VERSION` stays 3,
+golden vectors byte-identical): unit suffixes dropped from field names — the unit
+stays documented on the field, it just no longer rides in the name.
+
+- `msg::Uplink.rssi_dbm` → `rssi`; `msg::RadioStat::Channel.rssi_dbm` → `rssi`,
+  `msg::RadioStat::Tx.ack_rssi_dbm` → `ack_rssi`.
+- `mgmt::NodeEntry`: `last_seen_s` → `last_seen`, `rssi_dbm` → `rssi`.
+- `mgmt::MgmtOp`: `PairingOpen`/`JoinOpen` `window_s` → `window`;
+  `QueuePush.ttl_s` → `ttl`.
+- `mgmt::QueueEntry`: `age_s` → `age`, `ttl_s` → `ttl`.
+
+`LAST_SEEN_NEVER` and the constants are unchanged.
+
+**Radio schema change — `RADIO_SCHEMA_VERSION` 1 → 2** (the independently-versioned
+`src/radio.rs` surface, *not* `PROTOCOL_VERSION`; `radio_golden.rs` regenerated).
+`radio::NodeCmd::Shell` gains an `epoch: u32` field. The node de-duplicates the
+gateway's at-least-once downlink re-deliveries on `(epoch, cmd_id)`; the host stamps a
+random `epoch` per process, so a freshly-restarted host reusing a low `cmd_id` can no
+longer be mistaken for a re-delivery a node already ran (the "empty checkmark" reply).
+The reply (`NodeMsg::Shell`) is unchanged — correlation stays within one host process.
+A **push-button node reflash + `tower-cli` rebuild** are required to interoperate (the
+gateway firmware is a transparent bridge for `NodeCmd` and needs no change).
+
+Both surfaces move together → one minor bump + the usual coordinated re-pin of all
+three consumers (`tower-firmware`, `tower-cli`, `tower-hil`).
+
 ## v1.4.0 — 2026-07-12
 
 **API rename — wire UNCHANGED** (`PROTOCOL_VERSION` stays 3; postcard is positional, so

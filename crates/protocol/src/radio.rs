@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::Error;
 
 /// Leading byte of every radio application envelope.
-pub const RADIO_SCHEMA_VERSION: u8 = 1;
+pub const RADIO_SCHEMA_VERSION: u8 = 2;
 
 /// Max envelope size = the radio MTU (net-layer `MAX_PAYLOAD`). One `NodeMsg` /
 /// `NodeCmd` always fits a single radio frame — there is no radio-level chunking;
@@ -101,9 +101,13 @@ pub enum NodeMsg<'a> {
 /// on the node's next uplink. Variant order is the wire — never reorder.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub enum NodeCmd<'a> {
-    /// Run `line` in the node's shell dispatcher; respond with
-    /// [`NodeMsg::Shell`] chunks correlated by `cmd_id`.
-    Shell { cmd_id: u16, line: &'a str },
+    /// Run `line` in the node's shell dispatcher; respond with [`NodeMsg::Shell`]
+    /// chunks correlated by `cmd_id`. `epoch` is a per-host-process random tag: the
+    /// node de-duplicates the gateway's at-least-once re-deliveries on `(epoch,
+    /// cmd_id)`, so a fresh host that reuses a low `cmd_id` can never be mistaken for
+    /// a re-delivery a node already ran (the "empty checkmark" bug). The reply chunks
+    /// carry only `cmd_id` — correlation is within one host process.
+    Shell { epoch: u32, cmd_id: u16, line: &'a str },
 }
 
 fn encode_envelope<T: Serialize>(payload: &T, out: &mut [u8]) -> Result<usize, Error> {

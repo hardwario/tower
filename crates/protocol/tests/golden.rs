@@ -78,7 +78,7 @@ fn golden_uplink() {
     let got = frame(
         MsgType::Uplink,
         4,
-        &Uplink { src: 0x1122_3344, counter: 7, rssi_dbm: -67, lqi: 40, data: &[0xAA, 0xBB] },
+        &Uplink { src: 0x1122_3344, counter: 7, rssi: -67, lqi: 40, data: &[0xAA, 0xBB] },
     );
     assert_eq!(
         got,
@@ -142,7 +142,7 @@ fn golden_radio_stat_tx() {
             dest: 0x0000_AB12,
             item: 2,
             outcome: tower_protocol::mgmt::TX_DELIVERED,
-            ack_rssi_dbm: Some(-70),
+            ack_rssi: Some(-70),
         },
     );
     assert_eq!(
@@ -202,7 +202,7 @@ fn golden_mgmt_device_info() {
 #[test]
 fn golden_mgmt_node_entry() {
     use tower_protocol::mgmt::*;
-    let e = NodeEntry { addr: 0x0000_AB12, name: "kitchen", flags: 0x03, last_seen_s: 42, rssi_dbm: -70, uplinks: 7, queued: 2 };
+    let e = NodeEntry { addr: 0x0000_AB12, name: "kitchen", flags: 0x03, last_seen: 42, rssi: -70, uplinks: 7, queued: 2 };
     let bytes = rec(&e);
     assert_eq!(
         bytes,
@@ -210,7 +210,7 @@ fn golden_mgmt_node_entry() {
     );
     let back: NodeEntry = postcard::from_bytes(&bytes).unwrap();
     assert_eq!((back.addr, back.name, back.flags), (0x0000_AB12, "kitchen", 0x03));
-    assert_eq!((back.last_seen_s, back.rssi_dbm, back.uplinks, back.queued), (42, -70, 7, 2));
+    assert_eq!((back.last_seen, back.rssi, back.uplinks, back.queued), (42, -70, 7, 2));
 }
 
 #[test]
@@ -252,11 +252,11 @@ fn golden_mgmt_small_records() {
 #[test]
 fn golden_mgmt_queue_entry() {
     use tower_protocol::mgmt::*;
-    let q = QueueEntry { node_addr: 0x0000_AB12, item: 5, age_s: 10, ttl_s: 3600, data: &[0x01, 0x02] };
+    let q = QueueEntry { node_addr: 0x0000_AB12, item: 5, age: 10, ttl: 3600, data: &[0x01, 0x02] };
     let bytes = rec(&q);
     assert_eq!(bytes, [0x92, 0xd6, 0x02, 0x05, 0x0a, 0x90, 0x1c, 0x02, 0x01, 0x02]);
     let back: QueueEntry = postcard::from_bytes(&bytes).unwrap();
-    assert_eq!((back.node_addr, back.item, back.age_s, back.ttl_s), (0x0000_AB12, 5, 10, 3600));
+    assert_eq!((back.node_addr, back.item, back.age, back.ttl), (0x0000_AB12, 5, 10, 3600));
     assert_eq!(back.data, &[0x01, 0x02]);
 }
 
@@ -267,9 +267,9 @@ fn golden_mgmt_queue_entry() {
 fn mgmt_response_record_stream_reassembles() {
     use tower_protocol::mgmt::{LAST_SEEN_NEVER, NodeEntry};
     let entries = [
-        NodeEntry { addr: 1, name: "a", flags: 0, last_seen_s: 0, rssi_dbm: -50, uplinks: 1, queued: 0 },
-        NodeEntry { addr: 2, name: "bb", flags: 1, last_seen_s: LAST_SEEN_NEVER, rssi_dbm: -70, uplinks: 9, queued: 2 },
-        NodeEntry { addr: 3, name: "ccc", flags: 3, last_seen_s: 5, rssi_dbm: -90, uplinks: 0, queued: 1 },
+        NodeEntry { addr: 1, name: "a", flags: 0, last_seen: 0, rssi: -50, uplinks: 1, queued: 0 },
+        NodeEntry { addr: 2, name: "bb", flags: 1, last_seen: LAST_SEEN_NEVER, rssi: -70, uplinks: 9, queued: 2 },
+        NodeEntry { addr: 3, name: "ccc", flags: 3, last_seen: 5, rssi: -90, uplinks: 0, queued: 1 },
     ];
     let mut stream = Vec::new();
     for e in &entries {
@@ -401,14 +401,14 @@ fn mgmt_op_variant_order_is_stable() {
         MgmtOp::NodeRemove { addr: 1 },
         MgmtOp::NodeUpdate { addr: 1, name: None, flags: None },
         MgmtOp::NodeRevealKey { addr: 1 },
-        MgmtOp::PairingOpen { window_s: 60, key },
+        MgmtOp::PairingOpen { window: 60, key },
         MgmtOp::PairingCancel,
-        MgmtOp::QueuePush { node_addr: 1, ttl_s: 60, data: &[0] },
+        MgmtOp::QueuePush { node_addr: 1, ttl: 60, data: &[0] },
         MgmtOp::QueueList { node_addr: 0 },
         MgmtOp::QueueDrop { node_addr: 1, item: None },
         MgmtOp::StatsConfig { channel_period_ms: 1000 },
         MgmtOp::Provision(Provision { addr: None, gw_addr: 1, key, band: BAND_EU868, channel: 0 }),
-        MgmtOp::JoinOpen { window_s: 60 },
+        MgmtOp::JoinOpen { window: 60 },
     ];
     for (i, op) in ops.iter().enumerate() {
         let mut buf = [0u8; 64];
@@ -435,8 +435,8 @@ fn device_role_variant_order_is_stable() {
 #[test]
 fn radio_stat_variant_order_is_stable() {
     let stats = [
-        RadioStat::Channel { channel: 0, rssi_dbm: -100 },
-        RadioStat::Tx { dest: 1, item: 0, outcome: 0, ack_rssi_dbm: None },
+        RadioStat::Channel { channel: 0, rssi: -100 },
+        RadioStat::Tx { dest: 1, item: 0, outcome: 0, ack_rssi: None },
     ];
     for (i, stat) in stats.iter().enumerate() {
         let mut buf = [0u8; 16];
@@ -454,7 +454,7 @@ fn radio_stat_variant_order_is_stable() {
 fn max_queue_push_fits_one_frame() {
     use tower_protocol::mgmt::MgmtOp;
     let data = [0xEEu8; 74];
-    let req = MgmtRequest { req_id: u16::MAX, op: MgmtOp::QueuePush { node_addr: u32::MAX, ttl_s: u16::MAX, data: &data } };
+    let req = MgmtRequest { req_id: u16::MAX, op: MgmtOp::QueuePush { node_addr: u32::MAX, ttl: u16::MAX, data: &data } };
     let mut out = [0u8; MAX_WIRE];
     encode_frame(MsgType::MgmtRequest, 0, &req, &mut out).expect("max QueuePush must fit");
 }
@@ -463,7 +463,7 @@ fn max_queue_push_fits_one_frame() {
 #[test]
 fn max_uplink_fits_one_frame() {
     let data = [0xEEu8; 74];
-    let up = Uplink { src: u32::MAX, counter: u32::MAX, rssi_dbm: i16::MIN, lqi: u8::MAX, data: &data };
+    let up = Uplink { src: u32::MAX, counter: u32::MAX, rssi: i16::MIN, lqi: u8::MAX, data: &data };
     let mut out = [0u8; MAX_WIRE];
     encode_frame(MsgType::Uplink, u16::MAX, &up, &mut out).expect("max Uplink must fit");
 }
@@ -483,8 +483,8 @@ fn mgmt_chunking_budget_holds() {
         addr: u32::MAX,
         name: "sixteen-byte-nam", // MAX_NODE_NAME
         flags: 0xFF,
-        last_seen_s: LAST_SEEN_NEVER,
-        rssi_dbm: i8::MIN,
+        last_seen: LAST_SEEN_NEVER,
+        rssi: i8::MIN,
         uplinks: u32::MAX,
         queued: u8::MAX,
     };

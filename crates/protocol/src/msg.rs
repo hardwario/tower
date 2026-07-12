@@ -107,13 +107,13 @@ pub struct Dropped {
 /// the gateway. The gateway does NOT interpret `data` — it is a radio-application
 /// envelope (see the [`radio`](crate::radio) module) the **host** decodes; new node
 /// app types therefore never require a gateway firmware change. `counter` is the
-/// net-layer frame counter (dedup/diagnostics); `rssi_dbm`/`lqi` are the reception
+/// net-layer frame counter (dedup/diagnostics); `rssi`/`lqi` are the reception
 /// metadata for the host's link table and graph.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Uplink<'a> {
     pub src: u32,
     pub counter: u32,
-    pub rssi_dbm: i16,
+    pub rssi: i16,
     pub lqi: u8,
     /// ≤ 74 bytes (the radio MTU, [`radio::MAX_RADIO_PAYLOAD`](crate::radio::MAX_RADIO_PAYLOAD)).
     pub data: &'a [u8],
@@ -140,11 +140,11 @@ pub struct MgmtResponse<'a> {
 pub enum RadioStat {
     /// Ambient RSSI of the current receive channel, sampled at the cadence set by
     /// `MgmtOp::StatsConfig` (or the gateway's persisted `stats-period` setting).
-    Channel { channel: u8, rssi_dbm: i16 },
+    Channel { channel: u8, rssi: i16 },
     /// One gateway TX attempt. `item` is the downlink-queue id it carried (0 = not
-    /// a queue item); `outcome` is a `mgmt::TX_*` code; `ack_rssi_dbm` is the
+    /// a queue item); `outcome` is a `mgmt::TX_*` code; `ack_rssi` is the
     /// receiver-side RSSI the node reported inside its ACK (`None` = no ACK).
-    Tx { dest: u32, item: u16, outcome: u8, ack_rssi_dbm: Option<i8> },
+    Tx { dest: u32, item: u16, outcome: u8, ack_rssi: Option<i8> },
 }
 
 /// Host → target: a shell command line. `cmd_id` correlates the response.
