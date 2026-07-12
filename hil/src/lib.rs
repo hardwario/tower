@@ -184,7 +184,7 @@ pub enum Frame {
     Dropped { count: u32 },
     /// A forwarded radio uplink from the gateway firmware (wire v3): the decrypted,
     /// authenticated payload verbatim, plus reception metadata.
-    Uplink { src: u32, counter: u32, rssi_dbm: i16, lqi: u8, data: Vec<u8> },
+    Uplink { src: u32, counter: u32, rssi: i16, lqi: u8, data: Vec<u8> },
     /// One chunk of a management reply (wire v3) — reassemble by `req_id` (see
     /// [`Console::mgmt_roundtrip`]).
     Mgmt { req_id: u16, result: u8, chunk: u16, last: bool, data: Vec<u8> },
@@ -443,7 +443,7 @@ fn to_frame(msg_type: MsgType, payload: &[u8]) -> Frame {
             Ok(u) => Frame::Uplink {
                 src: u.src,
                 counter: u.counter,
-                rssi_dbm: u.rssi_dbm,
+                rssi: u.rssi,
                 lqi: u.lqi,
                 data: u.data.to_vec(),
             },
@@ -730,11 +730,11 @@ mod tests {
         let (_, frame) = decode_via_wire(
             MsgType::Uplink,
             6,
-            &Uplink { src: 0x1122_3344, counter: 7, rssi_dbm: -80, lqi: 12, data: &[1, 2, 3, 4] },
+            &Uplink { src: 0x1122_3344, counter: 7, rssi: -80, lqi: 12, data: &[1, 2, 3, 4] },
         );
         assert_eq!(
             frame,
-            Frame::Uplink { src: 0x1122_3344, counter: 7, rssi_dbm: -80, lqi: 12, data: vec![1, 2, 3, 4] }
+            Frame::Uplink { src: 0x1122_3344, counter: 7, rssi: -80, lqi: 12, data: vec![1, 2, 3, 4] }
         );
     }
 
@@ -752,10 +752,10 @@ mod tests {
     #[test]
     fn to_frame_maps_radio_stat() {
         // wire-v3 gateway frame — both RadioStat variants map verbatim into Frame::Stat.
-        let (_, ch) = decode_via_wire(MsgType::RadioStat, 8, &RadioStat::Channel { channel: 4, rssi_dbm: -95 });
-        assert_eq!(ch, Frame::Stat(RadioStat::Channel { channel: 4, rssi_dbm: -95 }));
+        let (_, ch) = decode_via_wire(MsgType::RadioStat, 8, &RadioStat::Channel { channel: 4, rssi: -95 });
+        assert_eq!(ch, Frame::Stat(RadioStat::Channel { channel: 4, rssi: -95 }));
 
-        let tx = RadioStat::Tx { dest: 0x00AA_BB00, item: 3, outcome: 1, ack_rssi_dbm: Some(-70) };
+        let tx = RadioStat::Tx { dest: 0x00AA_BB00, item: 3, outcome: 1, ack_rssi: Some(-70) };
         let (_, txf) = decode_via_wire(MsgType::RadioStat, 9, &tx);
         assert_eq!(txf, Frame::Stat(tx));
     }

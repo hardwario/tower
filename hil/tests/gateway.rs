@@ -128,12 +128,12 @@ fn gateway_bridges_push_button_end_to_end() {
     // --- downlink queue + remote shell: enqueue, deliver on the next wake, reply ---
     let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
     let n = radio::encode_node_cmd(
-        &NodeCmd::Shell { cmd_id: 77, line: "/system settings get temp-period" },
+        &NodeCmd::Shell { epoch: 0x4849_4C00, cmd_id: 77, line: "/system settings get therm-period" },
         &mut env,
     )
     .expect("encode NodeCmd");
     let (result, data) = gw
-        .mgmt_roundtrip(3, &MgmtOp::QueuePush { node_addr, ttl_s: 120, data: &env[..n] }, Duration::from_secs(4))
+        .mgmt_roundtrip(3, &MgmtOp::QueuePush { node_addr, ttl: 120, data: &env[..n] }, Duration::from_secs(4))
         .expect("QueuePush reply");
     assert_eq!(result, mgmt::MGMT_OK);
     let item = postcard::from_bytes::<QueueId>(&data).expect("QueueId").item;
