@@ -50,8 +50,14 @@ fn build_and_flash_app(port: &str, app: &str) -> Result<(), String> {
 }
 
 fn describe_full(console: &mut Console, req_id: u16) -> (DeviceRole, u32, u8, u8) {
+    // 10 s, not 4: this is the FIRST mgmt op after a reset, and a gateway with a full registry
+    // spends several seconds at boot arming one radio lane per node before its main loop drains
+    // mgmt — so a near-full store legitimately delays the reply past 4 s (the `tower` CLI uses the
+    // same generous window). A too-tight timeout here was a real cross-run flake when a prior test
+    // left phantom nodes in the registry. Later mgmt ops (below) run once the gateway is up, so
+    // they keep the tighter 4 s.
     let (result, data) = console
-        .mgmt_roundtrip(req_id, &MgmtOp::Describe, Duration::from_secs(4))
+        .mgmt_roundtrip(req_id, &MgmtOp::Describe, Duration::from_secs(10))
         .expect("Describe reply");
     assert_eq!(result, mgmt::MGMT_OK);
     let info = postcard::from_bytes::<DeviceInfo>(&data).expect("DeviceInfo record");
