@@ -139,9 +139,47 @@ class Ppk2Real(Ppk2Base):
         from ppk2_api.ppk2_api import PPK2_API
 
         self.ppk2 = PPK2_API(port)
-        self.ppk2.get_modifiers()      # load per-unit calibration — REQUIRED before measuring
-        self.ppk2.use_source_meter()   # source-measure: PPK2 powers the DUT and meters it
         self._measuring = False
+        # A PPK2 exposes TWO CDC endpoints and only one speaks the control protocol — so a
+        # successful open is NOT enough. `get_modifiers` reads the per-unit calibration; if it
+        # comes back falsy this is the wrong endpoint (or a prior session left a measurement
+        # stream that corrupts the read), so raise and let `make_device` try the next candidate.
+        # Without this check the sidecar silently ran on the dead endpoint and every reading was
+        # uncalibrated garbage (~45 A → rejected as CDC desync). Clear any stale stream first, then
+        # retry: the metadata reply lands a moment after the request.
+        try:
+            self.ppk2.stop_measuring()
+        except Exception:
+            pass
+        # Drain any leftover measurement stream: a prior sidecar that died mid-measure (e.g. a
+        # harness panic) leaves the device streaming, and those BINARY sample bytes make the
+        # metadata read's utf-8 decode throw (`invalid start byte`). Read+discard until quiet.
+        ser = getattr(self.ppk2, "ser", None)
+        if ser is not None:
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                pending = getattr(ser, "in_waiting", 0)
+                if pending:
+                    ser.read(pending)
+                    time.sleep(0.05)
+                else:
+                    time.sleep(0.05)
+                    if not getattr(ser, "in_waiting", 0):
+                        break
+        loaded = False
+        for _ in range(6):
+            time.sleep(0.15)
+            try:
+                if self.ppk2.get_modifiers():
+                    loaded = True
+                    break
+            except Exception:
+                # residual binary in the read — flush what's buffered and retry
+                if ser is not None and getattr(ser, "in_waiting", 0):
+                    ser.read(ser.in_waiting)
+        if not loaded:
+            raise RuntimeError(f"{port}: PPK2 calibration read failed (not the control CDC endpoint?)")
+        self.ppk2.use_source_meter()   # source-measure: PPK2 powers the DUT and meters it
         super().__init__()
 
     def _hw_on(self, mv):
@@ -160,22 +198,28 @@ class Ppk2Real(Ppk2Base):
 
     def _hw_sample_mean_ua(self, ms):
         # Drop the first buffered chunk (a partial/misaligned read the parser can turn into a
-        # spike), then drain get_data() for `ms` and mean every calibrated sample. PPK2 free-runs
-        # at ~100 kHz, so even a short window is thousands of samples; a short poll sleep keeps the
-        # USB reads efficient without missing the window. A desync spike is caught by the sane
-        # ceiling in `avg_ua` (confounder #3), not here — so the raw mean is returned unclamped.
+        # spike), then drain get_data() for `ms`. PPK2 free-runs at ~100 kHz, so even a short window
+        # is thousands of samples; a short poll sleep keeps the USB reads efficient.
+        #
+        # Return the **median** of the physically-plausible samples, not the raw mean:
+        #  - get_samples occasionally emits non-physical spikes (misaligned parse / CDC desync —
+        #    seen up to ~10 A), which a raw mean would let dominate. Filter them out (0..sane max).
+        #  - the STOP *floor* is the quiescent current; a plain mean is skewed upward by the brief
+        #    periodic wake spikes (the ~500 ms console VBUS poll), so the median reports the floor.
         self.ppk2.get_data()
-        acc = []
+        raw = []
         deadline = time.monotonic() + ms / 1000.0
         while time.monotonic() < deadline:
             data = self.ppk2.get_data()
             if data:
                 samples, _ = self.ppk2.get_samples(data)
-                acc.extend(samples)
+                raw.extend(samples)
             time.sleep(0.005)
-        if not acc:
-            raise RuntimeError("no PPK2 samples collected over the window (CDC stall?)")
-        return sum(acc) / len(acc)
+        clean = [x for x in raw if 0.0 <= x <= SANE_MAX_UA]
+        if not clean:
+            raise RuntimeError(f"no plausible PPK2 samples over the window ({len(raw)} raw, all rejected)")
+        clean.sort()
+        return clean[len(clean) // 2]  # median — robust to spikes + periodic wakes
 
 
 def _ppk2_candidates():

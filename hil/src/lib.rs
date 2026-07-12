@@ -146,6 +146,17 @@ pub fn bench_or_fail() -> Bench {
     bench
 }
 
+/// Roster load for the **power** group — deliberately does NOT require any FTDI console port to be
+/// present. The power test flashes the Core over SWD (J-Link, found by probe-rs `--chip`) and
+/// measures via the PPK2 (found by USB VID), so it needs no FTDI; `core.serial` is used only by the
+/// USB-present guard, which treats an un-openable port as "unplugged → measure". Requiring the port
+/// (as [`bench_or_fail`] does) is self-contradictory here, because a real STOP measurement needs
+/// the FTDI **unplugged** (VBUS low, else the SDK inhibits STOP). Loads the fixture for that
+/// optional guard without failing when the FTDI is gone.
+pub fn bench_or_fail_power() -> Bench {
+    Bench::load_default().unwrap_or_else(|e| panic!("{e}"))
+}
+
 /// The live serial-port roster, via `tower devices` (the CLI knows which ports are TOWER boards).
 /// Falls back to an empty list if `tower` isn't on PATH — [`Bench::resolve`] then reports "none
 /// present", which is the right fail-fast for a bench with no CLI.
