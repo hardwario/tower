@@ -110,17 +110,17 @@ pub enum MgmtOp<'a> {
     Describe,
     /// Stream the registry as [`NodeEntry`] records. Gateway.
     NodeList,
-    /// Install a node paired over the cable: persist `(id, key, name, flags)` and
+    /// Install a node paired over the cable: persist `(addr, key, name, flags)` and
     /// start accepting its traffic. The host minted `key` and provisioned the node
     /// on its own serial port. Gateway.
-    NodeAdd { id: u32, key: [u8; 16], name: &'a str, flags: u8 },
+    NodeAdd { addr: u32, key: [u8; 16], name: &'a str, flags: u8 },
     /// Forget a node: registry, RAM peer slot, and its queued downlinks. Gateway.
-    NodeRemove { id: u32 },
+    NodeRemove { addr: u32 },
     /// Update mutable metadata; `None` keeps the current value. Gateway.
-    NodeUpdate { id: u32, name: Option<&'a str>, flags: Option<u8> },
+    NodeUpdate { addr: u32, name: Option<&'a str>, flags: Option<u8> },
     /// Return the node's AES key as a [`NodeKey`] record — the only path that ever
     /// discloses a stored key. Gateway.
-    NodeRevealKey { id: u32 },
+    NodeRevealKey { addr: u32 },
     /// Open the OTA pairing window for `window_s` seconds with the host-minted key
     /// to hand out. Replies (delayed) [`Paired`] or [`MGMT_TIMEOUT`]. Gateway.
     PairingOpen { window_s: u16, key: [u8; 16] },
@@ -128,11 +128,11 @@ pub enum MgmtOp<'a> {
     PairingCancel,
     /// Enqueue an opaque downlink (a `radio::NodeCmd` envelope built by the host)
     /// for delivery on the node's next uplink. Replies [`QueueId`]. Gateway.
-    QueuePush { node: u32, ttl_s: u16, data: &'a [u8] },
-    /// Stream pending downlinks as [`QueueEntry`] records; `node = 0` = all. Gateway.
-    QueueList { node: u32 },
+    QueuePush { node_addr: u32, ttl_s: u16, data: &'a [u8] },
+    /// Stream pending downlinks as [`QueueEntry`] records; `node_addr = 0` = all. Gateway.
+    QueueList { node_addr: u32 },
     /// Drop one queued item (`Some(item)`) or a node's whole queue (`None`). Gateway.
-    QueueDrop { node: u32, item: Option<u16> },
+    QueueDrop { node_addr: u32, item: Option<u16> },
     /// Set the ambient channel-RSSI sampling cadence (`0` = off). RAM-only override
     /// of the persisted `stats-period` setting. Gateway.
     StatsConfig { channel_period_ms: u32 },
@@ -147,9 +147,9 @@ pub enum MgmtOp<'a> {
 /// Network credentials installed on a node by [`MgmtOp::Provision`].
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Provision {
-    /// `Some` overrides the node's UID-derived radio id; `None` keeps it.
-    pub my_id: Option<u32>,
-    pub gw_id: u32,
+    /// `Some` overrides the node's UID-derived radio address; `None` keeps it.
+    pub addr: Option<u32>,
+    pub gw_addr: u32,
     pub key: [u8; 16],
     /// [`BAND_EU868`] / [`BAND_US915`].
     pub band: u8,
@@ -170,8 +170,8 @@ pub struct DeviceInfo<'a> {
     pub role: DeviceRole,
     /// The `radio` module schema version this firmware encodes/decodes.
     pub radio_schema_version: u8,
-    /// The device's own radio id (a gateway's coordinator id; a node's node id).
-    pub net_id: u32,
+    /// The device's own radio address (a gateway's coordinator address; a node's own address).
+    pub addr: u32,
     pub band: u8,
     pub channel: u8,
     /// Registry slots (gateway); 0 on a node.
@@ -179,15 +179,15 @@ pub struct DeviceInfo<'a> {
     pub node_count: u8,
     /// Node: has a persisted gateway + key; gateway: always `true`.
     pub provisioned: bool,
-    /// Node: the gateway it is paired to (`0` = none); gateway: equals `net_id`.
-    pub gw_id: u32,
+    /// Node: the gateway it is paired to (`0` = none); gateway: equals `addr`.
+    pub gw_addr: u32,
     pub firmware_name: &'a str,
 }
 
 /// Reply record for [`MgmtOp::NodeList`] — one registered node.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct NodeEntry<'a> {
-    pub id: u32,
+    pub addr: u32,
     /// ≤ [`MAX_NODE_NAME`] bytes; empty while [`NODE_FLAG_UNNAMED`].
     pub name: &'a str,
     /// [`NODE_FLAG_SLEEPING`] | [`NODE_FLAG_UNNAMED`].
@@ -206,14 +206,14 @@ pub struct NodeEntry<'a> {
 /// Reply record for [`MgmtOp::NodeRevealKey`].
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct NodeKey {
-    pub id: u32,
+    pub addr: u32,
     pub key: [u8; 16],
 }
 
 /// Delayed reply record for [`MgmtOp::PairingOpen`] — a node joined the window.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Paired {
-    pub node_id: u32,
+    pub addr: u32,
 }
 
 /// Reply record for [`MgmtOp::QueuePush`] — the handle for `QueueDrop` and the
@@ -226,21 +226,21 @@ pub struct QueueId {
 /// Reply record for [`MgmtOp::QueueList`] — one pending downlink.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct QueueEntry<'a> {
-    pub node: u32,
+    pub node_addr: u32,
     pub item: u16,
     pub age_s: u16,
     pub ttl_s: u16,
     pub data: &'a [u8],
 }
 
-/// Reply record for [`MgmtOp::Provision`] — the node's effective radio id.
+/// Reply record for [`MgmtOp::Provision`] — the node's effective radio address.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ProvisionAck {
-    pub id: u32,
+    pub addr: u32,
 }
 
 /// Delayed reply record for [`MgmtOp::JoinOpen`] — the node joined a gateway.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Joined {
-    pub gw_id: u32,
+    pub gw_addr: u32,
 }

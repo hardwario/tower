@@ -97,7 +97,7 @@ fn golden_mgmt_request_node_add() {
         &MgmtRequest {
             req_id: 3,
             op: tower_protocol::mgmt::MgmtOp::NodeAdd {
-                id: 0x0000_AB12,
+                addr: 0x0000_AB12,
                 key: [
                     0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac,
                     0xad, 0xae, 0xaf,
@@ -172,17 +172,17 @@ fn rec<T: serde::Serialize>(p: &T) -> Vec<u8> {
 #[test]
 fn golden_mgmt_device_info() {
     use tower_protocol::mgmt::*;
-    // Distinct net_id (0x11223344) vs gw_id (0x55667788) so swapping the two u32s is caught.
+    // Distinct addr (0x11223344) vs gw_addr (0x55667788) so swapping the two u32s is caught.
     let d = DeviceInfo {
         role: DeviceRole::Gateway,
         radio_schema_version: 1,
-        net_id: 0x1122_3344,
+        addr: 0x1122_3344,
         band: BAND_US915,
         channel: 2,
         node_capacity: 16,
         node_count: 3,
         provisioned: true,
-        gw_id: 0x5566_7788,
+        gw_addr: 0x5566_7788,
         firmware_name: "gw",
     };
     let bytes = rec(&d);
@@ -194,7 +194,7 @@ fn golden_mgmt_device_info() {
         ]
     );
     let back: DeviceInfo = postcard::from_bytes(&bytes).unwrap();
-    assert_eq!((back.role, back.net_id, back.gw_id), (DeviceRole::Gateway, 0x1122_3344, 0x5566_7788));
+    assert_eq!((back.role, back.addr, back.gw_addr), (DeviceRole::Gateway, 0x1122_3344, 0x5566_7788));
     assert_eq!((back.node_capacity, back.node_count, back.provisioned), (16, 3, true));
     assert_eq!(back.firmware_name, "gw");
 }
@@ -202,14 +202,14 @@ fn golden_mgmt_device_info() {
 #[test]
 fn golden_mgmt_node_entry() {
     use tower_protocol::mgmt::*;
-    let e = NodeEntry { id: 0x0000_AB12, name: "kitchen", flags: 0x03, last_seen_s: 42, rssi_dbm: -70, uplinks: 7, queued: 2 };
+    let e = NodeEntry { addr: 0x0000_AB12, name: "kitchen", flags: 0x03, last_seen_s: 42, rssi_dbm: -70, uplinks: 7, queued: 2 };
     let bytes = rec(&e);
     assert_eq!(
         bytes,
         [0x92, 0xd6, 0x02, 0x07, 0x6b, 0x69, 0x74, 0x63, 0x68, 0x65, 0x6e, 0x03, 0x2a, 0xba, 0x07, 0x02]
     );
     let back: NodeEntry = postcard::from_bytes(&bytes).unwrap();
-    assert_eq!((back.id, back.name, back.flags), (0x0000_AB12, "kitchen", 0x03));
+    assert_eq!((back.addr, back.name, back.flags), (0x0000_AB12, "kitchen", 0x03));
     assert_eq!((back.last_seen_s, back.rssi_dbm, back.uplinks, back.queued), (42, -70, 7, 2));
 }
 
@@ -217,7 +217,7 @@ fn golden_mgmt_node_entry() {
 fn golden_mgmt_node_key() {
     use tower_protocol::mgmt::*;
     let k = NodeKey {
-        id: 0x0000_AB12,
+        addr: 0x0000_AB12,
         key: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf],
     };
     let bytes = rec(&k);
@@ -229,34 +229,34 @@ fn golden_mgmt_node_key() {
         ]
     );
     let back: NodeKey = postcard::from_bytes(&bytes).unwrap();
-    assert_eq!(back.id, 0x0000_AB12);
+    assert_eq!(back.addr, 0x0000_AB12);
     assert_eq!(back.key[15], 0xaf);
 }
 
 #[test]
 fn golden_mgmt_small_records() {
     use tower_protocol::mgmt::*;
-    assert_eq!(rec(&Paired { node_id: 0x0000_AB12 }), [0x92, 0xd6, 0x02]);
+    assert_eq!(rec(&Paired { addr: 0x0000_AB12 }), [0x92, 0xd6, 0x02]);
     assert_eq!(rec(&QueueId { item: 5 }), [0x05]);
-    assert_eq!(rec(&ProvisionAck { id: 0x88a4_e90d }), [0x8d, 0xd2, 0x93, 0xc5, 0x08]);
-    assert_eq!(rec(&Joined { gw_id: 0x1122_3344 }), [0xc4, 0xe6, 0x88, 0x89, 0x01]);
+    assert_eq!(rec(&ProvisionAck { addr: 0x88a4_e90d }), [0x8d, 0xd2, 0x93, 0xc5, 0x08]);
+    assert_eq!(rec(&Joined { gw_addr: 0x1122_3344 }), [0xc4, 0xe6, 0x88, 0x89, 0x01]);
     // Decode back (these are the delayed-pairing / provisioning acks the host waits on).
-    let p: Paired = postcard::from_bytes(&rec(&Paired { node_id: 0x0000_AB12 })).unwrap();
-    assert_eq!(p.node_id, 0x0000_AB12);
-    let j: Joined = postcard::from_bytes(&rec(&Joined { gw_id: 0x1122_3344 })).unwrap();
-    assert_eq!(j.gw_id, 0x1122_3344);
-    let a: ProvisionAck = postcard::from_bytes(&rec(&ProvisionAck { id: 0x88a4_e90d })).unwrap();
-    assert_eq!(a.id, 0x88a4_e90d);
+    let p: Paired = postcard::from_bytes(&rec(&Paired { addr: 0x0000_AB12 })).unwrap();
+    assert_eq!(p.addr, 0x0000_AB12);
+    let j: Joined = postcard::from_bytes(&rec(&Joined { gw_addr: 0x1122_3344 })).unwrap();
+    assert_eq!(j.gw_addr, 0x1122_3344);
+    let a: ProvisionAck = postcard::from_bytes(&rec(&ProvisionAck { addr: 0x88a4_e90d })).unwrap();
+    assert_eq!(a.addr, 0x88a4_e90d);
 }
 
 #[test]
 fn golden_mgmt_queue_entry() {
     use tower_protocol::mgmt::*;
-    let q = QueueEntry { node: 0x0000_AB12, item: 5, age_s: 10, ttl_s: 3600, data: &[0x01, 0x02] };
+    let q = QueueEntry { node_addr: 0x0000_AB12, item: 5, age_s: 10, ttl_s: 3600, data: &[0x01, 0x02] };
     let bytes = rec(&q);
     assert_eq!(bytes, [0x92, 0xd6, 0x02, 0x05, 0x0a, 0x90, 0x1c, 0x02, 0x01, 0x02]);
     let back: QueueEntry = postcard::from_bytes(&bytes).unwrap();
-    assert_eq!((back.node, back.item, back.age_s, back.ttl_s), (0x0000_AB12, 5, 10, 3600));
+    assert_eq!((back.node_addr, back.item, back.age_s, back.ttl_s), (0x0000_AB12, 5, 10, 3600));
     assert_eq!(back.data, &[0x01, 0x02]);
 }
 
@@ -267,9 +267,9 @@ fn golden_mgmt_queue_entry() {
 fn mgmt_response_record_stream_reassembles() {
     use tower_protocol::mgmt::{LAST_SEEN_NEVER, NodeEntry};
     let entries = [
-        NodeEntry { id: 1, name: "a", flags: 0, last_seen_s: 0, rssi_dbm: -50, uplinks: 1, queued: 0 },
-        NodeEntry { id: 2, name: "bb", flags: 1, last_seen_s: LAST_SEEN_NEVER, rssi_dbm: -70, uplinks: 9, queued: 2 },
-        NodeEntry { id: 3, name: "ccc", flags: 3, last_seen_s: 5, rssi_dbm: -90, uplinks: 0, queued: 1 },
+        NodeEntry { addr: 1, name: "a", flags: 0, last_seen_s: 0, rssi_dbm: -50, uplinks: 1, queued: 0 },
+        NodeEntry { addr: 2, name: "bb", flags: 1, last_seen_s: LAST_SEEN_NEVER, rssi_dbm: -70, uplinks: 9, queued: 2 },
+        NodeEntry { addr: 3, name: "ccc", flags: 3, last_seen_s: 5, rssi_dbm: -90, uplinks: 0, queued: 1 },
     ];
     let mut stream = Vec::new();
     for e in &entries {
@@ -290,7 +290,7 @@ fn mgmt_response_record_stream_reassembles() {
     let mut decoded = Vec::new();
     while !rest.is_empty() {
         let (e, tail) = postcard::take_from_bytes::<NodeEntry>(rest).unwrap();
-        decoded.push((e.id, e.uplinks, e.queued));
+        decoded.push((e.addr, e.uplinks, e.queued));
         rest = tail;
     }
     assert_eq!(decoded, vec![(1, 1, 0), (2, 9, 2), (3, 0, 1)]);
@@ -397,17 +397,17 @@ fn mgmt_op_variant_order_is_stable() {
     let ops: [MgmtOp; 14] = [
         MgmtOp::Describe,
         MgmtOp::NodeList,
-        MgmtOp::NodeAdd { id: 1, key, name: "n", flags: 0 },
-        MgmtOp::NodeRemove { id: 1 },
-        MgmtOp::NodeUpdate { id: 1, name: None, flags: None },
-        MgmtOp::NodeRevealKey { id: 1 },
+        MgmtOp::NodeAdd { addr: 1, key, name: "n", flags: 0 },
+        MgmtOp::NodeRemove { addr: 1 },
+        MgmtOp::NodeUpdate { addr: 1, name: None, flags: None },
+        MgmtOp::NodeRevealKey { addr: 1 },
         MgmtOp::PairingOpen { window_s: 60, key },
         MgmtOp::PairingCancel,
-        MgmtOp::QueuePush { node: 1, ttl_s: 60, data: &[0] },
-        MgmtOp::QueueList { node: 0 },
-        MgmtOp::QueueDrop { node: 1, item: None },
+        MgmtOp::QueuePush { node_addr: 1, ttl_s: 60, data: &[0] },
+        MgmtOp::QueueList { node_addr: 0 },
+        MgmtOp::QueueDrop { node_addr: 1, item: None },
         MgmtOp::StatsConfig { channel_period_ms: 1000 },
-        MgmtOp::Provision(Provision { my_id: None, gw_id: 1, key, band: BAND_EU868, channel: 0 }),
+        MgmtOp::Provision(Provision { addr: None, gw_addr: 1, key, band: BAND_EU868, channel: 0 }),
         MgmtOp::JoinOpen { window_s: 60 },
     ];
     for (i, op) in ops.iter().enumerate() {
@@ -454,7 +454,7 @@ fn radio_stat_variant_order_is_stable() {
 fn max_queue_push_fits_one_frame() {
     use tower_protocol::mgmt::MgmtOp;
     let data = [0xEEu8; 74];
-    let req = MgmtRequest { req_id: u16::MAX, op: MgmtOp::QueuePush { node: u32::MAX, ttl_s: u16::MAX, data: &data } };
+    let req = MgmtRequest { req_id: u16::MAX, op: MgmtOp::QueuePush { node_addr: u32::MAX, ttl_s: u16::MAX, data: &data } };
     let mut out = [0u8; MAX_WIRE];
     encode_frame(MsgType::MgmtRequest, 0, &req, &mut out).expect("max QueuePush must fit");
 }
@@ -480,7 +480,7 @@ fn mgmt_chunking_budget_holds() {
     encode_frame(MsgType::MgmtResponse, 0, &rsp, &mut out).expect("192-byte chunk must fit");
 
     let entry = NodeEntry {
-        id: u32::MAX,
+        addr: u32::MAX,
         name: "sixteen-byte-nam", // MAX_NODE_NAME
         flags: 0xFF,
         last_seen_s: LAST_SEEN_NEVER,

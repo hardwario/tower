@@ -5,6 +5,28 @@ All notable changes to the wire format and the crate API. The wire format is pos
 bump and a coordinated re-pin of all three consumers (`tower-firmware`, `tower-cli`,
 `tower-hil`).
 
+## v1.4.0 — 2026-07-12
+
+**API rename — wire UNCHANGED** (`PROTOCOL_VERSION` stays 3; postcard is positional, so
+these field renames do not move a single byte — the golden vectors are byte-identical and
+the `wire-bump-guard` confirms it). This is a **source-breaking** change for consumers, hence
+a minor bump and a coordinated re-pin of all three (`tower-firmware`, `tower-cli`, `tower-hil`).
+
+Unifies the radio-address terminology across the ecosystem — no more `_id` for an address:
+
+- `mgmt::Provision`: `my_id` → `addr`, `gw_id` → `gw_addr`.
+- `mgmt::DeviceInfo`: `net_id` → `addr`, `gw_id` → `gw_addr`.
+- `mgmt::MgmtOp::{NodeAdd,NodeRemove,NodeUpdate,NodeRevealKey}`: field `id` → `addr`.
+- `mgmt::{NodeEntry,NodeKey}`: `id` → `addr`. `mgmt::Paired`: `node_id` → `addr`.
+- `mgmt::ProvisionAck`: `id` → `addr`. `mgmt::Joined`: `gw_id` → `gw_addr`.
+- `mgmt::MgmtOp::{QueuePush,QueueList,QueueDrop}` + `mgmt::QueueEntry`: `node` → `node_addr`
+  (the node is a *target* here, not the record's subject).
+
+Rule applied: a field's plain name is `addr` when its enclosing type already names the entity
+(`NodeAdd`, `DeviceInfo`-self, …); it is qualified (`gw_addr`, `node_addr`) only to disambiguate.
+Idiomatic frame fields `src`/`dest`, the queue-item `item`, and the non-address ids
+(`req_id`, `cmd_id`, `session_id`) are unchanged.
+
 ## v1.3.0 — 2026-07-11
 
 **Wire change** — `PROTOCOL_VERSION` 2 → 3: the gateway link.
