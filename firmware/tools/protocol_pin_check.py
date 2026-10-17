@@ -11,7 +11,7 @@ Usage:
     protocol_pin_check.py --peer-url <raw-url>   # also fetch a consumer repo's Cargo.toml and
                                                  # compare (repeatable: tower-cli, tower-hil)
 
-The in-repo manifests (see the repo CLAUDE.md lockstep note):
+The in-repo manifests (see the repo AGENTS.md lockstep note):
     Cargo.toml
     crates/tower-kv/Cargo.toml
 

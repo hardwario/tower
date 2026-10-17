@@ -10,6 +10,6 @@ description = "no_std key-value codec over byte-addressable EEPROM, extracted fr
 # The codec is generic over an `Eeprom` byte-store trait (the firmware implements it over the
 # L0 data EEPROM; host tests implement it over a RAM array), and uses the shared CRC primitive
 # so EEPROM records stay byte-compatible with the firmware. Pinned to the same tower-protocol
-# tag as the firmware (see the repo CLAUDE.md lockstep note).
+# tag as the firmware (see the repo AGENTS.md lockstep note).
 [dependencies]
 tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.5.0" }
