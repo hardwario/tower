@@ -1,8 +1,8 @@
 //! OTA-pairing admission rules (moved from `firmware/src/radio/net/pairing.rs`;
 //! firmware/docs/radio.md): which JOIN_REQ the host may answer and which JOIN_RESP is the
-//! joiner's. The pairing-v2 key agreement itself (X25519, the key schedule, the confirmation
-//! tags, the SAS) is the [`handshake`](crate::handshake) kernel; the TRNG draw, the windows and
-//! the JOIN frame exchange stay in the firmware's radio flow.
+//! joiner's. The pairing-v3 key agreement itself (X25519, the commitment round, the key
+//! schedule, the confirmation tags, the SAS) is the [`handshake`](crate::handshake) kernel;
+//! the TRNG draw, the windows and the JOIN frame exchange stay in the firmware's radio flow.
 //!
 //! The **keyed join** (E4, docs/radio.md) has its own three predicates below: a node whose
 //! per-node key the gateway already holds (NodeAdd) joins under that key: no key on air,

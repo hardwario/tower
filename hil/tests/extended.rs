@@ -126,7 +126,8 @@ fn ext_fhss_kat() {
     run_kat("fhss_kat", "ALL PASS ***", &["FAIL"], 10);
 }
 
-/// X25519 (pairing v2) vs RFC 7748 §5.2 / §6.1 on the MCU; ~10 s of compute before the verdict,
+/// The pairing-v3 crypto on the MCU: X25519 vs RFC 7748 §5.2 / §6.1, then the handshake golden
+/// (commitment, link key, SAS, tags) the host tests pin; ~12 s of compute before the verdict,
 /// which repeats every 5 s with the timing and the stack high-water.
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
@@ -244,9 +245,11 @@ fn ext_net_secure_ping_auth() {
     assert_eq!(auth_fail, 0, "gateway saw CCM auth failures");
 }
 
-/// OTA pairing (v2, X25519 key agreement): host opens a window, joiner joins with its own
+/// OTA pairing (v3, X25519 key agreement with a commitment round: JOIN_REQ, JOIN_RESP,
+/// JOIN_NONCE, JOIN_REVEAL, JOIN_CONFIRM): host opens a window, joiner joins with its own
 /// address; both sides must log the SAME node address, the same derived key prefix and the same
-/// SAS (`net: pairing: SAS dddddd`, logged just before each side's PAIRED / JOINED line).
+/// SAS (`net: pairing: SAS dddddd`, logged just before each side's PAIRED / JOINED line), and the
+/// joiner must never have seen a reveal that breaks the host's commitment or fails its tag.
 #[test]
 #[ignore = "requires the HIL bench (two TOWER boards in RF range)"]
 fn ext_net_pairing_handshake() {
@@ -261,13 +264,25 @@ fn ext_net_pairing_handshake() {
     joiner.reset_into_app().expect("reset joiner");
 
     // The joiner logs its SAS, then JOINED (or `join failed` when the window passed unjoined).
+    // A reveal that does not open the commitment, or fails key confirmation, is what a man in the
+    // middle (or a broken handshake) looks like on a bench with only the two boards: fail on it.
     let sas = joiner
         .wait_for(Duration::from_secs(70), |f| {
-            frame_text(f).is_some_and(|t| t.contains("pairing: SAS") || t.contains("join failed"))
+            frame_text(f).is_some_and(|t| {
+                t.contains("pairing: SAS")
+                    || t.contains("join failed")
+                    || t.contains("does not open its commitment")
+                    || t.contains("failed key confirmation")
+            })
         })
         .expect("joiner console read")
         .expect("joiner never concluded the handshake within 70 s");
-    let joiner_sas = field_sas(frame_text(&sas).unwrap_or("")).expect("join failed on the joiner");
+    let st = frame_text(&sas).unwrap_or("");
+    assert!(
+        !st.contains("commitment") && !st.contains("key confirmation"),
+        "the joiner refused the host's JOIN_REVEAL: {st:?}"
+    );
+    let joiner_sas = field_sas(st).expect("join failed on the joiner");
     let joined = joiner
         .wait_for(Duration::from_secs(10), |f| {
             frame_text(f).is_some_and(|t| t.contains("JOINED ***"))

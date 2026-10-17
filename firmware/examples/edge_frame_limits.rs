@@ -105,11 +105,11 @@ async fn run(_b: Board) {
             frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadVersion),
         );
     }
-    // Unknown type: set type field (bits[4:0]) to 8. Beacon=7 is the max valid type,
-    // so 8 is the first unused discriminant: `FrameType::from_u8` returns None → BadType.
+    // Unknown type: set type field (bits[4:0]) to 10. JoinReveal=9 is the max valid type,
+    // so 10 is the first unused discriminant: `FrameType::from_u8` returns None → BadType.
     {
         let mut b = buf;
-        b[0] = (b[0] & 0xE0) | 0x08;
+        b[0] = (b[0] & 0xE0) | 0x0A;
         check(
             "unknown type → BadType",
             frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadType),

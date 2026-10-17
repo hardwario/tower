@@ -53,6 +53,10 @@ pub enum FrameType {
     JoinConfirm = 6,
     /// FHSS hop-schedule beacon (broadcast time signal; see `net/fhss.rs`).
     Beacon = 7,
+    /// Pairing: the joiner's nonce, sent once it holds the host's commitment (`net/pairing.rs`).
+    JoinNonce = 8,
+    /// Pairing: the host reveals the nonce it committed to, with its confirmation tag.
+    JoinReveal = 9,
 }
 
 impl FrameType {
@@ -67,6 +71,8 @@ impl FrameType {
             5 => Self::JoinResp,
             6 => Self::JoinConfirm,
             7 => Self::Beacon,
+            8 => Self::JoinNonce,
+            9 => Self::JoinReveal,
             _ => return None,
         })
     }

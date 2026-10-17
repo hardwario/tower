@@ -525,8 +525,9 @@ async fn run(b: Board) {
                 let slice = PAIR_SLICE.min(sess.deadline.saturating_duration_since(Instant::now()));
                 // `open_pairing` never answers a JOIN_REQ for an already-registered (or reserved,
                 // or our own) address; OTA pairing only adds NEW nodes (docs/gateway.md). One
-                // call can outlast the slice by a handshake (~1 s compute + the confirm wait +
-                // ~1 s for the next ephemeral): still far inside the 10 s liveness check-in.
+                // call can outlast the slice by a handshake (the nonce wait, ~1.2 s compute, the
+                // 1.8 s confirm wait: ~3.4 s) plus ~1.2 s for the next ephemeral at its start:
+                // ~7 s worst case, still inside the 10 s liveness check-in.
                 if let Some((node_addr, key)) = net.open_pairing(&mut sess.host, slice).await {
                     let req_id = sess.req_id;
                     led.set_background(Some(HEARTBEAT));

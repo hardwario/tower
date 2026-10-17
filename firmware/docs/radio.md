@@ -10,8 +10,9 @@ security parameters, and a worked example per feature.
 > with quality metrics, CSMA/CCA, SLEEP/SHUTDOWN), on-MCU **AES-128-CCM**, the
 > frame codec, and the network layer (confirmed delivery + ACK/retransmit,
 > replay protection + counter persistence, the EU duty governor, bulk pull,
-> OTA pairing, and per-peer keys for star / P2P). Pairing v2 (X25519) is host-tested; its
-> on-air test (`net_pairing`, the gateway product) is pending. A semi-fuzzy soak (`radio_interop`)
+> OTA pairing, and per-peer keys for star / P2P). Pairing v3 (X25519 with a commitment round)
+> is host-tested and its crypto KAT-verified on the board; its on-air test (`net_pairing`, the
+> gateway product) is pending. A semi-fuzzy soak (`radio_interop`)
 > exercises it all under randomized traffic with latched invariant checks.
 
 ## Hardware
@@ -114,7 +115,8 @@ Little-endian frame, fits the 96-byte FIFO:
 ```
 
 - `ver_type`: bits[7:5] protocol version (=1), bits[4:0] frame type
-  (`Data`, `Ack`, `BulkReq`, `BulkData`, `JoinReq`, `JoinResp`, `JoinConfirm`, `Beacon`).
+  (`Data`, `Ack`, `BulkReq`, `BulkData`, `JoinReq`, `JoinResp`, `JoinConfirm`, `Beacon`,
+  `JoinNonce`, `JoinReveal`).
 - `flags`: `CONFIRMED`, `KEYED` (JOIN frames only), `LAST_CHUNK`, `BULK_ANNOUNCE`.
 - The whole cleartext header is the CCM **AAD**; the payload is encrypted.
 - **Nonce** (13 B, not transmitted, reconstructed from the header):
@@ -261,59 +263,81 @@ net.bulk_serve_from(NODE_ID, &mut source).await;   // BulkSource: read store →
 net.bulk_fetch_into(GW_ID, &mut sink).await;       // BulkSink: verify/hash/store each chunk
 ```
 
-**OTA pairing (v2: X25519 key agreement).** A node and a host with an open pairing window
-derive the per-node link key together; no key travels on air:
+**OTA pairing (v3: X25519 key agreement, numeric comparison).** A node and a host with an open
+pairing window derive the per-node link key together; no key travels on air. The exchange is
+Bluetooth LE Secure Connections numeric comparison (Core Specification Vol 3 Part H 2.3.5.6.2)
+with the node as the initiator and the host as the responder, HMAC-SHA256 / SHA-256 in place of
+its AES-CMAC functions:
 
-```
-node  JOIN_REQ      2 ‖ E_node            src = node, dest = 0     under JOIN_FRAME_KEY (public)
-host  JOIN_RESP     2 ‖ E_gw ‖ tag_gw     src = host, dest = node  under JOIN_FRAME_KEY (public)
-node  JOIN_CONFIRM  2 ‖ tag_node          src = node, dest = host  under the NEW link key
-```
+| # | Frame | Sender | Payload (bytes) | Sealed under | The sender computed first |
+|---|---|---|---|---|---|
+| 1 | JOIN_REQ | node, `dest = 0` | `3 ‖ E_node` (33) | `JOIN_FRAME_KEY` (public) | its ephemeral (before the attempt) |
+| 2 | JOIN_RESP | host, `dest = node` | `3 ‖ E_gw ‖ C_gw` (49) | `JOIN_FRAME_KEY` | the commitment (one HMAC) |
+| 3 | JOIN_NONCE | node, `dest = host` | `3 ‖ N_node` (17) | `JOIN_FRAME_KEY` | nothing |
+| 4 | JOIN_REVEAL | host, `dest = node` | `3 ‖ N_gw ‖ tag_gw` (25) | `JOIN_FRAME_KEY` | shared secret + key schedule |
+| 5 | JOIN_CONFIRM | node, `dest = host` | `3 ‖ tag_node` (9) | the NEW link key | commitment check, shared secret + key schedule |
 
+The leading `3` identifies the handshake (a node or host built from an older checkout, whose
+three-frame v2 started with `2`, is refused on it with a logged reason). Every payload fits the
+74-byte MTU.
+
+- **Commitment** (BLE f4): `C_gw = HMAC-SHA256(key = N_gw, "tower pairing v3 commit" ‖ node_addr
+  LE ‖ gw_addr LE ‖ E_node ‖ E_gw)[..16]`. The host commits to its nonce `N_gw` before it sees
+  `N_node`; the node sends `N_node` only once it holds `C_gw`, and accepts a JOIN_REVEAL only if
+  its `N_gw` opens `C_gw` (otherwise `net: pairing: JOIN_REVEAL from … does not open its
+  commitment, ignored`: never a key derived from it). Nonces are 16 bytes, fresh per handshake.
 - **Key schedule** (`tower_net::handshake`, host-tested against RFC 7748 / RFC 5869 vectors and
-  an independent reference): `shared = X25519(e_own, E_peer)` (an all-zero result, from a
-  low-order point, is refused); `okm = HKDF-SHA256(salt = E_node ‖ E_gw, ikm = shared, info =
-  "tower pairing v2" ‖ node_addr LE ‖ gw_addr LE)`, 40 B: link key `okm[0..16]`, confirm key
-  `okm[16..32]`, SAS `u64 LE(okm[32..40]) mod 10⁶`. The confirmation tags are
-  `HMAC-SHA256(confirm_key, label ‖ T)[..8]` with labels `"gw"` / `"node"` and the transcript
-  `T = "tower pairing v2" ‖ node_addr ‖ gw_addr ‖ E_node ‖ E_gw`, so both addresses and both
-  public keys are bound: a substituted key or address gives different keys and a failing tag.
-- **Who proves what.** The node checks `tag_gw` before it confirms (the host holds the key), the
-  host checks `tag_node` inside a frame that only opens under the derived key, and commits only
-  then. The node commits after sending the confirm; a lost confirm leaves the host's window open
-  (nothing installed) and the node with a key its gateway never accepted, the same as before:
-  repeat the pairing.
-- **SAS.** Both ends log `net: pairing: SAS 123456` (the same 6 digits). Comparing the two lines
-  is the **optional** out-of-band check against an active man in the middle during the window:
-  an attacker that runs one handshake with each side ends up with a different SAS on each side.
-  What it does not cover: to make them match, the attacker must see `E_node`, answer within the
-  node's response wait (≈ 1.8 s, below) and search on the order of 10⁶ X25519 operations for a
-  colliding 6-digit SAS, which is within reach of a PC-class attacker. So the SAS check stops an
-  opportunistic or modestly equipped attacker, not a prepared one; a commitment round (the node
-  commits to `E_node` before the host reveals `E_gw`) would close that and is not part of v2.
-  A passive eavesdropper learns nothing either way.
-- **Ephemerals: TRNG only, one per request, zeroized.** Each side derives its X25519 secret from
-  64 bytes of the STM32 hardware TRNG (`board::trng_fill`, hashed with SHA-256). If the TRNG
-  can't deliver, pairing is **refused** (`net: pairing: hardware TRNG unavailable, refusing to
-  pair ...`), never keyed from the non-cryptographic fallback. The node draws a fresh ephemeral
-  for every JOIN_REQ, the host for every JOIN_REQ it answers (a key reused across the window
-  would give a man in the middle the whole window to search for a SAS collision). Secrets, the
-  shared secret and the HKDF output are zeroized after use.
-- **Timing.** One X25519 scalar multiplication is ~12 M instructions on the M0+ (no 32x32→64
-  multiply), about 0.9-1.2 s at 16 MHz (an estimate; `crypto_x25519_kat` measures it). Each side
-  computes its own public key ahead (the host when the window opens and again after each answered
-  request, the node before transmitting), so only the shared secret sits on the critical path,
-  and each wait adds `PEER_KEX_TIME` = 1.5 s for the peer's computation: the joiner waits
-  300 ms + 1.5 s for the JOIN_RESP, the host 300 ms + 1.5 s for the JOIN_CONFIRM. A node attempt
-  takes ~3 s (ephemeral + request + wait), so a one-minute window (`PAIRING_WINDOW`) gives it
-  ~20 attempts. Too short a wait fails every pairing, too long only slows a retry: re-tune
-  `PEER_KEX_TIME` from the KAT's measurement if it disagrees.
+  an independent reference; `crypto_x25519_kat` checks the same golden on the board): the
+  transcript hash `th = SHA-256("tower pairing v3" ‖ node_addr LE ‖ gw_addr LE ‖ E_node ‖ E_gw ‖
+  N_node ‖ N_gw)`; `shared = X25519(e_own, E_peer)` (an all-zero result, from a low-order point,
+  is refused); `okm = HKDF-SHA256(salt = th, ikm = shared, info = "tower pairing v3")`, 32 B:
+  link key `okm[0..16]`, confirm key `okm[16..32]`. The confirmation tags are
+  `HMAC-SHA256(confirm_key, label ‖ th)[..8]` with labels `"gw"` / `"node"`. Both addresses, both
+  public keys and both nonces are bound into the key, the tags and the SAS: a substituted key,
+  nonce or address gives different keys and a failing tag.
+- **Who proves what.** The node checks the commitment, then `tag_gw` before it confirms (the
+  host holds the key); the host checks `tag_node` inside a frame that only opens under the
+  derived key, and commits only then. The node commits after sending the confirm; a lost confirm
+  leaves the host's window open (nothing installed) and the node with a key its gateway never
+  accepted: repeat the pairing.
+- **SAS** (BLE g2): `u64 LE(SHA-256("tower pairing v3 sas" ‖ th)[..8]) mod 10⁶`. Both ends log
+  `net: pairing: SAS 123456`. Its real guarantee: an active man in the middle that runs one
+  handshake with each side shows the same 6 digits on both with probability **10⁻⁶ per attempt,
+  whatever its computing power**, IF the operator compares the two values. The commitment is
+  what makes that true: whoever plays the host towards the node is bound to a nonce chosen
+  without knowing `N_node`, and whoever plays the node towards the host must send its nonce
+  without knowing `N_gw`, so one side's SAS is always a random value the attacker could not
+  steer (the three-frame v2 let it pick its key after seeing the node's and search ~10⁶ X25519
+  operations for a collision). The attacker can still abandon an attempt whose two values differ
+  (the node retries, silently), so a window gives it one 10⁻⁶ chance per attempt it can provoke:
+  about 15 in a one-minute window (~4 s per handshake), ~2·10⁻⁵ in all. If nobody compares the
+  SAS, an active attacker in range during the window is not detected. A passive eavesdropper learns nothing either way (the SAS is a function
+  of the public transcript; the key needs a private key).
+- **Ephemerals and nonces: TRNG only, one per request, zeroized.** Each side derives its X25519
+  secret and its nonce from 96 bytes of the STM32 hardware TRNG (`board::trng_fill`; 64 bytes
+  hashed with SHA-256 into the secret, 32 into the nonce). If the TRNG can't deliver, pairing is
+  **refused** (`net: pairing: hardware TRNG unavailable, refusing to pair ...`), never keyed from
+  the non-cryptographic fallback. The node draws a fresh pair for every JOIN_REQ, the host for
+  every JOIN_REQ it answers (whether or not that handshake completes). Secrets, nonces until they
+  are sent, the shared secret and the HKDF output are zeroized after use.
+- **Timing.** One X25519 scalar multiplication takes **1175 ms** on the Core Module (16 MHz M0+,
+  no 32x32→64 multiply; measured by `crypto_x25519_kat`), the handshake's critical path (shared
+  secret + key schedule) 1185 ms. Each side computes its own public key ahead (the host when the
+  window opens and again after each answered request, the node before transmitting), so exactly
+  one scalar multiplication per side sits on the exchange, and the commitment round adds frames
+  but none: the host computes after the JOIN_NONCE, the node after the JOIN_REVEAL. The waits:
+  the node waits 300 ms for the JOIN_RESP and 300 ms + `PEER_KEX_TIME` (1.5 s, ~27 % over the
+  measurement) for the JOIN_REVEAL; the host waits 300 ms for the JOIN_NONCE and 300 ms +
+  `PEER_KEX_TIME` for the JOIN_CONFIRM. A node attempt takes ~1.5 s with no host answering
+  (ephemeral + request + 300 ms) and ~3.8 s for a whole handshake, so a one-minute window
+  (`PAIRING_WINDOW`) gives it ~40 attempts. Too short a wait fails every pairing, too long only
+  slows a retry: re-tune `PEER_KEX_TIME` from the KAT's `timing:` line if it moves.
 - **Framing.** `JOIN_FRAME_KEY` is public and never used for anything else: it only gives the
-  two frames before the link key a CCM format, so a corrupted frame fails its tag and is dropped.
-  All three payloads start with the version byte `2`; every frame fits the MTU (JOIN_REQ 33 B,
-  JOIN_RESP 41 B, JOIN_CONFIRM 9 B of payload). Duty mode only: under LBT+AFA or FHSS both
-  sides refuse (a fixed-channel exchange). The `PAIRING_KEY` key transport of v1 (the host sent
-  the per-node key under a public key) is gone; nothing answers or sends it.
+  four frames before the link key a CCM format, so a corrupted frame fails its tag and is
+  dropped (its bytes still spell `v2`, so an older node's JOIN_REQ opens and is refused on its
+  handshake byte). Duty mode only: under LBT+AFA or FHSS both sides refuse (a fixed-channel
+  exchange). The `PAIRING_KEY` key transport of v1 and the three-frame v2 exchange are gone;
+  nothing answers or sends them.
 - **Cost.** ~22 KB of flash per image (X25519 + SHA-256 + HKDF + HMAC). Stack: the shared-secret
   computation needs ~2.5 KB below its caller (static estimate; `crypto_x25519_kat` reports the
   measured high-water), and it runs in non-inlined functions so that frame exists only while
@@ -324,11 +348,13 @@ is already a registered peer, reserved, or the host's own (logged once per windo
 `pairing: JOIN_REQ from … refused (…)`). The key agreement is unauthenticated until someone
 compares the SAS, so anyone could otherwise JOIN_REQ *as a victim*, complete a handshake and
 re-key the victim out of the network. To re-pair a known node, remove it first (`remove_peer`;
-the gateway's `NodeRemove`). The joiner accepts only a JOIN_RESP addressed to itself (`dest ==
-addr`) with a valid tag, and the host only a confirm from that joiner, addressed to it.
+the gateway's `NodeRemove`). The joiner accepts only host frames addressed to itself (`dest ==
+addr`), and after the first JOIN_RESP only that host's (a reveal that opens the commitment and
+carries a valid tag); the host accepts the nonce and the confirm only from that joiner,
+addressed to it.
 
 ```rust
-// host: precompute the window's ephemeral (TRNG; None = refused), then listen in slices
+// host: precompute the window's ephemeral and nonce (TRNG; None = refused), then listen in slices
 if let Some(mut host) = PairingHost::prepare() {
     if let Some((peer_addr, key)) = net.open_pairing(&mut host, PAIRING_WINDOW).await {
         let _ = net.add_peer(peer_addr, &key); // the derived link key
@@ -461,7 +487,7 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `crypto_aes_kat` | 1 | AES-128 ECB FIPS-197 known-answer test |
 | `crypto_ccm_kat` | 1 | AES-128-CCM RFC 3610 vector + tamper test |
 | `crypto_frame_loopback` | 1 | frame codec + nonce + CCM round-trip |
-| `crypto_x25519_kat` | 1 | pairing-v2 X25519 vs RFC 7748, scalar-multiplication timing, stack high-water |
+| `crypto_x25519_kat` | 1 | pairing-v3 crypto: X25519 vs RFC 7748, the handshake golden (commitment, key, SAS, tags), timing, stack high-water |
 | `net_secure_ping` | node / gateway | one CCM-sealed DATA frame end-to-end |
 | `net_confirmed` | node / gateway | confirmed delivery + ACK + retransmit |
 | `net_persist` | 1 | TX-counter reserve-ahead survives reboot |
@@ -469,7 +495,7 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `net_bulk` | gateway / node | bulk pull: announce → BULK_REQ/BULK_DATA |
 | `net_bulk_stress` | gateway / node | large bulk (multi-KB) + CRC-32 + throughput stress |
 | `net_bulk_stream` | gateway / node | streaming bulk (source/sink), 4-64 KB, constant RAM |
-| `net_pairing` | gateway / node | OTA pairing: X25519 key agreement derives a per-node key, SAS on both ends |
+| `net_pairing` | gateway / node | OTA pairing: X25519 key agreement with a commitment round derives a per-node key, SAS on both ends |
 | `net_keyed_join` | gateway / node | keyed join (E4) under a per-node key both ends hold |
 | `net_star` | gateway / node[,node-2] | star: per-node keys + per-node replay lanes |
 | `net_p2p` | role-peer-a / role-peer-b | P2P bidirectional confirmed exchange |
@@ -596,10 +622,11 @@ a practical limit). EEPROM key storage is only as safe as the chip's readout pro
 
 - **OTA pairing is unauthenticated unless the SAS is compared.** A passive eavesdropper learns
   nothing (X25519), but an active attacker in range during the window can sit between the two
-  ends; comparing the `pairing: SAS` lines detects that, except against an attacker able to
-  search ~10⁶ X25519 operations within the node's ~1.8 s response wait (see *OTA pairing*).
-  Keep windows short and user-initiated; enable flash RDP for production key storage. Where the
-  key can be provisioned out of band, the keyed join (E4) needs no window at all.
+  ends; comparing the `pairing: SAS` lines detects that except with probability 10⁻⁶ (the
+  commitment round leaves the attacker nothing to search; see *OTA pairing*). Nothing detects it
+  if nobody compares. Keep windows short and user-initiated; enable flash RDP for production key
+  storage. Where the key can be provisioned out of band, the keyed join (E4) needs no window at
+  all.
 - **US 915 single-channel `Us915` is bench-test only** (runtime-switchable via
   `set_band`, hardware-verified, but **not** FCC 15.247-compliant; use FHSS for a
   compliant US link). EU 868 (duty or LBT+AFA) is the compliant default region.

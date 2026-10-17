@@ -1,16 +1,18 @@
-//! net_pairing: OTA pairing by X25519 key agreement (pairing v2, docs/radio.md).
+//! net_pairing: OTA pairing by X25519 key agreement with a commitment round (pairing v3,
+//! docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash example net_pairing   # host: opens a window
 //!   TOWER_FEATURES=role-node    just flash example net_pairing   # joiner: requests to join
 //!
-//! The host precomputes its ephemeral key and opens a 1-minute pairing window
+//! The host precomputes its ephemeral key and nonce and opens a 1-minute pairing window
 //! ([`PAIRING_WINDOW`]); the joiner sends JOIN_REQ with its own ephemeral public key, the host
-//! answers with its public key and a confirmation tag (JOIN_RESP), the joiner checks it and
-//! confirms under the newly derived link key (JOIN_CONFIRM). No key travels on air: both ends
-//! derive the same link key. The **joiner chooses its own address** and keeps it. Both log the
-//! first key bytes (they must match), the joiner's address (the same on both sides) and the net
-//! layer's `pairing: SAS 123456` line (the same 6 digits on both sides: the out-of-band check
-//! that no man in the middle sat between them).
+//! answers with its public key and a commitment to its nonce (JOIN_RESP), the joiner sends its
+//! nonce (JOIN_NONCE), the host reveals its nonce with a confirmation tag (JOIN_REVEAL), and the
+//! joiner checks both and confirms under the newly derived link key (JOIN_CONFIRM). No key
+//! travels on air: both ends derive the same link key. The **joiner chooses its own address**
+//! and keeps it. Both log the first key bytes (they must match), the joiner's address (the same
+//! on both sides) and the net layer's `pairing: SAS 123456` line (the same 6 digits on both
+//! sides: compared, it is the out-of-band check that no man in the middle sat between them).
 
 #![no_std]
 #![no_main]

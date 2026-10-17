@@ -165,19 +165,22 @@ press is a hold. Used by the HIL gateway test.
 
 ### Pairing (node side)
 
-- **OTA**: hold the button ≥ 1 s while unprovisioned: the node pairs (X25519 key agreement,
-  docs/radio.md "OTA pairing") with any gateway that has a window open and persists `(gw_addr,
-  key, band, channel)` in `NS_APP`. It logs `net: pairing: SAS 123456` and `JOINED gateway
-  XXXXXXXX`; the same SAS on the gateway's console is the optional man-in-the-middle check. Each
-  attempt takes ~3 s (fresh TRNG ephemeral, request, ~1.8 s response wait). Without a working
-  hardware TRNG the node refuses to pair (logged).
+- **OTA**: hold the button ≥ 1 s while unprovisioned: the node pairs (X25519 key agreement
+  with a commitment round, docs/radio.md "OTA pairing") with any gateway that has a window open
+  and persists `(gw_addr, key, band, channel)` in `NS_APP`. It logs `net: pairing: SAS 123456`
+  and `JOINED gateway XXXXXXXX`; the same SAS on the gateway's console is the man-in-the-middle
+  check (compared, it leaves an active attacker a 1 in 10⁶ chance; not compared, none is
+  detected). An attempt takes ~1.5 s when no gateway answers (fresh TRNG ephemeral, request,
+  300 ms wait) and ~3.8 s for a whole handshake. Without a working hardware TRNG the node refuses
+  to pair (logged).
 - **Cable**: on USB the node serves the management channel: `Describe` (role probe), `Provision`
   (host-minted credentials; the key never rides the shell history), and `JoinOpen`
   (host-initiated OTA join). The node reboots into its new identity; watch for the fresh `Hello`.
   `Provision` answers `BAD_ARG` for a reserved address (`0` / `0xFFFFFFFF`) as either end, or a
   `gw_addr` equal to the node's own (effective) address (a shared `src` would collide CCM nonces).
 - The node runs its net layer **registered peers only**: it accepts radio frames from its
-  gateway and nothing else, and accepts a JOIN_RESP only if it is addressed to itself.
+  gateway and nothing else, and while pairing accepts host frames only if they are addressed to
+  itself (and, after the first JOIN_RESP, only from that host).
 
 ---
 
@@ -227,12 +230,13 @@ uplink cycle.
 ### Pairing (gateway side)
 
 - **OTA**: host sends `PairingOpen{window, key}` (`key` ignored: the link key is derived by the
-  X25519 key agreement); the gateway precomputes its first ephemeral (~1 s; no hardware TRNG →
-  `UNSUPPORTED` and an error log), opens the radio window, and on a completed handshake (a valid
-  JOIN_CONFIRM under the derived key) logs `net: pairing: SAS 123456`, commits the registry entry
-  (flags `UNNAMED` until the host auto-names it from the first `NodeInfo` via `NodeUpdate`) and
-  answers the *delayed* `Paired`, or `MGMT_TIMEOUT` on expiry. Compare the SAS with the node's to
-  rule out a man in the middle. **OTA pairing only adds new nodes:** a JOIN_REQ from an address
+  X25519 key agreement); the gateway precomputes its first ephemeral and nonce (~1.2 s; no
+  hardware TRNG → `UNSUPPORTED` and an error log), opens the radio window, and on a completed
+  handshake (the commitment round, then a valid JOIN_CONFIRM under the derived key) logs
+  `net: pairing: SAS 123456`, commits the registry entry (flags `UNNAMED` until the host
+  auto-names it from the first `NodeInfo` via `NodeUpdate`) and answers the *delayed* `Paired`,
+  or `MGMT_TIMEOUT` on expiry. Compare the SAS with the node's to rule out a man in the middle
+  (an attacker's chance of matching it is 1 in 10⁶). **OTA pairing only adds new nodes:** a JOIN_REQ from an address
   that is already registered (or reserved, or the gateway's own) gets no answer, and the gateway
   logs `pairing: JOIN_REQ from XXXXXXXX refused (already registered …)`. The key agreement is
   unauthenticated until the SAS is compared, so answering would let anyone re-key a registered
