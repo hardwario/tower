@@ -178,19 +178,21 @@ warning (not a refusal: the broker may sit on a segment you trust).
 
 **The embedded broker** serves TLS with `--broker-tls-identity <P12>`: a PKCS#12 file holding
 the server certificate (with its chain) and private key, its password in
-`TOWER_BROKER_TLS_PASSWORD`. The file is checked at startup, and the broker reads it again
-for every connection it accepts: keep it in place while the gateway runs (replacing it, with
-the same password, rotates the certificate for new connections). The listener then speaks
-TLS only. The bridge's own MQTT client does not use it: it connects to a second, plain
-listener on `127.0.0.1` at a free port (announced at startup, same login), so the
-certificate does not have to cover `localhost` and the bridge keeps its link even when the
-TLS listener is busy (see below). Two limits of the embedded broker's TLS (rumqttd's
-native-tls backend): it does not request client certificates (authentication is the login;
-for mutual TLS use an external broker), and it runs each TLS handshake inside its accept
-loop, so a peer that opens the port and never completes a handshake holds off new
-connections until it disconnects (sessions already open, and the bridge itself, keep
-working). On a network you don't control, firewall the port to the clients you expect, or
-put a hardened broker in front (`--mqtt`).
+`TOWER_BROKER_TLS_PASSWORD`. The file is checked and loaded once, at startup: a new
+certificate takes a restart. The port then speaks TLS only, through a front end of the
+gateway's own that hands each finished handshake to the broker behind it, on a plain
+listener on `127.0.0.1` that enforces the same login. A client that connects and never
+completes its handshake is closed after 10 s and holds up no one else: at most 32
+handshakes are in flight and 64 connections open at once, and a connection past either
+limit is closed right away. The bridge's own MQTT client does not use the TLS port either: it
+connects to another plain listener on `127.0.0.1` (both loopback ports are free ones,
+announced at startup, same login), so the certificate does not have to cover `localhost` and
+the bridge keeps its link whatever the network sends the TLS port. The embedded broker does
+not request client certificates (authentication is the login; for mutual TLS use an external
+broker), and a peer that keeps the handshake or connection slots full keeps new TLS clients
+out while it does so (sessions already open, and the bridge itself, keep working). On a
+network you don't control, firewall the port to the clients you expect, or put a hardened
+broker in front (`--mqtt`).
 
 A self-signed setup with OpenSSL 3 (a private CA, and a broker certificate for every name
 and address clients will dial; keep it at 825 days or less, macOS refuses longer-lived TLS

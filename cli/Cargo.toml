@@ -14,9 +14,10 @@ path = "src/main.rs"
 [features]
 # The embedded MQTT broker (`tower gateway --broker`, the zero-config default). Default-on;
 # opt out (`--no-default-features`) if rumqttd's dependency weight ever hurts a build target;
-# external-broker mode (`--mqtt`) keeps working without it.
+# external-broker mode (`--mqtt`) keeps working without it. tokio + tokio-native-tls are its TLS
+# front end (`src/gateway/tls_front.rs`).
 default = ["embedded-broker"]
-embedded-broker = ["dep:rumqttd"]
+embedded-broker = ["dep:rumqttd", "dep:tokio", "dep:tokio-native-tls"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
@@ -32,17 +33,26 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 postcard = { workspace = true, features = ["use-std"] }
 serde = { workspace = true, features = ["std"] }
 # The gateway's MQTT side (`tower gateway` + the `nodes`/`net` client commands). rumqttc's
-# synchronous Client/Connection API keeps the crate's no-async idiom: tokio appears only as
-# an internal dependency of these two crates, never in our code. Default features OFF: both
-# default to `use-rustls` (+ rumqttd `websocket`), and the rustls they build against (rustls
-# 0.22/0.23, rustls-webpki 0.102, unmaintained rustls-pemfile) carries RustSec advisories
-# that fail `cargo audit`. MQTT over TLS uses their `use-native-tls` backends instead: the
-# platform's own TLS stack (Security.framework on macOS, SChannel on Windows, OpenSSL on
-# Linux, see below). Never enable a rustls feature here.
+# synchronous Client/Connection API keeps the crate's no-async idiom: tokio is an internal
+# dependency of these two crates, and our code uses it in one place only, the embedded broker's
+# TLS front end (below). Default features OFF: both default to `use-rustls` (+ rumqttd
+# `websocket`), and the rustls they build against (rustls 0.22/0.23, rustls-webpki 0.102,
+# unmaintained rustls-pemfile) carries RustSec advisories that fail `cargo audit`. MQTT over
+# TLS uses rumqttc's `use-native-tls` backend instead: the platform's own TLS stack
+# (Security.framework on macOS, SChannel on Windows, OpenSSL on Linux, see below). rumqttd gets
+# no TLS feature at all: it serves plain MQTT on loopback only, and the front end terminates
+# TLS for it. Never enable a rustls feature here.
 rumqttc = { version = "0.25", default-features = false, features = ["use-native-tls"] }
-rumqttd = { version = "0.20", optional = true, default-features = false, features = ["use-native-tls"] }
-# Built directly for the client connector (extra root CAs, a client identity) and to validate
-# the PKCS#12 identities at startup; the same crate rumqttc/rumqttd use underneath.
+rumqttd = { version = "0.20", optional = true, default-features = false }
+# The embedded broker's TLS front end (`src/gateway/tls_front.rs`): rumqttd ran every TLS
+# handshake inside its accept loop, so one stalled peer kept all others out; the front end
+# accepts, handshakes under a deadline and proxies to rumqttd on loopback. The same tokio and
+# tokio-native-tls that rumqttc builds anyway.
+tokio = { version = "1", optional = true, features = ["rt", "net", "time", "io-util", "sync", "macros"] }
+tokio-native-tls = { version = "0.3", optional = true }
+# Built directly for the client connector (extra root CAs, a client identity) and the broker's
+# server identity (validated and loaded once at startup); the same crate rumqttc and
+# tokio-native-tls use underneath.
 native-tls = "0.2"
 serde_json = "1"
 # RPC correlation ids for the MQTT request/response topics.

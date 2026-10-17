@@ -283,38 +283,32 @@ fn pkcs12_identity(der: &[u8], password: &str) -> std::result::Result<Identity, 
     }
 }
 
-/// The embedded broker's TLS server identity, validated. Deliberately no `Debug`: it holds the
-/// password.
-#[cfg(any(feature = "embedded-broker", test))]
+/// The embedded broker's TLS server identity, loaded: what its TLS front end
+/// (`super::tls_front`) serves. The file is read once, at startup, and the password is not kept:
+/// the file may move afterwards, and a new certificate takes a restart (a per-connection reload
+/// would let every unauthenticated peer trigger a PKCS#12 decryption, and on Windows a key
+/// import).
+#[cfg(feature = "embedded-broker")]
 pub(crate) struct BrokerIdentity {
-    /// Absolute path of the PKCS#12 file. rumqttd takes a path, not a loaded identity, and
-    /// re-reads the file for every connection it accepts, so the file must stay in place while
-    /// the gateway runs (replacing it, with the same password, rotates the certificate for new
-    /// connections without a restart).
-    pub path: String,
-    pub password: String,
+    pub acceptor: native_tls::TlsAcceptor,
 }
 
 /// Load and validate `--broker-tls-identity` (password from [`BROKER_PASSWORD_ENV`]).
 #[cfg(feature = "embedded-broker")]
 pub(crate) fn broker_identity(path: &Path) -> Result<BrokerIdentity> {
-    broker_identity_with(path, env_password(BROKER_PASSWORD_ENV)?)
+    broker_identity_with(path, &env_password(BROKER_PASSWORD_ENV)?)
 }
 
 /// [`broker_identity`] with the password passed in (the tests' entry point). Validated the way
-/// the broker will use it: as a TLS server identity, not just a parseable file.
-#[cfg(any(feature = "embedded-broker", test))]
-pub(crate) fn broker_identity_with(path: &Path, password: String) -> Result<BrokerIdentity> {
+/// the broker uses it: as a TLS server identity, not just a parseable file. native-tls's
+/// defaults stand: TLS 1.2 at least, no client certificate requested.
+#[cfg(feature = "embedded-broker")]
+pub(crate) fn broker_identity_with(path: &Path, password: &str) -> Result<BrokerIdentity> {
     let what = || format!("--broker-tls-identity {}", path.display());
-    let id = load_identity(path, &password, BROKER_PASSWORD_ENV).with_context(what)?;
-    native_tls::TlsAcceptor::new(id)
+    let id = load_identity(path, password, BROKER_PASSWORD_ENV).with_context(what)?;
+    let acceptor = native_tls::TlsAcceptor::new(id)
         .with_context(|| format!("{}: not usable as a TLS server identity", what()))?;
-    let path = std::fs::canonicalize(path)
-        .with_context(what)?
-        .into_os_string()
-        .into_string()
-        .map_err(|_| anyhow!("{}: the path must be valid UTF-8", what()))?;
-    Ok(BrokerIdentity { path, password })
+    Ok(BrokerIdentity { acceptor })
 }
 
 /// Is `host` (as given to `--mqtt`) this machine: `localhost` or a loopback IP literal? Names are
@@ -672,21 +666,17 @@ mod tests {
         assert!(m.contains("missing.pem"), "{m}");
     }
 
+    #[cfg(feature = "embedded-broker")]
     #[test]
     fn broker_identity_is_validated_up_front() {
         let pki = test_pki::make();
-        let id = broker_identity_with(&pki.server_p12, test_pki::PASSWORD.into()).unwrap();
-        assert!(Path::new(&id.path).is_absolute());
-        assert_eq!(id.password, test_pki::PASSWORD);
+        assert!(broker_identity_with(&pki.server_p12, test_pki::PASSWORD).is_ok());
         for (path, pw) in [
             (&pki.server_p12, "wrong-pass"),
             (&pki.cert_only_p12, test_pki::PASSWORD),
             (&pki.ca_pem, test_pki::PASSWORD),
         ] {
-            let m = format!(
-                "{:#}",
-                broker_identity_with(path, pw.into()).err().expect("must fail")
-            );
+            let m = format!("{:#}", broker_identity_with(path, pw).err().expect("must fail"));
             assert!(
                 m.contains("--broker-tls-identity") && m.contains(BROKER_PASSWORD_ENV),
                 "{m}"

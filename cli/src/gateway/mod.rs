@@ -5,7 +5,7 @@
 //!  serial thread ──┐                       ┌── engine outputs ──▶ serial writer queue
 //!  mqtt conn loop ─┼─▶ Input mpsc ─▶ engine┼── publishes ───────▶ rumqttc Client
 //!  1 Hz ticker ────┘      (engine thread)  └── events ──────────▶ frontend (service/TUI)
-//!  [embedded rumqttd broker thread]
+//!  [embedded rumqttd broker thread; with TLS, its front end's thread (tls_front)]
 //! ```
 //!
 //! Startup is synchronous and fail-fast, *before* any thread or alt-screen: open the
@@ -23,6 +23,8 @@ pub(crate) mod payload;
 pub(crate) mod serial;
 pub(crate) mod service;
 pub(crate) mod tls;
+#[cfg(feature = "embedded-broker")]
+pub(crate) mod tls_front;
 pub(crate) mod topics;
 pub(crate) mod tui;
 
@@ -250,21 +252,26 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
     );
 
     // ---- broker resolution ----
+    // The embedded broker, held until `run` returns: dropping it stops its TLS front end.
+    #[cfg(feature = "embedded-broker")]
+    let mut _broker = None;
     let target = match external {
         Some(target) => target,
         None => {
             #[cfg(feature = "embedded-broker")]
             {
                 let (listen, identity) = embedded.expect("resolved above when --mqtt is absent");
-                // A wildcard bind is not a destination, and a TLS listener is not where the
+                // A wildcard bind is not a destination, and the TLS port is not where the
                 // gateway's own client goes: `embedded_broker` says where it connects (plain
                 // MQTT on loopback either way; see its docs).
-                let own = mqtt::embedded_broker(
+                let broker = mqtt::embedded_broker(
                     listen,
                     creds.as_ref(),
                     identity.as_ref(),
                     opts.broker_allow_plaintext,
+                    tls_front::Limits::DEFAULT,
                 )?;
+                let own = broker.own;
                 eprintln!(
                     "[tower] embedded MQTT broker on {listen} ({}, {}){}",
                     if identity.is_some() { "TLS" } else { "plain MQTT" },
@@ -273,12 +280,16 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
                     } else {
                         "anonymous, loopback only"
                     },
-                    // Say where the extra listener is, so it is no surprise in `ss -ltn`.
-                    match identity {
-                        Some(_) => format!("; the bridge's own client on {own}"),
+                    // Say where the extra listeners are, so they are no surprise in `ss -ltn`.
+                    match broker.upstream {
+                        Some(upstream) => format!(
+                            "; plain MQTT on loopback: {upstream} behind the TLS port, {own} for the \
+                             bridge's own client"
+                        ),
                         None => String::new(),
                     }
                 );
+                _broker = Some(broker);
                 tls::Target {
                     host: own.ip().to_string(),
                     port: own.port(),

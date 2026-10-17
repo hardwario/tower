@@ -10,7 +10,8 @@
 //! can drive the gateway, exactly like the serial port it owns. A non-loopback bind exposes node
 //! keys and the remote shell to the network, so it refuses to start without a login AND TLS
 //! (`--broker-tls-identity`); `--broker-allow-plaintext` waives the TLS half explicitly (with a
-//! warning). TLS itself lives in `super::tls`.
+//! warning). TLS itself lives in `super::tls`, the embedded broker's TLS port in
+//! `super::tls_front`.
 
 use std::collections::VecDeque;
 // The bind/auth policy only exists where the embedded broker does (and in its tests).
@@ -32,6 +33,8 @@ use super::payload;
 #[cfg(feature = "embedded-broker")]
 use super::tls::BrokerIdentity;
 use super::tls::{Target, handshake_hint};
+#[cfg(feature = "embedded-broker")]
+use super::tls_front::{self, TlsFront};
 use super::topics;
 
 /// Largest MQTT packet (remaining length: topic + payload) any TOWER link *sends*, and the
@@ -436,17 +439,15 @@ impl<S: Sink> Publisher<S> {
 /// clients sharing one response filter (`topics::gateway_rsp_filter`) the filter count
 /// stays bounded too. `max_payload_size` = [`MAX_PAYLOAD`], matching every client's send cap.
 ///
-/// With `tls`, the `listen` server speaks MQTT over TLS only, and `local` adds a second, plain
-/// listener on loopback for the gateway's own client (see [`embedded_broker`]); both enforce the
-/// same login table.
+/// `listeners` are rumqttd's servers, by name: the public one, or with TLS the two loopback ones
+/// behind the front end (see [`embedded_broker`]). All of them speak plain MQTT (rumqttd is
+/// built without TLS) and enforce the same login table.
 #[cfg(feature = "embedded-broker")]
 pub(crate) fn broker_config(
-    listen: SocketAddr,
+    listeners: &[(&str, SocketAddr)],
     auth: Option<HashMap<String, String>>,
-    tls: Option<&BrokerIdentity>,
-    local: Option<SocketAddr>,
 ) -> rumqttd::Config {
-    use rumqttd::{Config, ConnectionSettings, RouterConfig, ServerSettings, TlsConfig};
+    use rumqttd::{Config, ConnectionSettings, RouterConfig, ServerSettings};
 
     let router = RouterConfig {
         max_connections: 128,
@@ -455,10 +456,10 @@ pub(crate) fn broker_config(
         max_segment_count: 2,
         ..Default::default()
     };
-    let server = |name: &str, listen: SocketAddr, tls: Option<TlsConfig>| ServerSettings {
+    let server = |name: &str, listen: SocketAddr| ServerSettings {
         name: name.to_string(),
         listen,
-        tls,
+        tls: None,
         next_connection_delay_ms: 1,
         connections: ConnectionSettings {
             // TCP accept → MQTT CONNECT deadline (idle sockets can't pin connection slots).
@@ -470,26 +471,24 @@ pub(crate) fn broker_config(
             dynamic_filters: false,
         },
     };
-    let tls = tls.map(|id| TlsConfig::NativeTls {
-        pkcs12path: id.path.clone(),
-        pkcs12pass: id.password.clone(),
-    });
-    let mut servers = vec![("tower".to_string(), server("tower", listen, tls))];
-    if let Some(local) = local {
-        servers.push(("tower-local".to_string(), server("tower-local", local, None)));
-    }
     Config {
         id: 0,
         router,
-        v4: Some(servers.into_iter().collect()),
+        v4: Some(
+            listeners
+                .iter()
+                .map(|&(name, listen)| (name.to_string(), server(name, listen)))
+                .collect(),
+        ),
         ..Default::default()
     }
 }
 
-/// Fail early, with a usable message, if `addr` can't be bound (another broker owns it).
+/// Bind `addr` for the broker, failing early, with a usable message, if it can't be bound
+/// (another broker owns it).
 #[cfg(feature = "embedded-broker")]
-fn probe_bind(addr: SocketAddr) -> Result<()> {
-    std::net::TcpListener::bind(addr).map(drop).map_err(|e| {
+fn bind_port(addr: SocketAddr) -> Result<std::net::TcpListener> {
+    std::net::TcpListener::bind(addr).map_err(|e| {
         anyhow::anyhow!(
             "cannot host the embedded MQTT broker on {addr}: {e}; is another broker already \
              running there? Use it with --mqtt HOST[:PORT], or pick another --broker ADDR:PORT"
@@ -497,33 +496,64 @@ fn probe_bind(addr: SocketAddr) -> Result<()> {
     })
 }
 
+/// [`bind_port`], released at once: the port is free right now.
+#[cfg(feature = "embedded-broker")]
+fn probe_bind(addr: SocketAddr) -> Result<()> {
+    bind_port(addr).map(drop)
+}
+
+/// Two distinct free ports on `127.0.0.1` (both held until the second is found, then released).
+#[cfg(feature = "embedded-broker")]
+fn free_loopback_pair() -> std::io::Result<(SocketAddr, SocketAddr)> {
+    let bind = || std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
+    let (a, b) = (bind()?, bind()?);
+    Ok((a.local_addr()?, b.local_addr()?))
+}
+
+/// The running embedded broker, as the gateway holds it. Dropping it stops the TLS front end
+/// (its port closes, and every connection through it). rumqttd itself has no way to stop: its
+/// threads and loopback listeners end with the process, which the gateway's end is.
+#[cfg(feature = "embedded-broker")]
+#[must_use = "dropping it stops the TLS front end"]
+pub(crate) struct EmbeddedBroker {
+    /// Where the gateway's own client connects: plain MQTT, the public listener or (TLS) a
+    /// loopback one of its own.
+    pub own: SocketAddr,
+    /// With TLS: the plain loopback listener the front end hands every connection to.
+    pub upstream: Option<SocketAddr>,
+    _front: Option<TlsFront>,
+}
+
 /// Start the embedded rumqttd broker on `listen` under the access policy ([`broker_access`])
-/// and return once it is **confirmed listening**, with the address the gateway's own client
-/// connects to (plain MQTT). rumqttd reports a failed bind only through `tracing` and then
-/// returns `Ok` from `start()`, so the old code announced "embedded MQTT broker on …" and
-/// connected to whatever already owned the port. Now: probe-bind first (also the loopback
-/// address a wildcard bind is reached through; BSD lets a wildcard bind shadow-coexist with
-/// another process's specific one), then wait until the port accepts connections while the
-/// broker thread is still alive.
+/// and return once it is **confirmed listening**. rumqttd reports a failed bind only through
+/// `tracing` and then returns `Ok` from `start()`, so the old code announced "embedded MQTT
+/// broker on …" and connected to whatever already owned the port. Now: probe-bind first (also
+/// the loopback address a wildcard bind is reached through; BSD lets a wildcard bind
+/// shadow-coexist with another process's specific one), then wait until every rumqttd port
+/// accepts connections while the broker thread is still alive.
 ///
-/// **With TLS** (`tls`), `listen` speaks MQTT over TLS only, and the gateway's own client does
-/// not go through it: it gets a second, plain listener on `127.0.0.1` at a free port, with the
-/// same login table. A TLS hop between two threads of one process would authenticate nothing,
-/// and it would fail on exactly the certificates operators make: the client would have to dial
-/// a name the certificate holds and trust its CA, while a wildcard bind is only reachable as
-/// `127.0.0.1` / `localhost`, which a certificate for the gateway's network name does not cover.
-/// rumqttd also runs each TLS handshake inside its accept loop, so a peer that stalls one blocks
-/// new connections to that listener; the bridge's own (re)connects use the other listener and
-/// keep working. The extra listener is a specific loopback bind (it can't be shadowed later), and
-/// loopback is the trust boundary the policy already draws: it carries no anonymous access the
-/// TLS bind does not have.
+/// **With TLS** (`tls`), the public port belongs to the TLS front end (`super::tls_front`): bound
+/// here and held from then on, served once rumqttd is up. rumqttd itself runs each TLS handshake
+/// inside its accept loop, where one peer that stalls its handshake keeps every other client out;
+/// the front end accepts without waiting on any handshake, handshakes under a deadline (`limits`:
+/// `tls_front::Limits::DEFAULT` outside the tests) and proxies each connection to a plain rumqttd
+/// listener on `127.0.0.1`. The gateway's own client gets a second plain loopback listener: a TLS
+/// hop between two threads of one process would authenticate nothing, and it would fail on
+/// exactly the certificates operators make (the client would have to dial a name the certificate
+/// holds and trust its CA, while a wildcard bind is only reachable as `127.0.0.1` / `localhost`,
+/// which a certificate for the gateway's network name does not cover); and on a listener of its
+/// own, the bridge's (re)connects never wait behind whatever the network sends the TLS port. Both
+/// are specific loopback binds at free ports (they can't be shadowed later), both enforce the
+/// broker's login table, and loopback is the trust boundary the policy already draws: a local
+/// process that skips TLS through them gains no access the TLS port does not give.
 #[cfg(feature = "embedded-broker")]
 pub(crate) fn embedded_broker(
     listen: SocketAddr,
     creds: Option<&Credentials>,
     tls: Option<&BrokerIdentity>,
     allow_plaintext: bool,
-) -> Result<SocketAddr> {
+    limits: tls_front::Limits,
+) -> Result<EmbeddedBroker> {
     use std::sync::mpsc;
     use std::time::Instant;
 
@@ -535,21 +565,26 @@ pub(crate) fn embedded_broker(
     if public != listen {
         probe_bind(public)?;
     }
-    // The gateway's own way in: the public listener, or (TLS) a plain loopback one. Its port is
-    // probed free just before rumqttd binds it; to slip in, another process would have to guess
-    // that port and bind it within those microseconds.
-    let local = match tls {
-        Some(_) => Some(
-            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-                .and_then(|l| l.local_addr())
-                .context("finding a free loopback port for the gateway's own MQTT client")?,
-        ),
+    // With TLS: the front end's port, held from here on (a client that connects before the front
+    // end runs waits in the backlog), and rumqttd's two loopback ports behind it: the front end's
+    // upstream and the gateway's own. Those are probed free just before rumqttd binds them; to
+    // slip in, another process would have to guess one and bind it within those microseconds.
+    let front = match tls {
+        Some(id) => Some((
+            id,
+            bind_port(listen)?,
+            free_loopback_pair().context("finding free loopback ports for the broker behind TLS")?,
+        )),
         None => None,
     };
-    let own = local.unwrap_or(public);
-    let probes: Vec<SocketAddr> = std::iter::once(public).chain(local).collect();
+    let behind = front.as_ref().map(|&(_, _, ports)| ports);
+    let listeners = match behind {
+        Some((upstream, own)) => vec![("tower-tls", upstream), ("tower-local", own)],
+        None => vec![("tower", listen)],
+    };
+    let probes: Vec<SocketAddr> = listeners.iter().map(|&(_, a)| connect_addr(a)).collect();
 
-    let mut broker = rumqttd::Broker::new(broker_config(listen, access.auth, tls, local));
+    let mut broker = rumqttd::Broker::new(broker_config(&listeners, access.auth));
     let (died_tx, died) = mpsc::channel::<String>();
     std::thread::Builder::new()
         .name("mqtt-broker".into())
@@ -567,8 +602,7 @@ pub(crate) fn embedded_broker(
 
     // rumqttd's `start` only returns once every listener's thread has ended, so with two
     // listeners a lost bind shows up as a port that never accepts (the deadline below), not on
-    // `died`. A TLS listener accepts the probe's bare TCP connect too (the handshake then fails
-    // on EOF and rumqttd moves on).
+    // `died`. A probe is a bare TCP connect, which rumqttd drops at its CONNECT deadline.
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if let Ok(why) = died.try_recv() {
@@ -580,22 +614,40 @@ pub(crate) fn embedded_broker(
         {
             // rumqttd binds before it accepts, so a lost bind race has already ended its
             // thread by now; give that exit one beat to surface before trusting the port.
-            return match died.recv_timeout(Duration::from_millis(100)) {
-                Ok(why) => bail!("embedded MQTT broker on {listen} failed to start: {why}"),
-                Err(_) => Ok(own),
-            };
+            if let Ok(why) = died.recv_timeout(Duration::from_millis(100)) {
+                bail!("embedded MQTT broker on {listen} failed to start: {why}");
+            }
+            break;
         }
         if Instant::now() >= deadline {
             bail!("embedded MQTT broker did not start listening on {listen} within 3 s");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+
+    let Some((id, listener, (upstream, own))) = front else {
+        return Ok(EmbeddedBroker {
+            own: public,
+            upstream: None,
+            _front: None,
+        });
+    };
+    Ok(EmbeddedBroker {
+        own,
+        upstream: Some(upstream),
+        _front: Some(tls_front::start(listener, id.acceptor.clone(), upstream, limits)?),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    #[cfg(feature = "embedded-broker")]
+    use crate::gateway::tls::{self, test_pki};
+    #[cfg(feature = "embedded-broker")]
+    use crate::gateway::tls_front::test_peer::closed_within;
 
     fn creds() -> Credentials {
         Credentials {
@@ -701,7 +753,7 @@ mod tests {
     fn broker_config_is_bounded_and_carries_auth() {
         let listen: SocketAddr = "0.0.0.0:1883".parse().unwrap();
         let auth = broker_access(listen, Some(&creds()), false, true).unwrap().auth;
-        let cfg = broker_config(listen, auth, None, None);
+        let cfg = broker_config(&[("tower", listen)], auth);
         assert_eq!(cfg.router.max_segment_size, 1024 * 1024);
         assert_eq!(cfg.router.max_segment_count, 2);
         let servers = cfg.v4.as_ref().unwrap();
@@ -715,51 +767,38 @@ mod tests {
         // Loopback without credentials: no auth table.
         let lo: SocketAddr = "127.0.0.1:1883".parse().unwrap();
         let cfg = broker_config(
-            lo,
+            &[("tower", lo)],
             broker_access(lo, None, false, false).unwrap().auth,
-            None,
-            None,
         );
         assert!(cfg.v4.unwrap()["tower"].connections.auth.is_none());
     }
 
+    /// Behind the TLS front end: two plain loopback listeners, each with the public port's login.
     #[cfg(feature = "embedded-broker")]
     #[test]
-    fn broker_config_tls_adds_a_plain_loopback_listener_with_the_same_login() {
+    fn broker_config_behind_tls_gives_every_listener_the_login() {
         let listen: SocketAddr = "0.0.0.0:8883".parse().unwrap();
-        let local: SocketAddr = "127.0.0.1:40001".parse().unwrap();
-        let id = BrokerIdentity {
-            path: "/etc/tower/broker.p12".into(),
-            password: "p12-pass".into(),
-        };
+        let upstream: SocketAddr = "127.0.0.1:40001".parse().unwrap();
+        let own: SocketAddr = "127.0.0.1:40002".parse().unwrap();
         let auth = broker_access(listen, Some(&creds()), true, false).unwrap().auth;
-        let cfg = broker_config(listen, auth, Some(&id), Some(local));
+        let cfg = broker_config(&[("tower-tls", upstream), ("tower-local", own)], auth);
         let servers = cfg.v4.unwrap();
         assert_eq!(servers.len(), 2);
-        let public = &servers["tower"];
-        assert_eq!(public.listen, listen);
-        match &public.tls {
-            Some(rumqttd::TlsConfig::NativeTls {
-                pkcs12path,
-                pkcs12pass,
-            }) => assert_eq!(
-                (pkcs12path.as_str(), pkcs12pass.as_str()),
-                (id.path.as_str(), "p12-pass")
-            ),
-            _ => panic!("the public listener must be native-tls"),
+        for (name, addr) in [("tower-tls", upstream), ("tower-local", own)] {
+            let server = &servers[name];
+            assert_eq!(server.listen, addr);
+            assert!(server.tls.is_none(), "{name}: rumqttd serves plain MQTT only");
+            assert_eq!(
+                server
+                    .connections
+                    .auth
+                    .as_ref()
+                    .and_then(|t| t.get("ops"))
+                    .map(String::as_str),
+                Some("s3cret"),
+                "{name} enforces the login"
+            );
         }
-        let own = &servers["tower-local"];
-        assert_eq!(own.listen, local);
-        assert!(own.tls.is_none());
-        assert_eq!(
-            own.connections
-                .auth
-                .as_ref()
-                .and_then(|t| t.get("ops"))
-                .map(String::as_str),
-            Some("s3cret"),
-            "the loopback listener enforces the same login"
-        );
     }
 
     /// A fake rumqttc channel with a settable capacity.
@@ -868,11 +907,13 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let own = embedded_broker(addr, None, None, false).expect("broker confirmed listening");
+        let broker = embedded_broker(addr, None, None, false, tls_front::Limits::DEFAULT)
+            .expect("broker confirmed listening");
         assert_eq!(
-            own, addr,
+            broker.own, addr,
             "plain MQTT: the gateway's client uses the one listener"
         );
+        assert!(broker.upstream.is_none());
 
         let opts = options("test-client".into(), &plain("127.0.0.1", port), None);
         let (client, mut connection) = Client::new(opts, 10);
@@ -907,7 +948,10 @@ mod tests {
     fn embedded_broker_refuses_an_occupied_port() {
         let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = squatter.local_addr().unwrap();
-        let e = embedded_broker(addr, None, None, false).unwrap_err().to_string();
+        let e = embedded_broker(addr, None, None, false, tls_front::Limits::DEFAULT)
+            .err()
+            .expect("an occupied port fails startup")
+            .to_string();
         assert!(e.contains("cannot host the embedded MQTT broker"), "{e}");
         assert!(e.contains("--mqtt"), "actionable: {e}");
     }
@@ -921,7 +965,8 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        embedded_broker(addr, Some(&creds()), None, false).expect("broker up");
+        let _broker = embedded_broker(addr, Some(&creds()), None, false, tls_front::Limits::DEFAULT)
+            .expect("broker up");
 
         let connack = |c: Option<&Credentials>, id: &str| -> bool {
             connect_once(options(id.into(), &plain("127.0.0.1", port), c), WAIT).is_ok()
@@ -998,46 +1043,74 @@ mod tests {
         false
     }
 
-    /// MQTT over TLS end to end through the real embedded broker, against a throwaway CA and a
-    /// server identity for `localhost` + `127.0.0.1` minted for this test (`tls::test_pki`), on
-    /// ephemeral loopback ports. Covers what an operator can get wrong: a trusted CA connects
-    /// (by name and by IP) and carries data; no CA (OS roots only) is an untrusted certificate;
-    /// a certificate for another name is a hostname mismatch; plain MQTT on the TLS port gets no
-    /// session. Also: the gateway's own client is handed the plain loopback listener.
+    /// A client [`Target`] for a broker with the test PKI's server identity: `ca` trusts the test
+    /// CA (`--mqtt-ca`), `identity` presents the client certificate (`--mqtt-client-identity`).
+    #[cfg(feature = "embedded-broker")]
+    fn tls_target(pki: &test_pki::Pki, spec: &str, ca: bool, identity: bool) -> Target {
+        let flags = tls::ClientTlsFlags {
+            tls: false,
+            ca: ca.then_some(pki.ca_pem.as_path()),
+            identity: identity.then_some(pki.client_p12.as_path()),
+        };
+        tls::resolve_target_with(spec, &flags, test_pki::PASSWORD).unwrap()
+    }
+
+    /// An embedded TLS broker on a free loopback port, serving the test PKI's server identity
+    /// (for `localhost` and `127.0.0.1`), and that port.
+    #[cfg(feature = "embedded-broker")]
+    fn tls_broker(
+        pki: &test_pki::Pki,
+        creds: Option<&Credentials>,
+        limits: tls_front::Limits,
+    ) -> (EmbeddedBroker, SocketAddr) {
+        let id = tls::broker_identity_with(&pki.server_p12, test_pki::PASSWORD).unwrap();
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, free_port()));
+        let broker =
+            embedded_broker(addr, creds, Some(&id), false, limits).expect("TLS broker confirmed listening");
+        (broker, addr)
+    }
+
+    /// `mqtts://127.0.0.1:PORT`: the address a TLS test client dials when the name does not
+    /// matter (by IP, so Windows does not first spend 2 s on a refused `::1` for `localhost`).
+    #[cfg(feature = "embedded-broker")]
+    fn mqtts(addr: SocketAddr) -> String {
+        format!("mqtts://127.0.0.1:{}", addr.port())
+    }
+
+    /// MQTT over TLS end to end through the real embedded broker and its TLS front end, against
+    /// a throwaway CA and a server identity for `localhost` + `127.0.0.1` minted for this test
+    /// (`tls::test_pki`), on ephemeral loopback ports. Covers what an operator can get wrong: a
+    /// trusted CA connects (by name and by IP) and carries data; no CA (OS roots only) is an
+    /// untrusted certificate; a certificate for another name is a hostname mismatch. Also: the
+    /// gateway's own client is handed a plain loopback listener of its own.
     #[cfg(feature = "embedded-broker")]
     #[test]
     fn embedded_broker_tls_round_trip() {
-        use crate::gateway::tls::{self, ClientTlsFlags, test_pki};
-
         let pki = test_pki::make();
-        let tls_target = |spec: &str, ca: bool, identity: bool| -> Target {
-            let flags = ClientTlsFlags {
-                tls: false,
-                ca: ca.then_some(pki.ca_pem.as_path()),
-                identity: identity.then_some(pki.client_p12.as_path()),
-            };
-            tls::resolve_target_with(spec, &flags, test_pki::PASSWORD).unwrap()
-        };
-
-        let id = tls::broker_identity_with(&pki.server_p12, test_pki::PASSWORD.into()).unwrap();
-        let port = free_port();
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-        let own = embedded_broker(addr, None, Some(&id), false).expect("TLS broker confirmed listening");
+        let (broker, addr) = tls_broker(&pki, None, tls_front::Limits::DEFAULT);
+        let port = addr.port();
+        let own = broker.own;
         assert!(
             own.ip().is_loopback() && own != addr,
             "own client: a separate loopback listener"
         );
+        assert!(
+            broker
+                .upstream
+                .is_some_and(|u| u.ip().is_loopback() && u != own && u != addr),
+            "the front end's upstream: one more loopback listener"
+        );
 
         // Trusted CA: by DNS name and by IP address (both are in the certificate), with and
-        // without a client identity (rumqttd's native-tls acceptor never asks for one, so this
-        // proves the identity loads and the handshake still completes).
+        // without a client identity (the front end's native-tls acceptor never asks for one, so
+        // this proves the identity loads and the handshake still completes).
         for (i, (host, identity)) in [("localhost", false), ("127.0.0.1", false), ("localhost", true)]
             .into_iter()
             .enumerate()
         {
             let spec = format!("mqtts://{host}:{port}");
             let (client, mut conn) = connect_once(
-                options("tls-ok".into(), &tls_target(&spec, true, identity), None),
+                options("tls-ok".into(), &tls_target(&pki, &spec, true, identity), None),
                 WAIT,
             )
             .unwrap_or_else(|e| panic!("{spec} (identity {identity}): {e:?}"));
@@ -1050,7 +1123,11 @@ mod tests {
         // No --mqtt-ca: the OS roots don't know the test CA.
         let spec = format!("mqtts://localhost:{port}");
         match connect_once(
-            options("tls-untrusted".into(), &tls_target(&spec, false, false), None),
+            options(
+                "tls-untrusted".into(),
+                &tls_target(&pki, &spec, false, false),
+                None,
+            ),
             WAIT,
         ) {
             Err(Some(e)) if matches!(*e, ConnectionError::Tls(_)) => eprintln!("untrusted, as expected: {e}"),
@@ -1058,40 +1135,26 @@ mod tests {
             Err(e) => panic!("expected a TLS error for an untrusted certificate, got {e:?}"),
         }
 
-        // The gateway's own way in: plain MQTT on the loopback listener. It keeps working while a
-        // peer holds the TLS listener's accept loop with a handshake it never finishes (rumqttd
-        // runs each TLS handshake inline there), which is why the bridge does not use that port.
-        let staller = std::net::TcpStream::connect(addr).unwrap();
-        std::thread::sleep(Duration::from_millis(200));
+        // The gateway's own way in: plain MQTT on its loopback listener.
         let (client, mut conn) =
             connect_once(options("own".into(), &plain("127.0.0.1", own.port()), None), WAIT)
-                .expect("the gateway's own listener takes plain MQTT, even with the TLS port stalled");
+                .expect("the gateway's own listener takes plain MQTT");
         assert!(round_trip(&client, &mut conn, "tower/own"));
-        drop(staller);
-
-        // Plain MQTT against the TLS port gets no session (OpenSSL rejects the first byte; on
-        // macOS the broker waits for a TLS record that never comes, hence the short deadline).
-        assert!(
-            connect_once(
-                options("plain".into(), &plain("127.0.0.1", port), None),
-                Duration::from_secs(3)
-            )
-            .is_err()
-        );
 
         // A trusted CA but a certificate for another name: the hostname check stays on.
-        let other = tls::broker_identity_with(&pki.other_p12, test_pki::PASSWORD.into()).unwrap();
+        let other = tls::broker_identity_with(&pki.other_p12, test_pki::PASSWORD).unwrap();
         let port2 = free_port();
-        embedded_broker(
+        let _other = embedded_broker(
             SocketAddr::from((Ipv4Addr::LOCALHOST, port2)),
             None,
             Some(&other),
             false,
+            tls_front::Limits::DEFAULT,
         )
         .expect("second TLS broker up");
         let spec = format!("mqtts://localhost:{port2}");
         match connect_once(
-            options("tls-mismatch".into(), &tls_target(&spec, true, false), None),
+            options("tls-mismatch".into(), &tls_target(&pki, &spec, true, false), None),
             WAIT,
         ) {
             Err(Some(e)) if matches!(*e, ConnectionError::Tls(_)) => {
@@ -1102,19 +1165,104 @@ mod tests {
         }
     }
 
-    /// A TLS embedded broker keeps the login: the plain loopback listener for the gateway's own
-    /// client enforces it too (it is not an anonymous side door).
+    /// A TLS embedded broker keeps its login on every way in: the TLS port, the plain loopback
+    /// listener behind the front end and the one for the gateway's own client all refuse an
+    /// anonymous client and admit the login (neither loopback listener is an anonymous side door).
     #[cfg(feature = "embedded-broker")]
     #[test]
-    fn embedded_broker_tls_own_listener_enforces_the_login() {
-        use crate::gateway::tls::{self, test_pki};
+    fn embedded_broker_tls_enforces_the_login_on_every_listener() {
+        let pki = test_pki::make();
+        let (broker, addr) = tls_broker(&pki, Some(&creds()), tls_front::Limits::DEFAULT);
+        let upstream = broker
+            .upstream
+            .expect("TLS: rumqttd listens behind the front end");
+        let targets = [
+            tls_target(&pki, &mqtts(addr), true, false),
+            plain("127.0.0.1", upstream.port()),
+            plain("127.0.0.1", broker.own.port()),
+        ];
+        for (i, target) in targets.iter().enumerate() {
+            let url = target.url();
+            let anon = connect_once(options(format!("anon-{i}"), target, None), WAIT);
+            assert!(anon.is_err(), "{url}: anonymous is refused");
+            let authed = connect_once(options(format!("authed-{i}"), target, Some(&creds())), WAIT);
+            assert!(authed.is_ok(), "{url}: the login connects");
+        }
+    }
+
+    /// The defect the front end fixes: a peer that connected and never started its handshake held
+    /// rumqttd's accept loop (it ran each TLS handshake inline), so no other client got in. Now
+    /// another client completes a TLS session and a round trip while the staller still holds its
+    /// handshake: the deadline is far beyond the test, so the staller was not just reaped first.
+    #[cfg(feature = "embedded-broker")]
+    #[test]
+    fn embedded_broker_tls_serves_others_while_a_handshake_stalls() {
+        let pki = test_pki::make();
+        let limits = tls_front::Limits {
+            handshake_timeout: Duration::from_secs(3600),
+            ..tls_front::Limits::DEFAULT
+        };
+        let (_broker, addr) = tls_broker(&pki, Some(&creds()), limits);
+        let mut staller = std::net::TcpStream::connect(addr).unwrap();
+        let target = tls_target(&pki, &mqtts(addr), true, false);
+        let (client, mut conn) = connect_once(options("tls-next".into(), &target, Some(&creds())), WAIT)
+            .expect("a TLS client gets in past the stalled handshake");
+        assert!(round_trip(&client, &mut conn, "tower/stall"), "data over TLS");
+        assert!(
+            closed_within(&mut staller, Duration::from_millis(100)).is_none(),
+            "the staller still holds its handshake"
+        );
+    }
+
+    /// Plain MQTT on the TLS port gets no session: the front end forwards nothing before a
+    /// finished handshake. OpenSSL and SChannel reject the first byte; Security.framework reads
+    /// it as the header of a record it then waits for, so the (shortened) deadline closes it.
+    #[cfg(feature = "embedded-broker")]
+    #[test]
+    fn embedded_broker_tls_refuses_plain_mqtt() {
+        use std::io::Write;
+
+        // CONNECT, MQTT 3.1.1, clean session, keep-alive 60 s, client id "x": anonymous, which
+        // this broker (loopback, no login) would answer with a CONNACK if it ever saw it.
+        const CONNECT: [u8; 15] = [0x10, 13, 0, 4, b'M', b'Q', b'T', b'T', 4, 0x02, 0, 60, 0, 1, b'x'];
+        const CONNACK: u8 = 0x20;
 
         let pki = test_pki::make();
-        let id = tls::broker_identity_with(&pki.server_p12, test_pki::PASSWORD.into()).unwrap();
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, free_port()));
-        let own = embedded_broker(addr, Some(&creds()), Some(&id), false).expect("broker up");
-        let target = plain("127.0.0.1", own.port());
-        assert!(connect_once(options("own-anon".into(), &target, None), WAIT).is_err());
-        assert!(connect_once(options("own-authed".into(), &target, Some(&creds())), WAIT).is_ok());
+        let limits = tls_front::Limits {
+            handshake_timeout: Duration::from_secs(1),
+            ..tls_front::Limits::DEFAULT
+        };
+        let (_broker, addr) = tls_broker(&pki, None, limits);
+        let mut peer = std::net::TcpStream::connect(addr).unwrap();
+        peer.write_all(&CONNECT).unwrap();
+        let got = closed_within(&mut peer, WAIT).expect("the front end closes a plain MQTT connection");
+        assert_ne!(got.first(), Some(&CONNACK), "no CONNACK: {got:02x?}");
+    }
+
+    /// The TLS front end stops with the broker handle: its port closes, and so does every
+    /// connection through it (a stalled handshake, a live session), so nothing outlives the
+    /// gateway.
+    #[cfg(feature = "embedded-broker")]
+    #[test]
+    fn embedded_broker_tls_front_end_stops_on_drop() {
+        let pki = test_pki::make();
+        let (broker, addr) = tls_broker(&pki, None, tls_front::Limits::DEFAULT);
+        let mut staller = std::net::TcpStream::connect(addr).unwrap();
+        let target = tls_target(&pki, &mqtts(addr), true, false);
+        let (_client, mut conn) =
+            connect_once(options("tls-live".into(), &target, None), WAIT).expect("a TLS session");
+        drop(broker);
+        assert!(
+            closed_within(&mut staller, WAIT).is_some(),
+            "the stalled handshake is closed"
+        );
+        assert!(
+            matches!(conn.recv_timeout(WAIT), Ok(Err(_))),
+            "the TLS session is closed"
+        );
+        assert!(
+            std::net::TcpStream::connect_timeout(&addr, WAIT).is_err(),
+            "nothing listens on the TLS port any more"
+        );
     }
 }

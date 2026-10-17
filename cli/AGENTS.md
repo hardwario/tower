@@ -9,8 +9,14 @@ only, both confirmed interactively or by `--yes`; `unprotect` mass-erases flash 
 It is also the gateway/MQTT host: `tower gateway` bridges a Radio Dongle's network to MQTT
 (embedded `rumqttd` broker or external, TUI + `--service`), and `tower nodes` / `tower net` are
 the MQTT client commands (`src/gateway/`, `src/client/`). MQTT over TLS (`src/gateway/tls.rs`)
-uses the platform's TLS stack through native-tls (rumqttc/rumqttd `use-native-tls`); never
-enable their rustls features, whose rustls versions fail `cargo audit`. The embedded broker's
+uses the platform's TLS stack through native-tls (rumqttc `use-native-tls`); never enable the
+rustls features of rumqttc/rumqttd, whose rustls versions fail `cargo audit`. rumqttd is built
+without TLS: the embedded broker's TLS port is our own front end (`src/gateway/tls_front.rs`,
+the crate's only async code, a current-thread tokio runtime on its own thread), which
+handshakes under a deadline with capped slots and proxies to a plain rumqttd listener on
+loopback (rumqttd's own TLS listener handshakes inside its accept loop, so one stalled peer
+blocks every client). Every rumqttd listener (the one behind the front end, the bridge's own)
+enforces the same login. The embedded broker's
 access policy is the pure `mqtt::broker_access` (loopback anonymous, anything else login + TLS
 unless `--broker-allow-plaintext`); change it together with its test matrix, `README.md` and
 `docs/security-model.md`.

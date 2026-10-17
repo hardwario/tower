@@ -139,16 +139,27 @@ gateway's own.
 - TLS is the platform's stack through native-tls (Security.framework, SChannel, OpenSSL linked
   statically on Linux); rustls is not used (the versions rumqttc/rumqttd build against carry
   RustSec advisories). Minimum TLS 1.2.
+- The embedded broker's TLS port is a front end of our own (`tls_front`), not rumqttd's TLS
+  listener (rumqttd runs each handshake inside its accept loop, so one peer that stalls its
+  handshake keeps every other client out). Its accept loop never waits on a handshake; each
+  connection gets its own task with a 10 s handshake deadline, at most 32 handshakes are in
+  flight and 64 connections open, and a connection past either limit is closed at once. A
+  finished handshake is proxied to a plain rumqttd listener on 127.0.0.1 (a free port) with the
+  same login table: no byte reaches rumqttd before a finished handshake, and no path skips the
+  login. rumqttd then sees every TLS client as 127.0.0.1, which changes no decision (no rule of
+  rumqttd or of the access policy looks at the peer address; the limits sit in the front end, in
+  front of the hop). The server identity is loaded once at startup (a new certificate takes a
+  restart), so a connection costs no PKCS#12 decryption.
 - Clients (`tower gateway --mqtt`, `tower nodes`, `tower net`): `mqtts://` or `--mqtt-tls`; the OS
   roots plus optional `--mqtt-ca` roots; the certificate must name the host dialled (always
   checked, no switch to disable it); optional client identity for mutual TLS
   (`--mqtt-client-identity`, password `TOWER_MQTT_CLIENT_IDENTITY_PASSWORD`). A login sent over
   plain MQTT to a non-loopback host gets a warning, not a refusal. PKCS#12 passwords come only
   from the environment and are never printed; every TLS file is validated at startup.
-- With TLS, the gateway's own client reaches the embedded broker over a second, plain listener
-  on 127.0.0.1 (a free port, the same login table), not through the TLS port: an in-process TLS
-  hop authenticates nothing, and this keeps the bridge connected while the TLS listener is held
-  (residual risk 5).
+- With TLS, the gateway's own client reaches the embedded broker over another plain listener on
+  127.0.0.1 (a free port, the same login table), not through the TLS port: an in-process TLS hop
+  authenticates nothing, and this keeps the bridge's (re)connects clear of whatever the network
+  sends the TLS port (residual risk 5).
 - Retained command messages are ignored and cleared; payload sizes and request ids are bounded;
   duplicate requests (QoS 1 redelivery) are dropped; node names are printable and unique; keys
   are redacted in the TUI's MQTT mirror.
@@ -204,11 +215,13 @@ gateway's own.
 5. **Loopback MQTT is anonymous**, by decision, with or without TLS: every local process on the
    gateway host can control the network, read keys and queue remote shell lines. TLS is available
    for everything that crosses the network (required for a non-loopback embedded broker unless
-   waived). Limits of the embedded broker's TLS (rumqttd's native-tls backend): no client
-   certificates (authentication is the login), and each TLS handshake runs inside its accept
-   loop, so a network peer that opens the port and stalls its handshake holds off new
-   connections until it disconnects (open sessions and the bridge itself continue). Exposing it
-   to an untrusted network calls for a firewall rule or an external, hardened broker (`--mqtt`).
+   waived). Limits of the embedded broker's TLS (section 4.4): no client certificates
+   (authentication is the login), and its slots are bounded, not reserved: a network peer that
+   keeps 32 handshakes stalled (renewed every 10 s), or 64 connections open (a finished handshake
+   holds one for up to rumqttd's 5 s CONNECT deadline without a login), keeps new TLS clients out
+   while it does so (open sessions and the bridge itself continue; a single idle socket no longer
+   locks anyone out). There is no per-address limit. Exposing the broker to an untrusted network
+   calls for a firewall rule or an external, hardened broker (`--mqtt`).
 6. **A stale older watermark is not detectable**: if EEPROM corruption hides the newest watermark
    record while an older one still precedes it, boot resumes below counters already sent
    (counter reuse). A torn write at the log tail (the normal power-loss case) is safe; closing
@@ -236,7 +249,8 @@ gateway's own.
 5. The storage log's power-loss and corruption behaviour (section 4.5) with respect to the
    counter watermark (residual risk 6).
 6. The MQTT access policy for a gateway host shared with other services, and the plain loopback
-   listener the bridge's own client uses next to a TLS embedded broker (section 4.4).
+   listeners behind a TLS embedded broker (the front end's upstream and the bridge's own client;
+   section 4.4).
 
 ## 7. Where things live
 
