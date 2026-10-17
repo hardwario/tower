@@ -248,6 +248,15 @@ impl Ephemeral {
 
 impl Drop for Ephemeral {
     fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+/// Wipes the secret and the nonce (the public key is public). Also what makes
+/// `Option<Ephemeral>::zeroize` available, which wipes the bytes a value moved out of an
+/// `Option` (`take`) leaves behind: the moved copy's drop cannot reach them.
+impl Zeroize for Ephemeral {
+    fn zeroize(&mut self) {
         self.secret.zeroize();
         self.nonce.zeroize();
     }

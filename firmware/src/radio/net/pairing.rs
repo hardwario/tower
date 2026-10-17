@@ -435,6 +435,10 @@ impl Net {
             let Some(eph) = host.eph.take() else {
                 continue; // unreachable: `ready()` above
             };
+            // `take` moved the ephemeral out by copy: its secret and nonce bytes are still in the
+            // (now `None`) slot of the long-lived window state, where the moved value's
+            // zeroize-on-drop cannot reach them. Wipe the slot.
+            host.eph.zeroize();
             let mut e_node = [0u8; PUBLIC_LEN];
             e_node.copy_from_slice(&buf[1..REQ_LEN]);
             let resp = join_resp(&eph, &e_node, peer_addr, self.addr);
