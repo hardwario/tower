@@ -1,4 +1,4 @@
-//! `jolt` CLI — a thin shell over the `jolt` library crate (see `src/lib.rs`).
+//! `jolt` CLI: a thin shell over the `jolt` library crate (see `src/lib.rs`).
 //! Argument parsing (`cli`) and the subcommand handlers (`commands`) live here;
 //! the bootloader/flash engine lives in the library and is shared with other
 //! tools (e.g. tower-cli).

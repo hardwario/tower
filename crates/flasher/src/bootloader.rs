@@ -122,7 +122,7 @@ impl<'a, T: Transport> Bootloader<'a, T> {
 
     /// Auto-baud init: send a single `0x7F` and expect an ACK. Called after a
     /// fresh reset into the bootloader, so a NACK ("already initialised") means
-    /// something is off — `connect` then retries with another reset.
+    /// something is off; `connect` then retries with another reset.
     pub fn init(&mut self) -> Result<()> {
         self.port.clear_input()?;
         self.port.write_all(&[INIT])?;
@@ -155,8 +155,8 @@ impl<'a, T: Transport> Bootloader<'a, T> {
     /// `timeout` covers the (slow) erase ACK.
     ///
     /// The command byte + complement is acknowledged first (a NACK here is
-    /// [`NackStage::Command`] — usually line corruption); the page-list payload
-    /// is acknowledged second (a NACK here is [`NackStage::Payload`] — the
+    /// [`NackStage::Command`], usually line corruption); the page-list payload
+    /// is acknowledged second (a NACK here is [`NackStage::Payload`], the
     /// device rejecting an out-of-range page). Callers walking an unknown flash
     /// density must treat only a *payload* NACK as the flash boundary.
     pub fn extended_erase_pages(&mut self, pages: &[u16], timeout: Duration) -> Result<()> {
@@ -217,14 +217,14 @@ pub(crate) mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    /// In-memory [`Transport`] for protocol tests — no hardware.
+    /// In-memory [`Transport`] for protocol tests (no hardware).
     ///
     /// Two ways to drive it, which compose:
     ///   * a **manual reply queue** (`push_ack`, `push_nack`, `push_bytes`, …):
-    ///     reads pop these bytes in order — for deterministic scripts;
+    ///     reads pop these bytes in order, for deterministic scripts;
     ///   * an optional **erase-boundary simulation** (`set_erase_boundary`):
     ///     when set, Extended Erase (0x44) command+page-list frames are answered
-    ///     automatically — the command byte ACKs, and the page list ACKs iff
+    ///     automatically: the command byte ACKs, and the page list ACKs iff
     ///     every page is `< boundary` (erased pages are recorded), else NACKs.
     ///     This models a part of unknown density and lets [`erase_chip`]'s
     ///     bisection run against a moving boundary.

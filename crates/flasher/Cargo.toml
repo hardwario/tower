@@ -1,8 +1,8 @@
 [package]
 name = "jolt"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.99.1"
 description = "Program STM32L0 microcontrollers over the UART bootloader"
 license = "MIT"
 repository = "https://github.com/hardwario/jolt"
@@ -12,7 +12,7 @@ serialport = "4.9.0"
 thiserror = "2.0.18"
 
 # CLI-only dependencies: the reusable library (src/lib.rs and its modules) uses
-# none of these — the flash/erase engine is UI-free and returns typed errors.
+# none of these: the flash/erase engine is UI-free and returns typed errors.
 # They are optional so a library consumer (e.g. tower-cli) doesn't pull clap,
 # anyhow, or indicatif. The `cli` feature (default) turns them on and builds the
 # `jolt` binary.

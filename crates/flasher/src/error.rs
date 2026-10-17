@@ -10,8 +10,8 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Which phase of a two-step command handshake produced a NACK. AN3155 command
-/// frames are acknowledged in two stages — first the command byte + complement,
-/// then the command's payload — and the two mean very different things (a
+/// frames are acknowledged in two stages (first the command byte + complement,
+/// then the command's payload), and the two mean very different things (a
 /// command-byte NACK is usually line corruption; a payload NACK is the device
 /// rejecting the request, e.g. an out-of-range Extended Erase page list). Retry
 /// and boundary-detection logic must be able to tell them apart.
@@ -54,7 +54,7 @@ pub enum Error {
     },
 
     #[error(
-        "could not enter the bootloader after {attempts} attempt(s) (no ACK to 0x7F init) — check the --device and the cable"
+        "could not enter the bootloader after {attempts} attempt(s) (no ACK to 0x7F init); check the --device and the cable"
     )]
     BootloaderInit { attempts: u32 },
 
@@ -62,21 +62,29 @@ pub enum Error {
     VerifyMismatch { address: u32, got: u8, expected: u8 },
 
     #[error(
-        "erase truncated after {erased} page(s) ({kib} KiB) on chip 0x{id:03X}: not a valid STM32L0 flash density — the remaining pages are likely write-protected, so the device is only partly erased"
+        "erase truncated after {erased} page(s) ({kib} KiB) on chip 0x{id:03X}: not a valid STM32L0 flash density; the remaining pages are likely write-protected, so the device is only partly erased"
     )]
     PartialErase { erased: usize, kib: usize, id: u16 },
 
     #[error("invalid argument: {context}")]
     InvalidArgument { context: &'static str },
 
+    /// The image exceeds a flash bound: either the STM32L0 family maximum
+    /// ([`target::MAX_FLASH_SIZE`](crate::target::MAX_FLASH_SIZE), checked before connecting)
+    /// or the identified chip's flash ([`target::max_flash_size`](crate::target::max_flash_size),
+    /// checked right after `Get ID`, before any page is erased).
     #[error(
-        "firmware is {size} bytes, exceeding the {max} byte ({max_kib} KiB) maximum for any STM32L0 device"
+        "firmware is {size} bytes, exceeding the {max} byte ({max_kib} KiB) {}",
+        flash_limit_desc(.max)
     )]
     FirmwareTooLarge { size: usize, max: u32, max_kib: u32 },
 
+    /// The file is an ELF or Intel HEX image (detected by extension *or* by content), not
+    /// the raw binary jolt writes at the flash base.
     #[error(
         "{path} looks like a .{ext} file; jolt flashes raw binaries. \
-         Convert it first, e.g.: arm-none-eabi-objcopy -O binary in.{ext} out.bin"
+         Convert it first, e.g.: arm-none-eabi-objcopy -O binary in.{ext} out.bin \
+         (from a Cargo project: cargo objcopy --release -- -O binary out.bin)"
     )]
     FirmwareFormat { path: PathBuf, ext: String },
 
@@ -85,4 +93,13 @@ pub enum Error {
 
     #[error("serial port disconnected while {context}")]
     Disconnected { context: &'static str },
+}
+
+/// Wording for [`Error::FirmwareTooLarge`]: the family maximum vs a smaller, identified part.
+fn flash_limit_desc(max: &u32) -> &'static str {
+    if *max == crate::target::MAX_FLASH_SIZE {
+        "maximum for any STM32L0 device"
+    } else {
+        "flash of the connected chip"
+    }
 }

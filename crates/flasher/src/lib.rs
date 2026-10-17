@@ -1,4 +1,4 @@
-//! jolt — program STM32L0 microcontrollers over the UART bootloader.
+//! jolt: program STM32L0 microcontrollers over the UART bootloader.
 //!
 //! This crate is both a CLI (`src/main.rs`) and a reusable library. The library
 //! exposes the STM32 USART-bootloader engine so other tools can drive
@@ -27,7 +27,7 @@
 //! [`Port::reset_into_bootloader`](port::Port::reset_into_bootloader) reset
 //! pulses. The lower layers ([`bootloader`], [`port`]) are public for callers
 //! that need finer control. Every library entry point returns
-//! [`error::Error`] — no `anyhow` in the public surface.
+//! [`error::Error`]; there is no `anyhow` in the public surface.
 
 pub mod bootloader;
 pub mod error;

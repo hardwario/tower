@@ -61,8 +61,8 @@ pub fn no_progress(_: Progress) {}
 #[non_exhaustive]
 pub struct FlashOptions {
     /// Erase before writing. The erase covers only the **image footprint**
-    /// (the pages the firmware spans), not the whole device — a full-chip wipe
-    /// is [`erase`]. Writing STM32L0 flash that has *not* been erased corrupts
+    /// (the pages the firmware spans), not the whole device (a full-chip wipe
+    /// is [`erase`]). Writing STM32L0 flash that has *not* been erased corrupts
     /// the affected 8-byte words, so skip this only when you know the target
     /// pages are already erased.
     pub erase: bool,
@@ -98,10 +98,10 @@ fn pages_for_length(length: usize, max_pages: usize) -> usize {
 ///
 /// Rejects an **empty** image up front: erase/write/verify would each be a
 /// no-op, so [`flash`] would reset the chip and return `Ok(())` having flashed
-/// nothing — a library consumer could "successfully flash" an empty file
+/// nothing, and a library consumer could "successfully flash" an empty file
 /// without noticing. Also rejects an image larger than the family maximum
-/// [`target::MAX_FLASH_SIZE`] (the real per-part flash is smaller and is
-/// enforced later by an out-of-range NACK).
+/// [`target::MAX_FLASH_SIZE`] (the real per-part flash may be smaller; that is
+/// checked by [`check_fits_chip`] once `Get ID` has identified the part).
 fn check_firmware_len(len: usize) -> Result<()> {
     if len == 0 {
         return Err(Error::InvalidArgument {
@@ -116,6 +116,23 @@ fn check_firmware_len(len: usize) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Validate the image length against the **identified** chip's flash
+/// ([`target::max_flash_size`]), after `Get ID` but before any page is erased.
+/// Without this an image that fits the family maximum but not, say, a 16 KiB
+/// part would erase the app's pages and only then fail on an out-of-range
+/// page NACK, leaving the board bricked until re-flashed. An unrecognized id
+/// (no known size) passes; the family bound already applied.
+fn check_fits_chip(len: usize, id: u16) -> Result<()> {
+    match target::max_flash_size(id) {
+        Some(max) if len as u64 > u64::from(max) => Err(Error::FirmwareTooLarge {
+            size: len,
+            max,
+            max_kib: max / 1024,
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Erase pages `0..count` in chunks of ERASE_CHUNK, reporting progress. Every
@@ -152,8 +169,8 @@ fn erase_range<T: Transport>(bl: &mut Bootloader<T>, start: usize, end: usize) -
 }
 
 /// A chunk `[start..end)` was NACKed (page list ran past this part's flash).
-/// Bisect it to find the flash boundary — the first page the device rejects as
-/// out of range — and erase every valid page below it. Returns the boundary
+/// Bisect it to find the flash boundary (the first page the device rejects as
+/// out of range) and erase every valid page below it. Returns the boundary
 /// page number (== the number of pages in `[0..)` that are in range up to
 /// `end`, i.e. the first out-of-range page).
 ///
@@ -194,7 +211,7 @@ fn bisect_erase_boundary<T: Transport>(
 /// can't report its flash size (Read Memory of the factory region is rejected)
 /// and refuses the 0xFFFF mass-erase code, so erase pages from 0 up to the
 /// family maximum in chunks. When a chunk is NACKed *after* at least one chunk
-/// succeeded, the page list has run past this part's flash — `bisect_erase_boundary`
+/// succeeded, the page list has run past this part's flash; `bisect_erase_boundary`
 /// then finds the exact density boundary and erases the valid pages below it, so
 /// no in-range page is left un-erased. Returns the number of pages erased.
 ///
@@ -204,9 +221,9 @@ fn bisect_erase_boundary<T: Transport>(
 /// than being mistaken for successful completion.
 ///
 /// A payload NACK is ambiguous, though: AN3155 returns it both for an
-/// out-of-range page (the end of flash — the intended stop) *and* for a
+/// out-of-range page (the end of flash, the intended stop) *and* for a
 /// write-protected (WRP) page (a truncated erase). To tell them apart, the
-/// discovered boundary is cross-checked — using the `id` from `Get ID` — against
+/// discovered boundary is cross-checked (using the `id` from `Get ID`) against
 /// the known STM32L0 densities ([`target::FLASH_DENSITIES_PAGES`]) and the
 /// identified chip's flash size. If the stop point isn't a plausible full-flash
 /// density, the erase left pages behind and [`Error::PartialErase`] is returned
@@ -257,7 +274,7 @@ pub fn erase_chip<T: Transport>(
     // could equally be a write-protected (WRP) page rather than the end of
     // flash. Cross-check the stop point: it must be a real STM32L0 flash density
     // and fit the identified chip. Anything else is a truncated erase with pages
-    // still un-erased — surface it instead of reporting a silent, partial Ok.
+    // still un-erased; surface it instead of reporting a silent, partial Ok.
     if hit_boundary {
         let fits_family =
             target::max_flash_size(id).is_none_or(|max| page <= target::pages_in(max));
@@ -277,13 +294,18 @@ pub fn erase_chip<T: Transport>(
 /// back into the application. The high-level counterpart to [`flash`] for a
 /// standalone erase. Returns the number of pages erased.
 ///
-/// Note: unlike [`flash`], the device is left running the application. On an
-/// error *after* erase begins the device is left parked in the bootloader (its
-/// flash partly wiped) — power-cycle or re-run to recover.
+/// Note: unlike [`flash`], the device is left running the application. A
+/// failure to enter the bootloader or to read the id resets it back into the
+/// (intact) application; on an error *after* erase begins the device is left
+/// parked in the bootloader (its flash partly wiped); power-cycle or re-run to
+/// recover.
+///
+/// Only **main flash** is erased: the STM32L0's data EEPROM (e.g. 6 KiB on the
+/// L083, at 0x0808_0000) is a separate memory and keeps its contents.
 pub fn erase(port: &mut Port, progress: &mut dyn FnMut(Progress)) -> Result<usize> {
     connect(port, progress)?;
     let id = Bootloader::new(port).get_id().inspect_err(|_| {
-        // Get ID failed before any erase — the app is intact; put it back.
+        // Get ID failed before any erase: the app is intact, so put it back.
         let _ = port.reset_into_app();
     })?;
     progress(Progress::ChipIdentified { id });
@@ -305,20 +327,36 @@ fn pad_block(chunk: &[u8], align: usize) -> Vec<u8> {
 /// full reset sequence between attempts. Per-attempt failures are reported via
 /// [`Progress::ConnectError`]; only exhausting all attempts is an error
 /// ([`Error::BootloaderInit`]).
+///
+/// On that error the device is reset back into the application (best-effort;
+/// the original error is returned either way): every attempt pulsed it into
+/// the system bootloader, and if the last one *did* get there but its ACK was
+/// lost on the line, the app would otherwise not run again until a power cycle,
+/// even after a "read-only" `info`.
 pub fn connect(port: &mut Port, progress: &mut dyn FnMut(Progress)) -> Result<()> {
-    connect_with(port, |p| p.reset_into_bootloader(), progress)
+    connect_with(
+        port,
+        |p| p.reset_into_bootloader(),
+        |p| {
+            let _ = p.reset_into_app();
+        },
+        progress,
+    )
 }
 
-/// Retry core of [`connect`], generic over the transport and its reset action
-/// so the retry count can be tested without a real port.
-fn connect_with<T, R>(
+/// Retry core of [`connect`], generic over the transport and its reset /
+/// restore actions so the retry count and the give-up restore can be tested
+/// without a real port.
+fn connect_with<T, R, A>(
     transport: &mut T,
     mut reset: R,
+    mut restore: A,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<()>
 where
     T: Transport,
     R: FnMut(&mut T) -> Result<()>,
+    A: FnMut(&mut T),
 {
     for attempt in 1..=CONNECT_ATTEMPTS {
         progress(Progress::Connecting {
@@ -335,6 +373,8 @@ where
             }),
         }
     }
+    // Possibly parked in the bootloader by the last attempt; put the app back.
+    restore(transport);
     Err(Error::BootloaderInit {
         attempts: CONNECT_ATTEMPTS,
     })
@@ -344,24 +384,25 @@ where
 ///
 /// Full sequence: enter the bootloader ([`connect`]) → `Get ID`
 /// ([`Progress::ChipIdentified`]) → optional footprint erase (only the pages the
-/// image spans, not the whole device — see [`FlashOptions::erase`]) → write →
+/// image spans, not the whole device; see [`FlashOptions::erase`]) → write →
 /// optional read-back verify → optional start (reset into app, or `Go` when
 /// [`FlashOptions::go`] is set).
 ///
 /// The image length is validated up front (`check_firmware_len`): an **empty**
-/// image is rejected ([`Error::InvalidArgument`]) — erase/write/verify would all
-/// be vacuous, so without this check `flash` would reset the chip and return
-/// `Ok(())` having programmed nothing — and an image larger than
-/// [`target::MAX_FLASH_SIZE`] is rejected ([`Error::FirmwareTooLarge`]). The
-/// latter is the family *maximum*; an image that fits the maximum but exceeds
-/// the connected part's real flash still passes this check and instead fails
-/// mid-erase/write with an out-of-range page NACK.
+/// image is rejected ([`Error::InvalidArgument`]), since erase/write/verify would all
+/// be vacuous (without this check `flash` would reset the chip and return
+/// `Ok(())` having programmed nothing), and an image larger than
+/// [`target::MAX_FLASH_SIZE`] is rejected ([`Error::FirmwareTooLarge`]). Once
+/// `Get ID` has identified the part, the image is checked again against *that*
+/// chip's flash ([`target::max_flash_size`]), still before any page is erased.
+/// (The image *content* is not inspected here; [`crate::firmware::load`] /
+/// [`crate::firmware::validate`] do that.)
 ///
-/// Failure behaviour: on an error *before* the first erase/write (Get ID, or the
-/// footprint bounds check) the device is reset back into the application so the
-/// intact app keeps running. On any error *at or after* erase begins the device
-/// is left parked in the bootloader (flash partly modified) — recover by
-/// re-flashing or power-cycling.
+/// Failure behaviour: on an error *before* the first erase/write (bootloader
+/// entry, Get ID, or the per-chip size check) the device is reset back into the
+/// application so the intact app keeps running. On any error *at or after*
+/// erase begins the device is left parked in the bootloader (flash partly
+/// modified); recover by re-flashing or power-cycling.
 pub fn flash(
     port: &mut Port,
     firmware: &[u8],
@@ -372,7 +413,8 @@ pub fn flash(
 
     connect(port, progress)?;
 
-    // Get ID happens before any flash modification: on error, restore the app.
+    // Get ID and the per-chip size check happen before any flash modification:
+    // on error, restore the app.
     let id = match Bootloader::new(port).get_id() {
         Ok(id) => id,
         Err(e) => {
@@ -381,6 +423,10 @@ pub fn flash(
         }
     };
     progress(Progress::ChipIdentified { id });
+    if let Err(e) = check_fits_chip(firmware.len(), id) {
+        let _ = port.reset_into_app();
+        return Err(e);
+    }
 
     {
         let mut bl = Bootloader::new(port);
@@ -403,7 +449,7 @@ pub fn flash(
 /// The bootloader-protocol core of [`flash`]: optional footprint erase, write,
 /// and optional read-back verify. Generic over the transport so it can be
 /// exercised against a scripted in-memory device in tests. Does **not** touch
-/// reset lines or start the app — [`flash`] wraps that around it.
+/// reset lines or start the app; [`flash`] wraps that around it.
 fn write_image<T: Transport>(
     bl: &mut Bootloader<T>,
     firmware: &[u8],
@@ -469,6 +515,28 @@ fn write_image<T: Transport>(
 mod tests {
     use super::*;
     use crate::bootloader::tests::ScriptedTransport;
+    use crate::port::tests::{FakePort, FakeState};
+    use std::sync::{Arc, Mutex};
+
+    const ACK: u8 = 0x79;
+
+    /// A `Port` over the in-memory `FakePort` with `replies` scripted as the
+    /// device's answers (anything past them reads as 0x00 → a protocol error).
+    fn fake_port(replies: &[u8]) -> (Port, Arc<Mutex<FakeState>>) {
+        let state = Arc::new(Mutex::new(FakeState {
+            timeout: crate::port::DEFAULT_TIMEOUT,
+            replies: replies.iter().copied().collect(),
+            ..Default::default()
+        }));
+        (
+            Port::from_handle(Box::new(FakePort::new(state.clone()))),
+            state,
+        )
+    }
+
+    /// The modem-line tail of `Port::reset_into_app`: RESET asserted with BOOT0
+    /// low, then released.
+    const APP_RESET_TAIL: [(char, bool); 3] = [('R', true), ('D', false), ('R', false)];
 
     #[test]
     fn pages_for_length_rounds_up_and_clamps() {
@@ -517,7 +585,7 @@ mod tests {
 
     /// erase_chip on a part whose flash ends part-way through a chunk (not on a
     /// chunk boundary): chunk 0 (pages 0..80) ACKs, chunk 1 (80..160) is NACKed
-    /// because it runs past page 128 — the end of this test's 16 KiB part, so
+    /// because it runs past page 128 (the end of this test's 16 KiB part), so
     /// pages 128..160 are out of range. The C8 fix must bisect and erase the
     /// valid pages of the boundary chunk instead of dropping them.
     #[test]
@@ -529,7 +597,7 @@ mod tests {
         // the highest page in the list it was sent.
         t.set_erase_boundary(boundary);
 
-        // id 0x457 is the Cat-1 (16 KiB) part, whose full density is 128 pages —
+        // id 0x457 is the Cat-1 (16 KiB) part, whose full density is 128 pages,
         // so this boundary is a valid full-flash stop, not a truncated erase.
         let mut bl = Bootloader::new(&mut t);
         let pages = erase_chip(&mut bl, 0x457, &mut no_progress).unwrap();
@@ -549,7 +617,7 @@ mod tests {
 
     /// C25: a NACK to the Extended Erase *command* byte (line corruption),
     /// distinct from a page-list NACK, must NOT be read as "reached the flash
-    /// boundary" — it propagates as an error.
+    /// boundary"; it propagates as an error.
     #[test]
     fn erase_chip_command_nack_is_an_error_not_a_boundary() {
         let mut t = ScriptedTransport::new();
@@ -577,7 +645,7 @@ mod tests {
     /// rather than a silent Ok reporting fewer pages than were requested.
     #[test]
     fn erase_chip_partial_erase_on_non_density_boundary() {
-        // Boundary at page 200 (25 KiB) — not any STM32L0 density. Models a WRP
+        // Boundary at page 200 (25 KiB): not any STM32L0 density. Models a WRP
         // page at 200 on a part whose real flash is larger.
         let mut t = ScriptedTransport::new();
         t.set_erase_boundary(200);
@@ -594,7 +662,7 @@ mod tests {
 
     /// A boundary that is a valid density but is larger than the identified
     /// chip's flash (e.g. a 64 KiB stop reported for a 16 KiB part) is also a
-    /// truncated erase — the family cross-check must catch it.
+    /// truncated erase; the family cross-check must catch it.
     #[test]
     fn erase_chip_partial_erase_when_boundary_exceeds_chip_family() {
         // 512 pages == 64 KiB (a valid density), but chip 0x457 is a 16 KiB part.
@@ -608,7 +676,7 @@ mod tests {
         );
     }
 
-    /// A full-density part (192 KiB, 1536 pages) never NACKs a page-list — the
+    /// A full-density part (192 KiB, 1536 pages) never NACKs a page-list: the
     /// erase walks to the family maximum and returns it, no PartialErase.
     #[test]
     fn erase_chip_full_density_reaches_maximum() {
@@ -689,12 +757,14 @@ mod tests {
                 connects += 1;
             }
         };
+        let mut restores = 0u32;
         let err = connect_with(
             &mut t,
             |_| {
                 resets += 1;
                 Ok(())
             },
+            |_| restores += 1,
             &mut report,
         )
         .unwrap_err();
@@ -706,6 +776,7 @@ mod tests {
         ));
         assert_eq!(resets, CONNECT_ATTEMPTS, "reset attempted once per try");
         assert_eq!(connects, CONNECT_ATTEMPTS, "one Connecting event per try");
+        assert_eq!(restores, 1, "J1: app restored once after giving up");
     }
 
     /// connect succeeds on the second attempt (first init NACKs, second ACKs).
@@ -715,15 +786,92 @@ mod tests {
         t.push_nack(); // attempt 1 init -> NACK
         t.push_ack(); // attempt 2 init -> ACK
         let mut resets = 0u32;
+        let mut restores = 0u32;
         connect_with(
             &mut t,
             |_| {
                 resets += 1;
                 Ok(())
             },
+            |_| restores += 1,
             &mut no_progress,
         )
         .unwrap();
         assert_eq!(resets, 2);
+        assert_eq!(restores, 0, "a successful connect stays in the bootloader");
+    }
+
+    /// J2: the per-chip bound: 16/32/64 KiB parts reject an image one byte over
+    /// their flash; the 192 KiB part and an unrecognized id defer to the family
+    /// bound.
+    #[test]
+    fn check_fits_chip_uses_the_identified_density() {
+        for (id, kib) in [(0x457u16, 16usize), (0x425, 32), (0x417, 64), (0x447, 192)] {
+            assert!(
+                check_fits_chip(kib * 1024, id).is_ok(),
+                "0x{id:03X} exact fit"
+            );
+            assert!(
+                matches!(
+                    check_fits_chip(kib * 1024 + 1, id),
+                    Err(Error::FirmwareTooLarge { max, .. }) if max as usize == kib * 1024
+                ),
+                "0x{id:03X} one byte over"
+            );
+        }
+        assert!(
+            check_fits_chip(usize::MAX, 0x123).is_ok(),
+            "unknown id: no per-chip bound"
+        );
+        // The per-chip wording differs from the family-maximum wording.
+        let msg = check_fits_chip(20 * 1024, 0x457).unwrap_err().to_string();
+        assert!(msg.contains("connected chip"), "{msg}");
+    }
+
+    /// J2 end to end: an image that fits the family maximum but not the
+    /// identified 16 KiB part (0x457) fails *before* any Extended Erase is sent,
+    /// and the device is reset back into its intact application.
+    #[test]
+    fn flash_rejects_image_too_big_for_the_chip_before_erasing() {
+        // init ACK, then Get ID: cmd ACK, len=1, 0x04 0x57, final ACK.
+        let (mut port, state) = fake_port(&[ACK, ACK, 0x01, 0x04, 0x57, ACK]);
+        let fw = vec![0u8; 20 * 1024];
+        let err = flash(&mut port, &fw, &FlashOptions::default(), &mut no_progress).unwrap_err();
+        assert!(
+            matches!(err, Error::FirmwareTooLarge { max: 16384, .. }),
+            "got {err:?}"
+        );
+        let st = state.lock().unwrap();
+        assert!(
+            !st.written.windows(2).any(|w| w == [0x44, 0xBB]),
+            "no Extended Erase may be sent"
+        );
+        assert!(
+            st.lines.ends_with(&APP_RESET_TAIL),
+            "reset into app: {:?}",
+            st.lines
+        );
+    }
+
+    /// J1: when bootloader entry fails (every init reads garbage), `flash` and
+    /// `erase` reset the device back into the application instead of leaving it
+    /// possibly parked in the system bootloader.
+    #[test]
+    fn failed_connect_resets_into_the_app() {
+        let (mut port, state) = fake_port(&[]);
+        let err = flash(
+            &mut port,
+            &[0u8; 8],
+            &FlashOptions::default(),
+            &mut no_progress,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::BootloaderInit { .. }), "got {err:?}");
+        assert!(state.lock().unwrap().lines.ends_with(&APP_RESET_TAIL));
+
+        let (mut port, state) = fake_port(&[]);
+        let err = erase(&mut port, &mut no_progress).unwrap_err();
+        assert!(matches!(err, Error::BootloaderInit { .. }), "got {err:?}");
+        assert!(state.lock().unwrap().lines.ends_with(&APP_RESET_TAIL));
     }
 }

@@ -81,7 +81,7 @@ impl Reporter {
                 println!("Chip id : 0x{id:03X} ({})", target::chip_name(id));
                 if !target::is_known(id) {
                     eprintln!(
-                        "warning: 0x{id:03X} is not a recognized STM32L0 family id — continuing anyway"
+                        "warning: 0x{id:03X} is not a recognized STM32L0 family id; continuing anyway"
                     );
                 }
             }
@@ -140,17 +140,54 @@ impl Reporter {
 }
 
 /// Resolve which serial-port path to use: explicit `--device`, else the only
-/// device present, otherwise an error asking the user to pick one.
+/// USB serial device present, otherwise an error asking the user to pick one.
+///
+/// Auto-pick deliberately considers USB serial ports only: `erase`/`flash`
+/// pulse DTR/RTS and wipe whatever answers, so a built-in, PCI, or Bluetooth
+/// port must never be chosen implicitly (this mirrors tower-cli's filter).
 fn resolve_port(global: &GlobalOpts) -> Result<String> {
     if let Some(p) = &global.port {
         return Ok(p.clone());
     }
     let ports = serialport::available_ports().context("listing serial ports")?;
-    match ports.as_slice() {
-        [only] => Ok(only.port_name.clone()),
-        [] => anyhow::bail!("no serial devices found; connect the device or pass --device"),
-        _ => anyhow::bail!("multiple serial devices found; pass --device (see `jolt devices`)"),
+    let candidates = usb_candidates(ports.into_iter().map(|p| {
+        let usb = matches!(p.port_type, serialport::SerialPortType::UsbPort(_));
+        (p.port_name, usb)
+    }));
+    match candidates.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => anyhow::bail!("no USB serial device found; connect the device or pass --device"),
+        _ => anyhow::bail!(
+            "multiple USB serial devices found; pass --device (one of: {})",
+            candidates.join(", ")
+        ),
     }
+}
+
+/// The auto-pick candidates from `(port name, enumerated as USB)` pairs: USB
+/// ports (or, where enumeration can't tell, names that are unmistakably USB-UART
+/// nodes), with macOS's duplicate `/dev/tty.X` dropped in favour of its
+/// `/dev/cu.X` twin. serialport lists both nodes for every device on macOS, so
+/// without the de-dupe a single plugged-in board looks like two and auto-pick
+/// never fires; `cu.` is the callout node (opening `tty.` waits for carrier).
+fn usb_candidates(ports: impl IntoIterator<Item = (String, bool)>) -> Vec<String> {
+    let usb: Vec<String> = ports
+        .into_iter()
+        .filter(|(name, is_usb)| {
+            *is_usb
+                || ["usbserial", "usbmodem", "ttyUSB", "ttyACM"]
+                    .iter()
+                    .any(|tag| name.contains(tag))
+        })
+        .map(|(name, _)| name)
+        .collect();
+    usb.iter()
+        .filter(|name| {
+            name.strip_prefix("/dev/tty.")
+                .is_none_or(|rest| !usb.iter().any(|n| n == &format!("/dev/cu.{rest}")))
+        })
+        .cloned()
+        .collect()
 }
 
 fn open(global: &GlobalOpts) -> Result<Port> {
@@ -160,11 +197,19 @@ fn open(global: &GlobalOpts) -> Result<Port> {
 }
 
 /// Enter the bootloader and print the chip id. Leaves the port in the
-/// bootloader, ready for further commands.
+/// bootloader, ready for further commands (on success only): if `Get ID` fails
+/// the device is reset back into the application (best-effort) so even a
+/// failed, read-only `info` never leaves the app stopped. (A failed bootloader
+/// *entry* is already restored by `flash::connect`.)
 fn enter_and_identify(port: &mut Port, verbose: bool) -> Result<()> {
     let mut reporter = Reporter::new(verbose);
     flash::connect(port, &mut |p| reporter.handle(p)).context("entering bootloader")?;
-    let id = Bootloader::new(port).get_id().context("Get ID")?;
+    let id = Bootloader::new(port)
+        .get_id()
+        .inspect_err(|_| {
+            let _ = port.reset_into_app();
+        })
+        .context("Get ID")?;
     reporter.handle(Progress::ChipIdentified { id });
     Ok(())
 }
@@ -252,7 +297,7 @@ pub fn reset(global: &GlobalOpts, args: &ResetArgs) -> Result<()> {
 }
 
 /// Open the port with the requested frame format and stream incoming bytes to
-/// stdout until interrupted (Ctrl-C) or the device disconnects. Read-only —
+/// stdout until interrupted (Ctrl-C) or the device disconnects. Read-only:
 /// nothing is sent to the device, but `--reset` first pulses NRST into the
 /// application.
 pub fn monitor(global: &GlobalOpts, args: &MonitorArgs) -> Result<()> {
@@ -286,7 +331,7 @@ pub fn monitor(global: &GlobalOpts, args: &MonitorArgs) -> Result<()> {
 
     // Banner on stderr so `jolt monitor > log.txt` captures only device output.
     eprintln!(
-        "Monitoring {path} @ {} baud, {}{}{} — press Ctrl-C to exit.",
+        "Monitoring {path} @ {} baud, {}{}{}; press Ctrl-C to exit.",
         args.baudrate, args.databits, parity_letter, args.stopbits
     );
 
@@ -295,7 +340,7 @@ pub fn monitor(global: &GlobalOpts, args: &MonitorArgs) -> Result<()> {
     let mut out = stdout.lock();
     loop {
         // `read_stream` yields Ok(0) on an idle-line timeout and errors with
-        // Disconnected when the device is unplugged — so this loop can't
+        // Disconnected when the device is unplugged, so this loop can't
         // busy-spin at 100% CPU after a disconnect.
         let n = port
             .read_stream(&mut buf, "reading serial port")
@@ -304,5 +349,54 @@ pub fn monitor(global: &GlobalOpts, args: &MonitorArgs) -> Result<()> {
             out.write_all(&buf[..n]).context("writing to stdout")?;
             out.flush().context("flushing stdout")?;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(v: &[(&str, bool)]) -> Vec<String> {
+        usb_candidates(v.iter().map(|(n, u)| (n.to_string(), *u)))
+    }
+
+    /// J4: non-USB ports are never auto-picked, and macOS's cu./tty. twins of one
+    /// device collapse to the `cu.` node, so one plugged-in board auto-picks.
+    #[test]
+    fn usb_candidates_filter_and_dedupe() {
+        // A typical Mac: Bluetooth + debug console (not USB) and one FTDI listed twice.
+        assert_eq!(
+            names(&[
+                ("/dev/cu.Bluetooth-Incoming-Port", false),
+                ("/dev/tty.Bluetooth-Incoming-Port", false),
+                ("/dev/cu.debug-console", false),
+                ("/dev/cu.usbserial-2110", true),
+                ("/dev/tty.usbserial-2110", true),
+            ]),
+            vec!["/dev/cu.usbserial-2110"]
+        );
+        // Two boards stay two (ambiguous → the caller asks for --device).
+        assert_eq!(
+            names(&[
+                ("/dev/cu.usbserial-1", true),
+                ("/dev/tty.usbserial-1", true),
+                ("/dev/cu.usbserial-2", true),
+                ("/dev/tty.usbserial-2", true),
+            ]),
+            vec!["/dev/cu.usbserial-1", "/dev/cu.usbserial-2"]
+        );
+        // Linux: a built-in UART is dropped; a USB node is kept even when
+        // enumeration couldn't classify it (no udev info).
+        assert_eq!(
+            names(&[("/dev/ttyS0", false), ("/dev/ttyUSB0", false)]),
+            vec!["/dev/ttyUSB0"]
+        );
+        // A lone tty. node (no cu. twin) is kept.
+        assert_eq!(
+            names(&[("/dev/tty.usbserial-9", true)]),
+            vec!["/dev/tty.usbserial-9"]
+        );
+        assert!(names(&[("COM1", false)]).is_empty());
+        assert_eq!(names(&[("COM7", true)]), vec!["COM7"]);
     }
 }

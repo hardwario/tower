@@ -48,9 +48,9 @@ pub struct Port {
     /// Read timeout to restore on [`reset_timeout`](Port::reset_timeout).
     /// Captured the first time [`set_timeout`](Port::set_timeout) overrides the
     /// handle's timeout, so the engine's per-command overrides (e.g. the long
-    /// erase timeout) are rolled back to whatever the handle actually had —
-    /// notably a loaned handle's caller-configured timeout (see
-    /// [`from_handle`](Port::from_handle)) — rather than to a hard-coded default.
+    /// erase timeout) are rolled back to whatever the handle actually had
+    /// (notably a loaned handle's caller-configured timeout, see
+    /// [`from_handle`](Port::from_handle)) rather than to a hard-coded default.
     saved_timeout: Option<Duration>,
 }
 
@@ -99,10 +99,10 @@ impl Port {
     /// NRST/BOOT0 reset sequence (and the bootloader engine) without forking it.
     ///
     /// The caller is responsible for having opened the handle with the correct
-    /// frame format — the bootloader protocol needs [`target::BAUD`] 8-E-1
+    /// frame format: the bootloader protocol needs [`target::BAUD`] 8-E-1
     /// (see [`Port::open`]); a serial monitor picks its own format. Unlike
     /// [`open`](Self::open) / [`open_with`](Self::open_with) this does **not**
-    /// drive the run-state lines or settle — it takes the handle exactly as
+    /// drive the run-state lines or settle; it takes the handle exactly as
     /// given.
     ///
     /// The handle's configured read timeout is likewise preserved: the engine
@@ -135,7 +135,7 @@ impl Port {
     /// [`set_timeout`](Self::set_timeout) override (falling back to
     /// [`DEFAULT_TIMEOUT`] if none was captured). Scoped rather than clobbering
     /// with the global default, so a loaned handle's timeout survives the
-    /// engine's per-command overrides — see [`from_handle`](Self::from_handle).
+    /// engine's per-command overrides (see [`from_handle`](Self::from_handle)).
     pub fn reset_timeout(&mut self) -> Result<()> {
         let restore = self.saved_timeout.take().unwrap_or(DEFAULT_TIMEOUT);
         self.inner.set_timeout(restore)?;
@@ -165,8 +165,8 @@ impl Port {
     /// deliberate: with the 1 µF cap on NRST the transient ordering of each
     /// (rts,dtr) change matters.
     ///
-    /// (T,F) asserts RESET; switching to (F,T) raises BOOT0 while RESET releases
-    /// — the cap delays the NRST rise so BOOT0 is high when the chip latches it,
+    /// (T,F) asserts RESET; switching to (F,T) raises BOOT0 while RESET releases;
+    /// the cap delays the NRST rise so BOOT0 is high when the chip latches it,
     /// selecting system memory. (F,F) then drops BOOT0 (harmless once latched).
     pub fn reset_into_bootloader(&mut self) -> Result<()> {
         self.clear_buffers()?;
@@ -206,7 +206,7 @@ impl Port {
     /// Like [`reset_into_app`](Self::reset_into_app) but returns as soon as
     /// RESET is released, with no post-boot settle. Use when the caller manages
     /// the wait itself (e.g. it immediately starts streaming the app's output
-    /// and wants the boot banner) — this is the reason tower-cli previously
+    /// and wants the boot banner). This is the reason tower-cli previously
     /// forked the reset sequence.
     pub fn reset_into_app_no_settle(&mut self) -> Result<()> {
         self.reset_into_app_settle(Duration::ZERO)
@@ -258,7 +258,7 @@ impl Port {
     /// Read exactly `buf.len()` bytes, honouring the configured read timeout.
     ///
     /// The serialport timeout is *per-`read`*, so it restarts on every call that
-    /// returns data — a byte-at-a-time trickle would otherwise stretch an
+    /// returns data; a byte-at-a-time trickle would otherwise stretch an
     /// N-byte read without any wall-clock bound. So this also enforces an
     /// overall deadline scaled to the request size (one per-read timeout budget
     /// per byte, with the per-read timeout as a floor) and returns
@@ -300,11 +300,11 @@ impl Port {
     }
 
     /// Read whatever bytes are currently available, up to `buf.len()`. Returns
-    /// 0 on a read timeout (no data) instead of erroring — for streaming a port
+    /// 0 on a read timeout (no data) instead of erroring, for streaming a port
     /// where idle gaps are normal rather than a failure (e.g. the monitor).
     ///
     /// Note: a genuine `Ok(0)` from the OS (EOF / device unplugged) is reported
-    /// as [`Error::Disconnected`], not `Ok(0)` — otherwise a caller looping on
+    /// as [`Error::Disconnected`], not `Ok(0)`; otherwise a caller looping on
     /// this would busy-spin at 100% CPU after a USB disconnect. Only a *timeout*
     /// (the line is idle but still present) yields `Ok(0)`. See
     /// [`read_stream`](Self::read_stream) for the monitor's read loop.
@@ -314,7 +314,7 @@ impl Port {
 
     /// Streaming read for a serial monitor: `Ok(n>0)` for data, `Ok(0)` on an
     /// idle-line timeout, and [`Error::Disconnected`] when the OS reports EOF
-    /// (an instantly-returning zero-byte read — the device was unplugged). This
+    /// (an instantly-returning zero-byte read: the device was unplugged). This
     /// last case is what stops the read loop from spinning after a disconnect.
     pub fn read_stream(&mut self, buf: &mut [u8], context: &'static str) -> Result<usize> {
         match self.inner.read(buf) {
@@ -366,37 +366,44 @@ impl crate::bootloader::Transport for Port {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    /// Shared, inspectable state for [`FakePort`] — the test keeps a clone of
-    /// the `Arc` to observe what the `Port` did to a moved-in handle.
+    /// Shared, inspectable state for [`FakePort`]; the test keeps a clone of
+    /// the `Arc` to observe what the `Port` did to a moved-in handle. Also used
+    /// by the flash-engine tests (`flash.rs`) to drive `flash()` end to end.
     #[derive(Default)]
-    struct FakeState {
-        timeout: Duration,
+    pub(crate) struct FakeState {
+        pub(crate) timeout: Duration,
         /// Recorded modem-line writes as `('R'|'D', level)`, in order. The
         /// failing write (see `fail_line_write_at`) is not recorded.
-        lines: Vec<(char, bool)>,
+        pub(crate) lines: Vec<(char, bool)>,
         /// Count of modem-line writes attempted so far.
-        line_writes: usize,
+        pub(crate) line_writes: usize,
         /// 1-based index of the modem-line write that should return an error
         /// (to simulate a mid-sequence line-write failure), or `None`.
-        fail_line_write_at: Option<usize>,
+        pub(crate) fail_line_write_at: Option<usize>,
+        /// Scripted reply bytes, served one per `read` before falling back to
+        /// `FakePort::read_fill`.
+        pub(crate) replies: VecDeque<u8>,
+        /// Every byte written to the port, in order.
+        pub(crate) written: Vec<u8>,
     }
 
     /// A scriptable in-memory [`SerialPort`] for exercising `Port`'s timeout
     /// bookkeeping, reset-line recovery, and read deadline without hardware.
-    struct FakePort {
+    pub(crate) struct FakePort {
         state: Arc<Mutex<FakeState>>,
-        /// Sleep before each `read` returns a byte — models a slow trickle.
+        /// Sleep before each `read` returns a byte (models a slow trickle).
         read_delay: Duration,
         /// Byte value each `read` yields.
         read_fill: u8,
     }
 
     impl FakePort {
-        fn new(state: Arc<Mutex<FakeState>>) -> Self {
+        pub(crate) fn new(state: Arc<Mutex<FakeState>>) -> Self {
             FakePort {
                 state,
                 read_delay: Duration::ZERO,
@@ -426,13 +433,20 @@ mod tests {
             if buf.is_empty() {
                 return Ok(0);
             }
-            buf[0] = self.read_fill;
+            buf[0] = self
+                .state
+                .lock()
+                .unwrap()
+                .replies
+                .pop_front()
+                .unwrap_or(self.read_fill);
             Ok(1)
         }
     }
 
     impl Write for FakePort {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.state.lock().unwrap().written.extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> io::Result<()> {
@@ -527,7 +541,7 @@ mod tests {
     }
 
     /// C2: a loaned handle's configured timeout survives the engine's per-command
-    /// override — `reset_timeout` restores what `set_timeout` stashed, not the
+    /// override: `reset_timeout` restores what `set_timeout` stashed, not the
     /// global `DEFAULT_TIMEOUT`.
     #[test]
     fn reset_timeout_restores_the_loaned_handles_timeout() {
@@ -562,7 +576,7 @@ mod tests {
     }
 
     /// C3: if a modem-line write fails after RESET is asserted, the device is
-    /// not left held in reset — the run state `(T,T)` is restored best-effort
+    /// not left held in reset: the run state `(T,T)` is restored best-effort
     /// before the original error propagates.
     #[test]
     fn reset_into_bootloader_recovers_run_state_on_line_failure() {
@@ -609,7 +623,7 @@ mod tests {
 
     /// C4: a slow trickle (each `read` returns a byte within the per-read
     /// timeout) cannot make an N-byte read run past the overall wall-clock
-    /// deadline — it returns `Timeout` instead of blocking indefinitely.
+    /// deadline; it returns `Timeout` instead of blocking indefinitely.
     #[test]
     fn read_exact_buf_enforces_overall_deadline_under_trickle() {
         let state = Arc::new(Mutex::new(FakeState::default()));

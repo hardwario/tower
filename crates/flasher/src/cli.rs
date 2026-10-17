@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[command(
     name = "jolt",
     version,
-    about = "jolt — program STM32L0 microcontrollers over the UART bootloader"
+    about = "jolt: program STM32L0 microcontrollers over the UART bootloader"
 )]
 pub struct Cli {
     #[command(flatten)]
@@ -20,7 +20,7 @@ pub struct Cli {
 
 #[derive(Args)]
 pub struct GlobalOpts {
-    /// Serial device path (default: the only device present, otherwise required)
+    /// Serial device path (default: the only USB serial device present, otherwise required)
     // The field stays `port` since it holds a serial-port path; the user-facing flag is `--device`.
     #[arg(short = 'd', long = "device", value_name = "DEVICE", global = true)]
     pub port: Option<String>,
@@ -34,7 +34,7 @@ pub struct GlobalOpts {
 pub enum Command {
     /// List connected serial devices
     Devices,
-    /// Read bootloader info (chip id, version, supported commands) — read-only
+    /// Read bootloader info (chip id, version, supported commands); read-only
     Info,
     /// Flash a raw firmware .bin file
     Flash(FlashArgs),
@@ -85,7 +85,7 @@ pub struct MonitorArgs {
     #[arg(short, long, default_value_t = 115_200)]
     pub baudrate: u32,
 
-    /// Data bits per frame (5–8). Long-only: `-d` is the global `--device` short.
+    /// Data bits per frame (5-8). Long-only: `-d` is the global `--device` short.
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(5..=8))]
     pub databits: u8,
 
