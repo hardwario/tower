@@ -1,7 +1,14 @@
-# Release the `tower` binary (cli/, package tower-cli) for every platform on a `cli-vX.Y.Z` tag.
+# Release the `tower` binary (cli/, package tower-cli) for every platform on a `cli-vX.Y.Z` tag,
+# together with the product firmware built from the same commit (a `tower` binary and firmware
+# from other sources refuse each other's frames, so the two ship as a matched set).
 #
 # The other crates are internal path dependencies with no releases of their own; the historical
 # `protocol-v*` and `jolt-v*` tags are not built.
+#
+# Dry run: start the workflow by hand on main (Actions > Release (tower CLI) > Run workflow). It
+# runs the checks and every build and uploads the archives as workflow artifacts, but skips the
+# tag gate and publishes nothing. Tags are immutable here, so a build that fails after tagging
+# burns the version: dry-run a release first whenever the build or its dependencies changed.
 
 name: Release (tower CLI)
 
@@ -9,6 +16,11 @@ on:
   push:
     tags:
       - 'cli-v[0-9]+.*'
+  workflow_dispatch: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 # Least privilege: everything is read-only except the final `publish` job, which alone gets
 # the release-write + attestation (OIDC) permissions.
@@ -27,6 +39,7 @@ jobs:
   # pushing a tag must not be a way to ship an unreviewed or red commit.
   verify:
     name: Verify tag (version, on main, CI green)
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -115,14 +128,21 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: [verify, checks]
+    # A dry run skips `verify`; a skipped need would otherwise skip this job too.
+    if: >-
+      ${{ !cancelled() && needs.checks.result == 'success' &&
+          (needs.verify.result == 'success' ||
+           (needs.verify.result == 'skipped' && github.ref_type != 'tag')) }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Every Linux target builds in a cross image (an old glibc), so the binary runs on any
+          # current distribution: a native build on ubuntu-latest needs that runner's glibc.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            cross: false
+            cross: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             cross: true
@@ -152,28 +172,22 @@ jobs:
           targets: ${{ matrix.target }}, thumbv6m-none-eabi
           components: rustfmt, clippy, llvm-tools
 
-      # Native Linux build needs host libudev; cross builds get it from the root Cross.toml. The
-      # vendored OpenSSL (the CLI's MQTT TLS stack on Linux) builds with the runner's perl, make
-      # and gcc natively, and inside the cross images (Cross.toml installs perl + make there).
-      - name: Install libudev (native Linux)
-        if: matrix.os == 'ubuntu-latest' && !matrix.cross
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: ${{ matrix.target }}
-
+      # The Linux builds get libudev and the vendored OpenSSL's perl + make inside the cross
+      # images (the root Cross.toml). No build cache: a cache saved under a tag is never reused,
+      # and a release should not restore one.
       - name: Install cross
         if: matrix.cross
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cross@0.2.5
 
+      # crt-static: tower.exe carries the C runtime instead of needing the VC++ redistributable.
       - name: Build
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           USE_CROSS: ${{ matrix.cross }}
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
         run: |
           if [ "$USE_CROSS" = "true" ]; then
             cross build --locked --release -p tower-cli --target "$TARGET"
@@ -181,7 +195,23 @@ jobs:
             cargo build --locked --release -p tower-cli --target "$TARGET"
           fi
 
-      # Archive name = tag + target, e.g. tower-cli-v2.0.0-aarch64-apple-darwin.tar.gz.
+      # The newest glibc symbol the binary needs: what the oldest distribution it runs on must
+      # have. Fail above 2.28 (Debian 10, RHEL 8).
+      - name: glibc floor (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          floor="$(readelf -W --version-info "target/${TARGET}/release/tower" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          echo "needs ${floor}"
+          if [ "$(printf '%s\nGLIBC_2.28\n' "$floor" | sort -V | tail -1)" != "GLIBC_2.28" ]; then
+            echo "::error::${TARGET} needs ${floor}, newer than GLIBC_2.28"
+            exit 1
+          fi
+
+      # Archive name = tag + target, e.g. tower-cli-v2.0.0-aarch64-apple-darwin.tar.gz (a dry run
+      # names it after the branch).
       - name: Package
         id: package
         shell: bash
@@ -217,13 +247,78 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The product firmware from the same commit, as raw images for `tower flash`: the matched set
+  # for this `tower` binary (same schema tags), so a kit user needs no embedded toolchain.
+  firmware:
+    name: Build firmware images
+    needs: [verify, checks]
+    if: >-
+      ${{ !cancelled() && needs.checks.result == 'success' &&
+          (needs.verify.result == 'success' ||
+           (needs.verify.result == 'skipped' && github.ref_type != 'tag')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml pin) + thumbv6m
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: thumbv6m-none-eabi
+          components: rustfmt, clippy, llvm-tools
+      - name: Install flip-link (the firmware linker)
+        run: cargo install --locked --version 0.1.12 flip-link
+      # Inside firmware/, so its .cargo/config.toml (target + flip-link) applies. The images are
+      # what `just fw build app <name>` makes (objcopy -O binary of the release ELF).
+      - name: Build + package
+        shell: bash
+        working-directory: firmware
+        run: |
+          apps=(radio_push_button radio_dongle_gateway)
+          examples=(blinky)
+          args=()
+          for a in "${apps[@]}"; do args+=(--bin "$a"); done
+          for e in "${examples[@]}"; do args+=(--example "$e"); done
+          cargo build --locked --release "${args[@]}"
+          objcopy="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objcopy"
+          staging="tower-firmware-${GITHUB_REF_NAME}"
+          mkdir "../$staging"
+          for a in "${apps[@]}"; do "$objcopy" -O binary "target/thumbv6m-none-eabi/release/$a" "../$staging/$a.bin"; done
+          for e in "${examples[@]}"; do "$objcopy" -O binary "target/thumbv6m-none-eabi/release/examples/$e" "../$staging/$e.bin"; done
+          cp ../LICENSE "../$staging/"
+          cat > "../$staging/README.md" <<EOF
+          # TOWER firmware ${GITHUB_REF_NAME}
+
+          Raw images for \`tower flash <image>.bin\` (the \`tower\` binary of the same release):
+
+          - \`radio_push_button.bin\`: the push-button node (Core Module)
+          - \`radio_dongle_gateway.bin\`: the gateway (Radio Dongle)
+          - \`blinky.bin\`: the LED blink example
+
+          See firmware/docs/gateway.md in https://github.com/hardwario/tower for the product.
+          EOF
+          cd ..
+          zip -qr "$staging.zip" "$staging"
+          sha256sum "$staging.zip" > "$staging.zip.sha256"
+          ls -l "$staging"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-firmware
+          path: |
+            tower-firmware-*.zip
+            tower-firmware-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
   # The only job with write access: attest build provenance for every archive (verifiable with
   # `gh attestation verify <archive> --repo hardwario/tower`), then create the release as a
   # draft, upload, and publish, so users never see a half-populated release, and assets are
   # attached before publication (required once immutable releases are enabled).
   publish:
     name: Attest + publish release
-    needs: build
+    needs: [build, firmware]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release + upload assets
@@ -286,6 +381,12 @@ jobs:
             | macOS Intel | `x86_64-apple-darwin` |
             | macOS Apple Silicon | `aarch64-apple-darwin` |
             | Windows x86_64 | `x86_64-pc-windows-msvc` |
+
+            ### Firmware
+            `tower-firmware-${{ github.ref_name }}.zip` holds the product firmware built from the
+            same commit (`radio_push_button.bin`, `radio_dongle_gateway.bin`, `blinky.bin`). This
+            `tower` talks only to firmware of the same sources: flash these images (`tower flash
+            radio_push_button.bin`) or build from the tag.
 
       - name: Publish release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
