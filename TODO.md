@@ -35,3 +35,21 @@ announcement, whichever comes first.
 
 **Done when.** Each bullet has a written decision (in the relevant docs) and the implementation
 or test that backs it; AGENTS.md states the compatibility guarantees instead of their absence.
+
+## Retire the previous TOWER generation
+
+**Why.** The new generation (this repository) replaces the C-SDK TOWER line, which still lives in
+40+ repositories in the hardwario organization: `twr-sdk`, the `twr-radio-*` / `twr-lora-*`
+application firmwares, `twr-gateway-radio-dongle`, `bch-firmware-tool`, `hardwario-playground`,
+`hardwario-code`, `hardwario-tower-vscode-extension`, `twr-zephyr`, `twr-skeleton` and others.
+Decided 2026-10-17: they will be made obsolete later; until then, work only on the new
+generation and leave them untouched.
+
+**When.** Not before the new generation covers what users of the old line rely on (at least the
+product apps they deploy) and the compatibility gate above is done.
+
+**What it takes.** An inventory of which old repositories have users and what replaces each; a
+migration path for deployed devices (re-flash and re-pair, or a documented end of support);
+README notices pointing to hardwario/tower; then archive (not delete) the old repositories so
+existing links and releases keep working. Keep `twr-hardware` and `twr-enclosures` if the new
+generation still targets the same modules.
