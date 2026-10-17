@@ -95,7 +95,7 @@ def check_surface(base: str, golden: str, const: str, decl: str) -> int:
         f"but {const} is still {new_ver}.\n"
         f"A golden change means the bytes on the wire changed. Bump {const} in "
         f"{decl} (and the crate version + tag), or revert the wire change.\n"
-        "Do NOT 'just fix the bytes' — see CLAUDE.md, 'Releasing a change'.",
+        "Do NOT 'just fix the bytes' — see AGENTS.md, 'Releasing a change'.",
         file=sys.stderr,
     )
     return 1

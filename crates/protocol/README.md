@@ -60,7 +60,7 @@ guard (`tools/check_wire_bump.py`):
    visible error, never a silent mis-decode.
 4. Renaming a field or variant is wire-transparent (names aren't encoded) — no version bump, but
    it is a source-breaking change for consumers, so it still needs a new crate version + tag.
-5. Ship the change with the full lockstep runbook in `CLAUDE.md`: new tag, then re-pin
+5. Ship the change with the full lockstep runbook in `AGENTS.md`: new tag, then re-pin
    `tower-firmware` (two manifests), `tower-cli`, and `tower-hil` in the same change-set.
 
 ## Versioning
