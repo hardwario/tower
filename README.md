@@ -41,11 +41,14 @@ tower/
 ├── rust-toolchain.toml   the one toolchain (1.99.1 + rustfmt, clippy, llvm-tools, thumbv6m)
 ├── rustfmt.toml          the one house style (110 columns), applied everywhere
 ├── justfile              just check / test / fw / hil
-├── crates/               protocol, kv, net, radio, gateway, shell, boot
+├── crates/               protocol, kv, net, radio, gateway, shell, flasher
 ├── firmware/             tower-sdk: src/, examples/, apps/, docs/, tools/ (own workspace)
 ├── cli/                  tower-cli: the `tower` binary
 ├── hil/                  tower-hil: the bench harness
+├── fuzz/                 cargo-fuzz targets for the decoders and kernels (own workspace)
+├── docs/                 the security model
 ├── AGENTS.md             the operating manual for coding agents (CLAUDE.md imports it)
+├── SECURITY.md, TODO.md  vulnerability reporting; open items
 ├── .claude/skills/       /bootstrap, /build
 └── .github/              CI, the CLI release workflow, Dependabot
 ```
@@ -53,26 +56,28 @@ tower/
 ## Quick start
 
 Prerequisites: [rustup](https://rustup.rs) (`rustup toolchain install` in the checkout installs
-the toolchain pinned in `rust-toolchain.toml`), [`just`](https://just.systems), `python3` >= 3.11,
-and for the firmware `cargo install --locked flip-link cargo-binutils`. On Linux also
-`libudev-dev` + `pkg-config`, and `perl` + `make` + a C compiler (the `tower` CLI builds OpenSSL
-from source for MQTT over TLS).
+the toolchain pinned in `rust-toolchain.toml`), [`just`](https://just.systems) >= 1.59,
+`python3` >= 3.11, and for the firmware `cargo install --locked flip-link cargo-binutils`. On
+Linux also `libudev-dev` + `pkg-config`, and `perl` + `make` + a C compiler (the `tower` CLI
+builds OpenSSL from source for MQTT over TLS); join the `dialout` group to open serial ports
+(`sudo usermod -aG dialout $USER`, then log in again).
 
 ```bash
-git clone git@github.com:hardwario/tower.git
+git clone https://github.com/hardwario/tower.git
 cd tower
-
-just check                         # every hardware-free gate (what CI runs)
-just test                          # host workspace tests
 
 cargo install --locked --path cli  # the `tower` CLI on your PATH (= just install-cli)
 tower devices                      # attached serial devices
 
 just fw examples                   # firmware example names
-just fw build example blinky       # -> firmware/target/firmware.bin
 just fw flash example blinky       # build + flash over the UART bootloader (board attached)
 tower logs                         # decoded console
+tower                              # the console TUI: events, shell and logs
+tower exec "/system/resource print"  # one shell command, its reply, exit
 ```
+
+The radio products (a push button node, a Radio Dongle gateway, MQTT) are described in
+[`firmware/docs/gateway.md`](firmware/docs/gateway.md).
 
 Bench runs (`just hil hil`, `hil-power`, `hil-full`) flash real hardware; see
 [`hil/README.md`](hil/README.md). Working with [Claude Code](https://claude.com/claude-code)?
@@ -89,6 +94,14 @@ Open it here and run `/bootstrap`; `AGENTS.md` gives it the whole-stack context.
   checkout is refused. The older `protocol-vX.Y.Z` tags are history; no new ones are made.
 
 ## Contributing
+
+```bash
+just check                         # every hardware-free gate (what CI runs)
+just test                          # host workspace tests
+```
+
+`just check` also needs `cargo install --locked cargo-audit` and network access (the RustSec
+advisory database).
 
 - Develop straight on `main`. A wire-format change is one commit across `crates/protocol` and
   its callers; see the runbook in [`AGENTS.md`](AGENTS.md).
