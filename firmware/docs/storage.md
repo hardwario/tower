@@ -23,6 +23,27 @@ rules an app should follow so the EEPROM lasts the product's life.
   and the tombstone, so the live set can **shrink**, not only grow. Append-only and power-loss-safe
   like any write; a redundant delete of an absent key is a wear-free no-op. (`len == 0` is therefore
   reserved as the tombstone marker: no key stores a genuinely empty value.)
+- **Mount or format** (`tower_kv::init`, run by `Kv::new` on every boot). A region with a valid
+  superblock mounts as it is, untouched. Anything else, a blank part or bytes in any other layout
+  (such as the single-region log of older firmware), is **formatted empty**: nothing is adopted,
+  migrated or kept. The format is two writes: the tag slot at the head of half 0 is cleared, then
+  half 0's superblock is committed at generation 1. The rest of the region is not scrubbed (no
+  multi-second stall on the first boot; the next point is why its old bytes stay unreadable). A
+  power loss before the commit leaves the region unformatted, and the next boot formats it again.
+  A board flashed over a store in another layout therefore starts empty: re-pair or re-provision
+  it.
+- **Every log end is terminated.** An append first clears the 2-byte tag slot just past the
+  record it is about to write (read-first: no write when the slot is already blank), then writes
+  the record. Stale bytes past the log end (what a torn append left, the tail of a corrupted
+  mid-log record, the untouched rest of a freshly formatted half) can therefore never be scanned
+  as records. Without it, a new record shorter than a torn or corrupted one left that one's
+  remaining bytes right behind it, and the next scan read on into them: a superseded TX-counter
+  watermark resurrected over the one just written (CCM nonce reuse) or bytes from inside a value
+  surfaced as a phantom key (found by the `kv_store` fuzz target, host-tested by
+  `torn_tail_then_shorter_append_exposes_no_phantom` and
+  `corrupt_mid_log_record_never_resurrects_the_tail`). A power loss between the two writes is
+  harmless: the cleared slot lies beyond the log end, and a torn append is cut at its CRC as
+  before.
 
 ## How it wears: it wear-levels
 
@@ -99,8 +120,8 @@ Pre-blanking adds **no extra wear**: it programs exactly the nonzero words the n
 blank pass would have programmed (which then skips them), just earlier and in slices. Note the
 per-boot session id and TX watermark deliberately stay ordinary KV records: the KV region
 occupies the entire 6 KiB EEPROM (3060 + 3060 + 2×12 superblocks; no reserved raw area), so
-relocating them to dedicated raw cells would shrink the region and force a full store
-migration; bounded maintenance removes the motive.
+relocating them to dedicated raw cells would shrink the region and change the layout (every
+store formatted empty); bounded maintenance removes the motive.
 
 ## Write budget
 

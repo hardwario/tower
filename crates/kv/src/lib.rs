@@ -7,7 +7,7 @@
 //! it cannot `cargo test`. The codec, by contrast, is pure logic over a tiny [`Eeprom`] byte-store
 //! trait. The firmware implements it over the L0 data EEPROM (`tower::storage::Storage`); the
 //! tests here implement it over a RAM array, so the layout, the compaction commit, the
-//! power-loss edges, and the legacy migration can all be exercised on the host.
+//! power-loss edges, and the first-boot format can all be exercised on the host.
 //!
 //! # Why double-buffered
 //!
@@ -30,9 +30,9 @@
 //!   commit: torn before it, the old half is still active (no data lost); torn during it, the
 //!   superblock fails its CRC and the old half still wins.
 //!
-//! The record format inside a half is unchanged from the firmware's original single-region store
-//! (`[tag(2) | len(2) | crc(4) | value]`, little-endian, CRC over `tag‖len‖value`), so legacy data
-//! migrates without reserialization; see [`init`].
+//! A record inside a half is `[tag(2) | len(2) | crc(4) | value]`, little-endian, CRC over
+//! `tag‖len‖value`. A region that holds no valid superblock (a blank part, or bytes in any other
+//! layout) is formatted empty by [`init`]; there is no migration of other layouts.
 //!
 //! **Deletion** rides the same append-only log: [`delete`] writes a **tombstone** (a zero-length
 //! record, `len == 0`), so the key reads back absent ([`get_bytes`]), and the next flip drops any
@@ -58,13 +58,13 @@
 
 /// Largest value (bytes) one record can hold.
 pub const MAX_VALUE: usize = 256;
-/// Maximum number of distinct keys [`compact`] / migration can track in one pass.
+/// Maximum number of distinct keys [`compact`] can track in one pass.
 pub const MAX_KEYS: usize = 64;
 /// Record header: tag(2) + value-len(2) + crc32(4). Value bytes follow.
 pub const KV_HEADER: usize = 8;
 
-/// Superblock magic; it also distinguishes a double-buffered region from legacy single-region data
-/// (a legacy record's first bytes are a `u16` key, never this magic).
+/// Superblock magic: with the CRC, what tells an initialized double-buffered region from a blank
+/// part or bytes in any other layout (formatted empty by [`init`]).
 const SUPER_MAGIC: [u8; 4] = *b"TKV1";
 /// Superblock size: magic(4) + generation(4 LE) + crc(4 LE, over magic‖generation).
 const SUPER_LEN: u32 = 12;
@@ -89,12 +89,11 @@ pub enum KvError<E> {
     Backend(E),
     /// A value exceeded [`MAX_VALUE`] bytes.
     ValueTooLarge,
-    /// The store (one half) is full even after a compaction flip, or the legacy live set being
-    /// migrated does not fit one half.
+    /// The store (one half) is full even after a compaction flip.
     Full,
     /// Key `0` is reserved (it marks the end of the record log).
     InvalidKey,
-    /// More distinct keys than [`MAX_KEYS`] (only hit during compaction / migration).
+    /// More distinct keys than [`MAX_KEYS`] (only hit during compaction).
     TooManyKeys,
     /// A [`FlipState`] no longer matches the store (another flip committed underneath it).
     /// Returned by [`flip_step`]/[`flip_commit`] so a stale RAM plan can never be committed;
@@ -179,7 +178,7 @@ fn super_crc(b: &[u8]) -> u32 {
 }
 
 /// The active half `(h, generation)`: the valid superblock with the highest generation, or `None`
-/// if neither half is initialized yet (a fresh, un-migrated region).
+/// if neither half is initialized yet (a fresh, not yet formatted region).
 fn active<S: Eeprom>(store: &S, capacity: u32) -> Result<Option<(u8, u32)>, KvError<S::Error>> {
     let g0 = read_gen(store, capacity, 0)?;
     let g1 = read_gen(store, capacity, 1)?;
@@ -330,31 +329,31 @@ fn blank_step_span<S: Eeprom>(
 
 // --- public API ---------------------------------------------------------------------------------
 
-/// Initialize / migrate the region into the double-buffered layout. Idempotent: returns
-/// immediately if a valid superblock already exists. Call once before first use (the firmware's
-/// `Kv::new` does, best-effort).
+/// Mount the region, formatting it first if needed. Idempotent: an initialized double-buffered
+/// region (a valid superblock) mounts as it is, untouched. Anything else, a blank part or bytes
+/// in any other layout, is **formatted empty**: nothing in it is adopted, migrated or kept. Call
+/// once before first use (the firmware's `Kv::new` does, best-effort).
 ///
-/// Migration of legacy single-region data is non-destructive in the common case: legacy records
-/// already live in half 0's record area, so if they fit one half this just commits half 0's
-/// superblock (zero data movement, fully power-safe). A legacy log larger than one half is first
-/// packed by a one-time legacy compaction (the only place the old non-atomic pack still runs; if
-/// interrupted, no superblock was written, so the next boot re-migrates).
+/// The format is two writes: the tag slot at the head of half 0 is cleared, so its record scan
+/// stops at offset 0 (an empty log), then half 0's superblock is committed at generation 1. The
+/// rest of the region is left as it is (no seconds of NVM stall on the first boot): whatever
+/// sits further in half 0 can never be read as records, because every append first clears the
+/// tag slot just past the record it writes (`append_end`), so the scan always stops at the log
+/// end, and a flip blanks its destination half before writing it. Power loss before the commit
+/// leaves the region unformatted, and the next `init` formats it again; a torn commit fails its
+/// CRC the same way.
 pub fn init<S: Eeprom>(store: &mut S, capacity: u32) -> Result<(), KvError<S::Error>> {
     if active(store, capacity)?.is_some() {
         return Ok(()); // already double-buffered
     }
-    let half = half_len(capacity);
-    let oldfree = legacy_free(store, capacity)?;
-    if oldfree > half {
-        // Legacy log spilled past one half: pack its live set to the front so it fits half 0.
-        let live = legacy_compact(store, capacity)?;
-        if live > half {
-            return Err(KvError::Full); // live set genuinely too big for a half
+    if KV_HEADER as u32 <= half_len(capacity) {
+        let at = half_base(capacity, 0);
+        let mut tag = [0u8; 2];
+        store.read(at, &mut tag).map_err(KvError::Backend)?;
+        if tag != [0, 0] {
+            store.write(at, &[0, 0]).map_err(KvError::Backend)?;
         }
     }
-    // Legacy records (if any) now occupy `[0, min(oldfree, half))` ⊂ half 0's record area, in the
-    // same record format, so committing half 0's superblock adopts them verbatim. A fresh region
-    // (oldfree == 0) commits an empty half 0. Half 1's superblock is left blank → invalid.
     write_gen(store, capacity, 0, 1)
 }
 
@@ -560,9 +559,9 @@ pub fn compact_with<S: Eeprom>(
 ///    anyway (its superblock is left as an ordinary superseded one, exactly like after a flip).
 ///
 /// So a reset at any point leaves either the complete old store or an empty one, never a mix,
-/// and never a half whose tail can resurface. An un-initialized region (fresh, or legacy
-/// single-region data that [`init`] would adopt from offset 0) is committed empty in half 1 at
-/// generation 1 and then scrubbed (half 0 + superblock slot 0, which holds no valid superblock).
+/// and never a half whose tail can resurface. An un-initialized region (fresh, or bytes in any
+/// other layout) is committed empty in half 1 at generation 1 and then scrubbed (half 0 +
+/// superblock slot 0, which holds no valid superblock).
 ///
 /// Cost: one half of word-programs (~2.6 s of NVM stall on the STM32L0) when the dead half was
 /// pre-blanked, two halves (~5.2 s) otherwise. A caller holding RAM state derived from the store
@@ -1117,55 +1116,6 @@ pub fn maintain<S: Eeprom>(
     blank_dead_step(store, capacity, &mut m.blank, budget_words)
 }
 
-// --- legacy single-region migration -------------------------------------------------------------
-//
-// The pre-double-buffer store laid records from offset 0 over the whole region with no superblock.
-// These two helpers read/pack that layout during a one-time [`init`] migration only.
-
-/// End offset of the legacy single-region log (scanning records from offset 0 over the whole
-/// region). `0` means no legacy data (a fresh region).
-fn legacy_free<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S::Error>> {
-    // The whole region is the legacy record area; reuse the half scanner with base 0 / area=cap.
-    Ok(scan_half(store, 0, capacity, 0)?.0)
-}
-
-/// One-time legacy in-place compaction: pack the legacy live set to `[0, live)` and return `live`.
-/// Front-packing keeps `dest <= src`, so the copy never clobbers a not-yet-read source. Used only
-/// for a legacy log too large for one half; if interrupted, [`init`] re-runs (no superblock yet).
-fn legacy_compact<S: Eeprom>(store: &mut S, capacity: u32) -> Result<u32, KvError<S::Error>> {
-    let mut latest: [(u16, u32); MAX_KEYS] = [(0, 0); MAX_KEYS];
-    let mut nkeys = 0usize;
-    // Reuse one buffer for the CRC-check scan (pass 1) and the record copy (pass 2); see `flip`.
-    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
-    let old_free = walk_latest(store, 0, capacity, &mut latest, &mut nkeys, &mut tmp)?;
-
-    let mut wr = 0u32;
-    let mut o = 0u32;
-    while o < old_free {
-        let mut hdr = [0u8; KV_HEADER];
-        store.read(o, &mut hdr).map_err(KvError::Backend)?;
-        let tag = u16::from_le_bytes([hdr[0], hdr[1]]);
-        if tag == 0 {
-            break;
-        }
-        let len = u16::from_le_bytes([hdr[2], hdr[3]]);
-        let size = KV_HEADER as u32 + len as u32;
-        if latest[..nkeys].iter().any(|&(t, off)| t == tag && off == o) {
-            if wr != o {
-                store
-                    .read(o, &mut tmp[..size as usize])
-                    .map_err(KvError::Backend)?;
-                store.write(wr, &tmp[..size as usize]).map_err(KvError::Backend)?;
-            }
-            wr += size;
-        }
-        o += size;
-    }
-    // Blank the freed tail through the old end so a later scan/migration sees a clean boundary.
-    blank(store, wr, old_free - wr)?;
-    Ok(wr)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1193,9 +1143,10 @@ mod tests {
             let n = landed.min(data.len());
             self.buf[off as usize..off as usize + n].copy_from_slice(&data[..n]);
         }
-        /// Write a legacy single-region record at `off`, returning the next offset (for building
-        /// pre-double-buffer fixtures in the migration tests).
-        fn legacy_put(&mut self, off: u32, key: u16, value: &[u8]) -> u32 {
+        /// Write a well-formed record at absolute `off` with no superblock anywhere, returning the
+        /// next offset: bytes in another layout (e.g. the old single-region log) for the format
+        /// tests, which must never be read back as records.
+        fn raw_put(&mut self, off: u32, key: u16, value: &[u8]) -> u32 {
             append(self, off, key, value).unwrap();
             off + KV_HEADER as u32 + value.len() as u32
         }
@@ -1366,65 +1317,98 @@ mod tests {
         assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"good"[..]));
     }
 
-    #[test]
-    fn migrate_legacy_fast_path() {
-        // Legacy single-region data that fits one half migrates with zero data movement.
+    /// A region holding valid-looking records but no superblock (the old single-region layout).
+    fn foreign_region() -> Ram {
         let mut ram = Ram::new(CAP as usize);
         let mut o = 0u32;
-        o = ram.legacy_put(o, 0x5201, &7u32.to_le_bytes()); // e.g. the TX-counter watermark
-        o = ram.legacy_put(o, 0x5202, &3u32.to_le_bytes());
-        let _ = ram.legacy_put(o, 0x5300, b"peer");
-        assert!(
-            active(&ram, CAP).unwrap().is_none(),
-            "legacy data must look un-initialized"
-        );
-        init(&mut ram, CAP).unwrap();
-        assert!(
-            active(&ram, CAP).unwrap().is_some(),
-            "init must commit a superblock"
-        );
-        assert_eq!(get_vec(&ram, 0x5201).unwrap(), 7u32.to_le_bytes());
-        assert_eq!(get_vec(&ram, 0x5202).unwrap(), 3u32.to_le_bytes());
-        assert_eq!(get_vec(&ram, 0x5300).as_deref(), Some(&b"peer"[..]));
-        // And the store keeps working (and stays consistent) after migration.
-        set(&mut ram, 0x5201, &8u32.to_le_bytes()).unwrap();
-        assert_eq!(get_vec(&ram, 0x5201).unwrap(), 8u32.to_le_bytes());
+        o = ram.raw_put(o, 0x5201, &7u32.to_le_bytes()); // e.g. an old TX-counter watermark
+        o = ram.raw_put(o, 0x5202, &3u32.to_le_bytes());
+        let mut n = 0u32;
+        while o + (KV_HEADER as u32 + 4) <= CAP - 2 * SUPER_LEN {
+            n += 1;
+            o = ram.raw_put(o, 0x5300, &n.to_le_bytes()); // through both halves
+        }
+        ram
     }
 
     #[test]
-    fn migrate_fresh_region_is_empty_then_usable() {
+    fn init_formats_a_foreign_region_empty() {
+        // Anything without a valid superblock is formatted empty: nothing is adopted or migrated,
+        // in two writes (the head tag of half 0, then its superblock), not a scrub of the region.
+        let mut ram = foreign_region();
+        assert!(active(&ram, CAP).unwrap().is_none());
+        ram.words_written = 0;
+        init(&mut ram, CAP).unwrap();
+        assert_eq!(active(&ram, CAP).unwrap(), Some((0, 1)));
+        assert_eq!(ram.words_written, 1 + SUPER_LEN as usize / 4);
+        for key in [0x5201, 0x5202, 0x5300] {
+            assert_eq!(get_vec(&ram, key), None, "key {key:#x} adopted");
+        }
+        assert_eq!(free_bytes(&ram, CAP).unwrap(), half_len(CAP));
+        // The old records further in the half never resurface: appends of every size, through
+        // flips, read back exactly what was written and nothing else.
+        for i in 0..200u32 {
+            let len = (i % 9) as usize + 1;
+            let v: Vec<u8> = (0..len).map(|j| (i as u8).wrapping_add(j as u8) | 1).collect();
+            set(&mut ram, 1 + (i % 3) as u16, &v).unwrap();
+            assert_eq!(get_vec(&ram, 1 + (i % 3) as u16), Some(v));
+            for key in [0x5201, 0x5202, 0x5300] {
+                assert_eq!(get_vec(&ram, key), None, "key {key:#x} resurfaced at step {i}");
+            }
+        }
+        assert!(generation(&ram, CAP).unwrap() > 1, "the churn must have flipped");
+    }
+
+    #[test]
+    fn init_fresh_region_is_empty_then_usable() {
         let mut ram = Ram::new(CAP as usize);
         init(&mut ram, CAP).unwrap();
+        assert_eq!(active(&ram, CAP).unwrap(), Some((0, 1)));
         assert_eq!(get_vec(&ram, 1), None);
         set(&mut ram, 1, b"x").unwrap();
         assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"x"[..]));
     }
 
     #[test]
-    fn migrate_legacy_slow_path_preserves_live_set() {
-        // A legacy log larger than one half: many superseded versions of one key plus a couple of
-        // others. After migration only the latest survive, and the watermark is intact.
-        let mut ram = Ram::new(CAP as usize);
-        let half = half_len(CAP);
-        let mut o = 0u32;
-        o = ram.legacy_put(o, 0x5201, &1u32.to_le_bytes()); // watermark (early in the log)
-        o = ram.legacy_put(o, 0x5202, b"keep");
-        let mut last = 0u32;
-        while o + (KV_HEADER as u32 + 4) <= CAP - 2 * SUPER_LEN {
-            last += 1;
-            o = ram.legacy_put(o, 0x5300, &last.to_le_bytes()); // churn key, growing the log
-        }
-        assert!(o > half, "fixture must exceed one half to exercise the slow path");
-        // Update the watermark to a higher value late in the log (its latest must win post-migrate).
-        let _ = ram.legacy_put(o, 0x5201, &42u32.to_le_bytes());
+    fn init_mounts_an_initialized_region_untouched() {
+        // A valid superblock: init is a pure read, whichever half is active.
+        let mut ram = flip_fixture();
+        let before = ram.buf.clone();
+        ram.words_written = 0;
         init(&mut ram, CAP).unwrap();
-        assert_eq!(
-            get_vec(&ram, 0x5201).unwrap(),
-            42u32.to_le_bytes(),
-            "latest watermark must survive"
-        );
-        assert_eq!(get_vec(&ram, 0x5202).as_deref(), Some(&b"keep"[..]));
-        assert_eq!(get_vec(&ram, 0x5300).unwrap(), last.to_le_bytes());
+        assert_eq!(ram.words_written, 0);
+        assert_eq!(ram.buf, before);
+        assert_fixture_live(&ram);
+    }
+
+    #[test]
+    fn init_is_power_loss_safe() {
+        // Cut the format at each of its two writes, landing none, part or all but one byte of it:
+        // the region stays unformatted (no valid superblock), and the next init formats it.
+        for cut in 0..2 {
+            for landed in [0usize, 1, 5, 11] {
+                let mut ram = foreign_region();
+                // Replay init's writes by hand, tearing the `cut`-th one.
+                let head = half_base(CAP, 0);
+                if cut == 0 {
+                    ram.torn_write(head, &[0, 0], landed.min(1));
+                } else {
+                    ram.buf[head as usize..head as usize + 2].copy_from_slice(&[0, 0]);
+                    let mut sb = [0u8; SUPER_LEN as usize];
+                    sb[0..4].copy_from_slice(&SUPER_MAGIC);
+                    sb[4..8].copy_from_slice(&1u32.to_le_bytes());
+                    let crc = super_crc(&sb[0..8]);
+                    sb[8..12].copy_from_slice(&crc.to_le_bytes());
+                    ram.torn_write(super_off(CAP, 0), &sb, landed);
+                }
+                assert!(active(&ram, CAP).unwrap().is_none(), "cut {cut} landed {landed}");
+                init(&mut ram, CAP).unwrap();
+                assert_eq!(active(&ram, CAP).unwrap(), Some((0, 1)));
+                assert_eq!(get_vec(&ram, 0x5201), None);
+                set(&mut ram, 7, b"ok").unwrap();
+                assert_eq!(get_vec(&ram, 7).as_deref(), Some(&b"ok"[..]));
+            }
+        }
     }
 
     // --- incremental maintenance ------------------------------------------------------------
@@ -1957,11 +1941,11 @@ mod tests {
     }
 
     #[test]
-    fn wipe_of_an_uninitialized_or_legacy_region() {
-        // Legacy single-region data (no superblock) that init() would otherwise adopt.
+    fn wipe_of_an_uninitialized_region() {
+        // Bytes in another layout (no superblock): the wipe commits an empty store and scrubs them.
         let mut ram = Ram::new(CAP as usize);
-        let o = ram.legacy_put(0, 1, b"legacy-one");
-        let _ = ram.legacy_put(o, 2, b"legacy-two");
+        let o = ram.raw_put(0, 1, b"foreign-one");
+        let _ = ram.raw_put(o, 2, b"foreign-two");
         wipe(&mut ram, CAP).unwrap();
         assert_eq!(active(&ram, CAP).unwrap(), Some((1, 1)));
         assert_fixture_gone(&ram);
@@ -1969,7 +1953,7 @@ mod tests {
         let s1 = super_off(CAP, 1) as usize;
         assert!(
             ram.buf[..s1].iter().all(|&b| b == 0),
-            "legacy residue must be scrubbed"
+            "foreign residue must be scrubbed"
         );
         set(&mut ram, 1, b"new").unwrap();
         assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"new"[..]));

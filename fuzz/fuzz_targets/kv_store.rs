@@ -4,8 +4,8 @@
 //! region whose 244-byte halves make every input cross many compaction flips). The input picks a
 //! **starting image** and then a sequence of operations:
 //!
-//! * starting images: blank (a fresh part), a raw byte image, a pre-double-buffer legacy log (the
-//!   one-time migration path), or a store built through the codec and then corrupted byte-wise;
+//! * starting images: blank (a fresh part), a raw byte image (bytes in any other layout, which
+//!   `init` must format empty), or a store built through the codec and then corrupted byte-wise;
 //! * operations: `set` / `delete` / `compact` (plain and the `_with` variants that share an
 //!   incremental-flip plan), `maintain` slices, `wipe`, reads, clean reboots, EEPROM corruption,
 //!   and **power cuts**: an armed cut makes the Nth EEPROM write from now land only a prefix of its
@@ -15,9 +15,9 @@
 //! The oracle is an independent reader of the documented on-EEPROM format (superblocks with
 //! `magic ‖ generation ‖ crc`, the highest valid generation is active, records
 //! `[tag | len | crc | value]` scanned up to the first blank or corrupt one, latest record per key
-//! wins, a zero-length record is a delete tombstone, an uninitialized region is read as the legacy
-//! single-region log that `init` adopts). Before and after every operation the harness reads the
-//! image with it and asserts the transition the API documents:
+//! wins, a zero-length record is a delete tombstone, an uninitialized region holds nothing: `init`
+//! formats it empty). Before and after every operation the harness reads the image with it and
+//! asserts the transition the API documents:
 //!
 //! * a completed `set(k, v)` changes exactly `k` to `v` (a tombstone for an empty `v`), a completed
 //!   `delete(k)` removes exactly `k`, `compact` / `maintain` / `init` / a reboot change nothing,
@@ -178,8 +178,8 @@ fn scan(buf: &[u8], base: u32, area: u32) -> (Vec<(u16, Vec<u8>)>, u32) {
 #[derive(Clone)]
 struct Snapshot {
     active: Option<(u8, u32)>,
-    /// Latest value per key, tombstoned keys removed. For an uninitialized region, the legacy
-    /// single-region log `init` would adopt.
+    /// Latest value per key, tombstoned keys removed. Empty for an uninitialized region (`init`
+    /// formats it empty, whatever bytes it holds).
     view: View,
     /// Log end of the active half (relative to its base).
     end: u32,
@@ -199,10 +199,7 @@ fn snapshot(buf: &[u8], cap: u32) -> Snapshot {
             let dead = ((1 - h) as u32 * half) as usize;
             (r, e, buf[dead..dead + half as usize].iter().all(|&b| b == 0))
         }
-        None => {
-            let (r, e) = scan(buf, 0, cap);
-            (r, e, true)
-        }
+        None => (Vec::new(), 0, true),
     };
     let mut view = View::new();
     let mut tags = BTreeSet::new();
@@ -337,7 +334,6 @@ enum Start<'a> {
         at: u16,
         bytes: &'a [u8],
     },
-    Legacy(Vec<(Key, Value)>),
     Patched {
         sets: Vec<(Key, Value)>,
         patches: Vec<(u16, u8)>,
@@ -348,7 +344,7 @@ enum Start<'a> {
 struct Input<'a> {
     small: bool,
     start: Start<'a>,
-    /// A power cut armed before the first boot's `init` (e.g. mid legacy migration).
+    /// A power cut armed before the first boot's `init` (e.g. mid format).
     boot_cut: Option<(u8, u16, Option<u8>)>,
     ops: Vec<Op>,
 }
@@ -426,35 +422,32 @@ impl Harness {
     }
 
     /// Boot: drop all RAM state and run `init`, as the firmware's `Kv::new` does. `init` must
-    /// preserve the logical content (adopting a legacy log included), even when itself cut by a
-    /// power loss (an armed cut may fire inside it; the device then boots again). Returns whether
-    /// the store is usable (`init` refuses a legacy log that does not fit one half).
-    fn boot(&mut self) -> bool {
+    /// mount an initialized store untouched and format anything else empty (the reference reader
+    /// already reads an uninitialized region as empty), in at most the head tag and one
+    /// superblock, even when itself cut by a power loss (an armed cut may fire inside it; the
+    /// device then boots again).
+    fn boot(&mut self) {
         loop {
             self.ram.dead = false;
             self.maint = MaintState::new();
             let before = self.snap();
-            let w0 = self.ram.writes;
+            let (w0, words0) = (self.ram.writes, self.ram.words);
             let r = kv::init(&mut self.ram, self.cap);
             let cut = self.ram.dead;
             let after = self.snap();
-            // KNOWN ISSUE, reported and deliberately NOT asserted: the one-time migration of a
-            // legacy log longer than one half (`legacy_compact`) packs it in place, front to back,
-            // with no commit point, so a power cut mid-copy leaves a torn record boundary and the
-            // next boot's re-migration loses every live record not yet copied. A power-safe pack
-            // needs a different migration design (scratch space), not a local fix. Every other
-            // `init`, the zero-copy fast-path migration included, must keep the content under any
-            // cut. Drop this exception once the slow path is made power-safe.
-            let legacy_pack = before.active.is_none() && before.end > self.half();
-            if !(cut && legacy_pack) {
-                assert_eq!(
-                    after.view, before.view,
-                    "init (cut: {cut}) changed the stored content"
-                );
-            }
+            assert_eq!(
+                after.view, before.view,
+                "init (cut: {cut}) changed the stored content"
+            );
             if before.active.is_some() {
                 assert_eq!(r, Ok(()));
                 assert_eq!(self.ram.writes, w0, "init of an initialized store must not write");
+            } else {
+                // The format: the 2-byte head tag (one word) and the 12-byte superblock (three).
+                assert!(
+                    self.ram.words - words0 <= 4,
+                    "the format programmed more than it needs"
+                );
             }
             if cut {
                 assert_eq!(r, Err(KvError::Backend(Fault::PowerLost)));
@@ -464,11 +457,7 @@ impl Harness {
                 Ok(()) => {
                     let keys = self.all_keys();
                     self.cross_check(&after, &keys);
-                    return true;
-                }
-                Err(KvError::Full | KvError::TooManyKeys) => {
-                    assert!(after.active.is_none(), "a refused migration must not commit");
-                    return false;
+                    return;
                 }
                 Err(e) => panic!("init failed: {e:?}"),
             }
@@ -506,7 +495,8 @@ impl Harness {
                 done,
                 after.view
             );
-            return self.boot();
+            self.boot();
+            return true;
         }
         match r {
             Ok(()) => assert_eq!(
@@ -684,12 +674,16 @@ impl Harness {
                 });
                 true
             }
-            Op::Reboot => self.boot(),
+            Op::Reboot => {
+                self.boot();
+                true
+            }
             Op::Corrupt { off, xor } => {
                 let i = *off as usize % self.ram.buf.len();
                 self.ram.buf[i] ^= xor;
                 self.strict = false;
-                self.boot()
+                self.boot();
+                true
             }
         }
     }
@@ -703,24 +697,6 @@ fn build_start(start: &Start<'_>, cap: u32) -> Vec<u8> {
             let at = *at as usize % buf.len();
             let n = bytes.len().min(buf.len() - at);
             buf[at..at + n].copy_from_slice(&bytes[..n]);
-        }
-        Start::Legacy(records) => {
-            // The pre-double-buffer layout: one log from offset 0 over the whole region.
-            let mut o = 0usize;
-            for (k, v) in records {
-                let (k, v) = (k.get(), v.bytes());
-                let v = &v[..v.len().min(MAX_VALUE)];
-                if k == 0 || o + KV_HEADER + v.len() > buf.len() {
-                    break;
-                }
-                let mut rec = k.to_le_bytes().to_vec();
-                rec.extend_from_slice(&(v.len() as u16).to_le_bytes());
-                let crc = kv::entry_crc(&rec, v);
-                rec.extend_from_slice(&crc.to_le_bytes());
-                rec.extend_from_slice(v);
-                buf[o..o + rec.len()].copy_from_slice(&rec);
-                o += rec.len();
-            }
         }
         Start::Patched { sets, patches } => {
             let mut ram = Ram {
@@ -766,9 +742,7 @@ fuzz_target!(|input: Input<'_>| {
             garbage,
         });
     }
-    if !h.boot() {
-        return;
-    }
+    h.boot();
     for op in input.ops.iter().take(MAX_OPS) {
         if !h.run(op) {
             return;

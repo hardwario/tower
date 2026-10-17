@@ -225,10 +225,11 @@ pub struct Kv<'d> {
 }
 
 impl<'d> Kv<'d> {
-    /// Build a key-value store over the whole EEPROM region of `storage`, initializing the
-    /// double-buffered layout (and migrating legacy single-region data, once) if needed. The
-    /// init is best-effort: a flash fault leaves the store empty rather than failing `new`, the
-    /// same fallback as a blank/corrupt key.
+    /// Build a key-value store over the whole EEPROM region of `storage`: an initialized
+    /// double-buffered region mounts as it is; anything else (a blank part, or bytes in any other
+    /// layout, e.g. an older firmware's store) is formatted empty, never migrated
+    /// ([`tower_kv::init`], docs/storage.md). The init is best-effort: a flash fault leaves the
+    /// store empty rather than failing `new`, the same fallback as a blank/corrupt key.
     pub fn new(mut storage: Storage<'d>) -> Self {
         let capacity = storage.len() as u32;
         let _ = tower_kv::init(&mut storage, capacity);
