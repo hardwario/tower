@@ -1,0 +1,3240 @@
+//! The gateway engine, a **pure, synchronous state machine**: `handle(Input) ->
+//! Vec<Output>`. No I/O, no threads, no clocks beyond the injected 1 Hz `Tick`; the
+//! surrounding threads (serial reader/writer, rumqttc connection loop, frontend) feed
+//! `Input`s in and execute `Output`s. That seam is what makes the whole
+//! serial↔MQTT bridge unit-testable without hardware or a broker: the same trick as
+//! `session::Transport`, one level up.
+//!
+//! Responsibilities: mirror the dongle's registry into retained MQTT topics, translate
+//! uplinks into telemetry topics (the gateway firmware forwards payloads verbatim;
+//! *this* is where `tower_protocol::radio` is decoded), run the remote-shell
+//! queue/response correlation (MQTT uuid ↔ radio `cmd_id` ↔ queue item), serve the
+//! `gateway/cmd` RPC surface, stream radio diagnostics, and keep `gateway/status`
+//! truthful across serial/MQTT link changes and gateway reboots (session_id).
+
+use std::collections::VecDeque;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tower_protocol::mgmt::{self, MgmtOp, NodeEntry, NodeKey, Paired, QueueEntry, QueueId};
+use tower_protocol::msg::RadioStat;
+use tower_protocol::radio::{self, NodeCmd, NodeMsg};
+
+use crate::mgmt::{DeviceInfoOwned, NodeEntryOwned, encode_mgmt, parse_records};
+
+use super::payload::{self, PendingEntry, RpcRequest, RpcResponse};
+use super::topics;
+
+/// Idle ticks (1 Hz) before an in-flight management op is failed as a device timeout.
+const MGMT_TIMEOUT_TICKS: u64 = 8;
+/// Idle ticks before a delivered-but-unanswered remote shell command is failed (the
+/// node executed it on its wake cycle; a healthy reply arrives within its RX window).
+const SHELL_REPLY_TIMEOUT_TICKS: u64 = 30;
+/// Ticks between retained `gateway/stats` refreshes.
+const STATS_EVERY_TICKS: u64 = 10;
+/// The gateway firmware's queue TTL when a `ShellReq` leaves `ttl` at 0, in seconds.
+const DEFAULT_QUEUE_TTL: u64 = 3600;
+/// Slack past a queued (undelivered) shell command's TTL before the host gives up on it
+/// without the gateway's `TX_EXPIRED` report: the backstop for a report lost to a missed
+/// gateway reboot or a serial drop, so a pending entry can never live forever.
+const SHELL_TTL_GRACE_TICKS: u64 = 30;
+/// Largest command payload (`gateway/cmd`, `nodes/+/shell/req`) the engine will parse;
+/// real requests are a few hundred bytes.
+const MAX_COMMAND_PAYLOAD: usize = 4096;
+/// How many recent MQTT request ids are remembered to drop QoS-1 redeliveries.
+const RECENT_IDS: usize = 64;
+/// Uplinks held (not dropped) while the startup registry sync is still in flight.
+const HELD_UPLINKS: usize = 16;
+/// Distinct unregistered senders tracked for drop accounting (the table resets beyond).
+const UNREGISTERED_TRACKED: usize = 32;
+
+/// One decoded target→host frame, owned (the serial thread copies out of its buffer).
+#[derive(Debug, Clone)]
+pub(crate) enum SerialMsg {
+    Hello {
+        firmware_name: String,
+        firmware_version: String,
+        session_id: u32,
+    },
+    Log {
+        line: String,
+    },
+    Uplink {
+        src: u32,
+        counter: u32,
+        rssi: i16,
+        lqi: u8,
+        data: Vec<u8>,
+    },
+    Mgmt {
+        req_id: u16,
+        result: u8,
+        chunk: u16,
+        last: bool,
+        data: Vec<u8>,
+    },
+    Stat(RadioStat),
+    Dropped(u32),
+}
+
+/// Everything that can happen to the engine.
+#[derive(Debug)]
+pub(crate) enum Input {
+    SerialUp,
+    SerialDown {
+        error: String,
+    },
+    SerialFrame(SerialMsg),
+    MqttUp,
+    MqttDown {
+        error: String,
+    },
+    MqttIn {
+        topic: String,
+        payload: Vec<u8>,
+        /// The broker replayed a *stored* retained message (live deliveries carry 0).
+        retain: bool,
+    },
+    /// An in-process frontend action (the TUI drives the same surfaces the MQTT
+    /// clients do). Its RPC responses come back as events, routed by this *origin*,
+    /// never by the id string, which an MQTT client could mint to look like the TUI's.
+    Frontend(FrontendCmd),
+    /// 1 Hz housekeeping (timeouts, stats refresh, pairing countdown).
+    Tick,
+}
+
+/// What the TUI can ask for.
+#[derive(Debug)]
+pub(crate) enum FrontendCmd {
+    Rpc(RpcRequest),
+    Shell { node: u32, req: payload::ShellReq },
+}
+
+/// Everything the engine wants done. Executed by the runner thread.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Output {
+    /// Write one pre-encoded frame to the dongle.
+    SerialSend(Vec<u8>),
+    Publish {
+        topic: String,
+        payload: Vec<u8>,
+        retain: bool,
+    },
+    Subscribe(String),
+    /// A frontend event (service log line / TUI view-model update).
+    Event(Event),
+}
+
+/// Frontend feed: the service prints these; the TUI folds them into its view-model.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Event {
+    /// A human-readable line (device logs, engine milestones, warnings).
+    Log(String),
+    /// Link state changed.
+    Link { serial_up: bool, mqtt_up: bool },
+    /// The registry mirror changed (full snapshot: ≤16 nodes, cheap).
+    Registry(Vec<NodeView>),
+    /// A remote-shell response chunk (or terminal error) for a node's dialog.
+    Shell { node: u32, rsp: payload::ShellRsp },
+    /// One radio-graph sample.
+    Radio(RadioSample),
+    /// Pairing window state changed.
+    Pairing(payload::Pairing),
+    /// The response to a frontend-initiated RPC (`Input::Frontend` origin only).
+    Rpc(RpcResponse),
+    /// One MQTT message crossed the broker link (mirrored by the runner; the
+    /// engine itself never emits this). TUI feed food; the service ignores it.
+    Mqtt(MqttMsg),
+}
+
+/// Which way an MQTT message crossed the link, seen from the gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MqttDir {
+    /// Published by this gateway.
+    Out,
+    /// Received from a broker subscription (`gateway/cmd`, `nodes/+/shell/req`).
+    In,
+}
+
+/// One mirrored MQTT message (the TUI's traffic-feed entry).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MqttMsg {
+    pub dir: MqttDir,
+    pub topic: String,
+    pub payload: Vec<u8>,
+    pub retain: bool,
+}
+
+/// The frontend's view of one node (mirror row + live pendings).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NodeView {
+    pub addr: u32,
+    pub name: String,
+    pub kind: String,
+    pub sleeping: bool,
+    pub unnamed: bool,
+    pub last_seen: Option<u32>,
+    pub rssi: Option<i8>,
+    pub uplinks: u32,
+    pub queued: u8,
+    pub pending: Vec<PendingEntry>,
+}
+
+/// One radio-graph sample (TUI chart food).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum RadioSample {
+    Ambient { dbm: i16, channel: u8 },
+    Rx { src: u32, rssi: i16 },
+    Tx { dest: u32, delivered: bool },
+}
+
+// ---- internal state ---------------------------------------------------------------
+
+/// What an in-flight `MgmtRequest` was for (drives reply decoding + follow-ups).
+#[derive(Debug, Clone)]
+enum OpKind {
+    /// `resync`: re-describe after a serial reconnect / gateway reboot.
+    Describe,
+    NodeList,
+    NodeAdd {
+        id: u32,
+        name: String,
+    },
+    NodeRemove {
+        id: u32,
+    },
+    NodeUpdate,
+    RevealKey {
+        id: u32,
+    },
+    PairingOpen,
+    PairingCancel,
+    QueuePush {
+        node: u32,
+        shell: Option<ShellOrigin>,
+    },
+    QueueList,
+    /// Engine-internal `QueueList` reconciling the pending mirror with the device queue
+    /// (startup purge of a previous host's leftovers; resync after a serial drop).
+    QueueSync,
+    QueueDrop {
+        node: u32,
+    },
+    /// Engine-internal drop of one stale item found by [`OpKind::QueueSync`].
+    QueueDropStale,
+    StatsConfig,
+}
+
+/// Where a remote-shell command came from (for response routing).
+#[derive(Debug, Clone)]
+struct ShellOrigin {
+    rpc: String,
+    line: String,
+    cmd_id: u16,
+    /// Requested queue TTL (0 = the gateway default): the host-side expiry backstop.
+    ttl: u16,
+}
+
+/// Which surface an RPC arrived on, and so where its response goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RpcOrigin {
+    /// `gateway/cmd` → answered on `gateway/rsp/{id}`.
+    Mqtt,
+    /// The in-process TUI → answered as [`Event::Rpc`].
+    Frontend,
+}
+
+/// An RPC awaiting its response: the client's correlation id + where to answer.
+#[derive(Debug, Clone)]
+struct RpcRef {
+    id: String,
+    origin: RpcOrigin,
+}
+
+/// One in-flight management request.
+#[derive(Debug)]
+struct PendingMgmt {
+    req_id: u16,
+    op: OpKind,
+    /// The RPC to answer (None = engine-internal).
+    rpc: Option<RpcRef>,
+    data: Vec<u8>,
+    next_chunk: u16,
+    truncated: bool,
+    /// Tick deadline (delayed ops, i.e. pairing, get their window + slack).
+    deadline: u64,
+}
+
+/// The registry mirror row (device truth + host-side enrichment).
+#[derive(Debug, Clone)]
+struct NodeMirror {
+    entry: NodeEntryOwned,
+    /// From the node's `NodeInfo` heartbeat: firmware name mapped to a kind.
+    kind: String,
+    /// Last `NodeInfo.session_id` (count-reset disambiguation for subscribers).
+    session_id: Option<u32>,
+    /// Live remote-shell queue entries (ref = gateway queue item id).
+    pending: Vec<PendingShell>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingShell {
+    item: u16,
+    rpc: String,
+    line: String,
+    cmd_id: u16,
+    /// Set once the gateway reports TX_DELIVERED (awaiting the node's reply chunks).
+    delivered_tick: Option<u64>,
+    /// While undelivered: the tick past which the host stops waiting for the gateway's
+    /// `TX_EXPIRED` report (queue TTL + grace).
+    expires_tick: u64,
+    next_chunk: u16,
+    truncated: bool,
+}
+
+/// An uplink parked until the startup registry sync says whether its sender is ours.
+#[derive(Debug)]
+struct HeldUplink {
+    src: u32,
+    counter: u32,
+    rssi: i16,
+    lqi: u8,
+    data: Vec<u8>,
+}
+
+pub(crate) struct Engine {
+    prefix: String,
+    port_name: String,
+    describe: DeviceInfoOwned,
+    hello_session: Option<u32>,
+    firmware_version: String,
+    serial_up: bool,
+    mqtt_up: bool,
+    seq: u16,
+    next_req: u16,
+    next_cmd: u16,
+    /// Per-process random dedup epoch stamped on every downlink shell command.
+    shell_epoch: u32,
+    pending_mgmt: Vec<PendingMgmt>,
+    nodes: Vec<NodeMirror>,
+    /// The first `NodeList` has been merged; before that an unknown uplink sender may
+    /// simply not be mirrored *yet* (held, not dropped).
+    registry_synced: bool,
+    held: Vec<HeldUplink>,
+    /// Uplinks dropped per unregistered sender (bounded table).
+    unregistered: Vec<(u32, u64)>,
+    /// Recently seen MQTT request ids (QoS-1 redelivery dedup), oldest first.
+    recent_ids: VecDeque<String>,
+    pairing_rpc: Option<String>,
+    pairing_until: Option<u64>,
+    tick: u64,
+    uplinks: u64,
+    last_ambient: Option<(i16, u8)>,
+}
+
+/// Is `name` acceptable as a node name? Printable text only: names are echoed on plain
+/// terminal output (`nodes list`, service logs), so control characters, the bidi
+/// embedding/override/isolate controls and anything else non-printable are refused at
+/// the source. Length (1..=`MAX_NODE_NAME` bytes) is the caller's check.
+fn printable_name(name: &str) -> bool {
+    name.chars()
+        .all(|c| !c.is_control() && !matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+}
+
+/// Parse a 32-hex-digit AES key.
+fn parse_key_hex(s: &str) -> Option<[u8; 16]> {
+    if s.len() != 32 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut key = [0u8; 16];
+    for (i, k) in key.iter_mut().enumerate() {
+        *k = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(key)
+}
+
+fn now_ts() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn json<T: serde::Serialize>(v: &T) -> Vec<u8> {
+    serde_json::to_vec(v).unwrap_or_default()
+}
+
+/// Firmware name → device kind: `radio_push_button` → `push-button`.
+fn kind_of(firmware_name: &str) -> String {
+    firmware_name
+        .strip_prefix("radio_")
+        .unwrap_or(firmware_name)
+        .replace('_', "-")
+}
+
+impl Engine {
+    pub(crate) fn new(prefix: String, port_name: String, describe: DeviceInfoOwned) -> Self {
+        Self {
+            prefix,
+            port_name,
+            describe,
+            hello_session: None,
+            firmware_version: String::new(),
+            serial_up: true,
+            mqtt_up: false,
+            seq: 0,
+            next_req: 1,
+            next_cmd: 1,
+            shell_epoch: 0,
+            pending_mgmt: Vec::new(),
+            nodes: Vec::new(),
+            registry_synced: false,
+            held: Vec::new(),
+            unregistered: Vec::new(),
+            recent_ids: VecDeque::new(),
+            pairing_rpc: None,
+            pairing_until: None,
+            tick: 0,
+            uplinks: 0,
+            last_ambient: None,
+        }
+    }
+
+    /// Seed a fresh random per-process **shell dedup epoch** and **starting `cmd_id`**.
+    ///
+    /// The node de-duplicates the gateway's at-least-once re-deliveries on the
+    /// `(epoch, cmd_id)` pair, and its memory survives a host restart (the node
+    /// keeps running). Reusing a low `cmd_id` from a fresh host would otherwise be
+    /// mistaken for a re-delivery the node already ran: the "checkmark, no output"
+    /// bug. A 32-bit random epoch per `tower gateway` process makes that collision
+    /// ~2⁻³² (a fresh host would have to draw the previous process's exact epoch AND
+    /// reuse its `cmd_id`).
+    ///
+    /// The node's *reply* carries only the `cmd_id`, though, and the gateway's queue
+    /// (TTL up to an hour) survives a host restart: a late reply to the previous
+    /// process's command #1 would be credited to this process's command #1. A random
+    /// starting `cmd_id` makes that ~1/65535 per pending command; the startup
+    /// [`OpKind::QueueSync`] purge removes the leftovers outright. Production only;
+    /// tests keep the deterministic epoch 0 / first `cmd_id` 1.
+    pub(crate) fn randomize_shell_ids(&mut self) {
+        let mut b = [0u8; 6];
+        if getrandom::fill(&mut b).is_ok() {
+            self.shell_epoch = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            self.next_cmd = u16::from_le_bytes([b[4], b[5]]).max(1);
+        }
+    }
+
+    /// The initial output batch: subscriptions + a registry/queue sync. The queue sync
+    /// purges items a previous host process left queued on the gateway; their replies
+    /// could only be mis-credited (see [`Engine::randomize_shell_ids`]).
+    pub(crate) fn start(&mut self) -> Vec<Output> {
+        let mut out = vec![
+            Output::Subscribe(topics::gateway_cmd(&self.prefix)),
+            Output::Subscribe(topics::shell_req_filter(&self.prefix)),
+        ];
+        self.issue(&mut out, OpKind::NodeList, MgmtOp::NodeList, None);
+        self.issue(
+            &mut out,
+            OpKind::QueueSync,
+            MgmtOp::QueueList { node_addr: 0 },
+            None,
+        );
+        out.push(Output::Event(Event::Log(format!(
+            "gateway {} on {} ({} node slots)",
+            topics::node_hex(self.describe.addr),
+            self.port_name,
+            self.describe.node_capacity
+        ))));
+        out
+    }
+
+    pub(crate) fn handle(&mut self, input: Input) -> Vec<Output> {
+        let mut out = Vec::new();
+        match input {
+            Input::SerialUp => {
+                self.serial_up = true;
+                self.publish_status(&mut out);
+                out.push(Output::Event(Event::Link {
+                    serial_up: true,
+                    mqtt_up: self.mqtt_up,
+                }));
+                // Resync: the dongle may have rebooted while we were away (its Hello
+                // settles that), and requests issued while the link was down were never
+                // delivered: reconcile the pending mirror with what is really queued.
+                self.issue(&mut out, OpKind::Describe, MgmtOp::Describe, None);
+                self.issue(
+                    &mut out,
+                    OpKind::QueueSync,
+                    MgmtOp::QueueList { node_addr: 0 },
+                    None,
+                );
+            }
+            Input::SerialDown { error } => {
+                self.serial_up = false;
+                self.publish_status(&mut out);
+                out.push(Output::Event(Event::Link {
+                    serial_up: false,
+                    mqtt_up: self.mqtt_up,
+                }));
+                out.push(Output::Event(Event::Log(format!("serial lost: {error}"))));
+            }
+            Input::SerialFrame(msg) => self.on_serial(msg, &mut out),
+            Input::MqttUp => {
+                self.mqtt_up = true;
+                out.push(Output::Subscribe(topics::gateway_cmd(&self.prefix)));
+                out.push(Output::Subscribe(topics::shell_req_filter(&self.prefix)));
+                // Retained world re-publish: reconnect-resync is free by design.
+                self.publish_status(&mut out);
+                self.publish_stats(&mut out);
+                self.publish_pairing(&mut out, None);
+                for i in 0..self.nodes.len() {
+                    self.publish_node(&mut out, i);
+                    self.publish_pending(&mut out, i);
+                }
+                out.push(Output::Event(Event::Link {
+                    serial_up: self.serial_up,
+                    mqtt_up: true,
+                }));
+            }
+            Input::MqttDown { error } => {
+                // Also reported while never connected (each distinct error once): a
+                // wrong password or unreachable broker must not fail silently.
+                let line = if self.mqtt_up {
+                    format!("mqtt lost: {error}")
+                } else {
+                    format!("mqtt: cannot connect to the broker: {error}")
+                };
+                self.mqtt_up = false;
+                out.push(Output::Event(Event::Link {
+                    serial_up: self.serial_up,
+                    mqtt_up: false,
+                }));
+                out.push(Output::Event(Event::Log(line)));
+            }
+            Input::MqttIn {
+                topic,
+                payload,
+                retain,
+            } => self.on_mqtt(&topic, &payload, retain, &mut out),
+            Input::Frontend(FrontendCmd::Rpc(req)) => {
+                self.on_rpc(req, RpcOrigin::Frontend, &mut out)
+            }
+            Input::Frontend(FrontendCmd::Shell { node, req }) => {
+                self.on_shell_req(node, req, &mut out)
+            }
+            Input::Tick => self.on_tick(&mut out),
+        }
+        out
+    }
+
+    // ---- serial → engine ------------------------------------------------------
+
+    fn on_serial(&mut self, msg: SerialMsg, out: &mut Vec<Output>) {
+        match msg {
+            SerialMsg::Hello {
+                firmware_name,
+                firmware_version,
+                session_id,
+            } => {
+                // The dongle emits Hello once per console session: at boot (it is
+                // USB-powered: a replug is a reboot too). The boot Hello of the session we
+                // attached to was consumed by the startup `describe` probe (and DeviceInfo
+                // carries no session id), so NO session is pinned at start: the first
+                // Hello seen here already means a reboot since attach. Only a Hello that
+                // repeats the pinned session (a console restart without a reboot) is benign.
+                let rebooted = self.hello_session != Some(session_id);
+                self.hello_session = Some(session_id);
+                self.firmware_version = firmware_version;
+                self.describe.firmware_name = firmware_name;
+                if rebooted {
+                    out.push(Output::Event(Event::Log(format!(
+                        "gateway rebooted (session {session_id}): resyncing; queued downlinks were lost"
+                    ))));
+                    // The RAM queue died with the old session: fail every pending
+                    // command loudly, then resync the registry.
+                    for i in 0..self.nodes.len() {
+                        let node = self.nodes[i].entry.addr;
+                        for p in std::mem::take(&mut self.nodes[i].pending) {
+                            self.shell_error(out, node, &p, "gateway rebooted; command lost");
+                        }
+                        self.publish_pending(out, i);
+                    }
+                    self.issue(out, OpKind::Describe, MgmtOp::Describe, None);
+                    self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+                }
+                self.publish_status(out);
+            }
+            SerialMsg::Log { line } => out.push(Output::Event(Event::Log(line))),
+            SerialMsg::Uplink {
+                src,
+                counter,
+                rssi,
+                lqi,
+                data,
+            } => self.on_uplink(
+                HeldUplink {
+                    src,
+                    counter,
+                    rssi,
+                    lqi,
+                    data,
+                },
+                out,
+            ),
+            SerialMsg::Mgmt {
+                req_id,
+                result,
+                chunk,
+                last,
+                data,
+            } => self.on_mgmt_chunk(req_id, result, chunk, last, data, out),
+            SerialMsg::Stat(stat) => self.on_radio_stat(stat, out),
+            SerialMsg::Dropped(count) => {
+                out.push(Output::Event(Event::Log(format!(
+                    "gateway console dropped {count} frame(s) (link congestion)"
+                ))));
+            }
+        }
+    }
+
+    /// One forwarded uplink. Only **registered** nodes reach MQTT: the host is the last
+    /// line before the public topic tree, so a sender the registry doesn't know (a stale
+    /// mirror aside) is dropped and counted, not published, whatever let it through the
+    /// gateway. Before the first registry sync the mirror is simply empty, so those
+    /// uplinks are parked and replayed once it lands.
+    fn on_uplink(&mut self, u: HeldUplink, out: &mut Vec<Output>) {
+        if self.nodes.iter().all(|n| n.entry.addr != u.src) {
+            if !self.registry_synced {
+                if self.held.len() < HELD_UPLINKS {
+                    self.held.push(u);
+                }
+                return;
+            }
+            // Keep the radio-graph mark (something authenticated transmitted); it
+            // never leaves the process.
+            out.push(Output::Event(Event::Radio(RadioSample::Rx {
+                src: u.src,
+                rssi: u.rssi,
+            })));
+            return self.drop_unregistered(u.src, out);
+        }
+        let HeldUplink {
+            src,
+            counter,
+            rssi,
+            lqi,
+            data,
+        } = u;
+        self.uplinks += 1;
+        self.touch_node(src, rssi);
+        out.push(Output::Event(Event::Radio(RadioSample::Rx { src, rssi })));
+        out.push(Output::Publish {
+            topic: topics::radio_rx(&self.prefix),
+            payload: json(&payload::RadioRx {
+                src: topics::node_hex(src),
+                rssi,
+                lqi,
+                len: data.len(),
+                ts: now_ts(),
+            }),
+            retain: false,
+        });
+        out.push(Output::Publish {
+            topic: topics::node_uplink(&self.prefix, src),
+            payload: json(&payload::UplinkDebug {
+                counter,
+                rssi,
+                lqi,
+                len: data.len(),
+                hex: data.iter().map(|b| format!("{b:02x}")).collect(),
+                ts: now_ts(),
+            }),
+            retain: false,
+        });
+        self.on_node_msg(src, counter, &data, out);
+    }
+
+    /// Account one uplink from a sender the registry doesn't know: log at 1, 10, 100, …
+    /// drops per sender (bounded noise), and on the first one re-list the registry in case
+    /// the mirror is merely stale.
+    fn drop_unregistered(&mut self, src: u32, out: &mut Vec<Output>) {
+        let count = match self.unregistered.iter_mut().find(|(a, _)| *a == src) {
+            Some((_, c)) => {
+                *c += 1;
+                *c
+            }
+            None => {
+                if self.unregistered.len() >= UNREGISTERED_TRACKED {
+                    self.unregistered.clear();
+                }
+                self.unregistered.push((src, 1));
+                self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+                1
+            }
+        };
+        let mut n = count;
+        while n % 10 == 0 {
+            n /= 10;
+        }
+        if n == 1 {
+            out.push(Output::Event(Event::Log(format!(
+                "dropped uplink from unregistered node {} ({count} so far): not in the gateway registry, not published",
+                topics::node_hex(src)
+            ))));
+        }
+    }
+
+    /// Decode one forwarded radio-application payload: the host side of the
+    /// "gateway is a transparent bridge" contract.
+    fn on_node_msg(&mut self, src: u32, counter: u32, data: &[u8], out: &mut Vec<Output>) {
+        let ts = now_ts();
+        match radio::decode_node_msg(data) {
+            Ok(NodeMsg::Button { kind, count }) => {
+                let event = match kind {
+                    radio::ButtonKind::Press => "press",
+                    radio::ButtonKind::Release => "release",
+                    radio::ButtonKind::Click => "click",
+                    radio::ButtonKind::Hold => "hold",
+                };
+                out.push(Output::Publish {
+                    topic: topics::node_button(&self.prefix, src),
+                    payload: json(&payload::ButtonEvent {
+                        event: event.into(),
+                        count,
+                        counter,
+                        ts,
+                    }),
+                    retain: false,
+                });
+            }
+            Ok(NodeMsg::Temperature { millic }) => {
+                out.push(Output::Publish {
+                    topic: topics::node_temperature(&self.prefix, src),
+                    payload: json(&payload::Temperature {
+                        celsius: millic as f64 / 1000.0,
+                        millic,
+                        ts,
+                    }),
+                    retain: true,
+                });
+            }
+            Ok(NodeMsg::Accel { kind, face }) => {
+                let event = match kind {
+                    radio::AccelKind::Motion => "motion",
+                    radio::AccelKind::Orientation => "orientation",
+                };
+                out.push(Output::Publish {
+                    topic: topics::node_accel(&self.prefix, src),
+                    payload: json(&payload::AccelEvent {
+                        event: event.into(),
+                        face,
+                        counter,
+                        ts,
+                    }),
+                    retain: false,
+                });
+            }
+            Ok(NodeMsg::Info(info)) => self.on_node_info(src, &info, out),
+            Ok(NodeMsg::Shell(chunk)) => self.on_shell_chunk(src, &chunk, out),
+            Err(tower_protocol::Error::BadVersion { got }) => {
+                out.push(Output::Event(Event::Log(format!(
+                    "node {} speaks radio schema v{got}, this build v{}; update tower-cli or the node",
+                    topics::node_hex(src),
+                    radio::RADIO_SCHEMA_VERSION
+                ))));
+            }
+            Err(_) => {
+                out.push(Output::Event(Event::Log(format!(
+                    "node {}: undecodable application payload ({} B)",
+                    topics::node_hex(src),
+                    data.len()
+                ))));
+            }
+        }
+    }
+
+    /// A `NodeInfo` heartbeat: enrich the mirror (kind/sleeping) and auto-name
+    /// unnamed nodes, `push-button:0` style, host-side by design (the gateway
+    /// firmware never interprets payloads).
+    fn on_node_info(&mut self, src: u32, info: &radio::NodeInfo<'_>, out: &mut Vec<Output>) {
+        let kind = kind_of(info.firmware_name);
+        let Some(i) = self.nodes.iter().position(|n| n.entry.addr == src) else {
+            return; // unregistered node: forwarded but not ours to manage
+        };
+        self.nodes[i].kind = kind.clone();
+        self.nodes[i].session_id = Some(info.session_id);
+
+        let mut flags = self.nodes[i].entry.flags;
+        if info.sleeping {
+            flags |= mgmt::NODE_FLAG_SLEEPING;
+        } else {
+            flags &= !mgmt::NODE_FLAG_SLEEPING;
+        }
+
+        if self.nodes[i].entry.flags & mgmt::NODE_FLAG_UNNAMED != 0 {
+            // Auto-name: smallest free index for this kind.
+            let name = (0..)
+                .map(|n| format!("{kind}:{n}"))
+                .find(|cand| !self.nodes.iter().any(|m| &m.entry.name == cand))
+                .unwrap();
+            flags &= !mgmt::NODE_FLAG_UNNAMED;
+            out.push(Output::Event(Event::Log(format!(
+                "auto-naming node {} \"{name}\"",
+                topics::node_hex(src)
+            ))));
+            // `op` borrows the local; `issue` encodes it immediately, so no leak/copy.
+            let op = MgmtOp::NodeUpdate {
+                addr: src,
+                name: Some(name.as_str()),
+                flags: Some(flags),
+            };
+            self.issue(out, OpKind::NodeUpdate, op, None);
+        } else if flags != self.nodes[i].entry.flags {
+            let op = MgmtOp::NodeUpdate {
+                addr: src,
+                name: None,
+                flags: Some(flags),
+            };
+            self.issue(out, OpKind::NodeUpdate, op, None);
+        }
+        self.publish_node(out, i);
+    }
+
+    /// One remote-shell response chunk from a node → the MQTT dialog + frontend.
+    fn on_shell_chunk(
+        &mut self,
+        src: u32,
+        chunk: &radio::NodeShellChunk<'_>,
+        out: &mut Vec<Output>,
+    ) {
+        let Some(i) = self.nodes.iter().position(|n| n.entry.addr == src) else {
+            return;
+        };
+        let Some(pi) = self.nodes[i]
+            .pending
+            .iter()
+            .position(|p| p.cmd_id == chunk.cmd_id)
+        else {
+            out.push(Output::Event(Event::Log(format!(
+                "node {}: shell chunk for unknown cmd_id {}",
+                topics::node_hex(src),
+                chunk.cmd_id
+            ))));
+            return;
+        };
+        let gap = self.nodes[i].pending[pi].next_chunk != chunk.chunk;
+        if gap {
+            self.nodes[i].pending[pi].truncated = true;
+        }
+        self.nodes[i].pending[pi].next_chunk = chunk.chunk.wrapping_add(1);
+        let rsp = payload::ShellRsp {
+            id: self.nodes[i].pending[pi].rpc.clone(),
+            chunk: chunk.chunk,
+            text: chunk.text.to_string(),
+            done: chunk.last,
+            result: chunk.result,
+            truncated: self.nodes[i].pending[pi].truncated,
+            error: None,
+        };
+        out.push(Output::Publish {
+            topic: topics::node_shell_rsp(&self.prefix, src),
+            payload: json(&rsp),
+            retain: false,
+        });
+        out.push(Output::Event(Event::Shell { node: src, rsp }));
+        if chunk.last {
+            self.nodes[i].pending.remove(pi);
+            self.publish_pending(out, i);
+        }
+    }
+
+    fn on_radio_stat(&mut self, stat: RadioStat, out: &mut Vec<Output>) {
+        let ts = now_ts();
+        match stat {
+            RadioStat::Channel { channel, rssi } => {
+                self.last_ambient = Some((rssi, channel));
+                out.push(Output::Event(Event::Radio(RadioSample::Ambient {
+                    dbm: rssi,
+                    channel,
+                })));
+                out.push(Output::Publish {
+                    topic: topics::radio_rssi(&self.prefix),
+                    payload: json(&payload::RadioRssi {
+                        dbm: rssi,
+                        channel,
+                        ts,
+                    }),
+                    retain: false,
+                });
+            }
+            RadioStat::Tx {
+                dest,
+                item,
+                outcome,
+                ack_rssi,
+            } => {
+                out.push(Output::Event(Event::Radio(RadioSample::Tx {
+                    dest,
+                    delivered: outcome == mgmt::TX_DELIVERED,
+                })));
+                out.push(Output::Publish {
+                    topic: topics::radio_tx(&self.prefix),
+                    payload: json(&payload::RadioTx {
+                        dest: topics::node_hex(dest),
+                        item,
+                        outcome: payload::tx_outcome_str(outcome).into(),
+                        ack_rssi,
+                        ts,
+                    }),
+                    retain: false,
+                });
+                if item != 0 {
+                    self.on_queue_outcome(dest, item, outcome, out);
+                }
+            }
+        }
+    }
+
+    /// A queue item left the gateway (delivered) or died (expired / kept for retry).
+    fn on_queue_outcome(&mut self, node: u32, item: u16, outcome: u8, out: &mut Vec<Output>) {
+        let Some(i) = self.nodes.iter().position(|n| n.entry.addr == node) else {
+            return;
+        };
+        match outcome {
+            mgmt::TX_DELIVERED => {
+                if let Some(p) = self.nodes[i].pending.iter_mut().find(|p| p.item == item) {
+                    p.delivered_tick = Some(self.tick);
+                }
+                // Stays in `pending` until the node's reply completes (the dialog's
+                // "pending" marker covers queued *and* awaiting-reply).
+            }
+            mgmt::TX_EXPIRED => {
+                if let Some(pi) = self.nodes[i].pending.iter().position(|p| p.item == item) {
+                    let p = self.nodes[i].pending.remove(pi);
+                    self.shell_error(out, node, &p, "queue TTL expired before delivery");
+                    self.publish_pending(out, i);
+                }
+            }
+            _ => {} // not-delivered/busy/duty: the gateway retries on the next uplink
+        }
+    }
+
+    // ---- management replies -----------------------------------------------------
+
+    fn on_mgmt_chunk(
+        &mut self,
+        req_id: u16,
+        result: u8,
+        chunk: u16,
+        last: bool,
+        data: Vec<u8>,
+        out: &mut Vec<Output>,
+    ) {
+        let Some(idx) = self.pending_mgmt.iter().position(|p| p.req_id == req_id) else {
+            return; // stale/unknown (e.g. a timed-out op answering late)
+        };
+        {
+            let p = &mut self.pending_mgmt[idx];
+            if p.next_chunk != chunk {
+                p.truncated = true;
+            }
+            p.next_chunk = chunk.wrapping_add(1);
+            p.data.extend_from_slice(&data);
+        }
+        if !last {
+            return;
+        }
+        let done = self.pending_mgmt.remove(idx);
+        self.on_mgmt_done(done, result, out);
+    }
+
+    fn on_mgmt_done(&mut self, p: PendingMgmt, result: u8, out: &mut Vec<Output>) {
+        let err = payload::mgmt_error_str(result);
+        match (&p.op, err) {
+            // ---- happy paths ----
+            (OpKind::Describe, None) => {
+                if let Ok(info) = postcard::from_bytes::<tower_protocol::mgmt::DeviceInfo>(&p.data)
+                {
+                    self.describe = info.into();
+                    self.publish_status(out);
+                }
+                // Band + channel are what a cable-provisioned node must be told
+                // (`nodes add --port`): without them it was provisioned onto band 0 /
+                // channel 0 whatever the gateway ran, unreachable on us915 or ch 1/2.
+                self.rpc_ok(
+                    out,
+                    &p,
+                    serde_json::json!({
+                        "gateway": topics::node_hex(self.describe.addr),
+                        "band": self.describe.band,
+                        "channel": self.describe.channel,
+                    }),
+                );
+            }
+            (OpKind::NodeList, None) => {
+                let entries: Vec<NodeEntry> = parse_records(&p.data);
+                let owned: Vec<NodeEntryOwned> = entries.into_iter().map(Into::into).collect();
+                self.merge_registry(owned, out);
+                let data = serde_json::to_value(self.node_payloads()).unwrap_or_default();
+                self.rpc_ok(out, &p, data);
+                if !self.registry_synced {
+                    // The startup sync landed: replay what arrived before it (still
+                    // unregistered senders are dropped now).
+                    self.registry_synced = true;
+                    for u in std::mem::take(&mut self.held) {
+                        self.on_uplink(u, out);
+                    }
+                }
+            }
+            (OpKind::NodeAdd { id, name }, None) => {
+                out.push(Output::Event(Event::Log(format!(
+                    "node {} added ({name})",
+                    topics::node_hex(*id)
+                ))));
+                let flags = if name.is_empty() {
+                    mgmt::NODE_FLAG_UNNAMED
+                } else {
+                    0
+                };
+                self.provisional_node(*id, name, flags);
+                self.rpc_ok(out, &p, serde_json::Value::Null);
+                self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+            }
+            (OpKind::NodeRemove { id }, None) => {
+                let id = *id;
+                if let Some(i) = self.nodes.iter().position(|n| n.entry.addr == id) {
+                    for pd in std::mem::take(&mut self.nodes[i].pending) {
+                        self.shell_error(out, id, &pd, "node removed");
+                    }
+                    self.nodes.remove(i);
+                }
+                // Clear the retained topics for the removed node.
+                for topic in [
+                    topics::node(&self.prefix, id),
+                    topics::node_temperature(&self.prefix, id),
+                    topics::node_shell_pending(&self.prefix, id),
+                ] {
+                    out.push(Output::Publish {
+                        topic,
+                        payload: Vec::new(),
+                        retain: true,
+                    });
+                }
+                self.emit_registry(out);
+                self.rpc_ok(out, &p, serde_json::Value::Null);
+            }
+            (OpKind::NodeUpdate, None) => {
+                self.rpc_ok(out, &p, serde_json::Value::Null);
+                self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+            }
+            (OpKind::RevealKey { id }, None) => match postcard::from_bytes::<NodeKey>(&p.data) {
+                Ok(k) => {
+                    let hex: String = k.key.iter().map(|b| format!("{b:02x}")).collect();
+                    self.rpc_ok(
+                        out,
+                        &p,
+                        serde_json::json!({ "addr": topics::node_hex(*id), "key": hex }),
+                    );
+                }
+                Err(_) => self.rpc_err(out, &p, "malformed key record"),
+            },
+            (OpKind::PairingOpen, None) => {
+                // Delayed resolution: a node joined.
+                self.pairing_rpc = None;
+                self.pairing_until = None;
+                let joined = postcard::from_bytes::<Paired>(&p.data).ok();
+                if let Some(j) = &joined {
+                    self.provisional_node(j.addr, "", mgmt::NODE_FLAG_UNNAMED);
+                }
+                let hex = joined.map(|j| topics::node_hex(j.addr));
+                out.push(Output::Event(Event::Log(match &hex {
+                    Some(h) => format!("node {h} paired"),
+                    None => "pairing window resolved".into(),
+                })));
+                self.publish_pairing(out, hex.clone());
+                self.rpc_ok(out, &p, serde_json::json!({ "joined": hex }));
+                self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+            }
+            (OpKind::PairingCancel, None) => self.rpc_ok(out, &p, serde_json::Value::Null),
+            (OpKind::QueuePush { node, shell }, None) => {
+                let node = *node;
+                match postcard::from_bytes::<QueueId>(&p.data) {
+                    Ok(qid) => {
+                        if let Some(origin) = shell
+                            && let Some(i) = self.nodes.iter().position(|n| n.entry.addr == node)
+                        {
+                            let ttl = match origin.ttl {
+                                0 => DEFAULT_QUEUE_TTL,
+                                t => t as u64,
+                            };
+                            self.nodes[i].pending.push(PendingShell {
+                                item: qid.item,
+                                rpc: origin.rpc.clone(),
+                                line: origin.line.clone(),
+                                cmd_id: origin.cmd_id,
+                                delivered_tick: None,
+                                expires_tick: self.tick + ttl + SHELL_TTL_GRACE_TICKS,
+                                next_chunk: 0,
+                                truncated: false,
+                            });
+                            self.publish_pending(out, i);
+                            self.publish_node(out, i);
+                        }
+                        self.rpc_ok(out, &p, serde_json::json!({ "ref": qid.item }));
+                    }
+                    Err(_) => self.rpc_err(out, &p, "malformed queue id"),
+                }
+            }
+            (OpKind::QueueList, None) => {
+                let entries: Vec<QueueEntry> = parse_records(&p.data);
+                let list: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "addr": topics::node_hex(e.node_addr),
+                            "ref": e.item,
+                            "age": e.age,
+                            "ttl": e.ttl,
+                        })
+                    })
+                    .collect();
+                self.rpc_ok(out, &p, serde_json::Value::Array(list));
+            }
+            (OpKind::QueueSync, None) => {
+                // A truncated list can't prove an item absent: skip rather than fail
+                // live commands on a chunk loss; the next resync tries again.
+                if !p.truncated {
+                    let entries: Vec<QueueEntry> = parse_records(&p.data);
+                    let device: Vec<(u32, u16)> =
+                        entries.iter().map(|e| (e.node_addr, e.item)).collect();
+                    self.reconcile_queue(&device, out);
+                }
+            }
+            (OpKind::QueueDrop { node }, None) => {
+                let node = *node;
+                // The dequeue succeeded on the device; drop the mirror entry too. We
+                // don't know which item without echoing it; the caller's ref is in
+                // the RPC params, so re-list pending from the mirror by pruning the
+                // ref recorded at issue time (see rpc handling; the ref rides in op).
+                self.rpc_ok(out, &p, serde_json::Value::Null);
+                if let Some(i) = self.nodes.iter().position(|n| n.entry.addr == node) {
+                    self.publish_pending(out, i);
+                }
+                self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+            }
+            (OpKind::QueueDropStale, _) => {} // best effort; the item's TTL is the backstop
+            (OpKind::StatsConfig, None) => self.rpc_ok(out, &p, serde_json::Value::Null),
+            // ---- refusals ----
+            (OpKind::PairingOpen, Some(e)) => {
+                self.pairing_rpc = None;
+                self.pairing_until = None;
+                self.publish_pairing(out, None);
+                if result == mgmt::MGMT_TIMEOUT {
+                    // Window expired unjoined: a normal outcome, not an error.
+                    self.rpc_ok(out, &p, serde_json::json!({ "joined": null }));
+                } else {
+                    self.rpc_err(out, &p, e);
+                }
+            }
+            (OpKind::QueuePush { node, shell }, Some(e)) => {
+                let node = *node;
+                if let Some(origin) = shell {
+                    let rsp = payload::ShellRsp {
+                        id: origin.rpc.clone(),
+                        chunk: 0,
+                        text: String::new(),
+                        done: true,
+                        result: result.max(1),
+                        truncated: false,
+                        error: Some(e.to_string()),
+                    };
+                    out.push(Output::Publish {
+                        topic: topics::node_shell_rsp(&self.prefix, node),
+                        payload: json(&rsp),
+                        retain: false,
+                    });
+                    out.push(Output::Event(Event::Shell { node, rsp }));
+                }
+                self.rpc_err(out, &p, e);
+            }
+            (OpKind::QueueSync, Some(e)) => out.push(Output::Event(Event::Log(format!(
+                "queue resync refused by the gateway: {e}"
+            )))),
+            (_, Some(e)) => self.rpc_err(out, &p, e),
+        }
+        if p.truncated {
+            out.push(Output::Event(Event::Log(format!(
+                "management reply {} arrived truncated (chunk gap)",
+                p.req_id
+            ))));
+        }
+    }
+
+    // ---- MQTT → engine ----------------------------------------------------------
+
+    fn on_mqtt(&mut self, topic: &str, data: &[u8], retain: bool, out: &mut Vec<Output>) {
+        let inbound = topics::classify(&self.prefix, topic);
+        if inbound == topics::Inbound::Other || data.is_empty() {
+            return; // not ours / an empty publish (e.g. a retained-command clear echoing back)
+        }
+        if retain {
+            // A *stored* retained message, replayed by the broker on (re)subscribe: run it
+            // and it re-runs on every reconnect, forever (a retained `node_remove`, a
+            // retained shell line). Live deliveries carry retain=0, so a retained publish
+            // already ran once when it was sent: refuse the replay and clear the stored copy.
+            out.push(Output::Event(Event::Log(format!(
+                "ignoring a retained command on {topic} (commands must not be retained); clearing it"
+            ))));
+            out.push(Output::Publish {
+                topic: topic.to_string(),
+                payload: Vec::new(),
+                retain: true,
+            });
+            return;
+        }
+        if data.len() > MAX_COMMAND_PAYLOAD {
+            out.push(Output::Event(Event::Log(format!(
+                "ignoring an oversized command on {topic} ({} B > {MAX_COMMAND_PAYLOAD} B)",
+                data.len()
+            ))));
+            return;
+        }
+        match inbound {
+            topics::Inbound::Cmd => match serde_json::from_slice::<RpcRequest>(data) {
+                Ok(req) => {
+                    if self.accept_request_id(&req.id, topic, out) {
+                        self.on_rpc(req, RpcOrigin::Mqtt, out);
+                    }
+                }
+                Err(e) => out.push(Output::Event(Event::Log(format!("bad RPC payload: {e}")))),
+            },
+            topics::Inbound::ShellReq(node) => {
+                match serde_json::from_slice::<payload::ShellReq>(data) {
+                    Ok(req) => {
+                        if self.accept_request_id(&req.id, topic, out) {
+                            self.on_shell_req(node, req, out);
+                        }
+                    }
+                    Err(e) => {
+                        out.push(Output::Event(Event::Log(format!("bad shell request: {e}"))))
+                    }
+                }
+            }
+            topics::Inbound::Other => {}
+        }
+    }
+
+    /// Gate an MQTT request id. A malformed one is refused (it would be echoed into a
+    /// response topic and payload; see [`payload::valid_request_id`]; with no safe topic
+    /// to answer on, the request is dropped with a log line). A QoS-1 *redelivery* of an id
+    /// already handled is dropped too: at-least-once would otherwise run a shell command,
+    /// a removal or a pairing window twice.
+    fn accept_request_id(&mut self, id: &str, topic: &str, out: &mut Vec<Output>) -> bool {
+        if !payload::valid_request_id(id) {
+            out.push(Output::Event(Event::Log(format!(
+                "ignoring a request on {topic}: invalid id (want 1..={} chars of [A-Za-z0-9_.-])",
+                payload::MAX_REQUEST_ID
+            ))));
+            return false;
+        }
+        if self.recent_ids.iter().any(|r| r == id) {
+            out.push(Output::Event(Event::Log(format!(
+                "ignoring duplicate request {id} on {topic} (MQTT redelivery)"
+            ))));
+            return false;
+        }
+        if self.recent_ids.len() >= RECENT_IDS {
+            self.recent_ids.pop_front();
+        }
+        self.recent_ids.push_back(id.to_string());
+        true
+    }
+
+    /// Validate a node name for `node_add` / `node_rename`: the host is the only writer
+    /// (the gateway firmware stores whatever it is given): 1..=`MAX_NODE_NAME` bytes of
+    /// printable text ([`printable_name`]), not a node-address lookalike (`<node>`
+    /// arguments resolve hex first, so such a name could never be addressed), and unique:
+    /// name lookup takes the first match, so a duplicate would silently shadow (and
+    /// misroute commands meant for) one of the two.
+    fn check_name(&self, name: &str, addr: u32) -> Result<(), String> {
+        if name.is_empty() || name.len() > mgmt::MAX_NODE_NAME {
+            return Err(format!("name must be 1..={} bytes", mgmt::MAX_NODE_NAME));
+        }
+        if !printable_name(name) {
+            return Err("name must be printable text (no control characters)".into());
+        }
+        if topics::parse_node_hex(name).is_some() {
+            return Err("name must not look like a node address (0xHHHHHHHH)".into());
+        }
+        if let Some(other) = self
+            .nodes
+            .iter()
+            .find(|n| n.entry.addr != addr && n.entry.name == name)
+        {
+            return Err(format!(
+                "name \"{name}\" is already used by {}",
+                topics::node_hex(other.entry.addr)
+            ));
+        }
+        Ok(())
+    }
+
+    /// Enqueue one remote-shell line for `node` (from `nodes/{id}/shell/req`).
+    pub(crate) fn on_shell_req(
+        &mut self,
+        node: u32,
+        req: payload::ShellReq,
+        out: &mut Vec<Output>,
+    ) {
+        let fail = |engine: &Engine, out: &mut Vec<Output>, error: &str| {
+            let rsp = payload::ShellRsp {
+                id: req.id.clone(),
+                chunk: 0,
+                text: String::new(),
+                done: true,
+                result: 1,
+                truncated: false,
+                error: Some(error.to_string()),
+            };
+            out.push(Output::Publish {
+                topic: topics::node_shell_rsp(&engine.prefix, node),
+                payload: json(&rsp),
+                retain: false,
+            });
+            out.push(Output::Event(Event::Shell { node, rsp }));
+        };
+        if self.nodes.iter().all(|n| n.entry.addr != node) {
+            return fail(self, out, "unknown node");
+        }
+        if req.line.len() > radio::RADIO_SHELL_CHUNK {
+            return fail(
+                self,
+                out,
+                &format!(
+                    "line too long for the radio MTU (max {} bytes)",
+                    radio::RADIO_SHELL_CHUNK
+                ),
+            );
+        }
+        let cmd_id = self.next_cmd;
+        self.next_cmd = self
+            .next_cmd
+            .checked_add(1)
+            .filter(|&v| v != 0)
+            .unwrap_or(1);
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let Ok(n) = radio::encode_node_cmd(
+            &NodeCmd::Shell {
+                epoch: self.shell_epoch,
+                cmd_id,
+                line: &req.line,
+            },
+            &mut env,
+        ) else {
+            return fail(self, out, "envelope encode failed");
+        };
+        let data = env[..n].to_vec();
+        let origin = ShellOrigin {
+            rpc: req.id.clone(),
+            line: req.line.clone(),
+            cmd_id,
+            ttl: req.ttl,
+        };
+        // The borrow-carrying op is encoded immediately by `issue`. The enqueue carries no
+        // RPC id: its failure (refusal, timeout, link down) answers on `shell/rsp` instead
+        // (see `fail_op`).
+        let op = MgmtOp::QueuePush {
+            node_addr: node,
+            ttl: req.ttl,
+            data: &data,
+        };
+        self.issue(
+            out,
+            OpKind::QueuePush {
+                node,
+                shell: Some(origin),
+            },
+            op,
+            None,
+        );
+    }
+
+    /// The `gateway/cmd` RPC surface: what the `tower nodes`/`net` client commands
+    /// (and the TUI, in-process) drive. `origin` decides where the response goes.
+    fn on_rpc(&mut self, req: RpcRequest, origin: RpcOrigin, out: &mut Vec<Output>) {
+        let me = RpcRef {
+            id: req.id.clone(),
+            origin,
+        };
+        let rpc = Some(me.clone());
+        let params = &req.params;
+        let node_param = || -> Option<u32> {
+            let v = params.get("addr")?.as_str()?;
+            topics::parse_node_hex(v).or_else(|| {
+                self.nodes
+                    .iter()
+                    .find(|n| n.entry.name == v)
+                    .map(|n| n.entry.addr)
+            })
+        };
+        match req.op.as_str() {
+            "describe" => self.issue(out, OpKind::Describe, MgmtOp::Describe, rpc),
+            "node_list" => self.issue(out, OpKind::NodeList, MgmtOp::NodeList, rpc),
+            "node_add" => {
+                // Cable pairing: the client provisioned the node on its own serial
+                // port and registers (id, key, name) here.
+                let id = params
+                    .get("addr")
+                    .and_then(|v| v.as_str())
+                    .and_then(topics::parse_node_hex);
+                let key = params
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_key_hex);
+                let name = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let sleeping = params
+                    .get("sleeping")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let (Some(id), Some(key)) = (id, key) else {
+                    return self.rpc_err_direct(out, &me, "node_add needs addr + key (hex)");
+                };
+                if !name.is_empty()
+                    && let Err(e) = self.check_name(&name, id)
+                {
+                    return self.rpc_err_direct(out, &me, &e);
+                }
+                let mut flags = if sleeping {
+                    mgmt::NODE_FLAG_SLEEPING
+                } else {
+                    0
+                };
+                if name.is_empty() {
+                    flags |= mgmt::NODE_FLAG_UNNAMED;
+                }
+                let op = MgmtOp::NodeAdd {
+                    addr: id,
+                    key,
+                    name: name.as_str(),
+                    flags,
+                };
+                self.issue(
+                    out,
+                    OpKind::NodeAdd {
+                        id,
+                        name: name.clone(),
+                    },
+                    op,
+                    rpc,
+                );
+            }
+            "node_remove" => match node_param() {
+                Some(id) => self.issue(
+                    out,
+                    OpKind::NodeRemove { id },
+                    MgmtOp::NodeRemove { addr: id },
+                    rpc,
+                ),
+                None => self.rpc_err_direct(out, &me, "unknown node"),
+            },
+            "node_rename" => {
+                let Some(id) = node_param() else {
+                    return self.rpc_err_direct(out, &me, "unknown node");
+                };
+                let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
+                    return self.rpc_err_direct(out, &me, "missing name");
+                };
+                if let Err(e) = self.check_name(name, id) {
+                    return self.rpc_err_direct(out, &me, &e);
+                }
+                let flags = self
+                    .nodes
+                    .iter()
+                    .find(|n| n.entry.addr == id)
+                    .map(|n| n.entry.flags & !mgmt::NODE_FLAG_UNNAMED);
+                let op = MgmtOp::NodeUpdate {
+                    addr: id,
+                    name: Some(name),
+                    flags,
+                };
+                self.issue(out, OpKind::NodeUpdate, op, rpc);
+            }
+            "reveal_key" => match node_param() {
+                Some(id) => self.issue(
+                    out,
+                    OpKind::RevealKey { id },
+                    MgmtOp::NodeRevealKey { addr: id },
+                    rpc,
+                ),
+                None => self.rpc_err_direct(out, &me, "unknown node"),
+            },
+            "node_add_ota" => {
+                if self.pairing_rpc.is_some() {
+                    return self.rpc_err_direct(out, &me, "a pairing window is already open");
+                }
+                let window = params
+                    .get("window")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(60)
+                    .clamp(1, 600) as u16;
+                // The host mints the AES key: the only CSPRNG in the system.
+                let mut key = [0u8; 16];
+                if getrandom::fill(&mut key).is_err() {
+                    return self.rpc_err_direct(out, &me, "no entropy source for the node key");
+                }
+                self.pairing_rpc = Some(req.id.clone());
+                self.pairing_until = Some(self.tick + window as u64);
+                self.publish_pairing(out, None);
+                self.issue_delayed(
+                    out,
+                    OpKind::PairingOpen,
+                    MgmtOp::PairingOpen { window, key },
+                    rpc,
+                    window as u64 + 5,
+                );
+            }
+            "pairing_cancel" => {
+                self.pairing_rpc = None;
+                self.pairing_until = None;
+                self.publish_pairing(out, None);
+                self.issue(out, OpKind::PairingCancel, MgmtOp::PairingCancel, rpc);
+            }
+            "queue_list" => {
+                let node = node_param().unwrap_or(0);
+                self.issue(
+                    out,
+                    OpKind::QueueList,
+                    MgmtOp::QueueList { node_addr: node },
+                    rpc,
+                );
+            }
+            "queue_drop" => {
+                let Some(node) = node_param() else {
+                    return self.rpc_err_direct(out, &me, "unknown node");
+                };
+                // `ref` absent = the node's whole queue. A present one must be a real item
+                // id: `as u16` used to truncate 65536+ into some *other* live item.
+                let item = match params.get("ref") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(v) => match v
+                        .as_u64()
+                        .and_then(|v| u16::try_from(v).ok())
+                        .filter(|&v| v != 0)
+                    {
+                        Some(it) => Some(it),
+                        None => {
+                            return self.rpc_err_direct(
+                                out,
+                                &me,
+                                "ref must be a queue item id (1..=65535)",
+                            );
+                        }
+                    },
+                };
+                // Prune the mirror now (the device answer confirms; a NotFound still
+                // clears our side, which matches "it isn't queued anymore"). Without a
+                // ref the device drops the node's WHOLE queue, so the mirror drops every
+                // undelivered entry too: no phantom pendings. Delivered entries are no
+                // longer on the device; they stay, awaiting the node's reply.
+                if let Some(i) = self.nodes.iter().position(|n| n.entry.addr == node) {
+                    let (gone, keep): (Vec<PendingShell>, Vec<PendingShell>) =
+                        std::mem::take(&mut self.nodes[i].pending)
+                            .into_iter()
+                            .partition(|pd| match item {
+                                Some(it) => pd.item == it,
+                                None => pd.delivered_tick.is_none(),
+                            });
+                    self.nodes[i].pending = keep;
+                    if !gone.is_empty() {
+                        for pd in &gone {
+                            self.shell_error(out, node, pd, "dequeued");
+                        }
+                        self.publish_pending(out, i);
+                    }
+                }
+                self.issue(
+                    out,
+                    OpKind::QueueDrop { node },
+                    MgmtOp::QueueDrop {
+                        node_addr: node,
+                        item,
+                    },
+                    rpc,
+                );
+            }
+            "stats_config" => {
+                let period = params
+                    .get("period_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1000)
+                    .min(60_000) as u32;
+                self.issue(
+                    out,
+                    OpKind::StatsConfig,
+                    MgmtOp::StatsConfig {
+                        channel_period_ms: period,
+                    },
+                    rpc,
+                );
+            }
+            other => self.rpc_err_direct(out, &me, &format!("unknown op \"{other}\"")),
+        }
+    }
+
+    // ---- housekeeping -------------------------------------------------------------
+
+    fn on_tick(&mut self, out: &mut Vec<Output>) {
+        self.tick += 1;
+        // Management timeouts.
+        let expired: Vec<usize> = self
+            .pending_mgmt
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| self.tick >= p.deadline)
+            .map(|(i, _)| i)
+            .collect();
+        let mut resync_queue = false;
+        for i in expired.into_iter().rev() {
+            let p = self.pending_mgmt.remove(i);
+            out.push(Output::Event(Event::Log(format!(
+                "management op timed out (req {})",
+                p.req_id
+            ))));
+            // An unanswered enqueue may still have landed on the device (only the reply
+            // was lost): reconcile afterwards so such an orphan is dropped, not run with
+            // nobody listening, which keeps the "not queued" answer below true.
+            resync_queue |= matches!(p.op, OpKind::QueuePush { .. });
+            self.fail_op(out, p.op, p.rpc.as_ref(), "device did not answer (timeout)");
+        }
+        if resync_queue {
+            self.issue(
+                out,
+                OpKind::QueueSync,
+                MgmtOp::QueueList { node_addr: 0 },
+                None,
+            );
+        }
+        // The startup registry sync must land eventually: uplinks are held until it does,
+        // so a refused/timed-out first NodeList is retried rather than leaving them parked.
+        if !self.registry_synced
+            && self.serial_up
+            && !self
+                .pending_mgmt
+                .iter()
+                .any(|p| matches!(p.op, OpKind::NodeList))
+        {
+            self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+        }
+        // Remote-shell timeouts: delivered but never answered; or never delivered and
+        // past its queue TTL with no `TX_EXPIRED` report (lost to a missed gateway reboot
+        // or link drop), so no pending entry can outlive its TTL.
+        for i in 0..self.nodes.len() {
+            let node = self.nodes[i].entry.addr;
+            let tick = self.tick;
+            let (dead, keep): (Vec<PendingShell>, Vec<PendingShell>) =
+                std::mem::take(&mut self.nodes[i].pending)
+                    .into_iter()
+                    .partition(|p| match p.delivered_tick {
+                        Some(t) => tick >= t + SHELL_REPLY_TIMEOUT_TICKS,
+                        None => tick >= p.expires_tick,
+                    });
+            self.nodes[i].pending = keep;
+            if dead.is_empty() {
+                continue;
+            }
+            for p in &dead {
+                let why = if p.delivered_tick.is_some() {
+                    "delivered but no reply from the node"
+                } else {
+                    "queue TTL elapsed with no delivery report from the gateway"
+                };
+                self.shell_error(out, node, p, why);
+            }
+            self.publish_pending(out, i);
+        }
+        // Pairing countdown surface.
+        if self.pairing_until.is_some() {
+            self.publish_pairing(out, None);
+        }
+        if self.tick.is_multiple_of(STATS_EVERY_TICKS) {
+            self.publish_stats(out);
+        }
+    }
+
+    // ---- helpers --------------------------------------------------------------------
+
+    /// Allocate a req_id, encode and send `op`, and track the reply.
+    fn issue(&mut self, out: &mut Vec<Output>, kind: OpKind, op: MgmtOp<'_>, rpc: Option<RpcRef>) {
+        self.issue_delayed(out, kind, op, rpc, MGMT_TIMEOUT_TICKS);
+    }
+
+    fn issue_delayed(
+        &mut self,
+        out: &mut Vec<Output>,
+        kind: OpKind,
+        op: MgmtOp<'_>,
+        rpc: Option<RpcRef>,
+        timeout_ticks: u64,
+    ) {
+        if !self.serial_up {
+            // The serial thread drops frames while the port is down: fail now instead of
+            // after a timeout (or, for a shell enqueue, never). Engine-internal ops need no
+            // answer: the reconnect resync re-issues what matters.
+            return self.fail_op(out, kind, rpc.as_ref(), "gateway serial link is down");
+        }
+        let req_id = self.next_req;
+        self.next_req = self
+            .next_req
+            .checked_add(1)
+            .filter(|&v| v != 0)
+            .unwrap_or(1);
+        let seq = self.seq;
+        self.seq = self.seq.wrapping_add(1);
+        match encode_mgmt(seq, req_id, &op) {
+            Some(frame) => {
+                self.pending_mgmt.push(PendingMgmt {
+                    req_id,
+                    op: kind,
+                    rpc,
+                    data: Vec::new(),
+                    next_chunk: 0,
+                    truncated: false,
+                    deadline: self.tick + timeout_ticks,
+                });
+                out.push(Output::SerialSend(frame));
+            }
+            None => self.fail_op(out, kind, rpc.as_ref(), "request encode failed"),
+        }
+    }
+
+    /// An op that will never be answered (timeout, serial down, encode failure): tell
+    /// whoever is waiting. An RPC gets its error response; a shell enqueue (which has no
+    /// RPC id) gets a terminal `shell/rsp` error (it used to vanish silently while the
+    /// client waited out its timeout); a pairing window resets the published state.
+    fn fail_op(&mut self, out: &mut Vec<Output>, op: OpKind, rpc: Option<&RpcRef>, error: &str) {
+        match op {
+            OpKind::PairingOpen => {
+                self.pairing_rpc = None;
+                self.pairing_until = None;
+                self.publish_pairing(out, None);
+            }
+            OpKind::QueuePush {
+                node,
+                shell: Some(origin),
+            } => {
+                let rsp = payload::ShellRsp {
+                    id: origin.rpc,
+                    chunk: 0,
+                    text: String::new(),
+                    done: true,
+                    result: 1,
+                    truncated: false,
+                    error: Some(format!("not queued: {error}")),
+                };
+                out.push(Output::Publish {
+                    topic: topics::node_shell_rsp(&self.prefix, node),
+                    payload: json(&rsp),
+                    retain: false,
+                });
+                out.push(Output::Event(Event::Shell { node, rsp }));
+            }
+            _ => {}
+        }
+        if let Some(r) = rpc {
+            self.rpc_err_direct(out, r, error);
+        }
+    }
+
+    fn rpc_ok(&self, out: &mut Vec<Output>, p: &PendingMgmt, data: serde_json::Value) {
+        if let Some(r) = &p.rpc {
+            self.rpc_respond(
+                out,
+                r.origin,
+                RpcResponse {
+                    id: r.id.clone(),
+                    ok: true,
+                    error: None,
+                    data,
+                },
+            );
+        }
+    }
+
+    fn rpc_err(&self, out: &mut Vec<Output>, p: &PendingMgmt, error: &str) {
+        if let Some(r) = &p.rpc {
+            self.rpc_err_direct(out, r, error);
+        }
+    }
+
+    fn rpc_err_direct(&self, out: &mut Vec<Output>, rpc: &RpcRef, error: &str) {
+        self.rpc_respond(
+            out,
+            rpc.origin,
+            RpcResponse {
+                id: rpc.id.clone(),
+                ok: false,
+                error: Some(error.to_string()),
+                data: serde_json::Value::Null,
+            },
+        );
+    }
+
+    /// Route an RPC response by the origin carried since its request came in: the
+    /// in-process frontend gets an event, MQTT clients the response topic. (It used to
+    /// key off a `tui-` id prefix, so any MQTT client could steer responses into the TUI
+    /// or the cable-pairing worker, e.g. answer its predictable `tui-cbl-N` itself.)
+    fn rpc_respond(&self, out: &mut Vec<Output>, origin: RpcOrigin, rsp: RpcResponse) {
+        match origin {
+            RpcOrigin::Frontend => out.push(Output::Event(Event::Rpc(rsp))),
+            RpcOrigin::Mqtt => out.push(Output::Publish {
+                topic: topics::gateway_rsp(&self.prefix, &rsp.id),
+                payload: json(&rsp),
+                retain: false,
+            }),
+        }
+    }
+
+    /// Publish a terminal error for a pending shell command (dialog + rsp topic).
+    fn shell_error(&self, out: &mut Vec<Output>, node: u32, p: &PendingShell, error: &str) {
+        let rsp = payload::ShellRsp {
+            id: p.rpc.clone(),
+            chunk: p.next_chunk,
+            text: String::new(),
+            done: true,
+            result: 1,
+            truncated: p.truncated,
+            error: Some(error.to_string()),
+        };
+        out.push(Output::Publish {
+            topic: topics::node_shell_rsp(&self.prefix, node),
+            payload: json(&rsp),
+            retain: false,
+        });
+        out.push(Output::Event(Event::Shell { node, rsp }));
+    }
+
+    /// Mirror a node the gateway just confirmed (OTA join / cable add) ahead of the
+    /// `NodeList` refresh, so its first uplinks (typically the `NodeInfo` that drives
+    /// auto-naming) aren't dropped as unregistered in the window before the list answers.
+    /// The refresh's merge then replaces the row with device truth.
+    fn provisional_node(&mut self, addr: u32, name: &str, flags: u8) {
+        if self.nodes.iter().any(|n| n.entry.addr == addr) {
+            return;
+        }
+        self.nodes.push(NodeMirror {
+            entry: NodeEntryOwned {
+                addr,
+                name: name.to_string(),
+                flags,
+                last_seen: mgmt::LAST_SEEN_NEVER,
+                rssi: mgmt::RSSI_NONE,
+                uplinks: 0,
+                queued: 0,
+            },
+            kind: String::new(),
+            session_id: None,
+            pending: Vec::new(),
+        });
+    }
+
+    /// Reconcile the pending-shell mirror with the gateway's real queue (a `QueueSync`
+    /// listing of `(node, item)`):
+    ///
+    /// - an **undelivered** mirror entry the gateway no longer holds was lost: its request
+    ///   never reached the device, or it was delivered/dropped while the host link was
+    ///   down and the report (and any reply) went with it → fail it loudly;
+    /// - a device item the mirror doesn't know is a leftover (a previous `tower gateway`
+    ///   process, or an enqueue whose reply was lost) whose reply could only be
+    ///   mis-credited → drop it on the device.
+    ///
+    /// Delivered entries are legitimately gone from the device (awaiting the node's reply).
+    fn reconcile_queue(&mut self, device: &[(u32, u16)], out: &mut Vec<Output>) {
+        for i in 0..self.nodes.len() {
+            let node = self.nodes[i].entry.addr;
+            let (lost, keep): (Vec<PendingShell>, Vec<PendingShell>) =
+                std::mem::take(&mut self.nodes[i].pending)
+                    .into_iter()
+                    .partition(|p| p.delivered_tick.is_none() && !device.contains(&(node, p.item)));
+            self.nodes[i].pending = keep;
+            if !lost.is_empty() {
+                for p in &lost {
+                    self.shell_error(
+                        out,
+                        node,
+                        p,
+                        "no longer queued on the gateway (lost while the host link was down)",
+                    );
+                }
+                self.publish_pending(out, i);
+            }
+        }
+        let stale: Vec<(u32, u16)> = device
+            .iter()
+            .copied()
+            .filter(|&(node, item)| {
+                !self
+                    .nodes
+                    .iter()
+                    .any(|n| n.entry.addr == node && n.pending.iter().any(|p| p.item == item))
+            })
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        out.push(Output::Event(Event::Log(format!(
+            "dropping {} stale queued downlink(s) this host has no record of (left by a previous `tower gateway`?)",
+            stale.len()
+        ))));
+        for (node, item) in stale {
+            self.issue(
+                out,
+                OpKind::QueueDropStale,
+                MgmtOp::QueueDrop {
+                    node_addr: node,
+                    item: Some(item),
+                },
+                None,
+            );
+        }
+        // Refresh the per-node `queued` counts (answered after the drops, in order).
+        self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+    }
+
+    /// Merge a fresh `NodeList` into the mirror: keep host-side enrichment (kind,
+    /// session, pendings) for surviving nodes, publish adds/changes, clear removals.
+    fn merge_registry(&mut self, fresh: Vec<NodeEntryOwned>, out: &mut Vec<Output>) {
+        let mut next: Vec<NodeMirror> = Vec::with_capacity(fresh.len());
+        for entry in fresh {
+            let old = self.nodes.iter_mut().find(|n| n.entry.addr == entry.addr);
+            match old {
+                Some(o) => next.push(NodeMirror {
+                    entry,
+                    kind: o.kind.clone(),
+                    session_id: o.session_id,
+                    pending: std::mem::take(&mut o.pending),
+                }),
+                None => next.push(NodeMirror {
+                    entry,
+                    kind: String::new(),
+                    session_id: None,
+                    pending: Vec::new(),
+                }),
+            }
+        }
+        // Anything left in the old mirror was removed on the device.
+        for gone in self
+            .nodes
+            .iter()
+            .filter(|o| next.iter().all(|n| n.entry.addr != o.entry.addr))
+        {
+            out.push(Output::Publish {
+                topic: topics::node(&self.prefix, gone.entry.addr),
+                payload: Vec::new(),
+                retain: true,
+            });
+        }
+        self.nodes = next;
+        for i in 0..self.nodes.len() {
+            self.publish_node(out, i);
+        }
+        self.emit_registry(out);
+    }
+
+    /// Refresh a node's RAM-side liveliness on an uplink (the device tracks this too;
+    /// mirroring it keeps the TUI live without polling NodeList).
+    fn touch_node(&mut self, id: u32, rssi: i16) {
+        if let Some(n) = self.nodes.iter_mut().find(|n| n.entry.addr == id) {
+            n.entry.last_seen = 0;
+            n.entry.rssi = rssi.clamp(i8::MIN as i16, i8::MAX as i16) as i8;
+            n.entry.uplinks = n.entry.uplinks.saturating_add(1);
+        }
+    }
+
+    fn node_payloads(&self) -> Vec<payload::Node> {
+        self.nodes
+            .iter()
+            .map(|n| payload::Node {
+                addr: topics::node_hex(n.entry.addr),
+                name: n.entry.name.clone(),
+                kind: n.kind.clone(),
+                sleeping: n.entry.flags & mgmt::NODE_FLAG_SLEEPING != 0,
+                unnamed: n.entry.flags & mgmt::NODE_FLAG_UNNAMED != 0,
+                last_seen: (n.entry.last_seen != mgmt::LAST_SEEN_NEVER)
+                    .then_some(n.entry.last_seen),
+                rssi: (n.entry.rssi != mgmt::RSSI_NONE).then_some(n.entry.rssi),
+                uplinks: n.entry.uplinks,
+                queued: n.entry.queued.max(n.pending.len() as u8),
+            })
+            .collect()
+    }
+
+    fn publish_node(&self, out: &mut Vec<Output>, i: usize) {
+        let payloads = self.node_payloads();
+        out.push(Output::Publish {
+            topic: topics::node(&self.prefix, self.nodes[i].entry.addr),
+            payload: json(&payloads[i]),
+            retain: true,
+        });
+    }
+
+    fn publish_pending(&self, out: &mut Vec<Output>, i: usize) {
+        let entries: Vec<PendingEntry> = self.nodes[i]
+            .pending
+            .iter()
+            .map(|p| PendingEntry {
+                r#ref: p.item,
+                id: p.rpc.clone(),
+                line: p.line.clone(),
+            })
+            .collect();
+        out.push(Output::Publish {
+            topic: topics::node_shell_pending(&self.prefix, self.nodes[i].entry.addr),
+            payload: json(&entries),
+            retain: true,
+        });
+        self.emit_registry(out);
+    }
+
+    fn emit_registry(&self, out: &mut Vec<Output>) {
+        let views: Vec<NodeView> = self
+            .nodes
+            .iter()
+            .map(|n| NodeView {
+                addr: n.entry.addr,
+                name: n.entry.name.clone(),
+                kind: n.kind.clone(),
+                sleeping: n.entry.flags & mgmt::NODE_FLAG_SLEEPING != 0,
+                unnamed: n.entry.flags & mgmt::NODE_FLAG_UNNAMED != 0,
+                last_seen: (n.entry.last_seen != mgmt::LAST_SEEN_NEVER)
+                    .then_some(n.entry.last_seen),
+                rssi: (n.entry.rssi != mgmt::RSSI_NONE).then_some(n.entry.rssi),
+                uplinks: n.entry.uplinks,
+                queued: n.entry.queued.max(n.pending.len() as u8),
+                pending: n
+                    .pending
+                    .iter()
+                    .map(|p| PendingEntry {
+                        r#ref: p.item,
+                        id: p.rpc.clone(),
+                        line: p.line.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        out.push(Output::Event(Event::Registry(views)));
+    }
+
+    fn publish_status(&self, out: &mut Vec<Output>) {
+        let state = if self.serial_up { "online" } else { "degraded" };
+        out.push(Output::Publish {
+            topic: topics::gateway_status(&self.prefix),
+            payload: json(&payload::Status {
+                state: state.into(),
+                schema: payload::SCHEMA,
+                gateway: topics::node_hex(self.describe.addr),
+                firmware: self.describe.firmware_name.clone(),
+                firmware_version: self.firmware_version.clone(),
+                session_id: self.hello_session.unwrap_or(0),
+                protocol: tower_protocol::PROTOCOL_VERSION,
+                serial_port: self.port_name.clone(),
+                serial_up: self.serial_up,
+            }),
+            retain: true,
+        });
+    }
+
+    fn publish_stats(&self, out: &mut Vec<Output>) {
+        out.push(Output::Publish {
+            topic: topics::gateway_stats(&self.prefix),
+            payload: json(&payload::Stats {
+                uptime: self.tick,
+                nodes: self.nodes.len() as u32,
+                uplinks: self.uplinks,
+                queued: self.nodes.iter().map(|n| n.pending.len() as u32).sum(),
+                rssi: self.last_ambient.map(|(d, _)| d),
+                channel: self.last_ambient.map(|(_, c)| c),
+            }),
+            retain: true,
+        });
+    }
+
+    fn publish_pairing(&self, out: &mut Vec<Output>, joined: Option<String>) {
+        let open = self.pairing_until.is_some();
+        let p = payload::Pairing {
+            state: if open { "open" } else { "idle" }.into(),
+            remaining: self.pairing_until.map(|u| u.saturating_sub(self.tick)),
+            joined,
+        };
+        out.push(Output::Publish {
+            topic: topics::gateway_pairing(&self.prefix),
+            payload: json(&p),
+            retain: true,
+        });
+        out.push(Output::Event(Event::Pairing(p)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower_protocol::mgmt::{DeviceRole, MGMT_OK, NODE_FLAG_SLEEPING, NODE_FLAG_UNNAMED};
+    use tower_protocol::{MsgType, decode_frame};
+
+    #[test]
+    fn randomize_shell_ids_moves_off_the_defaults() {
+        // Cross-restart dedup fix: production stamps a random 32-bit epoch on every
+        // downlink shell command, so a fresh host reusing low cmd_ids is not mistaken
+        // for a re-delivery the node already ran, and starts its cmd_ids at a random
+        // point, so a late reply to the previous process's #1 isn't credited to ours.
+        let mut e = engine();
+        assert_eq!(e.shell_epoch, 0, "tests keep the deterministic epoch");
+        assert_eq!(e.next_cmd, 1, "tests keep the deterministic first cmd_id");
+        let (mut epoch_moved, mut cmd_moved) = (false, false);
+        for _ in 0..4 {
+            e.randomize_shell_ids();
+            epoch_moved |= e.shell_epoch != 0;
+            cmd_moved |= e.next_cmd != 1;
+            assert_ne!(e.next_cmd, 0, "cmd_id 0 is never used");
+        }
+        assert!(epoch_moved, "a random epoch should differ from 0");
+        assert!(cmd_moved, "a random first cmd_id should differ from 1");
+    }
+
+    fn engine() -> Engine {
+        Engine::new(
+            "tower/".into(),
+            "/dev/ttyTEST".into(),
+            crate::mgmt::DeviceInfoOwned {
+                role: DeviceRole::Gateway,
+                radio_schema_version: radio::RADIO_SCHEMA_VERSION,
+                addr: 0x0000_0001,
+                band: 0,
+                channel: 0,
+                node_capacity: 32,
+                node_count: 0,
+                provisioned: true,
+                gw_addr: 0x0000_0001,
+                firmware_name: "radio_dongle_gateway".into(),
+            },
+        )
+    }
+
+    /// Decode the MgmtRequest inside an Output::SerialSend.
+    fn sent_op(out: &Output) -> Option<(u16, String)> {
+        let Output::SerialSend(frame) = out else {
+            return None;
+        };
+        let mut dec = tower_protocol::FrameDecoder::new();
+        let inner: Vec<u8> = frame
+            .iter()
+            .find_map(|&b| dec.push(b).map(|s| s.to_vec()))?;
+        let (mt, _, payload) = decode_frame(&inner).ok()?;
+        if mt != MsgType::MgmtRequest {
+            return None;
+        }
+        let req: tower_protocol::msg::MgmtRequest = postcard::from_bytes(payload).ok()?;
+        Some((req.req_id, format!("{:?}", req.op)))
+    }
+
+    fn publishes<'a>(out: &'a [Output], topic: &str) -> Vec<&'a [u8]> {
+        out.iter()
+            .filter_map(|o| match o {
+                Output::Publish {
+                    topic: t, payload, ..
+                } if t == topic => Some(payload.as_slice()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Feed a complete single-chunk mgmt reply for the most recent request.
+    fn reply(e: &mut Engine, req_id: u16, result: u8, data: &[u8]) -> Vec<Output> {
+        e.handle(Input::SerialFrame(SerialMsg::Mgmt {
+            req_id,
+            result,
+            chunk: 0,
+            last: true,
+            data: data.to_vec(),
+        }))
+    }
+
+    fn node_entry_record(id: u32, name: &str, flags: u8) -> Vec<u8> {
+        postcard::to_stdvec(&NodeEntry {
+            addr: id,
+            name,
+            flags,
+            last_seen: 3,
+            rssi: -60,
+            uplinks: 5,
+            queued: 0,
+        })
+        .unwrap()
+    }
+
+    /// Install one node into the engine mirror via a NodeList round-trip.
+    fn with_node(e: &mut Engine, id: u32, name: &str, flags: u8) {
+        let start = e.start();
+        let (req_id, op) = start
+            .iter()
+            .find_map(sent_op)
+            .expect("start issues NodeList");
+        assert!(op.contains("NodeList"));
+        let out = reply(e, req_id, MGMT_OK, &node_entry_record(id, name, flags));
+        assert!(!publishes(&out, &format!("tower/nodes/{}", topics::node_hex(id))).is_empty());
+    }
+
+    #[test]
+    fn start_subscribes_and_lists() {
+        let mut e = engine();
+        let out = e.start();
+        let subs: Vec<&String> = out
+            .iter()
+            .filter_map(|o| match o {
+                Output::Subscribe(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        assert!(subs.iter().any(|f| *f == "tower/gateway/cmd"));
+        assert!(subs.iter().any(|f| *f == "tower/nodes/+/shell/req"));
+        assert!(
+            out.iter().find_map(sent_op).is_some(),
+            "a NodeList goes out"
+        );
+    }
+
+    #[test]
+    fn node_list_reply_publishes_retained_registry() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", NODE_FLAG_SLEEPING);
+        // The retained node payload carries the name and the sleeping flag.
+        let out = reply_dummy_registry(&mut e);
+        let raw = publishes(&out, "tower/nodes/0x0000ab12");
+        assert!(!raw.is_empty());
+        let n: payload::Node = serde_json::from_slice(raw[0]).unwrap();
+        assert_eq!(n.name, "kitchen");
+        assert!(n.sleeping);
+    }
+
+    /// Re-list helper so assertions read the publish of a fresh merge.
+    fn reply_dummy_registry(e: &mut Engine) -> Vec<Output> {
+        let mut out = Vec::new();
+        e.issue(&mut out, OpKind::NodeList, MgmtOp::NodeList, None);
+        let (req_id, _) = out.iter().find_map(sent_op).unwrap();
+        reply(
+            e,
+            req_id,
+            MGMT_OK,
+            &node_entry_record(0xAB12, "kitchen", NODE_FLAG_SLEEPING),
+        )
+    }
+
+    #[test]
+    fn button_uplink_maps_to_topic() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(
+            &NodeMsg::Button {
+                kind: radio::ButtonKind::Click,
+                count: 7,
+            },
+            &mut env,
+        )
+        .unwrap();
+        let out = e.handle(Input::SerialFrame(SerialMsg::Uplink {
+            src: 0xAB12,
+            counter: 42,
+            rssi: -67,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        }));
+        let raw = publishes(&out, "tower/nodes/0x0000ab12/event/button");
+        assert_eq!(raw.len(), 1);
+        let ev: payload::ButtonEvent = serde_json::from_slice(raw[0]).unwrap();
+        assert_eq!((ev.event.as_str(), ev.count, ev.counter), ("click", 7, 42));
+        // The graph feed got an RX mark too.
+        assert!(!publishes(&out, "tower/radio/rx").is_empty());
+    }
+
+    #[test]
+    fn unnamed_node_is_auto_named_from_info() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "", NODE_FLAG_UNNAMED);
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(
+            &NodeMsg::Info(radio::NodeInfo {
+                firmware_name: "radio_push_button",
+                firmware_version: "v0.1.0",
+                session_id: 1,
+                sleeping: true,
+                battery_mv: None,
+            }),
+            &mut env,
+        )
+        .unwrap();
+        let out = e.handle(Input::SerialFrame(SerialMsg::Uplink {
+            src: 0xAB12,
+            counter: 1,
+            rssi: -60,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        }));
+        let op = out.iter().find_map(sent_op).expect("a NodeUpdate goes out");
+        assert!(op.1.contains("NodeUpdate"), "{}", op.1);
+        assert!(op.1.contains("push-button:0"), "auto-name in {}", op.1);
+    }
+
+    #[test]
+    fn shell_req_roundtrip_queue_and_chunks() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", NODE_FLAG_SLEEPING);
+        // 1. MQTT shell request → QueuePush.
+        let out = e.handle(Input::MqttIn {
+            topic: "tower/nodes/0x0000ab12/shell/req".into(),
+            payload: serde_json::to_vec(&payload::ShellReq {
+                id: "u-1".into(),
+                line: "/led on".into(),
+                ttl: 0,
+            })
+            .unwrap(),
+            retain: false,
+        });
+        let (req_id, op) = out.iter().find_map(sent_op).expect("QueuePush goes out");
+        assert!(op.contains("QueuePush"), "{op}");
+        // 2. QueueId reply → retained pending mirror.
+        let qid = postcard::to_stdvec(&QueueId { item: 9 }).unwrap();
+        let out = reply(&mut e, req_id, MGMT_OK, &qid);
+        let pend = publishes(&out, "tower/nodes/0x0000ab12/shell/pending");
+        assert!(!pend.is_empty());
+        let entries: Vec<payload::PendingEntry> = serde_json::from_slice(pend[0]).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].r#ref, 9);
+        assert_eq!(entries[0].line, "/led on");
+        // 3. The node's reply chunks → shell/rsp; done clears pending.
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(
+            &NodeMsg::Shell(radio::NodeShellChunk {
+                cmd_id: 1, // first allocated cmd_id
+                result: 0,
+                chunk: 0,
+                last: true,
+                text: "ok",
+            }),
+            &mut env,
+        )
+        .unwrap();
+        let out = e.handle(Input::SerialFrame(SerialMsg::Uplink {
+            src: 0xAB12,
+            counter: 2,
+            rssi: -60,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        }));
+        let rsp_raw = publishes(&out, "tower/nodes/0x0000ab12/shell/rsp");
+        assert_eq!(rsp_raw.len(), 1);
+        let rsp: payload::ShellRsp = serde_json::from_slice(rsp_raw[0]).unwrap();
+        assert_eq!(
+            (rsp.id.as_str(), rsp.text.as_str(), rsp.done),
+            ("u-1", "ok", true)
+        );
+        // Pending mirror emptied.
+        let pend = publishes(&out, "tower/nodes/0x0000ab12/shell/pending");
+        assert!(!pend.is_empty());
+        let entries: Vec<payload::PendingEntry> = serde_json::from_slice(pend[0]).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn unknown_rpc_answers_error_on_rsp_topic() {
+        let mut e = engine();
+        let out = e.handle(Input::MqttIn {
+            topic: "tower/gateway/cmd".into(),
+            payload: serde_json::to_vec(&RpcRequest {
+                id: "u-9".into(),
+                op: "frobnicate".into(),
+                params: serde_json::Value::Null,
+            })
+            .unwrap(),
+            retain: false,
+        });
+        let raw = publishes(&out, "tower/gateway/rsp/u-9");
+        assert_eq!(raw.len(), 1);
+        let rsp: RpcResponse = serde_json::from_slice(raw[0]).unwrap();
+        assert!(!rsp.ok);
+    }
+
+    #[test]
+    fn first_hello_after_attach_is_a_reboot() {
+        // Reality: the boot Hello of the session we attached to is consumed by the startup
+        // `describe` probe, so the engine starts with NO pinned session. The first Hello it
+        // ever sees therefore already means "the dongle rebooted since attach"; the old
+        // test hid the bug by injecting a pinning Hello first.
+        let mut e = engine();
+        queue_shell(&mut e, 0xAB12, 3, "u-2", "/x");
+        let out = e.handle(Input::SerialFrame(SerialMsg::Hello {
+            firmware_name: "radio_dongle_gateway".into(),
+            firmware_version: "v0.1.0".into(),
+            session_id: 8,
+        }));
+        let rsp = last_shell_rsp(&out);
+        assert!(rsp.error.is_some(), "the lost queue item fails loudly");
+        let ops: Vec<String> = out.iter().filter_map(sent_op).map(|(_, op)| op).collect();
+        assert!(ops.iter().any(|o| o.contains("Describe")));
+        assert!(ops.iter().any(|o| o.contains("NodeList")));
+        // The same session again (a console restart without a reboot) is benign…
+        let out = e.handle(Input::SerialFrame(SerialMsg::Hello {
+            firmware_name: "radio_dongle_gateway".into(),
+            firmware_version: "v0.1.0".into(),
+            session_id: 8,
+        }));
+        assert!(out.iter().find_map(sent_op).is_none(), "no resync");
+        // …a new one is the next reboot.
+        let out = e.handle(Input::SerialFrame(SerialMsg::Hello {
+            firmware_name: "radio_dongle_gateway".into(),
+            firmware_version: "v0.1.0".into(),
+            session_id: 9,
+        }));
+        assert!(
+            out.iter()
+                .filter_map(sent_op)
+                .any(|(_, op)| op.contains("NodeList"))
+        );
+    }
+
+    #[test]
+    fn mgmt_timeout_fails_the_rpc() {
+        let mut e = engine();
+        let out = e.handle(Input::MqttIn {
+            topic: "tower/gateway/cmd".into(),
+            payload: br#"{"id":"u-3","op":"node_list"}"#.to_vec(),
+            retain: false,
+        });
+        assert!(out.iter().find_map(sent_op).is_some());
+        let mut failed = false;
+        for _ in 0..(MGMT_TIMEOUT_TICKS + 1) {
+            let out = e.handle(Input::Tick);
+            if !publishes(&out, "tower/gateway/rsp/u-3").is_empty() {
+                failed = true;
+            }
+        }
+        assert!(failed, "the pending RPC must fail after the timeout ticks");
+    }
+
+    #[test]
+    fn ambient_stat_publishes_and_feeds_the_graph() {
+        let mut e = engine();
+        let out = e.handle(Input::SerialFrame(SerialMsg::Stat(RadioStat::Channel {
+            channel: 0,
+            rssi: -98,
+        })));
+        assert!(!publishes(&out, "tower/radio/rssi").is_empty());
+        assert!(out.iter().any(|o| matches!(
+            o,
+            Output::Event(Event::Radio(RadioSample::Ambient { dbm: -98, .. }))
+        )));
+    }
+
+    #[test]
+    fn mqtt_reconnect_republishes_retained_world() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let out = e.handle(Input::MqttUp);
+        assert!(!publishes(&out, "tower/gateway/status").is_empty());
+        assert!(!publishes(&out, "tower/nodes/0x0000ab12").is_empty());
+        assert!(!publishes(&out, "tower/nodes/0x0000ab12/shell/pending").is_empty());
+        assert!(
+            out.iter()
+                .any(|o| matches!(o, Output::Subscribe(f) if f == "tower/gateway/cmd"))
+        );
+    }
+
+    // ---- shared helpers for the outcome-arm tests below ----
+
+    /// Deliver one `NodeMsg::Shell` reply chunk from `src` as an uplink.
+    fn shell_chunk_uplink(
+        e: &mut Engine,
+        src: u32,
+        cmd_id: u16,
+        chunk: u16,
+        last: bool,
+        text: &str,
+    ) -> Vec<Output> {
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(
+            &NodeMsg::Shell(radio::NodeShellChunk {
+                cmd_id,
+                result: 0,
+                chunk,
+                last,
+                text,
+            }),
+            &mut env,
+        )
+        .unwrap();
+        e.handle(Input::SerialFrame(SerialMsg::Uplink {
+            src,
+            counter: chunk as u32,
+            rssi: -60,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        }))
+    }
+
+    /// The last `ShellRsp` published to any `.../shell/rsp` topic in `out`.
+    fn last_shell_rsp(out: &[Output]) -> payload::ShellRsp {
+        let raw = out
+            .iter()
+            .rev()
+            .find_map(|o| match o {
+                Output::Publish { topic, payload, .. } if topic.ends_with("/shell/rsp") => {
+                    Some(payload.clone())
+                }
+                _ => None,
+            })
+            .expect("a shell/rsp publish");
+        serde_json::from_slice(&raw).unwrap()
+    }
+
+    /// Install a node and queue one shell command against it; returns the queue `item`.
+    fn queue_shell(e: &mut Engine, id: u32, item: u16, rpc: &str, line: &str) {
+        with_node(e, id, "kitchen", NODE_FLAG_SLEEPING);
+        let req = format!(r#"{{"id":"{rpc}","line":"{line}"}}"#);
+        let out = e.handle(Input::MqttIn {
+            topic: format!("tower/nodes/{}/shell/req", topics::node_hex(id)),
+            payload: req.into_bytes(),
+            retain: false,
+        });
+        let (req_id, op) = out.iter().find_map(sent_op).expect("QueuePush goes out");
+        assert!(op.contains("QueuePush"), "{op}");
+        let qid = postcard::to_stdvec(&QueueId { item }).unwrap();
+        let _ = reply(e, req_id, MGMT_OK, &qid);
+    }
+
+    // ---- shell response: chunk-gap truncation ----
+
+    #[test]
+    fn shell_lost_chunk_marks_truncated() {
+        let mut e = engine();
+        queue_shell(&mut e, 0xAB12, 9, "u-1", "/log tail");
+        // Chunk 0 arrives cleanly (cmd_id 1 = the first allocated shell cmd_id).
+        let out = shell_chunk_uplink(&mut e, 0xAB12, 1, 0, false, "aa");
+        let rsp = last_shell_rsp(&out);
+        assert_eq!(
+            (rsp.chunk, rsp.text.as_str(), rsp.truncated),
+            (0, "aa", false)
+        );
+        // Chunk 1 was CRC-dropped: chunk 2 (last) opens a gap → truncated, but the text that
+        // did arrive is still delivered.
+        let out = shell_chunk_uplink(&mut e, 0xAB12, 1, 2, true, "cc");
+        let rsp = last_shell_rsp(&out);
+        assert_eq!((rsp.chunk, rsp.text.as_str(), rsp.done), (2, "cc", true));
+        assert!(
+            rsp.truncated,
+            "a chunk-index gap must flag the response truncated"
+        );
+    }
+
+    // ---- TX outcomes on a queued shell command ----
+
+    #[test]
+    fn tx_expired_fails_pending_shell_and_clears_it() {
+        let mut e = engine();
+        queue_shell(&mut e, 0xAB12, 9, "u-1", "/x");
+        // The gateway reports the queue item's TTL expired before it could be delivered.
+        let out = e.handle(Input::SerialFrame(SerialMsg::Stat(RadioStat::Tx {
+            dest: 0xAB12,
+            item: 9,
+            outcome: mgmt::TX_EXPIRED,
+            ack_rssi: None,
+        })));
+        let rsp = last_shell_rsp(&out);
+        assert!(rsp.done);
+        assert!(
+            rsp.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("TTL expired"),
+            "{:?}",
+            rsp.error
+        );
+        // The pending mirror is cleared.
+        let pend = publishes(&out, "tower/nodes/0x0000ab12/shell/pending");
+        let entries: Vec<PendingEntry> = serde_json::from_slice(pend.last().unwrap()).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn tx_delivered_then_reply_timeout() {
+        let mut e = engine();
+        queue_shell(&mut e, 0xAB12, 9, "u-1", "/x");
+        // Delivered (node ACKed): the pending stays; we now await the node's shell reply.
+        let out = e.handle(Input::SerialFrame(SerialMsg::Stat(RadioStat::Tx {
+            dest: 0xAB12,
+            item: 9,
+            outcome: mgmt::TX_DELIVERED,
+            ack_rssi: Some(-50),
+        })));
+        assert!(
+            publishes(&out, "tower/nodes/0x0000ab12/shell/rsp").is_empty(),
+            "delivery alone must not answer the dialog"
+        );
+        // No reply within SHELL_REPLY_TIMEOUT_TICKS → a terminal timeout error.
+        let mut timed_out = None;
+        for _ in 0..=SHELL_REPLY_TIMEOUT_TICKS {
+            let out = e.handle(Input::Tick);
+            if !publishes(&out, "tower/nodes/0x0000ab12/shell/rsp").is_empty() {
+                timed_out = Some(last_shell_rsp(&out));
+            }
+        }
+        let rsp = timed_out.expect("a delivered-but-unanswered command must time out");
+        assert!(rsp.done);
+        assert!(
+            rsp.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no reply"),
+            "{:?}",
+            rsp.error
+        );
+    }
+
+    // ---- on_mgmt_done arms ----
+
+    #[test]
+    fn reveal_key_answers_with_hex_key() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let out = e.handle(Input::MqttIn {
+            topic: "tower/gateway/cmd".into(),
+            payload: br#"{"id":"u-rk","op":"reveal_key","params":{"addr":"0x0000ab12"}}"#.to_vec(),
+            retain: false,
+        });
+        let (req_id, op) = out.iter().find_map(sent_op).expect("NodeRevealKey issued");
+        assert!(op.contains("NodeRevealKey"), "{op}");
+        let key = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+            0x06, 0x07,
+        ];
+        let rec = postcard::to_stdvec(&NodeKey { addr: 0xAB12, key }).unwrap();
+        let out = reply(&mut e, req_id, MGMT_OK, &rec);
+        let raw = publishes(&out, "tower/gateway/rsp/u-rk");
+        assert_eq!(raw.len(), 1);
+        let rsp: RpcResponse = serde_json::from_slice(raw[0]).unwrap();
+        assert!(rsp.ok);
+        assert_eq!(rsp.data["addr"], "0x0000ab12");
+        assert_eq!(rsp.data["key"], "0123456789abcdef0001020304050607");
+    }
+
+    #[test]
+    fn node_remove_clears_retained_topics() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let out = e.handle(Input::MqttIn {
+            topic: "tower/gateway/cmd".into(),
+            payload: br#"{"id":"u-rm","op":"node_remove","params":{"addr":"0x0000ab12"}}"#.to_vec(),
+            retain: false,
+        });
+        let (req_id, op) = out.iter().find_map(sent_op).expect("NodeRemove issued");
+        assert!(op.contains("NodeRemove"), "{op}");
+        let out = reply(&mut e, req_id, MGMT_OK, &[]);
+        // An empty retained payload clears the node, its last temperature, and its pending
+        // queue for any subscriber that held the retained value.
+        for topic in [
+            "tower/nodes/0x0000ab12",
+            "tower/nodes/0x0000ab12/measure/temperature",
+            "tower/nodes/0x0000ab12/shell/pending",
+        ] {
+            let cleared = out.iter().any(|o| {
+                matches!(o, Output::Publish { topic: t, payload, retain: true }
+                    if t == topic && payload.is_empty())
+            });
+            assert!(cleared, "missing empty retained publish for {topic}");
+        }
+        let rsp: RpcResponse =
+            serde_json::from_slice(publishes(&out, "tower/gateway/rsp/u-rm")[0]).unwrap();
+        assert!(rsp.ok);
+    }
+
+    #[test]
+    fn ota_pairing_timeout_answers_joined_null() {
+        let mut e = engine();
+        let out = e.handle(Input::MqttIn {
+            topic: "tower/gateway/cmd".into(),
+            payload: br#"{"id":"u-ota","op":"node_add_ota","params":{"window":5}}"#.to_vec(),
+            retain: false,
+        });
+        let (req_id, op) = out.iter().find_map(sent_op).expect("PairingOpen issued");
+        assert!(op.contains("PairingOpen"), "{op}");
+        // The window closed unjoined: the device answers MGMT_TIMEOUT. That is a normal
+        // outcome for a pairing window, so the RPC succeeds with joined:null (not an error).
+        let out = reply(&mut e, req_id, mgmt::MGMT_TIMEOUT, &[]);
+        let raw = publishes(&out, "tower/gateway/rsp/u-ota");
+        assert_eq!(raw.len(), 1);
+        let rsp: RpcResponse = serde_json::from_slice(raw[0]).unwrap();
+        assert!(rsp.ok, "MGMT_TIMEOUT on a pairing window is not an error");
+        assert!(rsp.data["joined"].is_null());
+    }
+
+    // ---- more uplink → topic mappings (alongside `button_uplink_maps_to_topic`) ----
+
+    #[test]
+    fn temperature_uplink_maps_to_retained_topic() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(&NodeMsg::Temperature { millic: 21500 }, &mut env).unwrap();
+        let out = e.handle(Input::SerialFrame(SerialMsg::Uplink {
+            src: 0xAB12,
+            counter: 3,
+            rssi: -60,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        }));
+        let topic = "tower/nodes/0x0000ab12/measure/temperature";
+        assert!(
+            out.iter()
+                .any(|o| matches!(o, Output::Publish { topic: t, retain: true, .. } if t == topic)),
+            "temperature is a retained last-value topic"
+        );
+        let raw = publishes(&out, topic);
+        let t: payload::Temperature = serde_json::from_slice(raw[0]).unwrap();
+        assert_eq!((t.celsius, t.millic), (21.5, 21500));
+    }
+
+    #[test]
+    fn accel_uplink_maps_to_event_topic() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(
+            &NodeMsg::Accel {
+                kind: radio::AccelKind::Motion,
+                face: 0,
+            },
+            &mut env,
+        )
+        .unwrap();
+        let out = e.handle(Input::SerialFrame(SerialMsg::Uplink {
+            src: 0xAB12,
+            counter: 4,
+            rssi: -60,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        }));
+        let topic = "tower/nodes/0x0000ab12/event/accel";
+        let raw = publishes(&out, topic);
+        assert_eq!(raw.len(), 1);
+        let a: payload::AccelEvent = serde_json::from_slice(raw[0]).unwrap();
+        assert_eq!((a.event.as_str(), a.face, a.counter), ("motion", 0, 4));
+        // Accel events are transient (not retained).
+        assert!(
+            out.iter().any(
+                |o| matches!(o, Output::Publish { topic: t, retain: false, .. } if t == topic)
+            )
+        );
+    }
+
+    // ---- review fixes -------------------------------------------------------------
+
+    fn mqtt_in(topic: &str, payload: &[u8]) -> Input {
+        Input::MqttIn {
+            topic: topic.into(),
+            payload: payload.to_vec(),
+            retain: false,
+        }
+    }
+
+    fn logs(out: &[Output]) -> Vec<&str> {
+        out.iter()
+            .filter_map(|o| match o {
+                Output::Event(Event::Log(l)) => Some(l.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rpc_rsp(out: &[Output], id: &str) -> RpcResponse {
+        let raw = publishes(out, &format!("tower/gateway/rsp/{id}"));
+        assert_eq!(raw.len(), 1, "one response for {id}");
+        serde_json::from_slice(raw[0]).unwrap()
+    }
+
+    #[test]
+    fn describe_rpc_reports_band_and_channel() {
+        // `nodes add --port` provisions the node with these; without them it defaulted
+        // to band 0 / channel 0 and could never reach a us915 or channel-1/2 gateway.
+        let mut e = engine();
+        e.describe.band = 1;
+        e.describe.channel = 2;
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-d","op":"describe"}"#,
+        ));
+        let (req_id, _) = out.iter().find_map(sent_op).expect("Describe issued");
+        // A reply that doesn't parse leaves the startup describe authoritative.
+        let out = reply(&mut e, req_id, MGMT_OK, &[]);
+        let rsp = rpc_rsp(&out, "u-d");
+        assert_eq!(rsp.data["gateway"], "0x00000001");
+        assert_eq!(
+            (rsp.data["band"].as_u64(), rsp.data["channel"].as_u64()),
+            (Some(1), Some(2))
+        );
+    }
+
+    #[test]
+    fn retained_command_is_ignored_and_cleared() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        for topic in ["tower/gateway/cmd", "tower/nodes/0x0000ab12/shell/req"] {
+            let out = e.handle(Input::MqttIn {
+                topic: topic.into(),
+                payload:
+                    br#"{"id":"u-r","op":"node_remove","line":"/x","params":{"addr":"0x0000ab12"}}"#
+                        .to_vec(),
+                retain: true,
+            });
+            assert!(
+                out.iter().find_map(sent_op).is_none(),
+                "a retained replay never runs"
+            );
+            assert!(
+                out.iter().any(
+                    |o| matches!(o, Output::Publish { topic: t, payload, retain: true }
+                    if t == topic && payload.is_empty())
+                ),
+                "the stored copy is cleared on {topic}"
+            );
+        }
+        // The clear echoing back (an empty live publish) is silently ignored.
+        assert!(e.handle(mqtt_in("tower/gateway/cmd", b"")).is_empty());
+    }
+
+    #[test]
+    fn malformed_and_oversized_requests_are_refused() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let long = "x".repeat(payload::MAX_REQUEST_ID + 1);
+        for id in ["a/b", "+", long.as_str()] {
+            let rpc = format!(r#"{{"id":"{id}","op":"node_list"}}"#);
+            let out = e.handle(mqtt_in("tower/gateway/cmd", rpc.as_bytes()));
+            assert!(
+                out.iter().find_map(sent_op).is_none(),
+                "{id:?} must not run"
+            );
+            assert!(
+                !out.iter().any(|o| matches!(o, Output::Publish { .. })),
+                "no response topic can be built from {id:?}"
+            );
+            let sh = format!(r#"{{"id":"{id}","line":"/x"}}"#);
+            let out = e.handle(mqtt_in("tower/nodes/0x0000ab12/shell/req", sh.as_bytes()));
+            assert!(out.iter().find_map(sent_op).is_none());
+            assert!(!out.iter().any(|o| matches!(o, Output::Publish { .. })));
+        }
+        let big = format!(
+            r#"{{"id":"u-big","op":"node_list","pad":"{}"}}"#,
+            "y".repeat(5000)
+        );
+        let out = e.handle(mqtt_in("tower/gateway/cmd", big.as_bytes()));
+        assert!(
+            out.iter().find_map(sent_op).is_none(),
+            "oversized command refused"
+        );
+        assert!(logs(&out).iter().any(|l| l.contains("oversized")));
+    }
+
+    #[test]
+    fn duplicate_request_id_runs_once() {
+        // QoS-1 is at-least-once: a redelivered request must not run twice.
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let req = br#"{"id":"u-dup","line":"/led on"}"#;
+        let out = e.handle(mqtt_in("tower/nodes/0x0000ab12/shell/req", req));
+        assert!(out.iter().find_map(sent_op).is_some());
+        let out = e.handle(mqtt_in("tower/nodes/0x0000ab12/shell/req", req));
+        assert!(out.iter().find_map(sent_op).is_none(), "redelivery dropped");
+        assert!(logs(&out).iter().any(|l| l.contains("duplicate")));
+    }
+
+    #[test]
+    fn rpc_responses_route_by_origin_not_id() {
+        let mut e = engine();
+        // An MQTT client minting a TUI-looking id still gets its answer on MQTT…
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"tui-cbl-0","op":"frobnicate"}"#,
+        ));
+        assert!(!rpc_rsp(&out, "tui-cbl-0").ok);
+        assert!(
+            !out.iter()
+                .any(|o| matches!(o, Output::Event(Event::Rpc(_))))
+        );
+        // …and a frontend RPC with any id comes back as an event, never published.
+        let out = e.handle(Input::Frontend(FrontendCmd::Rpc(RpcRequest {
+            id: "anything".into(),
+            op: "frobnicate".into(),
+            params: serde_json::Value::Null,
+        })));
+        assert!(
+            out.iter()
+                .any(|o| matches!(o, Output::Event(Event::Rpc(r)) if r.id == "anything"))
+        );
+        assert!(!out.iter().any(|o| matches!(o, Output::Publish { .. })));
+    }
+
+    #[test]
+    fn unanswered_enqueue_fails_the_shell_dialog() {
+        // QueuePush carries no RPC id; its timeout used to vanish silently.
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let out = e.handle(mqtt_in(
+            "tower/nodes/0x0000ab12/shell/req",
+            br#"{"id":"u-q","line":"/x"}"#,
+        ));
+        assert!(out.iter().find_map(sent_op).is_some());
+        let mut failed = None;
+        for _ in 0..=MGMT_TIMEOUT_TICKS {
+            let out = e.handle(Input::Tick);
+            if !publishes(&out, "tower/nodes/0x0000ab12/shell/rsp").is_empty() {
+                failed = Some(last_shell_rsp(&out));
+            }
+        }
+        let rsp = failed.expect("a terminal shell/rsp error");
+        assert_eq!(rsp.id, "u-q");
+        assert!(rsp.done && rsp.error.as_deref().unwrap().contains("not queued"));
+        assert!(
+            e.pending_mgmt
+                .iter()
+                .any(|p| matches!(p.op, OpKind::QueueSync)),
+            "a queue resync follows, to drop the item if only the reply was lost"
+        );
+    }
+
+    #[test]
+    fn serial_down_fails_requests_immediately() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let _ = e.handle(Input::SerialDown {
+            error: "unplugged".into(),
+        });
+        let out = e.handle(mqtt_in(
+            "tower/nodes/0x0000ab12/shell/req",
+            br#"{"id":"u-s","line":"/x"}"#,
+        ));
+        assert!(
+            !out.iter().any(|o| matches!(o, Output::SerialSend(_))),
+            "frame would be dropped"
+        );
+        let rsp = last_shell_rsp(&out);
+        assert!(
+            rsp.error
+                .as_deref()
+                .unwrap()
+                .contains("serial link is down")
+        );
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-l","op":"node_list"}"#,
+        ));
+        assert!(
+            rpc_rsp(&out, "u-l")
+                .error
+                .unwrap()
+                .contains("serial link is down")
+        );
+    }
+
+    #[test]
+    fn startup_queue_sync_purges_a_previous_hosts_items() {
+        let mut e = engine();
+        let start = e.start();
+        let ops: Vec<(u16, String)> = start.iter().filter_map(sent_op).collect();
+        assert!(ops[1].1.contains("QueueList"), "{ops:?}");
+        let _ = reply(
+            &mut e,
+            ops[0].0,
+            MGMT_OK,
+            &node_entry_record(0xAB12, "k", 0),
+        );
+        // The device still holds item 5 for 0xAB12 from a previous `tower gateway`.
+        let stale = postcard::to_stdvec(&QueueEntry {
+            node_addr: 0xAB12,
+            item: 5,
+            age: 100,
+            ttl: 3600,
+            data: &[1, 2, 3],
+        })
+        .unwrap();
+        let out = reply(&mut e, ops[1].0, MGMT_OK, &stale);
+        let sent: Vec<String> = out.iter().filter_map(sent_op).map(|(_, op)| op).collect();
+        assert!(
+            sent.iter()
+                .any(|o| o.contains("QueueDrop") && o.contains("Some(5)")),
+            "{sent:?}"
+        );
+        assert!(logs(&out).iter().any(|l| l.contains("stale")));
+    }
+
+    #[test]
+    fn resync_after_serial_drop_fails_lost_commands() {
+        let mut e = engine();
+        queue_shell(&mut e, 0xAB12, 9, "u-1", "/x");
+        let _ = e.handle(Input::SerialDown {
+            error: "unplugged".into(),
+        });
+        let out = e.handle(Input::SerialUp);
+        let sync = out
+            .iter()
+            .filter_map(sent_op)
+            .find(|(_, op)| op.contains("QueueList"))
+            .expect("SerialUp reconciles the queue");
+        // The gateway no longer holds item 9: the command was lost; say so.
+        let out = reply(&mut e, sync.0, MGMT_OK, &[]);
+        let rsp = last_shell_rsp(&out);
+        assert_eq!(rsp.id, "u-1");
+        assert!(rsp.error.as_deref().unwrap().contains("no longer queued"));
+        let pend = publishes(&out, "tower/nodes/0x0000ab12/shell/pending");
+        let entries: Vec<PendingEntry> = serde_json::from_slice(pend.last().unwrap()).unwrap();
+        assert!(entries.is_empty(), "the retained mirror is corrected");
+    }
+
+    #[test]
+    fn undelivered_pending_expires_without_a_report() {
+        // No TX_EXPIRED ever arrives (missed reboot / link drop): the TTL backstop fires.
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", NODE_FLAG_SLEEPING);
+        let out = e.handle(mqtt_in(
+            "tower/nodes/0x0000ab12/shell/req",
+            br#"{"id":"u-t","line":"/x","ttl":5}"#,
+        ));
+        let (req_id, _) = out.iter().find_map(sent_op).unwrap();
+        let _ = reply(
+            &mut e,
+            req_id,
+            MGMT_OK,
+            &postcard::to_stdvec(&QueueId { item: 4 }).unwrap(),
+        );
+        let mut failed = None;
+        for _ in 0..(5 + SHELL_TTL_GRACE_TICKS + 1) {
+            let out = e.handle(Input::Tick);
+            if !publishes(&out, "tower/nodes/0x0000ab12/shell/rsp").is_empty() {
+                failed = Some(last_shell_rsp(&out));
+            }
+        }
+        let rsp = failed.expect("the pending entry must not live forever");
+        assert!(
+            rsp.error.as_deref().unwrap().contains("TTL"),
+            "{:?}",
+            rsp.error
+        );
+    }
+
+    #[test]
+    fn queue_drop_without_ref_prunes_the_whole_mirror() {
+        let mut e = engine();
+        queue_shell(&mut e, 0xAB12, 9, "u-1", "/x");
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-qd","op":"queue_drop","params":{"addr":"0x0000ab12"}}"#,
+        ));
+        assert!(
+            out.iter()
+                .filter_map(sent_op)
+                .any(|(_, op)| op.contains("item: None"))
+        );
+        let pend = publishes(&out, "tower/nodes/0x0000ab12/shell/pending");
+        let entries: Vec<PendingEntry> = serde_json::from_slice(pend.last().unwrap()).unwrap();
+        assert!(entries.is_empty(), "no phantom pendings");
+        assert!(last_shell_rsp(&out).error.as_deref() == Some("dequeued"));
+    }
+
+    #[test]
+    fn queue_drop_rejects_out_of_range_refs() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        for (i, r) in ["65545", "0", "-1", "\"9\""].iter().enumerate() {
+            let id = format!("u-r{i}");
+            let req = format!(
+                r#"{{"id":"{id}","op":"queue_drop","params":{{"addr":"0x0000ab12","ref":{r}}}}}"#
+            );
+            let out = e.handle(mqtt_in("tower/gateway/cmd", req.as_bytes()));
+            assert!(
+                out.iter().find_map(sent_op).is_none(),
+                "ref {r} must not truncate into a drop"
+            );
+            assert!(rpc_rsp(&out, &id).error.unwrap().contains("ref"));
+        }
+    }
+
+    #[test]
+    fn node_names_must_be_unique_printable_and_not_addresses() {
+        let mut e = engine();
+        let start = e.start();
+        let (req_id, _) = start.iter().find_map(sent_op).unwrap();
+        let recs = [
+            node_entry_record(0xAB12, "kitchen", 0),
+            node_entry_record(0xCD34, "garage", 0),
+        ]
+        .concat();
+        let _ = reply(&mut e, req_id, MGMT_OK, &recs);
+        for (i, name) in ["kitchen", "bad\u{1b}[2J", "rtl\u{202E}x", "0x00000001", ""]
+            .iter()
+            .enumerate()
+        {
+            let id = format!("u-n{i}");
+            let req = serde_json::json!({
+                "id": id, "op": "node_rename", "params": { "addr": "0x0000cd34", "name": name }
+            });
+            let out = e.handle(mqtt_in(
+                "tower/gateway/cmd",
+                &serde_json::to_vec(&req).unwrap(),
+            ));
+            assert!(
+                out.iter().find_map(sent_op).is_none(),
+                "{name:?} must be refused"
+            );
+            assert!(!rpc_rsp(&out, &id).ok);
+        }
+        // Renaming a node to its own current name is fine; so is a fresh printable name.
+        for name in ["garage", "dílna 2"] {
+            let req = serde_json::json!({
+                "id": "u-ok", "op": "node_rename", "params": { "addr": "0x0000cd34", "name": name }
+            });
+            let mut e2 = engine();
+            e2.nodes = e.nodes.clone();
+            e2.registry_synced = true;
+            let out = e2.handle(mqtt_in(
+                "tower/gateway/cmd",
+                &serde_json::to_vec(&req).unwrap(),
+            ));
+            assert!(out.iter().find_map(sent_op).is_some(), "{name:?} is valid");
+        }
+        // node_add validates the same way.
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-add","op":"node_add","params":{"addr":"0x0000ef56","key":"00112233445566778899aabbccddeeff","name":"garage"}}"#,
+        ));
+        assert!(
+            rpc_rsp(&out, "u-add")
+                .error
+                .unwrap()
+                .contains("already used")
+        );
+    }
+
+    fn button_uplink(src: u32) -> Input {
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(
+            &NodeMsg::Button {
+                kind: radio::ButtonKind::Click,
+                count: 1,
+            },
+            &mut env,
+        )
+        .unwrap();
+        Input::SerialFrame(SerialMsg::Uplink {
+            src,
+            counter: 1,
+            rssi: -60,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        })
+    }
+
+    #[test]
+    fn unregistered_uplinks_are_dropped_not_published() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let out = e.handle(button_uplink(0xCD34));
+        assert!(
+            !out.iter().any(|o| matches!(o, Output::Publish { .. })),
+            "nothing about an unregistered sender reaches MQTT"
+        );
+        assert!(logs(&out).iter().any(|l| l.contains("unregistered")));
+        assert!(
+            out.iter()
+                .filter_map(sent_op)
+                .any(|(_, op)| op.contains("NodeList")),
+            "the first drop re-lists in case the mirror is stale"
+        );
+        // Bounded noise: the 2nd..9th drops are silent, the 10th logs again.
+        for _ in 2..10 {
+            assert!(logs(&e.handle(button_uplink(0xCD34))).is_empty());
+        }
+        assert!(logs(&e.handle(button_uplink(0xCD34)))[0].contains("10 so far"));
+    }
+
+    #[test]
+    fn uplinks_before_the_first_registry_sync_are_held_then_replayed() {
+        let mut e = engine();
+        let start = e.start();
+        let (req_id, _) = start.iter().find_map(sent_op).unwrap();
+        let out = e.handle(button_uplink(0xAB12));
+        assert!(
+            out.is_empty(),
+            "held, not dropped, before the mirror exists"
+        );
+        let out = reply(&mut e, req_id, MGMT_OK, &node_entry_record(0xAB12, "k", 0));
+        assert_eq!(
+            publishes(&out, "tower/nodes/0x0000ab12/event/button").len(),
+            1,
+            "replayed once the registry landed"
+        );
+    }
+
+    #[test]
+    fn ota_joined_node_is_mirrored_before_the_list_refresh() {
+        // The joined node's first NodeInfo races the NodeList refresh: it must not be
+        // dropped as unregistered (that would also skip the auto-name).
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-ota","op":"node_add_ota","params":{"window":5}}"#,
+        ));
+        let (req_id, _) = out.iter().find_map(sent_op).unwrap();
+        let joined = postcard::to_stdvec(&Paired { addr: 0xCD34 }).unwrap();
+        let _ = reply(&mut e, req_id, MGMT_OK, &joined);
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(
+            &NodeMsg::Info(radio::NodeInfo {
+                firmware_name: "radio_push_button",
+                firmware_version: "v0.1.0",
+                session_id: 1,
+                sleeping: true,
+                battery_mv: None,
+            }),
+            &mut env,
+        )
+        .unwrap();
+        let out = e.handle(Input::SerialFrame(SerialMsg::Uplink {
+            src: 0xCD34,
+            counter: 1,
+            rssi: -60,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        }));
+        let op = out.iter().find_map(sent_op).expect("auto-name NodeUpdate");
+        assert!(
+            op.1.contains("NodeUpdate") && op.1.contains("push-button:0"),
+            "{}",
+            op.1
+        );
+    }
+
+    #[test]
+    fn broker_errors_are_reported_even_before_the_first_connect() {
+        let mut e = engine();
+        let out = e.handle(Input::MqttDown {
+            error: "connection refused: bad user name or password".into(),
+        });
+        assert!(logs(&out)[0].contains("cannot connect to the broker: connection refused"));
+        let _ = e.handle(Input::MqttUp);
+        let out = e.handle(Input::MqttDown {
+            error: "eof".into(),
+        });
+        assert!(logs(&out)[0].starts_with("mqtt lost"));
+    }
+}
