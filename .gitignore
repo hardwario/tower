@@ -10,3 +10,6 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# Python bytecode (tools/check_lockstep.py)
+__pycache__/

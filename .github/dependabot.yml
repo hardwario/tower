@@ -1,0 +1,17 @@
+# Dependabot version updates (security updates are a repo setting; see SECURITY.md).
+# The control plane has no Cargo manifest and its submodule pins move only via /pin (never a
+# bot), so only the SHA-pinned workflow actions are tracked here.
+# Weekly, grouped, with a 7-day cooldown so a freshly published (possibly compromised) release
+# is never picked up the day it appears. The GitHub Actions are pinned to full commit SHAs with a
+# `# vX.Y.Z` comment; Dependabot bumps the SHA and the comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]

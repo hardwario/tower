@@ -1,0 +1,40 @@
+# CI for the TOWER control plane. The repo holds no product code (only the submodule pins),
+# so CI proves the pinned snapshot is coherent: every child commit is fetchable from its
+# upstream (the recursive checkout fails otherwise, i.e. a pin of an unpushed commit), and the
+# tower-protocol lockstep holds across the PINNED firmware / cli / hil trees (tools/
+# check_lockstep.py: every manifest, every resolved Cargo.lock commit, and the tag's commit
+# both in protocol/ and upstream).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lockstep:
+    name: tower-protocol lockstep (pinned submodules)
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a full commit SHA (the comment names the release); Dependabot keeps it current.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          fetch-depth: 0   # full submodule history + tags: protocol/ tag -> commit, ancestry info
+          persist-credentials: false
+
+      - name: Python >= 3.11 (tomllib)
+        run: python3 -c 'import sys, tomllib; print(sys.version)'
+
+      # --strict: no co-dev override may shadow the pins; --remote: the tag must still name the
+      # locked commit upstream (catches a re-cut tag that the submodule clone would not see).
+      - name: Verify tower-protocol lockstep
+        run: python3 tools/check_lockstep.py --strict --remote
