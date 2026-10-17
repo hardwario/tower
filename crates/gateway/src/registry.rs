@@ -88,10 +88,23 @@ pub trait BucketIo {
 /// bucket means those nodes re-pair, which beats refusing to serve the rest of the
 /// network (the caller can't do anything smarter with the bytes either way).
 pub fn load(io: &impl BucketIo, index: usize) -> Bucket {
+    load_checked(io, index).unwrap_or_default()
+}
+
+/// A bucket that is present but cannot be read or decoded (see [`load_checked`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Unreadable;
+
+/// Decode bucket `index`, telling an absent bucket (never written: empty) apart from one that
+/// is present but unreadable (an I/O error, an oversized or undecodable value). [`add`] never
+/// writes over the latter: reading it as empty and storing a new record there would destroy
+/// the records it still holds, which a transient read error or a later fix could recover.
+fn load_checked(io: &impl BucketIo, index: usize) -> Result<Bucket, Unreadable> {
     let mut buf = [0u8; MAX_BUCKET_BYTES];
     match io.load(index, &mut buf) {
-        Ok(Some(n)) if n <= MAX_BUCKET_BYTES => postcard::from_bytes(&buf[..n]).unwrap_or_default(),
-        _ => Bucket::new(),
+        Ok(None) => Ok(Bucket::new()),
+        Ok(Some(n)) if n <= MAX_BUCKET_BYTES => postcard::from_bytes(&buf[..n]).map_err(|_| Unreadable),
+        _ => Err(Unreadable),
     }
 }
 
@@ -131,14 +144,24 @@ pub fn add(io: &mut impl BucketIo, rec: &NodeRecord) -> Result<(), RegistryError
     if count(io) >= CAPACITY {
         return Err(RegistryError::Full);
     }
+    // Insert into an absent or readable bucket with room; an unreadable one is left alone
+    // (see `load_checked`), and if it was the only one with room, that is a storage fault.
+    let mut unreadable = false;
     for i in 0..BUCKETS {
-        let mut bucket = load(io, i);
+        let Ok(mut bucket) = load_checked(io, i) else {
+            unreadable = true;
+            continue;
+        };
         if bucket.len() < PER_BUCKET {
             let _ = bucket.push(rec.clone()); // fits: len < PER_BUCKET just checked
             return store(io, i, &bucket);
         }
     }
-    Err(RegistryError::Full)
+    Err(if unreadable {
+        RegistryError::Storage
+    } else {
+        RegistryError::Full
+    })
 }
 
 /// Add a node **only if its addr is not registered yet**: the OTA-pairing commit path. Unlike
@@ -299,6 +322,27 @@ mod tests {
         assert_eq!(count(&io), 0);
         add(&mut io, &rec(2, "fresh")).unwrap();
         assert_eq!(find(&io, 2).unwrap().name.as_str(), "fresh");
+        // ...in another bucket: the unreadable one is never written over.
+        assert_eq!(io.buckets[0], Some(std::vec![0xFF; 40]));
+    }
+
+    /// When only unreadable buckets have room, an add is a storage fault (nothing written),
+    /// not "full", and the unreadable bytes survive.
+    #[test]
+    fn add_never_overwrites_an_unreadable_bucket() {
+        let mut io = Mem::default();
+        for a in 0..(2 * PER_BUCKET as u32) {
+            add(&mut io, &rec(100 + a, "n")).unwrap();
+        }
+        assert!(io.buckets[2].is_none());
+        io.buckets[2] = Some(std::vec![0xFF; 40]);
+        assert_eq!(add(&mut io, &rec(7, "x")), Err(RegistryError::Storage));
+        assert_eq!(add_new(&mut io, &rec(7, "x")), Err(RegistryError::Storage));
+        assert_eq!(io.buckets[2], Some(std::vec![0xFF; 40]));
+        // The readable records stay serviceable.
+        remove(&mut io, 100).unwrap();
+        add(&mut io, &rec(7, "x")).unwrap();
+        assert!(find(&io, 7).is_some());
     }
 
     /// Adding an existing addr overwrites in place (re-provision), never duplicates.
