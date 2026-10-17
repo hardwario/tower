@@ -532,6 +532,19 @@ pub(crate) mod tests {
         Port::from_handle(Box::new(FakePort::new(state)))
     }
 
+    /// A `Port` over the in-memory `FakePort` with `replies` scripted as the device's answers
+    /// (anything past them reads as 0x00, i.e. a protocol error), plus the shared state to
+    /// inspect afterwards (the bytes written, the modem-line history). The engine tests in
+    /// `flash`, `chip` and `rdp` drive their entry points end to end through it.
+    pub(crate) fn fake_port(replies: &[u8]) -> (Port, Arc<Mutex<FakeState>>) {
+        let state = Arc::new(Mutex::new(FakeState {
+            timeout: DEFAULT_TIMEOUT,
+            replies: replies.iter().copied().collect(),
+            ..Default::default()
+        }));
+        (port_with(state.clone()), state)
+    }
+
     /// C2: a loaned handle's configured timeout survives the engine's per-command
     /// override: `reset_timeout` restores what `set_timeout` stashed, not the
     /// global `DEFAULT_TIMEOUT`.

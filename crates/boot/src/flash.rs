@@ -34,6 +34,16 @@ pub enum Progress {
     Verify { bytes_done: usize, bytes_total: usize },
     /// Starting the application (reset into app or `Go`).
     Starting,
+    /// The readout-protection probe ran ([`crate::rdp`]): `readout_protected` is whether RDP
+    /// level 1 is active. Emitted right after `Get ID` by [`flash`], [`erase`],
+    /// [`chip::info`](crate::chip::info), and before and after the change by
+    /// [`rdp::protect`](crate::rdp::protect) / [`rdp::unprotect`](crate::rdp::unprotect).
+    ReadoutProbed { readout_protected: bool },
+    /// The bootloader accepted Readout Protect (`protect: true`) or Readout Unprotect
+    /// (`protect: false`) and is updating the option bytes (Unprotect: after mass-erasing the
+    /// flash and the data EEPROM); the device resets itself when done. Emitted only by
+    /// [`rdp::protect`](crate::rdp::protect) / [`rdp::unprotect`](crate::rdp::unprotect).
+    ReadoutChanging { protect: bool },
 }
 
 /// A `Progress` sink that discards every event. Handy default for callers that
@@ -284,6 +294,10 @@ pub fn erase_chip<T: Transport>(
 ///
 /// Only **main flash** is erased: the STM32L0's data EEPROM (e.g. 6 KiB on the
 /// L083, at 0x0808_0000) is a separate memory and keeps its contents.
+///
+/// A readout-protected chip (RDP level 1) is detected right after `Get ID` and fails with
+/// [`Error::ReadoutProtected`] before any erase is attempted (the bootloader would NACK it);
+/// the application is reset back into, as for any failure before the erase.
 pub fn erase(port: &mut Port, progress: &mut dyn FnMut(Progress)) -> Result<usize> {
     connect(port, progress)?;
     let id = Bootloader::new(port).get_id().inspect_err(|_| {
@@ -291,9 +305,34 @@ pub fn erase(port: &mut Port, progress: &mut dyn FnMut(Progress)) -> Result<usiz
         let _ = port.reset_into_app();
     })?;
     progress(Progress::ChipIdentified { id });
+    refuse_if_protected(port, "erase", progress)?;
     let pages = erase_chip(&mut Bootloader::new(port), id, progress)?;
     port.reset_into_app()?;
     Ok(pages)
+}
+
+/// The readout-protection check of [`flash`] and [`erase`], after `Get ID` and before the
+/// first erase or write: on a protected chip every one of those would be NACKed on its command
+/// byte, which would surface as a generic NACK (or, for a full-chip erase, could be misread).
+/// Probe instead ([`crate::rdp`]) and fail with [`Error::ReadoutProtected`]. On that error, and
+/// on a failed probe, nothing has been modified, so the application is reset back into.
+fn refuse_if_protected(
+    port: &mut Port,
+    operation: &'static str,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<()> {
+    let result = crate::rdp::probe(&mut Bootloader::new(port)).and_then(|readout_protected| {
+        progress(Progress::ReadoutProbed { readout_protected });
+        if readout_protected {
+            Err(Error::ReadoutProtected { operation })
+        } else {
+            Ok(())
+        }
+    });
+    if result.is_err() {
+        let _ = port.reset_into_app();
+    }
+    result
 }
 
 /// Pad `chunk` up to a multiple of `align` with 0xFF (erased-flash value).
@@ -380,9 +419,13 @@ where
 /// (The image *content* is not inspected here; [`crate::firmware::load`] /
 /// [`crate::firmware::validate`] do that.)
 ///
+/// A readout-protected chip (RDP level 1) is detected right after the size check, by the
+/// probe in [`crate::rdp`], and fails with [`Error::ReadoutProtected`] before any erase or
+/// write is sent (the bootloader would NACK them).
+///
 /// Failure behaviour: on an error *before* the first erase/write (bootloader
-/// entry, Get ID, or the per-chip size check) the device is reset back into the
-/// application so the intact app keeps running. On any error *at or after*
+/// entry, Get ID, the per-chip size check, or the protection probe) the device is reset back
+/// into the application so the intact app keeps running. On any error *at or after*
 /// erase begins the device is left parked in the bootloader (flash partly
 /// modified); recover by re-flashing or power-cycling.
 pub fn flash(
@@ -409,6 +452,7 @@ pub fn flash(
         let _ = port.reset_into_app();
         return Err(e);
     }
+    refuse_if_protected(port, "flashing", progress)?;
 
     {
         let mut bl = Bootloader::new(port);
@@ -497,21 +541,10 @@ fn write_image<T: Transport>(
 mod tests {
     use super::*;
     use crate::bootloader::tests::ScriptedTransport;
-    use crate::port::tests::{FakePort, FakeState};
-    use std::sync::{Arc, Mutex};
+    use crate::port::tests::fake_port;
+    use crate::rdp::tests::{GET_ID_447, INIT, PROBE_PROTECTED, frames, script};
 
     const ACK: u8 = 0x79;
-
-    /// A `Port` over the in-memory `FakePort` with `replies` scripted as the
-    /// device's answers (anything past them reads as 0x00 → a protocol error).
-    fn fake_port(replies: &[u8]) -> (Port, Arc<Mutex<FakeState>>) {
-        let state = Arc::new(Mutex::new(FakeState {
-            timeout: crate::port::DEFAULT_TIMEOUT,
-            replies: replies.iter().copied().collect(),
-            ..Default::default()
-        }));
-        (Port::from_handle(Box::new(FakePort::new(state.clone()))), state)
-    }
 
     /// The modem-line tail of `Port::reset_into_app`: RESET asserted with BOOT0
     /// low, then released.
@@ -839,5 +872,68 @@ mod tests {
         let err = erase(&mut port, &mut no_progress).unwrap_err();
         assert!(matches!(err, Error::BootloaderInit { .. }), "got {err:?}");
         assert!(state.lock().unwrap().lines.ends_with(&APP_RESET_TAIL));
+    }
+
+    /// `flash` on a readout-protected chip fails fast with `ReadoutProtected` (not the generic
+    /// command NACK the first erase would get): nothing is erased or written, and the device is
+    /// reset back into its (intact) application.
+    #[test]
+    fn flash_on_a_protected_chip_is_readout_protected_and_touches_nothing() {
+        let (mut port, state) = fake_port(&script(&[&INIT, &GET_ID_447, &PROBE_PROTECTED]));
+        let mut seen = Vec::new();
+        let err = flash(&mut port, &[0u8; 8], &FlashOptions::default(), &mut |p| {
+            seen.push(p)
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::ReadoutProtected {
+                    operation: "flashing"
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("readout-protected"), "{err}");
+        let st = state.lock().unwrap();
+        assert_eq!(frames(&st.written, [0x44, 0xBB]), 0, "no Extended Erase");
+        assert_eq!(frames(&st.written, [0x31, 0xCE]), 0, "no Write Memory");
+        assert!(st.lines.ends_with(&APP_RESET_TAIL), "reset into app");
+        assert!(
+            seen.iter().any(|p| matches!(
+                p,
+                Progress::ReadoutProbed {
+                    readout_protected: true
+                }
+            )),
+            "{seen:?}"
+        );
+    }
+
+    /// `erase` on a readout-protected chip: the same fail-fast, no erase sent.
+    #[test]
+    fn erase_on_a_protected_chip_is_readout_protected_and_touches_nothing() {
+        let (mut port, state) = fake_port(&script(&[&INIT, &GET_ID_447, &PROBE_PROTECTED]));
+        let err = erase(&mut port, &mut no_progress).unwrap_err();
+        assert!(
+            matches!(err, Error::ReadoutProtected { operation: "erase" }),
+            "got {err:?}"
+        );
+        let st = state.lock().unwrap();
+        assert_eq!(frames(&st.written, [0x44, 0xBB]), 0, "no Extended Erase");
+        assert!(st.lines.ends_with(&APP_RESET_TAIL), "reset into app");
+    }
+
+    /// A probe that gets no clean answer is an error before any erase (never assumed open),
+    /// and the app is restored.
+    #[test]
+    fn flash_with_a_failed_probe_erases_nothing() {
+        // Init, Get ID, then the Read Memory command reads 0x00 (past the script).
+        let (mut port, state) = fake_port(&script(&[&INIT, &GET_ID_447]));
+        let err = flash(&mut port, &[0u8; 8], &FlashOptions::default(), &mut no_progress).unwrap_err();
+        assert!(matches!(err, Error::UnexpectedByte { .. }), "got {err:?}");
+        let st = state.lock().unwrap();
+        assert_eq!(frames(&st.written, [0x44, 0xBB]), 0, "no Extended Erase");
+        assert!(st.lines.ends_with(&APP_RESET_TAIL));
     }
 }

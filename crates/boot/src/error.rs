@@ -12,15 +12,20 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Which phase of a two-step command handshake produced a NACK. AN3155 command
 /// frames are acknowledged in two stages (first the command byte + complement,
 /// then the command's payload), and the two mean very different things (a
-/// command-byte NACK is usually line corruption; a payload NACK is the device
-/// rejecting the request, e.g. an out-of-range Extended Erase page list). Retry
-/// and boundary-detection logic must be able to tell them apart.
+/// command-byte NACK is usually line corruption, or a command the active readout
+/// protection forbids; a payload NACK is the device rejecting the request, e.g. an
+/// out-of-range Extended Erase page list). Retry and boundary-detection logic must
+/// be able to tell them apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NackStage {
     /// NACK to the command byte + complement frame (before any payload).
     Command,
     /// NACK to the command's payload (address, length, page list, data).
     Payload,
+    /// NACK in place of the second ACK of Readout Protect / Readout Unprotect, which the
+    /// bootloader sends only after carrying out the option-byte update (AN3155): the update
+    /// failed, so the protection level did not change.
+    Operation,
 }
 
 impl std::fmt::Display for NackStage {
@@ -28,6 +33,7 @@ impl std::fmt::Display for NackStage {
         match self {
             NackStage::Command => f.write_str("command"),
             NackStage::Payload => f.write_str("payload"),
+            NackStage::Operation => f.write_str("operation"),
         }
     }
 }
@@ -89,6 +95,33 @@ pub enum Error {
 
     #[error("serial port disconnected while {context}")]
     Disconnected { context: &'static str },
+
+    /// The chip has readout protection (RDP level 1) active, found by the probe in
+    /// [`rdp`](crate::rdp) right after `Get ID` and before anything was modified. At level 1
+    /// the ROM bootloader NACKs Read Memory, Write Memory, Go and both Erase commands
+    /// (AN3155), so `operation` cannot work; reported as its own variant instead of the generic
+    /// command NACK the first refused command would produce. The only way back is Readout
+    /// Unprotect ([`rdp::unprotect`](crate::rdp::unprotect)), which mass-erases the flash AND
+    /// the data EEPROM.
+    #[error(
+        "the chip is readout-protected (RDP level 1): the bootloader refuses to read, write, erase or \
+         start its flash, so {operation} is impossible until the protection is removed (which \
+         mass-erases the flash and the data EEPROM)"
+    )]
+    ReadoutProtected { operation: &'static str },
+
+    /// [`rdp::protect`](crate::rdp::protect) / [`rdp::unprotect`](crate::rdp::unprotect): the
+    /// bootloader acknowledged the command twice, but a new bootloader session still reads the
+    /// old protection state. The usual cause is a debugger (SWD) attached since the last
+    /// power-on: RM0367 3.4 then requires a power-on reset for the new option bytes to load (a
+    /// system reset is not enough). `protect` is the requested direction.
+    #[error(
+        "the bootloader acknowledged Readout {}, but a new bootloader session still reads the chip as {}; \
+         power-cycle it (USB and any SWD probe) and read the state again",
+        if *.protect { "Protect" } else { "Unprotect" },
+        if *.protect { "not protected" } else { "protected" }
+    )]
+    ReadoutUnchanged { protect: bool },
 }
 
 /// Wording for [`Error::FirmwareTooLarge`]: the family maximum vs a smaller, identified part.

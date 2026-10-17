@@ -25,8 +25,11 @@
 //! ```
 //!
 //! The high-level entry points are [`flash::flash`], [`flash::erase`],
-//! [`chip::info`] (read-only: chip id, bootloader version, supported commands),
-//! and the [`Port::reset_into_app`](port::Port::reset_into_app) /
+//! [`chip::info`] (read-only: chip id, bootloader version, supported commands,
+//! readout-protection state), the opt-in production lock [`rdp::protect`] /
+//! [`rdp::unprotect`] (RDP level 1 and back, the latter mass-erasing flash and data
+//! EEPROM; level 2 is out of reach by design), and the
+//! [`Port::reset_into_app`](port::Port::reset_into_app) /
 //! [`Port::reset_into_bootloader`](port::Port::reset_into_bootloader) reset
 //! pulses. The lower layers ([`bootloader`], [`port`]) are public for callers
 //! that need finer control. Every library entry point returns
@@ -39,4 +42,5 @@ pub mod error;
 pub mod firmware;
 pub mod flash;
 pub mod port;
+pub mod rdp;
 pub mod target;

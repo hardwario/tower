@@ -3,10 +3,12 @@
 The `tower` host CLI (`cli/` in the hardwario/tower monorepo; read the root `AGENTS.md` first):
 decodes the framed serial link from the TOWER firmware (logs / events / shell / TUI) and
 flashes/erases/resets/identifies the chip over the UART bootloader (`tower flash` / `erase` /
-`reset` / `chip`, via the `tower-boot` library in `crates/boot`, formerly `jolt`). It is also the
-gateway/MQTT host: `tower gateway` bridges a Radio Dongle's network to MQTT (embedded `rumqttd`
-broker or external, TUI + `--service`), and `tower nodes` / `tower net` are the MQTT client
-commands (`src/gateway/`, `src/client/`).
+`reset` / `chip`, via the `tower-boot` library in `crates/boot`, formerly `jolt`), and sets or
+clears the opt-in production readout protection (`tower protect` / `unprotect`: RDP level 1
+only, both confirmed interactively or by `--yes`; `unprotect` mass-erases flash + data EEPROM).
+It is also the gateway/MQTT host: `tower gateway` bridges a Radio Dongle's network to MQTT
+(embedded `rumqttd` broker or external, TUI + `--service`), and `tower nodes` / `tower net` are
+the MQTT client commands (`src/gateway/`, `src/client/`).
 
 ## Shared crates (path dependencies)
 

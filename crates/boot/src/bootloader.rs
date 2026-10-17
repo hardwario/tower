@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use crate::error::{Error, NackStage, Result};
+use crate::target;
 
 const ACK: u8 = 0x79;
 const NACK: u8 = 0x1F;
@@ -32,6 +33,12 @@ const CMD_READ_MEMORY: u8 = 0x11;
 const CMD_GO: u8 = 0x21;
 const CMD_WRITE_MEMORY: u8 = 0x31;
 const CMD_EXT_ERASE: u8 = 0x44;
+// Readout protection (see `crate::rdp` for the semantics and the sources). Each one is sent by
+// exactly one crate-private method below, which only `rdp::protect` / `rdp::unprotect` call; a
+// test in `rdp` pins that. Write Protect (0x63), Write Unprotect (0x73) and any option-byte
+// write are deliberately absent.
+const CMD_READOUT_PROTECT: u8 = 0x82;
+const CMD_READOUT_UNPROTECT: u8 = 0x92;
 
 /// AN3155 command frame: the byte followed by its complement.
 fn cmd_frame(cmd: u8) -> [u8; 2] {
@@ -175,10 +182,24 @@ impl<'a, T: Transport> Bootloader<'a, T> {
     }
 
     /// Write 1..=256 bytes at `addr`. Data should already be aligned/padded.
+    ///
+    /// The whole block must lie in main flash (`FLASH_BASE .. FLASH_BASE + MAX_FLASH_SIZE`).
+    /// This bound is what keeps the option bytes (0x1FF8_0000 on the STM32L0, which hold the
+    /// RDP level) and the data EEPROM out of reach of every caller, the public API included:
+    /// writing RDP = 0xCC there would select level 2, which is permanent (RM0367 3.4.1,
+    /// Table 19). Readout protection is changed only through [`crate::rdp`], and only between
+    /// levels 0 and 1.
     pub fn write_block(&mut self, addr: u32, data: &[u8]) -> Result<()> {
         if data.is_empty() || data.len() > 256 {
             return Err(Error::InvalidArgument {
                 context: "write_block expects 1..=256 bytes",
+            });
+        }
+        let end = u64::from(addr) + data.len() as u64;
+        let flash_end = u64::from(target::FLASH_BASE) + u64::from(target::MAX_FLASH_SIZE);
+        if addr < target::FLASH_BASE || end > flash_end {
+            return Err(Error::InvalidArgument {
+                context: "write_block writes main flash only (never the option bytes or the data EEPROM)",
             });
         }
         self.send_command(CMD_WRITE_MEMORY, "Write Memory command")?;
@@ -209,6 +230,56 @@ impl<'a, T: Transport> Bootloader<'a, T> {
         self.send_command(CMD_GO, "Go command")?;
         self.send_address(addr, "Go address")
     }
+
+    /// Wait `settle`, then drop whatever the bootloader has sent since. Used after a NACK
+    /// that may be followed by a second one: some ST bootloaders send two NACKs for a Read or
+    /// Write Memory refused by active readout protection (AN2606, STM32L1xxxC known
+    /// limitations), and a stray NACK left in the buffer would read as the next command's
+    /// ACK stage.
+    pub(crate) fn discard_input(&mut self, settle: Duration) -> Result<()> {
+        std::thread::sleep(settle);
+        self.port.clear_input()
+    }
+
+    /// AN3155 Readout Protect (0x82): select RDP level 1. Crate-private on purpose: the only
+    /// caller is [`crate::rdp::protect`], which probes first and verifies afterwards.
+    ///
+    /// Host side: send `82 7D`, wait for the first ACK (the command is accepted; a NACK here is
+    /// [`NackStage::Command`]: line corruption, or protection already active, since Readout
+    /// Protect is not among the commands the bootloader serves at level 1), then call
+    /// `accepted` and wait up to `timeout` for the second ACK, which the bootloader sends after
+    /// writing the option bytes (a NACK there is [`NackStage::Operation`]). The device then
+    /// performs a system reset to load the new option bytes, so this session is over either
+    /// way.
+    pub(crate) fn readout_protect(&mut self, timeout: Duration, accepted: &mut dyn FnMut()) -> Result<()> {
+        self.send_command(CMD_READOUT_PROTECT, "Readout Protect command")?;
+        accepted();
+        self.await_second_ack("Readout Protect option-byte update", timeout)
+    }
+
+    /// AN3155 Readout Unprotect (0x92): RDP level 1 back to level 0. The regression
+    /// mass-erases the flash AND the data EEPROM (RM0367 3.4.1). Crate-private on purpose: the
+    /// only caller is [`crate::rdp::unprotect`].
+    ///
+    /// Same handshake as [`readout_protect`](Self::readout_protect) (`92 6D`, first ACK,
+    /// `accepted`, second ACK after the mass erase and the option-byte update, then a system
+    /// reset); per AN3155, a NACK in place of the second ACK means the protection stays
+    /// active.
+    pub(crate) fn readout_unprotect(&mut self, timeout: Duration, accepted: &mut dyn FnMut()) -> Result<()> {
+        self.send_command(CMD_READOUT_UNPROTECT, "Readout Unprotect command")?;
+        accepted();
+        self.await_second_ack("Readout Unprotect mass erase and option-byte update", timeout)
+    }
+
+    /// The second ACK of the readout-protection commands, under a long `timeout` (the device
+    /// is busy with the option bytes and, for Unprotect, a mass erase). The default timeout is
+    /// restored on both outcomes.
+    fn await_second_ack(&mut self, context: &str, timeout: Duration) -> Result<()> {
+        self.port.set_timeout(timeout)?;
+        let result = self.read_ack(context, NackStage::Operation);
+        let _ = self.port.reset_timeout();
+        result
+    }
 }
 
 #[cfg(test)]
@@ -231,7 +302,9 @@ pub(crate) mod tests {
     /// All written bytes are recorded (`take_written`).
     pub struct ScriptedTransport {
         written: Vec<u8>,
-        replies: VecDeque<u8>,
+        /// Scripted reply bytes; the flag marks a byte `clear_input` discards (a stray byte
+        /// already in the receive buffer, see `push_stale`).
+        replies: VecDeque<(u8, bool)>,
         timeouts: Vec<Duration>,
         erase_boundary: Option<usize>,
         erased_pages: Vec<u16>,
@@ -263,19 +336,26 @@ pub(crate) mod tests {
         }
 
         pub fn push_ack(&mut self) {
-            self.replies.push_back(ACK);
+            self.replies.push_back((ACK, false));
         }
 
         pub fn push_nack(&mut self) {
-            self.replies.push_back(NACK);
+            self.replies.push_back((NACK, false));
         }
 
         pub fn push_byte(&mut self, b: u8) {
-            self.replies.push_back(b);
+            self.replies.push_back((b, false));
         }
 
         pub fn push_bytes(&mut self, bytes: &[u8]) {
-            self.replies.extend(bytes.iter().copied());
+            self.replies.extend(bytes.iter().map(|&b| (b, false)));
+        }
+
+        /// Queue a byte the device sends unasked (e.g. the second NACK some bootloaders send
+        /// for a Read Memory refused by readout protection). A read still returns it, but a
+        /// `clear_input` reaching it first drops it, like a real port's receive buffer.
+        pub fn push_stale(&mut self, b: u8) {
+            self.replies.push_back((b, true));
         }
 
         /// Queue an Extended Erase chunk reply: command-frame ACK + page-list ACK.
@@ -319,7 +399,7 @@ pub(crate) mod tests {
             if let Some(boundary) = self.erase_boundary {
                 // Detect an Extended Erase command frame [0x44, 0xBB].
                 if buf == cmd_frame(CMD_EXT_ERASE) {
-                    self.replies.push_back(ACK); // command byte accepted
+                    self.replies.push_back((ACK, false)); // command byte accepted
                     self.awaiting_erase_pages = true;
                     return Ok(());
                 }
@@ -332,9 +412,9 @@ pub(crate) mod tests {
                                 self.erased_pages.push(p);
                             }
                         }
-                        self.replies.push_back(ACK);
+                        self.replies.push_back((ACK, false));
                     } else {
-                        self.replies.push_back(NACK);
+                        self.replies.push_back((NACK, false));
                     }
                     return Ok(());
                 }
@@ -344,14 +424,21 @@ pub(crate) mod tests {
 
         fn read_exact_buf(&mut self, buf: &mut [u8], context: &str) -> Result<()> {
             for slot in buf.iter_mut() {
-                *slot = self.replies.pop_front().ok_or_else(|| Error::Timeout {
-                    context: context.to_string(),
-                })?;
+                *slot = self
+                    .replies
+                    .pop_front()
+                    .map(|(b, _)| b)
+                    .ok_or_else(|| Error::Timeout {
+                        context: context.to_string(),
+                    })?;
             }
             Ok(())
         }
 
         fn clear_input(&mut self) -> Result<()> {
+            while self.replies.front().is_some_and(|&(_, stale)| stale) {
+                self.replies.pop_front();
+            }
             Ok(())
         }
 
@@ -490,6 +577,128 @@ pub(crate) mod tests {
         assert_eq!(cmd_frame(0x21), [0x21, 0xDE]); // Go
         assert_eq!(cmd_frame(0x31), [0x31, 0xCE]); // Write Memory
         assert_eq!(cmd_frame(0x44), [0x44, 0xBB]); // Extended Erase
+        assert_eq!(cmd_frame(CMD_READOUT_PROTECT), [0x82, 0x7D]); // Readout Protect
+        assert_eq!(cmd_frame(CMD_READOUT_UNPROTECT), [0x92, 0x6D]); // Readout Unprotect
+    }
+
+    /// Readout Protect: `82 7D`, first ACK, `accepted` fires, second ACK under the long
+    /// timeout, then the default timeout is restored.
+    #[test]
+    fn readout_protect_handshake_two_acks() {
+        let mut t = ScriptedTransport::new();
+        t.push_ack(); // command accepted
+        t.push_ack(); // option bytes written
+        let long = Duration::from_secs(30);
+        let mut accepted = 0;
+        Bootloader::new(&mut t)
+            .readout_protect(long, &mut || accepted += 1)
+            .unwrap();
+        assert_eq!(accepted, 1);
+        assert_eq!(t.written(), &[0x82, 0x7D]);
+        assert_eq!(t.timeouts(), &[long, DEFAULT_TIMEOUT_MARKER]);
+    }
+
+    /// Readout Unprotect: `92 6D` and the same two-ACK handshake.
+    #[test]
+    fn readout_unprotect_handshake_two_acks() {
+        let mut t = ScriptedTransport::new();
+        t.push_ack();
+        t.push_ack();
+        let long = Duration::from_secs(30);
+        Bootloader::new(&mut t)
+            .readout_unprotect(long, &mut || {})
+            .unwrap();
+        assert_eq!(t.written(), &[0x92, 0x6D]);
+        assert_eq!(t.timeouts(), &[long, DEFAULT_TIMEOUT_MARKER]);
+    }
+
+    /// A NACK to the command frame is a Command-stage NACK, `accepted` never fires and nothing
+    /// waits for a second ACK; a NACK in place of the second ACK is the Operation stage, and
+    /// the default timeout is still restored.
+    #[test]
+    fn readout_commands_report_the_nack_stage() {
+        let mut t = ScriptedTransport::new();
+        t.push_nack();
+        let mut accepted = false;
+        let err = Bootloader::new(&mut t)
+            .readout_protect(Duration::from_secs(30), &mut || accepted = true)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Nack {
+                    stage: NackStage::Command,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(!accepted);
+        assert!(t.timeouts().is_empty(), "no second-ACK wait after a command NACK");
+
+        let mut t = ScriptedTransport::new();
+        t.push_ack();
+        t.push_nack();
+        let long = Duration::from_secs(30);
+        let err = Bootloader::new(&mut t)
+            .readout_unprotect(long, &mut || {})
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Nack {
+                    stage: NackStage::Operation,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(t.timeouts(), &[long, DEFAULT_TIMEOUT_MARKER]);
+    }
+
+    /// Write Memory stays inside main flash: the option bytes (where RDP lives, and RDP = 0xCC
+    /// would be the permanent level 2), the data EEPROM and a block straddling the end of
+    /// flash are refused before anything is sent.
+    #[test]
+    fn write_block_refuses_everything_outside_main_flash() {
+        let flash_end = target::FLASH_BASE + target::MAX_FLASH_SIZE;
+        for (addr, len) in [
+            (0x1FF8_0000u32, 8usize), // option bytes (RDP)
+            (0x0808_0000, 8),         // data EEPROM
+            (0x2000_0000, 8),         // SRAM
+            (target::FLASH_BASE - 8, 8),
+            (flash_end - 8, 16), // straddles the end of flash
+            (flash_end, 8),
+        ] {
+            let mut t = ScriptedTransport::new();
+            let err = Bootloader::new(&mut t)
+                .write_block(addr, &vec![0u8; len])
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidArgument { .. }),
+                "0x{addr:08X}: {err:?}"
+            );
+            assert!(t.written().is_empty(), "0x{addr:08X}: nothing on the wire");
+        }
+        // The first and the last block of main flash are fine.
+        for addr in [target::FLASH_BASE, flash_end - 8] {
+            let mut t = ScriptedTransport::new();
+            t.push_bytes(&[ACK, ACK, ACK]);
+            Bootloader::new(&mut t).write_block(addr, &[0u8; 8]).unwrap();
+        }
+    }
+
+    /// A stale byte is dropped by `discard_input` (the double-NACK case), a regular reply
+    /// is not.
+    #[test]
+    fn discard_input_drops_only_stale_bytes() {
+        let mut t = ScriptedTransport::new();
+        t.push_stale(NACK);
+        t.push_ack();
+        let mut bl = Bootloader::new(&mut t);
+        bl.discard_input(Duration::ZERO).unwrap();
+        bl.discard_input(Duration::ZERO).unwrap();
+        assert_eq!(t.read_byte("after discard").unwrap(), ACK);
     }
 
     #[test]

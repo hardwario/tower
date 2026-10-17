@@ -39,12 +39,13 @@ Of particular interest, by component:
 - **`cli/`**: the gateway / MQTT surface (embedded broker, topic handling, node management
   commands), decoding of frames from an untrusted device, and the flashing path. Release
   archives carry signed build-provenance attestations
-  (`gh attestation verify <archive> --repo hardwario/tower`; archives of the former
-  hardwario/tower-cli repository verify with `--repo hardwario/tower-cli`); a missing or failing
-  attestation on an official archive is itself worth reporting.
+  (`gh attestation verify <archive> --repo hardwario/tower`); a missing or failing attestation on
+  an official archive is itself worth reporting.
 - **`crates/boot`**: handling of malformed bootloader responses or firmware images, and anything
-  that could write outside the intended flash range (main flash only; it never sends
-  readout-protection, write-protection or option-byte commands).
+  that could write outside the intended flash range (main flash only). Readout protection is
+  opt-in: level 1 is set or cleared only through the explicit `tower protect` / `tower unprotect`
+  commands; the tooling never writes option bytes directly and has no path to the permanent
+  level 2.
 - **`hil/`**: test tooling that runs on a developer's bench, not shipped product code; issues
   that could compromise the host running it (e.g. command injection via `hil.toml` or
   device-supplied data) are still in scope.

@@ -163,7 +163,7 @@ the cause of a failure:
 | Code | Meaning |
 |------|---------|
 | `0`  | success |
-| `1`  | tool error: I/O (incl. a port that fails mid-command, or a `logs`/`events` link lost under `--no-reconnect`), bad file, encode/decode, truncated/incomplete device response |
+| `1`  | tool error: I/O (incl. a port that fails mid-command, or a `logs`/`events` link lost under `--no-reconnect`), bad file, encode/decode, truncated/incomplete device response; also `flash`/`erase` refusing a readout-protected board, and `protect`/`unprotect` not confirmed |
 | `2`  | usage error (bad arguments, emitted by clap) |
 | `124`| device command timed out (no response at all to `exec` / `complete`; also: no gateway reply to an MQTT RPC) |
 | `125`| protocol mismatch: the device was built from a different tree (another `PROTOCOL_VERSION`, or the same version with a different wire fingerprint); rebuild `tower` or reflash the device from the same tree |
@@ -210,18 +210,86 @@ tower flash firmware.bin --no-verify --no-run
 tower erase                  # erase the whole flash, reset into the app
 tower reset                  # reset into the application
 tower reset --bootloader     # reset into the system bootloader
-tower chip                   # chip id + family, bootloader version, supported commands
+tower chip                   # chip id + family, readout protection, bootloader version, commands
+tower protect                # production lock: readout protection (RDP level 1), asks first
+tower unprotect              # remove it: ERASES flash + data EEPROM, asks for "erase" first
 ```
 
-`tower chip` is read-only (the former `jolt info`): it enters the bootloader, reads `Get ID`
-and `Get`, then resets back into the application on every path. The data goes to stdout,
-status lines to stderr; `-v` prints the bootloader connect diagnostics (as for `flash` /
-`erase`). The former `jolt monitor` raw serial monitor has no counterpart: `tower monitor
---hex` dumps every received byte.
+`tower chip` is read-only (the former `jolt info`, plus the protection state): it enters the
+bootloader, reads `Get ID` and `Get`, probes the readout protection with one Read Memory, then
+resets back into the application on every path. The data goes to stdout, status lines to
+stderr; `-v` prints the bootloader connect diagnostics (as for `flash` / `erase`):
+
+```
+Device  : /dev/ttyUSB0 @ 115200 baud, 8E1
+Chip id : 0x447 (STM32L07x/L08x (e.g. STM32L083CZ))
+Readout : not protected                  (or: Readout : protected (RDP level 1))
+BL ver  : 3.1
+Commands: 0x00 0x01 0x02 0x11 0x21 0x31 0x44 0x63 0x73 0x82 0x92
+```
+
+The `Commands` line is what the bootloader implements, the same at every protection level. The
+former `jolt monitor` raw serial monitor has no counterpart: `tower monitor --hex` dumps every
+received byte.
 
 Firmware must be a raw `.bin` (convert `.elf`/`.hex` with
 `arm-none-eabi-objcopy -O binary in.elf out.bin`). The device is auto-detected when
 exactly one USB serial device is present; otherwise pass `--device`.
+
+### Readout protection (production units)
+
+Dev boards stay **open**. For a production unit, `tower protect` sets the STM32L0's **readout
+protection to level 1**: from then on neither the UART bootloader nor a debugger (SWD) can read,
+write or erase the flash (the firmware) or the data EEPROM (radio keys, pairing, settings, TX
+counters), while the application keeps running from flash. `tower flash` and `tower erase`
+refuse such a board up front:
+
+```
+[tower] error: this board is readout-protected; `tower unprotect` erases it (flash + EEPROM) so it can be re-flashed; it must then be re-paired
+```
+
+(exit `1`, the tool-error code; the message is the way to tell it apart). Level 2, which is
+permanent (no SWD, no bootloader, no way back), is never set by this tool, and it has no
+option-byte writes at all.
+
+The way back, `tower unprotect`, **mass-erases the whole flash AND the data EEPROM** (that is
+what the chip does when leaving level 1; RM0367 3.4.1): the node loses its firmware, radio keys,
+pairing, settings and TX counters, and must be re-flashed and re-paired. On a board that is not
+protected it does nothing (and erases nothing).
+
+Both commands explain what they do and ask first: `tower protect` wants `yes`, `tower unprotect`
+wants the word `erase`. `--yes` skips the question (for a scripted production line); without it,
+a stdin that is not a terminal is refused before the port is touched. Afterwards they read the
+state back in a new bootloader session and print it as the `Readout :` line (stdout), like
+`tower chip`.
+
+**Production provisioning** (flash, verify, pair, then lock):
+
+```sh
+tower flash app.bin                  # erase, write, read-back verify, start
+tower exec "/system/resource print"  # the unit's functional check
+tower nodes add --port <SERIAL>      # pair it with the gateway (or: --ota)
+tower protect                        # RDP level 1, read back: "Readout : protected (RDP level 1)"
+# power-cycle the unit once (unplug USB): after RDP level 1 is set through the bootloader the
+# STM32L0 runs the application only after a power-down (RM0367 3.4.1)
+tower chip                           # optional: "Readout : protected (RDP level 1)"
+```
+
+**Field re-flash** of a protected unit:
+
+```sh
+tower unprotect                      # type "erase": flash + data EEPROM wiped, "Readout : not protected"
+tower flash app.bin                  # re-flash
+tower nodes add --port <SERIAL>      # re-pair (new key; the default `auto` address is
+                                     #   UID-derived and comes back, custom settings do not)
+tower protect                        # lock it again before it goes back out
+```
+
+If `protect` reports that the bootloader acknowledged but the read-back still finds the chip
+open, a debugger was most likely attached since power-on (the option bytes then load only on a
+power-on reset, RM0367 3.4): power-cycle the board (USB and any SWD probe) and run `tower chip`.
+If the application does not come back after a bootloader session on a protected board,
+power-cycle it as well.
 
 ## Build from source
 

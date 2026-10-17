@@ -114,6 +114,89 @@ fn chip_nonexistent_device_is_a_tool_error() {
         .stderr(predicate::str::contains("error"));
 }
 
+// ---- readout protection: protect / unprotect (no hardware) -----------------------
+//
+// assert_cmd gives the child a non-terminal stdin, which is exactly the scripted case: without
+// `--yes` both commands must refuse before touching any port (the bogus `--device` would
+// otherwise fail with "opening ..."), and with `--yes` they must get past the confirmation to
+// the port open (which then fails on the bogus device, so nothing ever reaches hardware).
+
+const NO_DEVICE: &str = "/dev/tower-cli-test-nonexistent";
+
+#[test]
+fn help_lists_protect_and_unprotect() {
+    tower()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("protect"))
+        .stdout(predicate::str::contains("unprotect"));
+}
+
+#[test]
+fn protect_help_documents_yes() {
+    tower()
+        .args(["protect", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("RDP level 1"))
+        .stdout(predicate::str::contains("--yes"));
+}
+
+#[test]
+fn unprotect_help_warns_about_the_erase() {
+    tower()
+        .args(["unprotect", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ERASES"))
+        .stdout(predicate::str::contains("EEPROM"))
+        .stdout(predicate::str::contains("--yes"));
+}
+
+#[test]
+fn protect_and_unprotect_reject_unknown_flags() {
+    tower().args(["protect", "--level", "2"]).assert().code(2);
+    tower().args(["unprotect", "--force"]).assert().code(2);
+}
+
+#[test]
+fn protect_refuses_a_non_terminal_stdin_without_yes() {
+    tower()
+        .args(["protect", "--device", NO_DEVICE])
+        .write_stdin("yes\n") // even a correct answer on a pipe is not a confirmation
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("not a terminal"))
+        .stderr(predicate::str::contains("--yes"))
+        .stderr(predicate::str::contains("opening").not());
+}
+
+#[test]
+fn unprotect_refuses_a_non_terminal_stdin_without_yes() {
+    tower()
+        .args(["unprotect", "--device", NO_DEVICE])
+        .write_stdin("erase\n")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("not a terminal"))
+        .stderr(predicate::str::contains("--yes"))
+        .stderr(predicate::str::contains("opening").not());
+}
+
+#[test]
+fn protect_and_unprotect_with_yes_skip_the_prompt() {
+    for cmd in ["protect", "unprotect"] {
+        tower()
+            .args([cmd, "--yes", "--device", NO_DEVICE])
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains(format!("opening {NO_DEVICE}")))
+            .stderr(predicate::str::contains("not a terminal").not())
+            .stderr(predicate::str::contains("Type \"").not());
+    }
+}
+
 // ---- gateway / nodes / net surfaces (no hardware, no broker) ---------------------
 
 #[test]

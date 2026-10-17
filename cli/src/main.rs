@@ -1,5 +1,5 @@
 //! `tower`, the HARDWARIO TOWER host CLI: devices, logs/events, shell/exec, the console TUI,
-//! and flash/erase/reset/chip (via the tower-boot engine, crates/boot).
+//! and flash/erase/reset/chip/protect/unprotect (via the tower-boot engine, crates/boot).
 //!
 //! The firmware's UART is always framed (`tower-protocol`: COBS + CRC + postcard),
 //! so a plain terminal shows binary; this tool decodes it. The same `FrameDecoder`
@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -56,7 +56,9 @@ use term::sanitize_line;
 //
 //   0    ok
 //   1    tool error: I/O (incl. a port that fails mid-command, or a stream link lost under
-//        `--no-reconnect`), bad file, encode/decode, truncated/incomplete device response
+//        `--no-reconnect`), bad file, encode/decode, truncated/incomplete device response;
+//        also `flash`/`erase` refusing a readout-protected board (its message names the way
+//        out), and `protect`/`unprotect` not confirmed (declined, or no --yes off a terminal)
 //   2    usage error (bad args, emitted by clap itself)
 //   124  device command timed out (no response at all: `exec`, `complete`, an MQTT RPC; a
 //        truncated response is 1)
@@ -275,9 +277,29 @@ enum Cmd {
         #[arg(short, long)]
         verbose: bool,
     },
-    /// Read the chip id, bootloader version and supported commands (read-only; the app is
-    /// restored afterwards).
+    /// Read the chip id, bootloader version, supported commands and readout-protection state
+    /// (read-only; the app is restored afterwards).
     Chip {
+        /// Print bootloader connect diagnostics.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Production lock: enable readout protection (RDP level 1), so the firmware and the data
+    /// EEPROM (radio keys, pairing) can no longer be read out. Undoing it erases the board.
+    Protect {
+        /// Don't ask for confirmation (required when stdin is not a terminal).
+        #[arg(long)]
+        yes: bool,
+        /// Print bootloader connect diagnostics.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Remove readout protection. ERASES the board: flash AND data EEPROM (radio keys,
+    /// pairing, settings, TX counters); the node must then be re-flashed and re-paired.
+    Unprotect {
+        /// Don't ask for confirmation (required when stdin is not a terminal).
+        #[arg(long)]
+        yes: bool,
         /// Print bootloader connect diagnostics.
         #[arg(short, long)]
         verbose: bool,
@@ -387,6 +409,8 @@ fn run(cli: Cli) -> Result<u8> {
         } => flash_cmd(cli.port, file, !no_erase, !no_verify, !no_run, go, verbose).map(|()| EXIT_OK),
         Cmd::Erase { verbose } => erase_cmd(cli.port, verbose).map(|()| EXIT_OK),
         Cmd::Chip { verbose } => chip_cmd(cli.port, verbose).map(|()| EXIT_OK),
+        Cmd::Protect { yes, verbose } => protect_cmd(cli.port, yes, verbose).map(|()| EXIT_OK),
+        Cmd::Unprotect { yes, verbose } => unprotect_cmd(cli.port, yes, verbose).map(|()| EXIT_OK),
         Cmd::Reset { bootloader } => reset_cmd(cli.port, bootloader).map(|()| EXIT_OK),
         Cmd::Gateway(opts) => gateway::run(cli.port, opts),
         Cmd::Nodes { cmd, mqtt } => client::nodes::run(cmd, mqtt),
@@ -929,7 +953,8 @@ fn flash_cmd(
     opts.go = go;
     let mut report = flash_progress(verbose);
     let start = Instant::now();
-    tower_boot::flash::flash(&mut sp, &fw, &opts, &mut report).context("flashing firmware")?;
+    tower_boot::flash::flash(&mut sp, &fw, &opts, &mut report)
+        .map_err(|e| boot_err(e, "flashing firmware"))?;
     // A ~45 s flash prints only live progress above; without a terminal line the caller
     // can't tell success from a hang, so always confirm completion.
     eprintln!(
@@ -945,15 +970,32 @@ fn erase_cmd(port: Option<String>, verbose: bool) -> Result<()> {
     eprintln!("[tower] erasing {port}");
     let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
     let mut report = flash_progress(verbose);
-    let pages = tower_boot::flash::erase(&mut sp, &mut report).context("erasing flash")?;
+    let pages = tower_boot::flash::erase(&mut sp, &mut report).map_err(|e| boot_err(e, "erasing flash"))?;
     eprintln!("[tower] erased {pages} page(s), reset into application");
     Ok(())
 }
 
+/// What `tower flash` / `tower erase` say about a readout-protected board, instead of the
+/// library's generic description: the board can be opened again, but only by erasing it.
+const READOUT_PROTECTED_HINT: &str = "this board is readout-protected; `tower unprotect` erases it \
+     (flash + EEPROM) so it can be re-flashed; it must then be re-paired";
+
+/// Map a tower-boot error of `flash` / `erase` to the CLI's: a readout-protected board gets the
+/// actionable [`READOUT_PROTECTED_HINT`] (still exit 1, the tool-error code), anything else keeps
+/// the library message under `context`.
+fn boot_err(e: tower_boot::error::Error, context: &'static str) -> anyhow::Error {
+    match e {
+        tower_boot::error::Error::ReadoutProtected { .. } => anyhow!(READOUT_PROTECTED_HINT),
+        e => anyhow::Error::new(e).context(context),
+    }
+}
+
 /// `tower chip`: what the STM32 ROM bootloader reports about the attached part (the content of
-/// the former `jolt info`). Read-only: [`tower_boot::chip::info`] enters the bootloader, reads
-/// `Get ID` + `Get`, and resets back into the application on every path. The data goes to
-/// stdout (one `Label   : value` line each, script-friendly); status lines go to stderr.
+/// the former `jolt info`, plus the readout-protection state). Read-only:
+/// [`tower_boot::chip::info`] enters the bootloader, reads `Get ID` + `Get`, probes the
+/// protection with one Read Memory, and resets back into the application on every path. The
+/// data goes to stdout (one `Label   : value` line each, script-friendly); status lines go to
+/// stderr.
 fn chip_cmd(port: Option<String>, verbose: bool) -> Result<()> {
     let port = pick_port(port)?;
     eprintln!("[tower] reading chip info on {port} (enters the bootloader, then restores the app)");
@@ -973,6 +1015,194 @@ fn chip_cmd(port: Option<String>, verbose: bool) -> Result<()> {
         );
     }
     eprintln!("[tower] {port} reset into application");
+    if info.readout_protected {
+        // RM0367 3.4.1: at level 1 the flash is locked while the system memory is connected,
+        // and after level 1 was set through the bootloader user code needs a power-down. Say
+        // so rather than let a silent board look broken.
+        eprintln!(
+            "[tower] readout-protected: `tower flash` / `tower erase` refuse this board; `tower unprotect` \
+             erases it (flash + EEPROM) to open it again. If the application does not restart, power-cycle \
+             the board (unplug USB)."
+        );
+    }
+    Ok(())
+}
+
+/// The `Readout : ...` line of `tower chip` (and of `protect` / `unprotect`, after the
+/// read-back).
+fn readout_line(readout_protected: bool) -> &'static str {
+    if readout_protected {
+        "Readout : protected (RDP level 1)\n"
+    } else {
+        "Readout : not protected\n"
+    }
+}
+
+// ---- readout protection: protect / unprotect --------------------------------
+//
+// Opt-in production lock (tower-boot's `rdp` module has the protocol and the ST citations).
+// Dev boards stay open; `protect` is a deliberate provisioning step after flash, verify and
+// pairing, and `unprotect` is the only way back, at the cost of a mass erase of the flash AND
+// the data EEPROM. Both ask first: `protect` for "yes", `unprotect` for the word "erase", so a
+// reflexive Enter or "y" can't wipe a node's keys. A script must say `--yes`; without it a
+// non-terminal stdin is refused before any I/O, instead of reading an answer from a pipe.
+
+/// What `tower protect` shows before asking. Ends with the prompt (no newline).
+fn protect_notice(port: &str) -> String {
+    format!(
+        "tower protect: enable readout protection (RDP level 1) on {port}\n\
+         \n\
+         What it does:\n  \
+           The chip's option bytes are set to RDP level 1. From then on neither the UART\n  \
+           bootloader nor a debugger (SWD) can read, write or erase the flash (the firmware)\n  \
+           or the data EEPROM (radio keys, pairing, settings, TX counters). The application\n  \
+           keeps running from flash. `tower flash` and `tower erase` refuse the board.\n  \
+           Level 2 (permanent, no way back) is never set by this tool.\n\
+         \n\
+         What undoing it costs:\n  \
+           `tower unprotect` is the only way back, and it mass-erases the whole flash AND\n  \
+           the data EEPROM: the node loses its firmware, radio keys, pairing, settings and\n  \
+           TX counters, and must be re-flashed and re-paired.\n\
+         \n\
+         Afterwards, power-cycle the board once (unplug USB) so the application starts.\n\
+         \n\
+         Type \"yes\" to protect this board: "
+    )
+}
+
+/// What `tower unprotect` shows before asking. Ends with the prompt (no newline).
+fn unprotect_notice(port: &str) -> String {
+    format!(
+        "tower unprotect: remove readout protection (RDP level 1 to 0) on {port}\n\
+         \n\
+         WARNING: this ERASES the board. Leaving RDP level 1 makes the chip mass-erase the\n\
+         whole flash (the firmware) AND the data EEPROM: radio keys, pairing, settings and\n\
+         TX counters are lost for good. Nothing can be read out first.\n\
+         \n\
+         Afterwards the node must be re-flashed (`tower flash <bin>`) and re-paired with its\n\
+         gateway (`tower nodes add`).\n\
+         \n\
+         Type \"erase\" to erase and unprotect this board: "
+    )
+}
+
+/// Refuse a protection change that cannot be confirmed: without `--yes`, stdin must be a
+/// terminal (the answer is read from it). Runs before any port I/O.
+fn confirmation_gate(yes: bool, stdin_is_tty: bool, action: &str) -> Result<()> {
+    if yes || stdin_is_tty {
+        return Ok(());
+    }
+    bail!(
+        "refusing to {action} without confirmation: stdin is not a terminal; pass --yes to confirm \
+         non-interactively"
+    )
+}
+
+/// Read one line of `input`; whether it is exactly `word` (surrounding whitespace ignored).
+/// End of input is a "no".
+fn read_confirmation(input: &mut impl std::io::BufRead, word: &str) -> Result<bool> {
+    let mut line = String::new();
+    input.read_line(&mut line).context("reading the confirmation")?;
+    Ok(line.trim() == word)
+}
+
+/// Show `notice` (which ends with the prompt) on stderr and require `word` on stdin.
+fn confirm(notice: &str, word: &str) -> Result<()> {
+    eprint!("{notice}");
+    let _ = std::io::stderr().flush();
+    if !read_confirmation(&mut std::io::stdin().lock(), word)? {
+        bail!("aborted (the answer was not \"{word}\"): nothing was changed");
+    }
+    Ok(())
+}
+
+/// A progress sink for `protect` / `unprotect`: one line per step (the chip id, each probe, the
+/// accepted command); `--verbose` dumps the raw events instead.
+fn rdp_progress(verbose: bool) -> impl FnMut(tower_boot::flash::Progress) {
+    use tower_boot::flash::Progress;
+    move |p| {
+        if verbose {
+            eprintln!("[tower] {p:?}");
+            return;
+        }
+        match p {
+            Progress::ChipIdentified { id } => eprintln!("[tower] chip 0x{id:03x}"),
+            Progress::ReadoutProbed { readout_protected } => eprintln!(
+                "[tower] readout protection: {}",
+                if readout_protected {
+                    "active (RDP level 1)"
+                } else {
+                    "not active"
+                }
+            ),
+            Progress::ReadoutChanging { protect: true } => {
+                eprintln!("[tower] Readout Protect accepted: writing the option bytes, then the chip resets")
+            }
+            Progress::ReadoutChanging { protect: false } => eprintln!(
+                "[tower] Readout Unprotect accepted: mass-erasing flash and data EEPROM, then the chip resets"
+            ),
+            _ => {}
+        }
+    }
+}
+
+/// `tower protect`: RDP level 1 through [`tower_boot::rdp::protect`], then the state read back in
+/// a new bootloader session is printed (`Readout : ...` on stdout).
+fn protect_cmd(port: Option<String>, yes: bool, verbose: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    confirmation_gate(yes, std::io::stdin().is_terminal(), "enable readout protection")?;
+    let port = pick_port(port)?;
+    if !yes {
+        confirm(&protect_notice(&port), "yes")?;
+    }
+    eprintln!("[tower] enabling readout protection (RDP level 1) on {port}");
+    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    let change = tower_boot::rdp::protect(&mut sp, &mut rdp_progress(verbose)).context(
+        "enabling readout protection (`tower chip` reads the current state; power-cycle the board first \
+         if the bootloader does not answer)",
+    )?;
+    print!("{}", readout_line(change.readout_protected));
+    if change.changed() {
+        eprintln!(
+            "[tower] {port} is readout-protected (read back in a new bootloader session). Power-cycle the \
+             board once (unplug USB) so the application starts: after RDP level 1 is set through the \
+             bootloader, the STM32L0 runs user code only after a power-down (RM0367 3.4.1)."
+        );
+    } else {
+        eprintln!("[tower] {port} was already readout-protected; nothing was changed");
+    }
+    Ok(())
+}
+
+/// `tower unprotect`: RDP level 1 back to 0 through [`tower_boot::rdp::unprotect`] (a mass erase
+/// of flash + data EEPROM), then the state read back is printed. A board that is not protected
+/// is left alone (nothing is erased).
+fn unprotect_cmd(port: Option<String>, yes: bool, verbose: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    confirmation_gate(
+        yes,
+        std::io::stdin().is_terminal(),
+        "remove readout protection (which erases the board)",
+    )?;
+    let port = pick_port(port)?;
+    if !yes {
+        confirm(&unprotect_notice(&port), "erase")?;
+    }
+    eprintln!("[tower] removing readout protection on {port} (erases flash + data EEPROM)");
+    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    let change = tower_boot::rdp::unprotect(&mut sp, &mut rdp_progress(verbose)).context(
+        "removing readout protection (`tower chip` reads the current state; power-cycle the board first \
+         if the bootloader does not answer)",
+    )?;
+    print!("{}", readout_line(change.readout_protected));
+    if change.changed() {
+        eprintln!(
+            "[tower] {port}: flash and data EEPROM erased, readout protection removed. Re-flash it \
+             (`tower flash <bin>`) and re-pair it (`tower nodes add`)."
+        );
+    } else {
+        eprintln!("[tower] {port} is not readout-protected; nothing was erased or changed");
+    }
     Ok(())
 }
 
@@ -980,10 +1210,11 @@ fn chip_cmd(port: Option<String>, verbose: bool) -> Result<()> {
 /// (the id is the essential part, as in the former `jolt info`).
 fn chip_report(port: &str, info: &tower_boot::chip::ChipInfo) -> String {
     let mut out = format!(
-        "Device  : {port} @ {} baud, 8E1\nChip id : 0x{:03X} ({})\n",
+        "Device  : {port} @ {} baud, 8E1\nChip id : 0x{:03X} ({})\n{}",
         tower_boot::target::BAUD,
         info.id,
-        info.family
+        info.family,
+        readout_line(info.readout_protected)
     );
     if let Some((major, minor)) = info.bootloader_version_parts() {
         let cmds: Vec<String> = info.commands.iter().map(|c| format!("0x{c:02X}")).collect();
@@ -1949,8 +2180,9 @@ mod tests {
         assert!(request_completions(&mut sp, &mut dec, "", 0, 2, SHORT).is_none());
     }
 
-    /// `tower chip` prints the same content the former `jolt info` did: the device line, the
-    /// chip id with its family, and (when `Get` answered) the bootloader version and commands.
+    /// `tower chip` prints the same content the former `jolt info` did, plus the protection
+    /// state: the device line, the chip id with its family, `Readout`, and (when `Get` answered)
+    /// the bootloader version and commands.
     #[test]
     fn chip_report_lines() {
         let info = tower_boot::chip::ChipInfo {
@@ -1958,24 +2190,133 @@ mod tests {
             family: tower_boot::target::chip_name(0x447),
             bootloader_version: Some(0x31),
             commands: vec![0x00, 0x02, 0x31],
+            readout_protected: false,
         };
         assert_eq!(
             chip_report("/dev/ttyUSB0", &info),
             "Device  : /dev/ttyUSB0 @ 115200 baud, 8E1\n\
              Chip id : 0x447 (STM32L07x/L08x (e.g. STM32L083CZ))\n\
+             Readout : not protected\n\
              BL ver  : 3.1\n\
              Commands: 0x00 0x02 0x31\n"
         );
-        // `Get` unanswered: the bootloader lines are omitted, the id is still reported.
+        // `Get` unanswered: the bootloader lines are omitted, the id and protection still shown.
         let bare = tower_boot::chip::ChipInfo {
             bootloader_version: None,
             commands: Vec::new(),
+            readout_protected: true,
             ..info
         };
         assert_eq!(
             chip_report("/dev/ttyUSB0", &bare),
             "Device  : /dev/ttyUSB0 @ 115200 baud, 8E1\n\
-             Chip id : 0x447 (STM32L07x/L08x (e.g. STM32L083CZ))\n"
+             Chip id : 0x447 (STM32L07x/L08x (e.g. STM32L083CZ))\n\
+             Readout : protected (RDP level 1)\n"
         );
+    }
+
+    // ---- readout protection: protect / unprotect (no hardware) ----
+
+    /// `flash` / `erase` on a protected board: the actionable message replaces the library's,
+    /// with no extra context; any other error keeps its context.
+    #[test]
+    fn boot_err_names_the_way_out_of_readout_protection() {
+        use tower_boot::error::Error;
+        let msg = format!(
+            "{:#}",
+            boot_err(
+                Error::ReadoutProtected {
+                    operation: "flashing"
+                },
+                "flashing firmware"
+            )
+        );
+        assert_eq!(msg, READOUT_PROTECTED_HINT);
+        for needle in [
+            "readout-protected",
+            "`tower unprotect`",
+            "flash + EEPROM",
+            "re-flashed",
+            "re-paired",
+        ] {
+            assert!(msg.contains(needle), "{needle}: {msg}");
+        }
+        let other = format!(
+            "{:#}",
+            boot_err(Error::BootloaderInit { attempts: 5 }, "erasing flash")
+        );
+        assert!(
+            other.starts_with("erasing flash: could not enter the bootloader"),
+            "{other}"
+        );
+    }
+
+    /// Without `--yes`, a non-terminal stdin is refused (before any I/O); `--yes` or a terminal
+    /// passes.
+    #[test]
+    fn confirmation_gate_needs_a_terminal_or_yes() {
+        let err = confirmation_gate(false, false, "enable readout protection").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not a terminal") && msg.contains("--yes"), "{msg}");
+        assert!(confirmation_gate(true, false, "x").is_ok());
+        assert!(confirmation_gate(false, true, "x").is_ok());
+        assert!(confirmation_gate(true, true, "x").is_ok());
+    }
+
+    /// Only the exact word confirms (whitespace around it ignored); "y", another word, an empty
+    /// line and end of input are all a "no".
+    #[test]
+    fn read_confirmation_wants_the_exact_word() {
+        let answer = |input: &str, word: &str| read_confirmation(&mut input.as_bytes(), word).unwrap();
+        assert!(answer("yes\n", "yes"));
+        assert!(answer("  erase \r\n", "erase"));
+        assert!(!answer("y\n", "yes"));
+        assert!(!answer("YES\n", "yes"));
+        assert!(!answer("yes\n", "erase"), "unprotect wants `erase`, not `yes`");
+        assert!(!answer("\n", "erase"));
+        assert!(!answer("", "erase"), "end of input");
+    }
+
+    /// The notices say what the step does and what it costs, and end with the prompt that names
+    /// the word to type.
+    #[test]
+    fn protection_notices_explain_the_cost() {
+        let p = protect_notice("/dev/ttyUSB0");
+        for needle in [
+            "/dev/ttyUSB0",
+            "RDP level 1",
+            "data EEPROM",
+            "`tower unprotect`",
+            "mass-erases",
+            "re-flashed and re-paired",
+            "Level 2",
+            "power-cycle",
+        ] {
+            assert!(p.contains(needle), "protect notice lacks {needle:?}");
+        }
+        assert!(p.ends_with("Type \"yes\" to protect this board: "), "{p}");
+
+        let u = unprotect_notice("/dev/ttyUSB0");
+        for needle in [
+            "/dev/ttyUSB0",
+            "ERASES",
+            "data EEPROM",
+            "radio keys, pairing, settings",
+            "TX counters",
+            "re-flashed",
+            "re-paired",
+        ] {
+            assert!(u.contains(needle), "unprotect notice lacks {needle:?}");
+        }
+        assert!(
+            u.ends_with("Type \"erase\" to erase and unprotect this board: "),
+            "{u}"
+        );
+    }
+
+    #[test]
+    fn readout_line_wording() {
+        assert_eq!(readout_line(true), "Readout : protected (RDP level 1)\n");
+        assert_eq!(readout_line(false), "Readout : not protected\n");
     }
 }
