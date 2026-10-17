@@ -244,8 +244,9 @@ tower net status --mqtt mqtts://gateway.local --mqtt-ca ca.pem   # with the same
 Keep `ca.key` and `broker.key` private (`broker.p12` contains the key too); clients only need
 `ca.pem`.
 
-The MQTT topic tree (under `--prefix`) is the gateway's public API; the full table lives
-in [`src/gateway/topics.rs`](src/gateway/topics.rs). Rules for clients writing to it:
+The MQTT topic tree (under `--prefix`) is the gateway's public API; every topic, payload and
+RPC op is documented in the [MQTT API reference](../docs/mqtt-api.md). Rules for clients
+writing to it:
 commands (`gateway/cmd`, `nodes/{addr}/shell/req`) must not be retained (a retained one is
 ignored and cleared); request ids must be 1-64 characters of `[A-Za-z0-9_.-]` (a uuid), and a
 QoS-1 redelivery of a recent id is dropped; RPC responses arrive on `gateway/rsp/{id}`, so

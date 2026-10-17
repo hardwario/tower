@@ -2,6 +2,7 @@
 //! topic tree (the public API surface of `tower gateway`). Everything lives under a
 //! configurable prefix (default `tower/`); node topics address nodes by **fixed hex
 //! addr** (`nodes/0x0000ab12/…`); names are mutable metadata and live only in payloads.
+//! The human reference (every topic, payload and RPC op) is `docs/mqtt-api.md`; keep it in step.
 //!
 //! | topic (under prefix)            | dir | retain | payload (`payload.rs`)        |
 //! |---------------------------------|-----|--------|-------------------------------|

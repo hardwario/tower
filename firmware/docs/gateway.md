@@ -32,7 +32,8 @@ the radio stack itself (framing, CCM, pairing handshake, FHSS, duty cycle) see
    *coordination*: the node registry, the downlink queue, pairing, and radio diagnostics.
 3. **Host** (`tower gateway`): decodes the radio application schema, bridges to MQTT, and
    drives the gateway via the management channel. See the [CLI README](../../cli/README.md)
-   (Gateway & MQTT).
+   (Gateway & MQTT) and, for the MQTT topics and payloads, the
+   [MQTT API reference](../../docs/mqtt-api.md).
 
 The transparent-bridge split is the design's backbone: **a new node app type needs no gateway
 firmware change**, because the gateway never interprets `NodeMsg`/`NodeCmd`; only the node
@@ -449,4 +450,6 @@ it flashes real hardware.
 - [`console.md`](console.md): the console framing, the full MsgType table, and the settings
   framework (`Kind`, base settings, result codes).
 - The [CLI README](../../cli/README.md) (*Gateway & MQTT bridge*): the host commands (`tower gateway`, `tower nodes`,
-  `tower net`) and the MQTT topic tree (the gateway's public API, in `src/gateway/topics.rs`).
+  `tower net`).
+- The [MQTT API reference](../../docs/mqtt-api.md): the MQTT topic tree, its payloads and the RPC ops (the gateway's
+  public API).

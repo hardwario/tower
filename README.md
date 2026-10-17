@@ -46,7 +46,7 @@ tower/
 ├── cli/                  tower-cli: the `tower` binary
 ├── hil/                  tower-hil: the bench harness
 ├── fuzz/                 cargo-fuzz targets for the decoders and kernels (own workspace)
-├── docs/                 the security model
+├── docs/                 the security model, the MQTT API
 ├── AGENTS.md             the operating manual for coding agents (CLAUDE.md imports it)
 ├── SECURITY.md, TODO.md  vulnerability reporting; open items
 ├── .claude/skills/       /bootstrap, /build
