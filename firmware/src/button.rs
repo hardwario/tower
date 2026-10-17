@@ -9,7 +9,8 @@
 //!   * [`init_exti`]: **low power.** Owns an [`ExtiInput`]; while the button is
 //!     released it sleeps on the pin's EXTI interrupt, so the MCU can enter STOP
 //!     and only wakes on a press edge. It polls at `scan_interval` *only* while a
-//!     press is being processed. Prefer this.
+//!     press is being processed; once Hold has fired it sleeps on the release edge.
+//!     Prefer this.
 //!   * [`init_polled`]: owns a plain [`Input`] and polls at `scan_interval`
 //!     continuously (no EXTI). Use it when the EXTI line is unavailable: STM32
 //!     shares EXTI line *N* across all ports' pin *N*, so e.g. PA8 and PB8 both
@@ -234,6 +235,21 @@ impl Source {
             },
         }
     }
+
+    /// Wait while the button is held with nothing left to detect (Hold already fired): EXTI
+    /// sleeps on the release edge (the MCU may STOP); polled waits one scan interval.
+    async fn held_wait(&mut self, active_high: bool, scan_interval: Duration) {
+        match self {
+            Source::Exti(i) => {
+                if active_high {
+                    i.wait_for_low().await
+                } else {
+                    i.wait_for_high().await
+                }
+            }
+            Source::Polled(_) => Timer::after(scan_interval).await,
+        }
+    }
 }
 
 /// Up to this many buttons (EXTI + polled combined) can run concurrently.
@@ -296,6 +312,11 @@ async fn scan_task(mut input: Source, active_high: bool, config: Config, ch: &'s
             if let Some(ms) = input.idle_wait(active_high, config.scan_interval).await {
                 sim_until = Some(Instant::now() + Duration::from_millis(ms as u64));
             }
+        } else if pressed && raw && hold_fired && candidate_since.is_none() && sim_until.is_none() {
+            // Held past Hold (physically): nothing more can happen until the release, so sleep on
+            // its edge instead of polling every scan interval for as long as the button stays
+            // down: a button held, or stuck, for hours woke the node 200 times a second.
+            input.held_wait(active_high, config.scan_interval).await;
         } else {
             // A press (real or simulated) is in progress; keep polling.
             Timer::after(config.scan_interval).await;
