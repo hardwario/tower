@@ -95,3 +95,22 @@ fw *args:
 # Run a hil/justfile recipe (inside hil/).
 hil *args:
     {{just}} -f hil/justfile {{args}}
+
+
+# === Fuzzing ======================================================================================
+
+# The ONE nightly corner of the repo: cargo-fuzz needs nightly rustc flags (`cargo install
+# cargo-fuzz --locked` + `rustup toolchain install nightly`). The working corpus grows in
+# fuzz/corpus/<target> (git-ignored, created on demand); fuzz/seeds/<target> is the curated seed
+# corpus, read but never written. A crash lands in fuzz/artifacts/<target>/ and fails the recipe.
+# Fuzz one target for `seconds` (default 60), e.g. `just fuzz kv_store 600`.
+fuzz target seconds="60":
+    cargo +nightly fuzz run {{target}} fuzz/corpus/{{target}} fuzz/seeds/{{target}} -- -max_total_time={{seconds}} -timeout=10 -create_missing_dirs=1
+
+# Fuzz every target in turn for `seconds` each (default 60); stops at the first crash.
+fuzz-all seconds="60":
+    {{just}} fuzz protocol_frames {{seconds}}
+    {{just}} fuzz protocol_radio {{seconds}}
+    {{just}} fuzz kv_store {{seconds}}
+    {{just}} fuzz shell_kernels {{seconds}}
+    {{just}} fuzz radio_kernels {{seconds}}

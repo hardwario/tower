@@ -1,0 +1,6 @@
+# Build output, the working corpus libFuzzer grows, crash/timeout artifacts and coverage data are
+# local. Only the small curated seed corpus (seeds/<target>/) and fuzz/Cargo.lock are tracked.
+target/
+corpus/
+artifacts/
+coverage/

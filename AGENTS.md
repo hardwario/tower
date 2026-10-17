@@ -86,6 +86,7 @@ just fw <recipe...>            # a firmware/justfile recipe, run inside firmware
 just hil <recipe...>           # a hil/justfile recipe, run inside hil/
 just install-cli               # cargo install --locked --path cli
 just fmt                       # rustfmt both workspaces
+just fuzz <target> [secs]      # cargo-fuzz one target (nightly + cargo-fuzz; fuzz/README.md), `just fuzz-all` = all
 ```
 
 `just check` = `check-host` (fmt, clippy `-D warnings`, tests, `tower-hil --features power`

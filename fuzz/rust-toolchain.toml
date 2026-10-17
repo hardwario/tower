@@ -1,0 +1,8 @@
+# The fuzz harness is the ONE part of the monorepo that is not on the pinned stable toolchain:
+# cargo-fuzz drives libFuzzer through nightly-only rustc flags (`-Zsanitizer=address`, the
+# SanitizerCoverage passes), so this directory selects nightly. rustup finds this file before the
+# repo-root rust-toolchain.toml (1.99.1) whenever cargo runs inside fuzz/; from the repo root,
+# `cargo +nightly fuzz ...` (what `just fuzz` and .github/workflows/fuzz.yml run) does the same.
+# Floating on purpose: the weekly fuzz workflow installs the current nightly too.
+[toolchain]
+channel = "nightly"

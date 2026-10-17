@@ -218,3 +218,5 @@ jobs:
         run: cargo-audit audit
       - name: cargo audit (firmware)
         run: cargo-audit audit --file firmware/Cargo.lock
+      - name: cargo audit (fuzz harness)
+        run: cargo-audit audit --file fuzz/Cargo.lock

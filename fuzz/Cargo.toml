@@ -1,0 +1,85 @@
+# Coverage-guided fuzzing of the TOWER shared crates (cargo-fuzz + libFuzzer).
+#
+# A standalone package with its OWN workspace (the empty `[workspace]` table below) and its own
+# Cargo.lock: it is not a member of the root host workspace (the root Cargo.toml lists `fuzz` in
+# `exclude`), because cargo-fuzz needs a nightly toolchain (`-Zsanitizer`, SanitizerCoverage) and
+# the rest of the monorepo is pinned to stable 1.99.1. `fuzz/rust-toolchain.toml` selects nightly
+# for this directory; from the repo root use `cargo +nightly fuzz ...` or `just fuzz`.
+#
+# The crates under test are path dependencies, exactly like every other consumer in the monorepo,
+# so a fuzz build always exercises the source tree it sits in. See fuzz/README.md.
+[package]
+name = "tower-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+# The crates under test (by path, never by tag or registry version).
+tower-protocol = { path = "../crates/protocol" }
+tower-kv = { path = "../crates/kv" }
+tower-shell = { path = "../crates/shell" }
+tower-radio = { path = "../crates/radio" }
+
+# Re-encoding decoded values for the round-trip checks needs the same serializer and collection
+# types the protocol crate uses (same major versions, no_std-safe features, as in the root).
+postcard = { version = "1.0", default-features = false }
+serde = { version = "1.0", default-features = false }
+heapless = { version = "0.9", default-features = false, features = ["serde"] }
+# Pure-Rust AES-128 as the `AesBlock` behind the CCM checks in `radio_kernels` (the same crate
+# tower-radio's own CCM tests use; the device uses the L0 hardware AES).
+aes = "0.9"
+# Independent AES-128-CCM (RustCrypto) as the differential oracle for tower-radio's CCM core.
+ccm = { version = "0.6", default-features = false }
+
+[lib]
+name = "tower_fuzz"
+path = "src/lib.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_frames"
+path = "fuzz_targets/protocol_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_radio"
+path = "fuzz_targets/protocol_radio.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kv_store"
+path = "fuzz_targets/kv_store.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shell_kernels"
+path = "fuzz_targets/shell_kernels.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "radio_kernels"
+path = "fuzz_targets/radio_kernels.rs"
+test = false
+doc = false
+bench = false
+
+# Standalone: not part of the root host workspace (which also lists `fuzz` in its `exclude`).
+[workspace]

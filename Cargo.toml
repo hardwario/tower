@@ -11,7 +11,7 @@
 # `crates/protocol` source tree: the wire-format lockstep is a compile-time fact.
 [workspace]
 members = ["crates/*", "cli", "hil"]
-exclude = ["firmware"]
+exclude = ["firmware", "fuzz"]
 resolver = "3"
 
 # Inherited by every member (`edition.workspace = true`, ...). `version` stays per crate.

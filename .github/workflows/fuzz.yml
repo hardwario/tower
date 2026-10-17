@@ -1,0 +1,84 @@
+# Coverage-guided fuzzing of the shared crates (fuzz/: cargo-fuzz + libFuzzer, see fuzz/README.md).
+#
+# Weekly and on demand, every target runs for a fixed time, starting from the committed seed corpus
+# (fuzz/seeds/<target>). A crash, a hang (-timeout) or an out-of-memory fails that target's job and
+# uploads fuzz/artifacts/<target>/ (the reproducer: `cargo +nightly fuzz run <target> <file>`, then
+# `tmin`, then a regression unit test in the owning crate). It is not part of the push / PR CI:
+# cargo-fuzz needs a nightly toolchain (the rest of the repo is pinned to stable) and a fuzz run is
+# open-ended by nature; `just fuzz <target> [seconds]` runs the same thing locally.
+#
+# Supply chain as in ci.yml: actions pinned to full commit SHAs, a read-only token, no persisted
+# credentials, cargo-fuzz installed at an exact version from its own lockfile, and the fuzz crate's
+# dependency graph held to the committed fuzz/Cargo.lock (`cargo fetch --locked` first, because
+# cargo-fuzz itself has no `--locked`).
+
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        type: number
+        default: 60
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # The repo's pinned stable (MUST equal `channel` in rust-toolchain.toml; ci.yml's `audit` job
+  # checks every workflow). Here it only builds cargo-fuzz: the fuzz targets need nightly.
+  RUST_TOOLCHAIN: "1.99.1"
+  CARGO_FUZZ_VERSION: "0.13.2"
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [protocol_frames, protocol_radio, kv_store, shell_kernels, radio_kernels]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml pin, builds cargo-fuzz)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Install Rust nightly (the fuzz targets)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz -> target
+          key: ${{ matrix.target }}
+      - name: Install cargo-fuzz
+        run: cargo +"$RUST_TOOLCHAIN" install --locked --version "$CARGO_FUZZ_VERSION" cargo-fuzz
+      - name: Hold the fuzz crate to fuzz/Cargo.lock
+        run: cargo +nightly fetch --locked --manifest-path fuzz/Cargo.toml
+      - name: Fuzz ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+          SECONDS_PER_TARGET: ${{ inputs.seconds || 60 }}
+        run: >-
+          cargo +nightly fuzz run "$TARGET" "fuzz/corpus/$TARGET" "fuzz/seeds/$TARGET" --
+          -max_total_time="$SECONDS_PER_TARGET" -timeout=10 -create_missing_dirs=1
+      - name: Upload the crash reproducer
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

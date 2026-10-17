@@ -27,6 +27,16 @@ updates:
     groups:
       cargo-minor-patch:
         update-types: [minor, patch]
+  # The fuzz harness: its own fuzz/Cargo.lock (libfuzzer-sys, arbitrary, ...).
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
     schedule:
