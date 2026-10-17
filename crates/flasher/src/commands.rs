@@ -1,0 +1,402 @@
+//! Subcommand handlers.
+//!
+//! All terminal output lives here: the library flash/erase engine is UI-free
+//! and emits [`flash::Progress`] events, which [`Reporter`] renders as
+//! `indicatif` progress bars. This keeps `indicatif` (and every `println!`) out
+//! of the library so a consumer's TUI or machine-readable frontend isn't
+//! corrupted.
+
+use std::io::Write;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use indicatif::{ProgressBar, ProgressStyle};
+use serialport::{DataBits, Parity, StopBits};
+
+use crate::cli::{FlashArgs, GlobalOpts, MonitorArgs, ParityArg, ResetArgs};
+use jolt::bootloader::Bootloader;
+use jolt::flash::{self, FlashOptions, Progress};
+use jolt::port::Port;
+use jolt::{firmware, target};
+
+/// Renders [`Progress`] events from the flash/erase engine as progress bars and
+/// status lines. Holds the currently-active bar (erase, write, or verify) and
+/// swaps it as the phases advance.
+struct Reporter {
+    verbose: bool,
+    bar: Option<ProgressBar>,
+}
+
+impl Reporter {
+    fn new(verbose: bool) -> Self {
+        Reporter { verbose, bar: None }
+    }
+
+    fn pages_bar(total: usize, msg: &'static str) -> ProgressBar {
+        let bar = ProgressBar::new(total as u64);
+        bar.set_style(
+            ProgressStyle::with_template("{msg:>9} [{bar:30.cyan/blue}] {pos:>4}/{len} pages")
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+        bar.set_message(msg);
+        bar
+    }
+
+    fn bytes_bar(total: u64, msg: &'static str) -> ProgressBar {
+        let bar = ProgressBar::new(total);
+        bar.set_style(
+            ProgressStyle::with_template(
+                "{msg:>9} [{bar:30.cyan/blue}] {bytes:>8}/{total_bytes:<8} {percent:>3}%",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        bar.set_message(msg);
+        bar
+    }
+
+    /// Finish and clear the active bar, if any, with a completion message.
+    fn finish_active(&mut self, msg: &'static str) {
+        if let Some(bar) = self.bar.take() {
+            bar.finish_with_message(msg);
+        }
+    }
+
+    fn handle(&mut self, p: Progress) {
+        match p {
+            Progress::Connecting { attempt, of } => {
+                if attempt == 1 {
+                    println!("Entering bootloader...");
+                } else if self.verbose {
+                    println!("  retry {attempt}/{of}");
+                }
+            }
+            Progress::ConnectError { attempt, of, error } => {
+                if self.verbose {
+                    eprintln!("  init attempt {attempt}/{of}: {error}");
+                }
+            }
+            Progress::ChipIdentified { id } => {
+                println!("Chip id : 0x{id:03X} ({})", target::chip_name(id));
+                if !target::is_known(id) {
+                    eprintln!(
+                        "warning: 0x{id:03X} is not a recognized STM32L0 family id; continuing anyway"
+                    );
+                }
+            }
+            Progress::Erase {
+                pages_done,
+                pages_total,
+            } => {
+                let bar = self
+                    .bar
+                    .get_or_insert_with(|| Self::pages_bar(pages_total, "Erasing"));
+                bar.set_length(pages_total as u64);
+                bar.set_position(pages_done as u64);
+                if pages_done == pages_total {
+                    self.finish_active("Erased");
+                }
+            }
+            Progress::Write {
+                bytes_done,
+                bytes_total,
+            } => {
+                let bar = self
+                    .bar
+                    .get_or_insert_with(|| Self::bytes_bar(bytes_total as u64, "Writing"));
+                bar.set_position(bytes_done as u64);
+                if bytes_done == bytes_total {
+                    self.finish_active("Written");
+                }
+            }
+            Progress::Verify {
+                bytes_done,
+                bytes_total,
+            } => {
+                let bar = self
+                    .bar
+                    .get_or_insert_with(|| Self::bytes_bar(bytes_total as u64, "Verifying"));
+                bar.set_position(bytes_done as u64);
+                if bytes_done == bytes_total {
+                    self.finish_active("Verified");
+                }
+            }
+            Progress::Starting => {
+                // Any write/verify bar has already finished at 100%.
+                self.finish_active("Done");
+                println!("Starting application...");
+            }
+        }
+    }
+
+    /// Abandon the active bar with a failure message (call before returning an
+    /// error so a half-drawn bar doesn't linger).
+    fn fail(&mut self, msg: &'static str) {
+        if let Some(bar) = self.bar.take() {
+            bar.abandon_with_message(msg);
+        }
+    }
+}
+
+/// Resolve which serial-port path to use: explicit `--device`, else the only
+/// USB serial device present, otherwise an error asking the user to pick one.
+///
+/// Auto-pick deliberately considers USB serial ports only: `erase`/`flash`
+/// pulse DTR/RTS and wipe whatever answers, so a built-in, PCI, or Bluetooth
+/// port must never be chosen implicitly (this mirrors tower-cli's filter).
+fn resolve_port(global: &GlobalOpts) -> Result<String> {
+    if let Some(p) = &global.port {
+        return Ok(p.clone());
+    }
+    let ports = serialport::available_ports().context("listing serial ports")?;
+    let candidates = usb_candidates(ports.into_iter().map(|p| {
+        let usb = matches!(p.port_type, serialport::SerialPortType::UsbPort(_));
+        (p.port_name, usb)
+    }));
+    match candidates.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => anyhow::bail!("no USB serial device found; connect the device or pass --device"),
+        _ => anyhow::bail!(
+            "multiple USB serial devices found; pass --device (one of: {})",
+            candidates.join(", ")
+        ),
+    }
+}
+
+/// The auto-pick candidates from `(port name, enumerated as USB)` pairs: USB
+/// ports (or, where enumeration can't tell, names that are unmistakably USB-UART
+/// nodes), with macOS's duplicate `/dev/tty.X` dropped in favour of its
+/// `/dev/cu.X` twin. serialport lists both nodes for every device on macOS, so
+/// without the de-dupe a single plugged-in board looks like two and auto-pick
+/// never fires; `cu.` is the callout node (opening `tty.` waits for carrier).
+fn usb_candidates(ports: impl IntoIterator<Item = (String, bool)>) -> Vec<String> {
+    let usb: Vec<String> = ports
+        .into_iter()
+        .filter(|(name, is_usb)| {
+            *is_usb
+                || ["usbserial", "usbmodem", "ttyUSB", "ttyACM"]
+                    .iter()
+                    .any(|tag| name.contains(tag))
+        })
+        .map(|(name, _)| name)
+        .collect();
+    usb.iter()
+        .filter(|name| {
+            name.strip_prefix("/dev/tty.")
+                .is_none_or(|rest| !usb.iter().any(|n| n == &format!("/dev/cu.{rest}")))
+        })
+        .cloned()
+        .collect()
+}
+
+fn open(global: &GlobalOpts) -> Result<Port> {
+    let path = resolve_port(global)?;
+    println!("Device  : {path} @ {} baud, 8E1", target::BAUD);
+    Port::open(&path).with_context(|| format!("failed to open serial port {path}"))
+}
+
+/// Enter the bootloader and print the chip id. Leaves the port in the
+/// bootloader, ready for further commands (on success only): if `Get ID` fails
+/// the device is reset back into the application (best-effort) so even a
+/// failed, read-only `info` never leaves the app stopped. (A failed bootloader
+/// *entry* is already restored by `flash::connect`.)
+fn enter_and_identify(port: &mut Port, verbose: bool) -> Result<()> {
+    let mut reporter = Reporter::new(verbose);
+    flash::connect(port, &mut |p| reporter.handle(p)).context("entering bootloader")?;
+    let id = Bootloader::new(port)
+        .get_id()
+        .inspect_err(|_| {
+            let _ = port.reset_into_app();
+        })
+        .context("Get ID")?;
+    reporter.handle(Progress::ChipIdentified { id });
+    Ok(())
+}
+
+pub fn devices() -> Result<()> {
+    let ports = serialport::available_ports().context("listing serial ports")?;
+    for p in &ports {
+        println!("{}", p.port_name);
+    }
+    Ok(())
+}
+
+pub fn info(global: &GlobalOpts) -> Result<()> {
+    let mut port = open(global)?;
+    enter_and_identify(&mut port, global.verbose > 0)?;
+    if let Ok((version, cmds)) = Bootloader::new(&mut port).get() {
+        let list: Vec<String> = cmds.iter().map(|c| format!("0x{c:02X}")).collect();
+        println!("BL ver  : {}.{}", version >> 4, version & 0x0F);
+        println!("Commands: {}", list.join(" "));
+    }
+    port.reset_into_app()
+        .context("resetting into application")?;
+    println!("Reset into application.");
+    Ok(())
+}
+
+pub fn erase(global: &GlobalOpts) -> Result<()> {
+    let mut port = open(global)?;
+    let mut reporter = Reporter::new(global.verbose > 0);
+    let result = flash::erase(&mut port, &mut |p| reporter.handle(p));
+    match result {
+        Ok(pages) => {
+            println!(
+                "Erased {} KiB and reset into application.",
+                pages * target::PAGE_SIZE / 1024
+            );
+            Ok(())
+        }
+        Err(e) => {
+            reporter.fail("Erase FAILED");
+            Err(anyhow::Error::from(e).context("erasing flash"))
+        }
+    }
+}
+
+pub fn flash(global: &GlobalOpts, args: &FlashArgs) -> Result<()> {
+    let fw = firmware::load(&args.file).map_err(anyhow::Error::from)?;
+    println!("Firmware: {} ({} bytes)", args.file.display(), fw.len());
+    let mut port = open(global)?;
+    // `FlashOptions` is `#[non_exhaustive]`: build from Default, then override.
+    let mut opts = FlashOptions::default();
+    opts.erase = !args.no_erase;
+    opts.verify = !args.no_verify;
+    opts.run = !args.no_run;
+    opts.go = args.go;
+    let mut reporter = Reporter::new(global.verbose > 0);
+    let start = Instant::now();
+    match flash::flash(&mut port, &fw, &opts, &mut |p| reporter.handle(p)) {
+        Ok(()) => {
+            println!(
+                "Done: {} bytes in {:.1}s.",
+                fw.len(),
+                start.elapsed().as_secs_f64()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            reporter.fail("FAILED");
+            Err(anyhow::Error::from(e))
+        }
+    }
+}
+
+pub fn reset(global: &GlobalOpts, args: &ResetArgs) -> Result<()> {
+    let mut port = open(global)?;
+    if args.bootloader {
+        port.reset_into_bootloader()
+            .context("reset into bootloader")?;
+        println!("Reset into bootloader.");
+    } else {
+        port.reset_into_app().context("reset into application")?;
+        println!("Reset into application.");
+    }
+    Ok(())
+}
+
+/// Open the port with the requested frame format and stream incoming bytes to
+/// stdout until interrupted (Ctrl-C) or the device disconnects. Read-only:
+/// nothing is sent to the device, but `--reset` first pulses NRST into the
+/// application.
+pub fn monitor(global: &GlobalOpts, args: &MonitorArgs) -> Result<()> {
+    let path = resolve_port(global)?;
+
+    let data_bits = match args.databits {
+        5 => DataBits::Five,
+        6 => DataBits::Six,
+        7 => DataBits::Seven,
+        _ => DataBits::Eight,
+    };
+    let (parity, parity_letter) = match args.parity {
+        ParityArg::None => (Parity::None, 'N'),
+        ParityArg::Even => (Parity::Even, 'E'),
+        ParityArg::Odd => (Parity::Odd, 'O'),
+    };
+    let stop_bits = match args.stopbits {
+        2 => StopBits::Two,
+        _ => StopBits::One,
+    };
+
+    let mut port = Port::open_with(&path, args.baudrate, data_bits, parity, stop_bits)
+        .with_context(|| format!("failed to open serial port {path}"))?;
+    // Short timeout so the read loop stays responsive on an idle line.
+    port.set_timeout(Duration::from_millis(100))?;
+
+    if args.reset {
+        port.reset_into_app()
+            .context("resetting into application")?;
+    }
+
+    // Banner on stderr so `jolt monitor > log.txt` captures only device output.
+    eprintln!(
+        "Monitoring {path} @ {} baud, {}{}{}; press Ctrl-C to exit.",
+        args.baudrate, args.databits, parity_letter, args.stopbits
+    );
+
+    let mut buf = [0u8; 1024];
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    loop {
+        // `read_stream` yields Ok(0) on an idle-line timeout and errors with
+        // Disconnected when the device is unplugged, so this loop can't
+        // busy-spin at 100% CPU after a disconnect.
+        let n = port
+            .read_stream(&mut buf, "reading serial port")
+            .context("reading serial port")?;
+        if n > 0 {
+            out.write_all(&buf[..n]).context("writing to stdout")?;
+            out.flush().context("flushing stdout")?;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(v: &[(&str, bool)]) -> Vec<String> {
+        usb_candidates(v.iter().map(|(n, u)| (n.to_string(), *u)))
+    }
+
+    /// J4: non-USB ports are never auto-picked, and macOS's cu./tty. twins of one
+    /// device collapse to the `cu.` node, so one plugged-in board auto-picks.
+    #[test]
+    fn usb_candidates_filter_and_dedupe() {
+        // A typical Mac: Bluetooth + debug console (not USB) and one FTDI listed twice.
+        assert_eq!(
+            names(&[
+                ("/dev/cu.Bluetooth-Incoming-Port", false),
+                ("/dev/tty.Bluetooth-Incoming-Port", false),
+                ("/dev/cu.debug-console", false),
+                ("/dev/cu.usbserial-2110", true),
+                ("/dev/tty.usbserial-2110", true),
+            ]),
+            vec!["/dev/cu.usbserial-2110"]
+        );
+        // Two boards stay two (ambiguous → the caller asks for --device).
+        assert_eq!(
+            names(&[
+                ("/dev/cu.usbserial-1", true),
+                ("/dev/tty.usbserial-1", true),
+                ("/dev/cu.usbserial-2", true),
+                ("/dev/tty.usbserial-2", true),
+            ]),
+            vec!["/dev/cu.usbserial-1", "/dev/cu.usbserial-2"]
+        );
+        // Linux: a built-in UART is dropped; a USB node is kept even when
+        // enumeration couldn't classify it (no udev info).
+        assert_eq!(
+            names(&[("/dev/ttyS0", false), ("/dev/ttyUSB0", false)]),
+            vec!["/dev/ttyUSB0"]
+        );
+        // A lone tty. node (no cu. twin) is kept.
+        assert_eq!(
+            names(&[("/dev/tty.usbserial-9", true)]),
+            vec!["/dev/tty.usbserial-9"]
+        );
+        assert!(names(&[("COM1", false)]).is_empty());
+        assert_eq!(names(&[("COM7", true)]), vec!["COM7"]);
+    }
+}
