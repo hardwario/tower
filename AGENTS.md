@@ -175,6 +175,19 @@ it. Details: `crates/protocol/AGENTS.md`, "Changing the wire".
   model, mechanisms and residual risks are in `docs/security-model.md`: update it with any change
   to keys, counters, pairing, the MQTT access policy or readout protection.
 
+## Compatibility: none, until the first users
+
+TOWER (this new generation) has **no users yet**, so there is **no backward-compatibility
+obligation anywhere**: wire formats, the radio protocol and pairing, EEPROM layouts, MQTT topics
+and payloads, CLI flags and exit codes, settings and crate APIs may all change freely. Don't add
+legacy paths, migrations, version negotiation, deprecation periods or "keep the old one for a
+release" shims. When something changes, change it everywhere in the same commit. Keep only
+mismatch **detection** (the schema tags), so a stale board or an old installed `tower` is caught
+instead of silently mis-decoding.
+
+This rule ends when TOWER gets its first users: the root [TODO.md](TODO.md) ("Compatibility
+gate") lists what to decide and reintroduce before that, and removing this section is part of it.
+
 ## Writing style
 
 No em or en dashes. This applies everywhere: code, comments, docs, UI texts and commit messages. Use a comma, a semicolon, a colon or parentheses, or split the sentence. A plain hyphen is fine.
@@ -193,3 +206,5 @@ No em or en dashes. This applies everywhere: code, comments, docs, UI texts and 
   the full commit SHA (with its `# vX.Y.Z` comment) and grant write only to the job that needs it.
 - Don't commit, tag or push anything unless the user asked.
 - Don't use em or en dashes anywhere (see *Writing style*).
+- Don't add backward-compatibility code (legacy formats, migrations, shims) while TOWER has no
+  users (see *Compatibility*).
