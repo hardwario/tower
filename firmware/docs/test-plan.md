@@ -189,7 +189,7 @@ B=tower logs --reset, H=host, X=interactive, S=shell-exec).
 |---|---|---|
 | H1 | `tower-kv` codec (12 tests: append/latest-wins, torn-append, torn-flip, torn-superblock fail-closed, compaction, full, migrate legacy/fresh, key-zero reserved) | `test result: ok. 12 passed` |
 | H2 | `tower-radio` (12 tests: duty token-bucket math + FHSS hop permutation + CCM RFC 3610 / key-check-value KAT) | `test result: ok. 12 passed` |
-| H3 | `tower-net` (90 tests: replay rule + re-ACK cap, KCV-checked addr-keyed lane binding, TX-counter watermark/fail-closed nonce safety + the single `alloc` allocator (cancellation, persist failure, ceiling), ACK resolution, FHSS beacon-epoch acceptance, pairing admission/confirm rules, reserved-address rules, CCM nonce layout/uniqueness) | `test result: ok. 90 passed` |
+| H3 | `tower-net` (96 tests: replay rule + re-ACK cap, KCV-checked addr-keyed lane binding, TX-counter watermark/fail-closed nonce safety + the single `alloc` allocator (cancellation, persist failure, ceiling), ACK resolution (6-byte ACKs), FHSS beacon-epoch acceptance, pairing admission rules, the pairing-v2 handshake (RFC 7748 §5.2/§6.1 X25519 vectors, RFC 5869 HKDF, a key-schedule golden from an independent reference, transcript binding, low-order points, MITM substitution), keyed-join predicates + the re-key/lane composition, reserved-address rules, CCM nonce layout/uniqueness) | `test result: ok. 96 passed` |
 | H4 | `tower-gateway` (23 tests: registry codec/capacity, insert-only `add_new` for OTA commits, downlink queue) | `test result: ok. 23 passed` |
 
 ### B. Board bring-up & peripheral drivers
@@ -262,7 +262,7 @@ B=tower logs --reset, H=host, X=interactive, S=shell-exec).
 ### J. Pairing & topologies (two boards; mode A)
 | ID | Example | Pass | Edge |
 |---|---|---|---|
-| J1 | net_pairing | host `PAIRED *** node id=… key[..4]=…`; joiner `JOINED *** … (expect …)` matching key | joiner picks own ID; PAIRING_KEY public (sniffable, by design); 60 s window |
+| J1 | net_pairing | host `PAIRED *** node addr=… key[..4]=…`; joiner `JOINED *** … key[..4]=…` with the same 4 key bytes; both consoles `net: pairing: SAS dddddd` with the **same** 6 digits | joiner picks own address; no key on air (a sniffer sees only the two public keys); each joiner attempt ~3 s; host refusal lines `pairing: JOIN_REQ from … refused (already registered / invalid address / not a pairing v2 request)`; TRNG unavailable → `pairing: hardware TRNG unavailable, refusing to pair` on either end and no frame sent; 60 s window |
 | J1b | net_keyed_join | host `JOINED *** node 000000BB (keyed …)`; joiner `JOINED *** gw=22222222` then `uplink: Delivered` (repeats every ~5 s, each join on a fresh counter) | no window; key never on air; a node under another key: host logs `keyed join from … refused: does not open under its registered key`, joiner `keyed join failed: no host answered`; reboot the joiner mid-run: it re-joins (fresh counter across the reboot); a captured JOIN_REQ replayed: host logs `refused: stale counter` and sends nothing; on a gateway app `keyed-join=off`: `refused: keyed joins are switched off` |
 | J2 | net_star | GW `2 peers registered`; `rx node A … "hello_a"`, `rx node B … "hello_b"` each under its own key | per-peer key + replay lane; B undecodable under A's key |
 | J3 | net_p2p | both `PING/PONG … Delivered`; bidirectional | shared LINK_KEY; RX-window timing |

@@ -5,11 +5,21 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "no_std, hardware-free decision core of the HARDWARIO TOWER radio network layer's security invariants: the per-peer replay-acceptance rule, the TX-counter reserve-ahead watermark + fail-closed nonce-safety kernel, ACK delivery resolution, the FHSS beacon-epoch acceptance machine, the OTA-pairing confirm freshness rule, and the CCM nonce construction. Not the network layer itself (that is the SDK's `tower::radio::net`); split out so the security-critical accept/reject arithmetic is unit-tested on the host."
+description = "no_std, hardware-free decision core of the HARDWARIO TOWER radio network layer's security invariants: the per-peer replay-acceptance rule, the TX-counter reserve-ahead watermark + fail-closed nonce-safety kernel, ACK delivery resolution, the FHSS beacon-epoch acceptance machine, the OTA-pairing admission rules and the pairing-v2 X25519 handshake (key schedule, confirmation tags, SAS), and the CCM nonce construction. Not the network layer itself (that is the SDK's `tower::radio::net`); split out so the security-critical accept/reject arithmetic is unit-tested on the host."
 
-# Leaf crate: NO dependencies (not even tower-radio: the one shared constant, the CCM
-# nonce length, is mirrored and const-asserted equal in the firmware). That keeps this crate
-# host-buildable AND host-testable with plain `cargo test`, exactly like crates/kv and
-# crates/radio. The firmware keeps all I/O, async, radio and EEPROM flow and
-# delegates each *decision* here, so no external API changes.
+# Dependencies: only the pairing-v2 handshake kernel (`handshake`) needs any, and only
+# no_std / no-alloc crypto with default features off: X25519 (x25519-dalek, the bare
+# `x25519()` function: no typed-secret API, no precomputed tables, which keep both flash and
+# stack down on the M0+), HKDF-SHA256 / HMAC-SHA256 (hkdf, hmac, sha2) and zeroize. Declared
+# here directly (not as root workspace dependencies) because the firmware workspace builds
+# this crate for thumbv6m too. Everything else stays dependency-free: no tower-radio (the one
+# shared constant, the CCM nonce length, is mirrored and const-asserted equal in the
+# firmware), no I/O, no async. That keeps this crate host-buildable AND host-testable with
+# plain `cargo test`, exactly like crates/kv and crates/radio. The firmware keeps all I/O,
+# async, radio and EEPROM flow and delegates each *decision* here.
 [dependencies]
+x25519-dalek = { version = "3.0.0", default-features = false }
+hkdf = { version = "0.13", default-features = false }
+hmac = { version = "0.13", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+zeroize = { version = "1.8", default-features = false }

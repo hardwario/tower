@@ -1,24 +1,42 @@
-//! OTA pairing: 3-way JOIN under the fixed public PAIRING_KEY (docs/radio.md). `impl Net`
-//! block over [`super::Net`].
+//! OTA pairing (v2): an X25519 key agreement between a joining node and a host with an open
+//! pairing window (docs/radio.md "OTA pairing"), plus the keyed join (E4) for nodes whose key
+//! the host already holds. `impl Net` block over [`super::Net`].
 //!
-//! The **joiner chooses its own address** and keeps it; the host only hands out the
-//! per-node key; it does NOT assign or override the address. JOIN_REQ(addr) →
-//! JOIN_RESP(key ‖ challenge) → JOIN_CONFIRM(addr ‖ challenge). Both sides commit
-//! only after the confirm; a lost confirm leaves the host's window to time out (the
-//! entry is never installed) and the joiner retries within its window.
+//! ```text
+//! node  JOIN_REQ      2 ‖ E_node            src = node, dest = 0     under JOIN_FRAME_KEY
+//! host  JOIN_RESP     2 ‖ E_gw ‖ tag_gw     src = host, dest = node  under JOIN_FRAME_KEY
+//! node  JOIN_CONFIRM  2 ‖ tag_node          src = node, dest = host  under the NEW link key
+//! ```
 //!
-//! The host mints a fresh per-session **challenge** in the JOIN_RESP that the joiner
-//! must echo in the JOIN_CONFIRM. This is anti-*replay* within the window (a confirm
-//! captured from a prior session carries a stale challenge and is rejected) on top of
-//! CCM integrity; it does NOT add confidentiality or mutual auth (the challenge rides
-//! the public-key frames in the clear-after-decrypt payload).
+//! Both ends derive the per-node link key from the X25519 shared secret (the
+//! `tower_net::handshake` kernel: HKDF-SHA256 over both public keys and both addresses), so no
+//! key travels on air and a passive eavesdropper learns nothing. The host proves the key with
+//! `tag_gw`, which the node checks before it confirms; the node proves it with `tag_node`,
+//! inside a frame sealed under the link key; the host commits only after a valid confirm. Both
+//! ends log the same 6-digit SAS (`pairing: SAS 123456`) for the optional out-of-band check
+//! against an active man in the middle during the window.
+//!
+//! [`JOIN_FRAME_KEY`] is public: it only gives the two clear-key frames a CCM format, so a
+//! corrupted frame fails its tag and is dropped. Secrecy and authentication come from the key
+//! agreement and the confirmation tags.
+//!
+//! Ephemerals come from the hardware TRNG only (`board::trng_fill`: refused, never drawn from
+//! the software fallback), one per JOIN_REQ sent or answered, zeroized after use. Each side's
+//! own public key is computed before it is needed (the host's when the window opens and again
+//! after each answered request, the node's before it transmits), so only one scalar
+//! multiplication (the shared secret) sits on each critical path, and the peer's wait covers it
+//! ([`PEER_KEX_TIME`]).
+//!
+//! The **joiner chooses its own address** and keeps it; the host does NOT assign or override
+//! it. Both sides commit only on success; a lost confirm leaves the host's window open (the
+//! entry is never installed).
 //!
 //! **OTA pairing only ever adds a NEW peer.** The host refuses (sends no JOIN_RESP to) a
-//! JOIN_REQ for an address already in its peer table, a reserved address, or its own: with a
-//! public pairing key anyone in range can JOIN_REQ *as a victim*, so answering would hand the
-//! window's key to a hijacker and re-key the victim out of the network. Re-pairing a known node
-//! therefore needs the operator to remove it first (an authenticated host-side action). The
-//! joiner, in turn, only accepts a JOIN_RESP addressed to itself.
+//! JOIN_REQ from an address already in its peer table, a reserved address, or its own: the key
+//! agreement is unauthenticated until the SAS is compared, so anyone in range can JOIN_REQ *as a
+//! victim*, and answering would let a hijacker re-key the victim out of the network. Re-pairing
+//! a known node therefore needs the operator to remove it first (an authenticated host-side
+//! action). The joiner, in turn, only accepts a JOIN_RESP addressed to itself.
 //!
 //! **Keyed join (E4).** A node whose per-node key the host already holds (`add_peer`, e.g.
 //! the gateway's NodeAdd) joins under that key instead: KEYED JOIN_REQ(addr), sealed under
@@ -26,38 +44,117 @@
 //! key. No key travels on air; the node proves the key and its freshness through the host's
 //! replay lane, the host proves the key and its freshness through the echo; the node learns
 //! the host's address. The host answers any time, with no window: the key is the
-//! authorization. A stock host ignores it (dest 0 is not its address, and the frame does not
-//! open under the pairing key), so the extension is additive.
+//! authorization. A host without the key ignores it (dest 0 is not its address, and the frame
+//! does not open under the framing key or any key it holds).
 
 use embassy_time::{Duration, Instant, Timer};
-// The admission rules (who may be answered / which response is ours) and the confirm
-// freshness rule (addr ‖ challenge echo) live in the host-testable `tower_net::pairing`
-// kernel; the challenge minting (Net's PRNG), the windows and the JOIN frame exchange stay here.
-use tower_net::pairing::{
-    confirm_matches, join_request_admissible, join_response_for, keyed_req_admit, keyed_req_valid,
-    keyed_resp_matches,
+// The pairing-v2 handshake (key schedule, confirmation tags, SAS) and the admission rules (who
+// may be answered / which response is ours) live in the host-testable `tower_net` kernels; the
+// TRNG draw, the windows and the JOIN frame exchange stay here.
+use tower_net::handshake::{
+    CONFIRM_LEN, ENTROPY_LEN, Ephemeral, PUBLIC_LEN, REQ_LEN, RESP_LEN, Role, Session, VERSION,
 };
+use tower_net::pairing::{
+    join_request_admissible, join_response_for, keyed_req_admit, keyed_req_valid, keyed_resp_matches,
+};
+use zeroize::Zeroize;
 
 use super::{ACK_TURNAROUND, Access, Net, TX_TIMEOUT, is_reserved_addr};
 use crate::radio::ccm::TAG_LEN;
 use crate::radio::duty;
 use crate::radio::frame::{self, FrameType, Header, MAX_FRAME, flags};
 
-/// Fixed, **publicly-known** OTA-pairing key (docs/radio.md). It gives the JOIN
-/// frames a uniform CCM format with integrity + in-session replay protection, but
-/// NO confidentiality (a sniffer in range during the window recovers the
-/// delivered per-node key) and NO mutual authentication. Mitigate with a short
-/// window, proximity, reduced power, user-initiated pairing.
-pub const PAIRING_KEY: [u8; 16] = *b"TOWER-PAIR-KEY!\0";
+/// Public CCM framing key of the v2 JOIN_REQ / JOIN_RESP (docs/radio.md). **Not a secret** and
+/// never used for anything else: it gives the two frames that precede the link key a uniform
+/// CCM format, so a corrupted frame fails its tag and is dropped. The key agreement's secrecy
+/// and authentication do not depend on it.
+pub const JOIN_FRAME_KEY: [u8; 16] = *b"TOWER-JOIN-v2\0\0\0";
 /// Default pairing window: the host listens (and the joiner retries) for this
 /// long. One minute gives a person time to put both ends into pairing mode.
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(60);
-/// How long the joiner waits for a JOIN_RESP after a JOIN_REQ.
+/// Radio part of the joiner's wait for a JOIN_RESP after a JOIN_REQ (the host's turnaround,
+/// the response's time on air, RX set-up, margin). The keyed join waits exactly this; the
+/// pairing handshake adds [`PEER_KEX_TIME`].
 const JOIN_RESP_WINDOW: Duration = Duration::from_millis(300);
-/// How long the host waits for a JOIN_CONFIRM after a JOIN_RESP.
+/// Radio part of the host's wait for a JOIN_CONFIRM after its JOIN_RESP (plus
+/// [`PEER_KEX_TIME`]).
 const JOIN_CONFIRM_WINDOW: Duration = Duration::from_millis(300);
+/// The peer's computation inside each pairing wait: one X25519 scalar multiplication plus the
+/// HKDF / HMAC key schedule, on a Cortex-M0+ at 16 MHz (HSI16, no wait states). Estimate,
+/// not a bench measurement: the curve25519-dalek u32 ladder executes ~12.0 M instructions
+/// (counted in an instruction-accurate emulator; v6-M has no 32x32→64 multiply, so every limb
+/// product is a library call), i.e. 0.9-1.2 s at a CPI of 1.2-1.6, plus ~0.01 s for HKDF and two
+/// HMACs. 1.5 s leaves ~25 % over the slow end. Err long: too short fails every pairing (the
+/// answer lands after the wait closed), too long only slows a retry. Re-tune from the
+/// `crypto_x25519_kat` measurement on the board.
+const PEER_KEX_TIME: Duration = Duration::from_millis(1500);
 /// One listen slice of the host's pairing window between JOIN_REQ polls.
 const PAIR_RX_SLICE: Duration = Duration::from_millis(500);
+
+/// The host side of an open pairing window: the precomputed X25519 ephemeral for the next
+/// JOIN_REQ it answers, so an answer only pays for the shared secret. Create it when the window
+/// opens ([`prepare`](Self::prepare)), pass it to every [`open_pairing`](Net::open_pairing)
+/// slice of that window, drop it when the window closes (the secret is zeroized). Each
+/// ephemeral answers **one** JOIN_REQ and is then replaced: a key reused across the window
+/// would give a man in the middle the whole window, instead of one response wait, to search for
+/// a colliding SAS.
+pub struct PairingHost {
+    eph: Option<Ephemeral>,
+    /// The TRNG failed once already (log the refusal once per window, not per slice).
+    trng_failed: bool,
+}
+
+impl PairingHost {
+    /// Draw the window's first ephemeral from the hardware TRNG (one X25519 scalar
+    /// multiplication, about a second on the M0+). `None` (logged) when the TRNG is unavailable:
+    /// pairing is refused rather than keyed from the software fallback.
+    #[must_use]
+    pub fn prepare() -> Option<Self> {
+        Some(Self {
+            eph: Some(trng_ephemeral(true)?),
+            trng_failed: false,
+        })
+    }
+
+    /// Make sure an ephemeral is ready (draw the next one after the last was used); `false`
+    /// when the TRNG can't deliver.
+    fn ready(&mut self) -> bool {
+        if self.eph.is_none() {
+            self.eph = trng_ephemeral(!self.trng_failed);
+            self.trng_failed |= self.eph.is_none();
+        }
+        self.eph.is_some()
+    }
+}
+
+/// A fresh X25519 ephemeral from the hardware TRNG ([`ENTROPY_LEN`] bytes, hashed into the
+/// secret; one scalar multiplication for the public key). `None` when the TRNG cannot deliver:
+/// pairing refuses rather than derive key material from the software fallback (logged when
+/// `log`). Not inlined: the curve arithmetic's ~2.4 KB of stack must exist only while it runs,
+/// never inside an async poll frame that every poll of the caller would carry.
+#[inline(never)]
+fn trng_ephemeral(log: bool) -> Option<Ephemeral> {
+    let mut entropy = [0u8; ENTROPY_LEN];
+    let e = crate::board::trng_fill(&mut entropy).then(|| Ephemeral::from_entropy(&entropy));
+    entropy.zeroize();
+    if e.is_none() && log {
+        log::error!(
+            target: "net",
+            "pairing: hardware TRNG unavailable, refusing to pair (ephemeral keys must not come from the software fallback)"
+        );
+    }
+    e
+}
+
+/// This side's half of the handshake: the X25519 shared secret (the one scalar multiplication on
+/// the critical path), the key schedule and both tags. `None` for a low-order peer key. Not
+/// inlined, for the same stack reason as [`trng_ephemeral`].
+#[inline(never)]
+fn handshake(own: &Ephemeral, peer: &[u8], role: Role, node_addr: u32, gw_addr: u32) -> Option<Session> {
+    let mut e = [0u8; PUBLIC_LEN];
+    e.copy_from_slice(peer);
+    own.session(&e, role, node_addr, gw_addr)
+}
 
 /// Why a keyed join ([`Net::join_keyed`]) returned without a host address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,55 +230,82 @@ impl core::fmt::Display for JoinError {
 }
 
 impl Net {
-    /// Host: open a pairing window for `timeout` (use [`PAIRING_WINDOW`] for the
-    /// default minute). On the first valid JOIN_REQ, hand out the per-node `key`
-    /// (JOIN_RESP) and wait for the JOIN_CONFIRM. Returns the joiner's **own,
-    /// self-chosen** address on commit (the caller installs the peer with
-    /// `add_peer(peer_addr, key)`), or `None` on timeout / lost confirm. The host does
-    /// NOT assign the address. Pairs the first joiner only.
+    /// Host: listen for a pairing JOIN_REQ for up to `timeout` (one slice of a window; use
+    /// [`PAIRING_WINDOW`] for a single default minute), answering with the precomputed
+    /// ephemeral of `host` (create it with [`PairingHost::prepare`] when the window opens and
+    /// keep passing the same one). On the first JOIN_REQ that completes the handshake (a valid
+    /// JOIN_CONFIRM under the derived key), logs the SAS and returns the joiner's **own,
+    /// self-chosen** address and the derived **link key**: the caller installs the peer with
+    /// `add_peer(peer_addr, &key)` (and persists it). `None` on timeout / a lost or invalid
+    /// confirm. Pairs the first joiner only.
     ///
-    /// A JOIN_REQ for an address that is **already a registered peer**, reserved, or our own
-    /// is ignored (no JOIN_RESP: the key is never sent; see the module docs): OTA pairing
-    /// never re-keys an existing node. Remove the node first to re-pair it.
-    pub async fn open_pairing(&mut self, timeout: Duration, key: &[u8; 16]) -> Option<u32> {
+    /// A JOIN_REQ from an address that is **already a registered peer**, reserved, or our own
+    /// is ignored (no JOIN_RESP; see the module docs): OTA pairing never re-keys an existing node.
+    /// Remove the node first to re-pair it. Duty mode only (a fixed-channel exchange, like
+    /// [`join_keyed`](Self::join_keyed)).
+    pub async fn open_pairing(
+        &mut self,
+        host: &mut PairingHost,
+        timeout: Duration,
+    ) -> Option<(u32, [u8; 16])> {
         if self.txc.locked() {
             return None; // fail closed (nonce safety): pairing replies consume TX counters
         }
         let deadline = Instant::now().checked_add(timeout)?;
-        let mut buf = [0u8; 24];
+        if self.access != Access::Duty {
+            log::warn!(target: "net", "pairing: refused, the radio is not in Duty mode");
+            Timer::at(deadline).await;
+            return None;
+        }
+        let mut buf = [0u8; REQ_LEN];
         let mut refusal_logged = false;
         while Instant::now() < deadline {
-            let Some((hdr, plen)) = self.rx_pair(&PAIRING_KEY, PAIR_RX_SLICE, &mut buf).await else {
+            if !host.ready() {
+                Timer::at(deadline).await; // TRNG down: nothing to answer with (logged once)
+                return None;
+            }
+            let Some((hdr, plen)) = self.rx_pair(&JOIN_FRAME_KEY, PAIR_RX_SLICE, &mut buf).await else {
                 continue;
             };
-            if hdr.frame_type != FrameType::JoinReq || plen < 4 {
+            if hdr.frame_type != FrameType::JoinReq {
                 continue;
             }
-            let peer_addr = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            let peer_addr = hdr.src;
             let registered = self.peer_slot(peer_addr).is_some();
-            if !join_request_admissible(peer_addr, hdr.src, self.addr, registered) {
+            let refusal = if plen != REQ_LEN || buf[0] != VERSION {
+                Some("not a pairing v2 request")
+            } else if !join_request_admissible(peer_addr, self.addr, registered) {
+                Some(if registered {
+                    "already registered - remove it first to re-pair"
+                } else {
+                    "invalid address"
+                })
+            } else {
+                None
+            };
+            if let Some(why) = refusal {
                 if !refusal_logged {
-                    // Once per call: a refused joiner retries every ~300 ms for its whole window.
+                    // Once per call: a refused joiner retries for its whole window.
                     refusal_logged = true;
-                    log::warn!(
-                        target: "net",
-                        "pairing: JOIN_REQ for {:08X} refused ({})",
-                        peer_addr,
-                        if registered {
-                            "already registered - remove it first to re-pair"
-                        } else {
-                            "invalid address"
-                        }
-                    );
+                    log::warn!(target: "net", "pairing: JOIN_REQ from {:08X} refused ({})", peer_addr, why);
                 }
                 continue;
             }
-            let challenge = self.rand_u32(); // fresh per session; the confirm must echo it
 
-            // JOIN_RESP: the per-node key ‖ a fresh challenge (the joiner keeps its own address).
-            let mut resp = [0u8; 20];
-            resp[..16].copy_from_slice(key);
-            resp[16..20].copy_from_slice(&challenge.to_le_bytes());
+            // The handshake: one scalar multiplication (~1 s), then this ephemeral is spent.
+            let Some(eph) = host.eph.take() else {
+                continue; // unreachable: `ready()` above
+            };
+            let Some(session) = handshake(&eph, &buf[1..REQ_LEN], Role::Gateway, peer_addr, self.addr) else {
+                log::warn!(target: "net", "pairing: JOIN_REQ from {:08X} refused (low-order key)", peer_addr);
+                continue;
+            };
+            let mut resp = [0u8; RESP_LEN];
+            resp[0] = VERSION;
+            resp[1..1 + PUBLIC_LEN].copy_from_slice(eph.public());
+            resp[1 + PUBLIC_LEN..].copy_from_slice(session.tag(Role::Gateway));
+            drop(eph); // zeroize the secret before anything awaits
+
             // Counter allocated (consumed) before the turnaround/TX awaits; see `alloc_counter`.
             let counter = self.alloc_counter()?; // None = TX locked: fail closed
             let resp_hdr = Header {
@@ -193,36 +317,46 @@ impl Net {
                 bulk_index: None,
             };
             Timer::after(ACK_TURNAROUND).await;
-            self.tx_pair(&PAIRING_KEY, &resp_hdr, &resp).await;
+            self.tx_pair(&JOIN_FRAME_KEY, &resp_hdr, &resp).await;
 
-            // Wait for the JOIN_CONFIRM (echoes addr ‖ challenge); the freshness rule
-            // (commit only when both match, so a confirm replayed from a prior session carries
-            // a stale challenge and is rejected) is the kernel's `confirm_matches`. The confirm
-            // must also come from that joiner and be addressed to us.
-            let mut cbuf = [0u8; 8];
-            if let Some((chdr, cplen)) = self.rx_pair(&PAIRING_KEY, JOIN_CONFIRM_WINDOW, &mut cbuf).await
-                && chdr.frame_type == FrameType::JoinConfirm
-                && chdr.src == peer_addr
-                && chdr.dest == self.addr
-                && confirm_matches(&cbuf[..cplen], peer_addr, challenge)
-            {
-                return Some(peer_addr);
+            // Wait out the whole confirm window (the joiner computes its shared secret first): a
+            // foreign frame, or one that does not open under the new link key, must not end it.
+            // Commit only on the joiner's tag, from that joiner, addressed to us.
+            let confirm_end = Instant::now() + JOIN_CONFIRM_WINDOW + PEER_KEX_TIME;
+            loop {
+                let remaining = confirm_end.saturating_duration_since(Instant::now());
+                if remaining.as_ticks() == 0 {
+                    break; // lost confirm: keep the window open for a retry
+                }
+                let mut cbuf = [0u8; CONFIRM_LEN];
+                if let Some((chdr, cplen)) = self.rx_pair(session.link_key(), remaining, &mut cbuf).await
+                    && chdr.frame_type == FrameType::JoinConfirm
+                    && chdr.src == peer_addr
+                    && chdr.dest == self.addr
+                    && cplen == CONFIRM_LEN
+                    && cbuf[0] == VERSION
+                    && session.verify(Role::Node, &cbuf[1..])
+                {
+                    log::info!(target: "net", "pairing: SAS {:06}", session.sas());
+                    return Some((peer_addr, *session.link_key()));
+                }
             }
-            // Lost confirm: discard, keep the window open for a retry.
         }
         None
     }
 
-    /// Joiner: request pairing using `addr` (the joiner's **own** address, which it
-    /// keeps) for up to `timeout` ([`PAIRING_WINDOW`] for the default). Sends
-    /// JOIN_REQ, waits for the JOIN_RESP (the per-node key), sends JOIN_CONFIRM,
-    /// and returns `(gw_addr, key)` on commit (or `None` on timeout); the gateway
-    /// address is what a product node persists so it knows *which* gateway to talk to
-    /// after a reboot.
+    /// Joiner: pair with a host that has a window open, using `addr` (the joiner's **own**
+    /// address, which it keeps) for up to `timeout` ([`PAIRING_WINDOW`] for the default).
+    /// Each attempt draws a fresh ephemeral from the TRNG, sends the JOIN_REQ, checks the
+    /// host's confirmation tag in the JOIN_RESP, and answers with the JOIN_CONFIRM under the
+    /// derived key. Returns `(gw_addr, link_key)` on success (after logging the SAS), or `None`
+    /// on timeout, when the TRNG is unavailable (logged; never keyed from the fallback), or
+    /// outside Duty mode. The gateway address is what a product node persists so it knows
+    /// *which* gateway to talk to after a reboot.
     ///
-    /// Only a JOIN_RESP addressed to `addr` (from a non-reserved host) is accepted: with two
-    /// nodes joining in one window, each must not adopt the other's key. A reserved `addr`
-    /// (`0` / broadcast) can never join.
+    /// Only a JOIN_RESP addressed to `addr` (from a non-reserved host) is accepted, and only
+    /// with a valid tag: with two nodes joining in one window, each completes only its own
+    /// handshake. A reserved `addr` (`0` / broadcast) can never join.
     pub async fn join(&mut self, addr: u32, timeout: Duration) -> Option<(u32, [u8; 16])> {
         if self.txc.locked() {
             return None; // fail closed (nonce safety): JOIN_REQ/CONFIRM consume TX counters
@@ -230,8 +364,20 @@ impl Net {
         if is_reserved_addr(addr) {
             return None; // a host refuses it anyway; don't advertise it on air
         }
+        if self.access != Access::Duty {
+            log::warn!(target: "net", "pairing: refused, the radio is not in Duty mode");
+            return None;
+        }
         let deadline = Instant::now().checked_add(timeout)?;
         while Instant::now() < deadline {
+            // A fresh ephemeral per attempt, drawn BEFORE the request goes out (its public key is
+            // what the request carries), so only the shared secret is computed after the
+            // response. Fresh per attempt also bounds a man in the middle's SAS search to one
+            // response wait. TRNG down: refuse (logged), never fall back.
+            let eph = trng_ephemeral(true)?;
+            let mut req = [0u8; REQ_LEN];
+            req[0] = VERSION;
+            req[1..].copy_from_slice(eph.public());
             // Each JOIN_REQ consumes a fresh counter, allocated before its TX await.
             let counter = self.alloc_counter()?; // None = TX locked: fail closed
             let req_hdr = Header {
@@ -242,20 +388,46 @@ impl Net {
                 counter,
                 bulk_index: None,
             };
-            self.tx_pair(&PAIRING_KEY, &req_hdr, &addr.to_le_bytes()).await;
+            if !self.tx_pair(&JOIN_FRAME_KEY, &req_hdr, &req).await {
+                Timer::after(JOIN_RESP_WINDOW).await; // duty-limited / radio error: back off
+                continue;
+            }
 
-            let mut buf = [0u8; 24];
-            if let Some((hdr, plen)) = self.rx_pair(&PAIRING_KEY, JOIN_RESP_WINDOW, &mut buf).await
-                && hdr.frame_type == FrameType::JoinResp
-                && plen >= 20
-                && join_response_for(hdr.dest, hdr.src, addr)
-            {
-                let mut key = [0u8; 16];
-                key.copy_from_slice(&buf[..16]);
-                // Confirm: echo addr ‖ the host's challenge, then commit.
-                let mut conf = [0u8; 8];
-                conf[..4].copy_from_slice(&addr.to_le_bytes());
-                conf[4..8].copy_from_slice(&buf[16..20]);
+            // Listen out the whole response wait (the host computes its shared secret first): a
+            // foreign frame, another joiner's response or a response that fails key confirmation
+            // must not end it.
+            let resp_end = Instant::now() + JOIN_RESP_WINDOW + PEER_KEX_TIME;
+            loop {
+                let remaining = resp_end.saturating_duration_since(Instant::now());
+                if remaining.as_ticks() == 0 {
+                    break;
+                }
+                let mut buf = [0u8; RESP_LEN];
+                let Some((hdr, plen)) = self.rx_pair(&JOIN_FRAME_KEY, remaining, &mut buf).await else {
+                    continue;
+                };
+                if hdr.frame_type != FrameType::JoinResp
+                    || plen != RESP_LEN
+                    || buf[0] != VERSION
+                    || !join_response_for(hdr.dest, hdr.src, addr)
+                {
+                    continue;
+                }
+                let Some(session) = handshake(&eph, &buf[1..1 + PUBLIC_LEN], Role::Node, addr, hdr.src)
+                else {
+                    continue; // low-order key: not a host we can pair with
+                };
+                if !session.verify(Role::Gateway, &buf[1 + PUBLIC_LEN..]) {
+                    log::warn!(
+                        target: "net",
+                        "pairing: JOIN_RESP from {:08X} failed key confirmation, ignored",
+                        hdr.src
+                    );
+                    continue;
+                }
+                let mut conf = [0u8; CONFIRM_LEN];
+                conf[0] = VERSION;
+                conf[1..].copy_from_slice(session.tag(Role::Node));
                 let counter = self.alloc_counter()?; // before the turnaround/TX awaits
                 let conf_hdr = Header {
                     frame_type: FrameType::JoinConfirm,
@@ -266,8 +438,9 @@ impl Net {
                     bulk_index: None,
                 };
                 Timer::after(ACK_TURNAROUND).await;
-                self.tx_pair(&PAIRING_KEY, &conf_hdr, &conf).await;
-                return Some((hdr.src, key));
+                self.tx_pair(session.link_key(), &conf_hdr, &conf).await;
+                log::info!(target: "net", "pairing: SAS {:06}", session.sas());
+                return Some((hdr.src, *session.link_key()));
             }
         }
         None

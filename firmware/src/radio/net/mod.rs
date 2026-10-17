@@ -19,7 +19,8 @@
 //!
 //! This module holds the core (peer table + confirmed unicast). The two larger
 //! sub-protocols live alongside it as `impl Net` blocks: [`bulk`] (pull-based bulk
-//! transfer, docs/radio.md) and [`pairing`] (OTA 3-way JOIN, docs/radio.md).
+//! transfer, docs/radio.md) and [`pairing`] (OTA pairing by X25519 key agreement, and the keyed
+//! join, docs/radio.md).
 
 mod afa;
 mod bulk;
@@ -29,7 +30,7 @@ mod pairing;
 pub use afa::{AfaConfig, AfaRole};
 pub use bulk::{BULK_CHUNK, BulkSink, BulkSource};
 pub use fhss::{FhssConfig, FhssRole, FhssState, MasterSlot, NodeSlot, hop_channel};
-pub use pairing::{JoinError, PAIRING_KEY, PAIRING_WINDOW};
+pub use pairing::{JOIN_FRAME_KEY, JoinError, PAIRING_WINDOW, PairingHost};
 
 use embassy_time::{Duration, Instant, Timer};
 // The security-critical *decision* kernels (replay rule, TX-counter watermark/fail-closed,
@@ -996,10 +997,9 @@ impl Net {
     }
 
     /// Advance the internal xorshift32 PRNG and return the new 32-bit state. Backs the
-    /// retransmit backoff and the pairing challenge nonce. **Not cryptographic** (seeded
-    /// deterministically from `addr`): enough to de-correlate collided retransmits and to make
-    /// a pairing confirm from a *prior* session fail to validate (the challenge advances each
-    /// session), but not a source of secret randomness.
+    /// retransmit backoff only. **Not cryptographic** (seeded deterministically from `addr`):
+    /// enough to de-correlate collided retransmits, never a source of secret randomness
+    /// (pairing keys come from the hardware TRNG, `board::trng_fill`).
     pub(crate) fn rand_u32(&mut self) -> u32 {
         let mut x = self.rng;
         x ^= x << 13;

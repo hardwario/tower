@@ -83,9 +83,11 @@ Two **independently versioned** schemas ride these frames:
 
 Result codes: `MGMT_OK`(0), `UNSUPPORTED`(1), `BAD_ARG`(2), `NOT_FOUND`(3), `FULL`(4),
 `BUSY`(5), `STORAGE`(6), `TIMEOUT`(7). An op a device does not serve → `UNSUPPORTED`; a
-concurrent pairing window → `BUSY`. **The host mints all AES keys**: device PRNGs are
-non-cryptographic, so keys travel host→device (in `PairingOpen`/`NodeAdd`/`Provision`), never
-the reverse except the deliberate `NodeRevealKey`.
+concurrent pairing window → `BUSY`. **Keys:** a cable-provisioned key is minted by the host
+(its CSPRNG) and travels host→device in `NodeAdd`/`Provision`; an OTA-paired link key is
+**derived on both ends** by the X25519 key agreement (docs/radio.md "OTA pairing") from TRNG
+ephemerals, so `PairingOpen`'s `key` field is ignored (it stays in the schema until the next wire
+revision). Keys never travel device→host except through the deliberate `NodeRevealKey`.
 
 ### Radio application schema (`radio::NodeMsg` / `NodeCmd`)
 
@@ -163,8 +165,12 @@ press is a hold. Used by the HIL gateway test.
 
 ### Pairing (node side)
 
-- **OTA**: hold the button ≥ 1 s while unprovisioned: the node runs the 3-way JOIN against any
-  gateway with an open window and persists `(gw_addr, key, band, channel)` in `NS_APP`.
+- **OTA**: hold the button ≥ 1 s while unprovisioned: the node pairs (X25519 key agreement,
+  docs/radio.md "OTA pairing") with any gateway that has a window open and persists `(gw_addr,
+  key, band, channel)` in `NS_APP`. It logs `net: pairing: SAS 123456` and `JOINED gateway
+  XXXXXXXX`; the same SAS on the gateway's console is the optional man-in-the-middle check. Each
+  attempt takes ~3 s (fresh TRNG ephemeral, request, ~1.8 s response wait). Without a working
+  hardware TRNG the node refuses to pair (logged).
 - **Cable**: on USB the node serves the management channel: `Describe` (role probe), `Provision`
   (host-minted credentials; the key never rides the shell history), and `JoinOpen`
   (host-initiated OTA join). The node reboots into its new identity; watch for the fresh `Hello`.
@@ -220,16 +226,19 @@ uplink cycle.
 
 ### Pairing (gateway side)
 
-- **OTA**: host sends `PairingOpen{window, key}`; the gateway opens the radio window, and on a
-  join commits the registry entry (flags `UNNAMED` until the host auto-names it from the first
-  `NodeInfo` via `NodeUpdate`) and answers the *delayed* `Paired`, or `MGMT_TIMEOUT` on expiry.
-  **OTA pairing only adds new nodes:** a JOIN_REQ for an address that is already registered (or
-  reserved, or the gateway's own) gets no answer (the window's key is never sent), and the
-  gateway logs `pairing: JOIN_REQ for XXXXXXXX refused (already registered …)`. The pairing key is
-  public, so answering would let anyone re-key a registered node by joining *as* it. **To re-pair
-  a known node (e.g. after a factory reset), `NodeRemove` it first**, then open the window. The
-  registry commit is insert-only as a backstop (`registry::add_new`; an existing address answers
-  `BAD_ARG`).
+- **OTA**: host sends `PairingOpen{window, key}` (`key` ignored: the link key is derived by the
+  X25519 key agreement); the gateway precomputes its first ephemeral (~1 s; no hardware TRNG →
+  `UNSUPPORTED` and an error log), opens the radio window, and on a completed handshake (a valid
+  JOIN_CONFIRM under the derived key) logs `net: pairing: SAS 123456`, commits the registry entry
+  (flags `UNNAMED` until the host auto-names it from the first `NodeInfo` via `NodeUpdate`) and
+  answers the *delayed* `Paired`, or `MGMT_TIMEOUT` on expiry. Compare the SAS with the node's to
+  rule out a man in the middle. **OTA pairing only adds new nodes:** a JOIN_REQ from an address
+  that is already registered (or reserved, or the gateway's own) gets no answer, and the gateway
+  logs `pairing: JOIN_REQ from XXXXXXXX refused (already registered …)`. The key agreement is
+  unauthenticated until the SAS is compared, so answering would let anyone re-key a registered
+  node by joining *as* it. **To re-pair a known node (e.g. after a factory reset), `NodeRemove`
+  it first**, then open the window. The registry commit is insert-only as a backstop
+  (`registry::add_new`; an existing address answers `BAD_ARG`).
 - **Cable**: the host (which alone can reach the node's serial port) provisions the node
   directly, then registers it on the gateway with `NodeAdd{addr, key, name, flags}`. `NodeAdd`
   answers `BAD_ARG` for `0`, `0xFFFFFFFF` or the gateway's own address; for an already-registered

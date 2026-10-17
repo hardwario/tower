@@ -1,14 +1,16 @@
-//! net_pairing: OTA 3-way pairing under the public pairing key (docs/radio.md).
+//! net_pairing: OTA pairing by X25519 key agreement (pairing v2, docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash example net_pairing   # host: opens a window
 //!   TOWER_FEATURES=role-node    just flash example net_pairing   # joiner: requests to join
 //!
-//! The host opens a 1-minute pairing window ([`PAIRING_WINDOW`]) and, on the first
-//! JOIN_REQ, hands out a per-node key (JOIN_RESP) and waits for JOIN_CONFIRM. The
-//! **joiner chooses its own address** and keeps it. The host does NOT assign it; the
-//! host only learns that address and the key it handed out, to install the peer. Both
-//! log the key (they must match) and the joiner's address (the same on both sides),
-//! proving the handshake. (The key is sniffable in-window by design; see docs/radio.md.)
+//! The host precomputes its ephemeral key and opens a 1-minute pairing window
+//! ([`PAIRING_WINDOW`]); the joiner sends JOIN_REQ with its own ephemeral public key, the host
+//! answers with its public key and a confirmation tag (JOIN_RESP), the joiner checks it and
+//! confirms under the newly derived link key (JOIN_CONFIRM). No key travels on air: both ends
+//! derive the same link key. The **joiner chooses its own address** and keeps it. Both log the
+//! first key bytes (they must match), the joiner's address (the same on both sides) and the net
+//! layer's `pairing: SAS 123456` line (the same 6 digits on both sides: the out-of-band check
+//! that no man in the middle sat between them).
 
 #![no_std]
 #![no_main]
@@ -17,7 +19,9 @@ use embassy_time::Timer;
 use log::{error, info, warn};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
-use tower::radio::net::{Net, NetConfig, PAIRING_KEY, PAIRING_WINDOW};
+#[cfg(not(feature = "role-node"))]
+use tower::radio::net::PairingHost;
+use tower::radio::net::{Net, NetConfig, PAIRING_WINDOW};
 use tower::{app, board::Board};
 
 #[cfg(not(feature = "role-node"))]
@@ -25,11 +29,6 @@ const HOST_ADDR: u32 = 0x2222_2222;
 // The joiner's OWN, self-chosen address (kept after pairing, not assigned by the host).
 #[cfg(feature = "role-node")]
 const MY_ADDR: u32 = 0x0000_00BB;
-// The per-node key the host hands out (would be random in production).
-#[cfg(not(feature = "role-node"))]
-const HANDED_KEY: [u8; 16] = [
-    0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
-];
 
 async fn run(b: Board) {
     let radio = Spirit1::new(
@@ -47,13 +46,14 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-node"))]
     let addr = HOST_ADDR;
 
-    // The Net's own key is unused during pairing (JOIN frames use PAIRING_KEY).
+    // The Net's own (default-lane) key is unused during pairing: the JOIN frames use the public
+    // framing key and then the derived link key.
     let mut net = match Net::new(
         radio,
         b.kv,
         NetConfig {
             addr,
-            key: PAIRING_KEY,
+            key: [0; 16],
             band: Band::DEFAULT,
             channel: 0,
         },
@@ -71,12 +71,18 @@ async fn run(b: Board) {
     {
         info!(target: "pair", "HOST {:08X}: opening pairing window (1 min)", HOST_ADDR);
         loop {
-            match net.open_pairing(PAIRING_WINDOW, &HANDED_KEY).await {
+            // A fresh window, a fresh precomputed ephemeral (TRNG only; refused without it).
+            let Some(mut host) = PairingHost::prepare() else {
+                error!(target: "pair", "no hardware TRNG: pairing refused");
+                Timer::after_secs(10).await;
+                continue;
+            };
+            match net.open_pairing(&mut host, PAIRING_WINDOW).await {
                 // The joiner brought its own address; the host installs (peer_addr, key).
-                Some(peer_addr) => info!(
+                Some((peer_addr, key)) => info!(
                     target: "pair",
                     "PAIRED *** node addr={:08X} (joiner-chosen) key[..4]={:02x}{:02x}{:02x}{:02x}",
-                    peer_addr, HANDED_KEY[0], HANDED_KEY[1], HANDED_KEY[2], HANDED_KEY[3]
+                    peer_addr, key[0], key[1], key[2], key[3]
                 ),
                 None => warn!(target: "pair", "pairing window closed (no joiner / lost confirm)"),
             }
@@ -91,7 +97,7 @@ async fn run(b: Board) {
             match net.join(MY_ADDR, PAIRING_WINDOW).await {
                 Some((gw_addr, key)) => info!(
                     target: "pair",
-                    "JOINED *** addr={:08X} (mine) gw={:08X} key[..4]={:02x}{:02x}{:02x}{:02x} (expect a0a1a2a3)",
+                    "JOINED *** addr={:08X} (mine) gw={:08X} key[..4]={:02x}{:02x}{:02x}{:02x} (expect the host's)",
                     MY_ADDR, gw_addr, key[0], key[1], key[2], key[3]
                 ),
                 None => warn!(target: "pair", "join failed (no host in range)"),

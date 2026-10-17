@@ -10,8 +10,9 @@
 //!   EEPROM buckets (`tower-gateway::registry`), accessed bucket-at-a-time (never
 //!   RAM-resident; see the RAM budget note below) and mirrored into the net layer's
 //!   peer table at boot;
-//! * **pairing**: an OTA window opened on host request (`MgmtOp::PairingOpen`; the
-//!   host mints the key) and cable-paired installs (`MgmtOp::NodeAdd`);
+//! * **pairing**: an OTA window opened on host request (`MgmtOp::PairingOpen`; the link
+//!   key comes from an X25519 key agreement with the joining node, so the request's `key`
+//!   field is unused) and cable-paired installs (`MgmtOp::NodeAdd`, host-minted key);
 //! * the **downlink queue**: opaque host-built payloads (`tower-gateway::queue`,
 //!   RAM-only; a reboot drops it and the host re-queues on the `Hello` session bump)
 //!   delivered on a sleeping node's next uplink, advertised via the ACK pending flag;
@@ -44,7 +45,7 @@ use log::{info, warn};
 use tower::led::{self, LedChannel, Pattern, Polarity, Step};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
-use tower::radio::net::{Net, NetConfig, SendResult, peer_addr_valid};
+use tower::radio::net::{Net, NetConfig, PairingHost, SendResult, peer_addr_valid};
 use tower::storage::{NS_APP, NS_SHELL, Nv, Scoped};
 use tower::{app, board::Board, console, shell, watchdog};
 use tower_gateway::queue::{PushError, Queue};
@@ -180,7 +181,7 @@ static PAIRING: Pattern = &[Step::on(100), Step::off(150)];
 /// gateway ACKed them and forwarded them to the host as genuine uplinks.) The gateway therefore
 /// runs **registered peers only** (`set_default_lane(false)` right after `Net::new`): no
 /// default lane, so this key is never used to open a frame. It only exists because `NetConfig`
-/// requires one; no legitimate node uses it (each has its own key; pairing uses `PAIRING_KEY`).
+/// requires one; no legitimate node uses it (each has its own key; pairing derives one by X25519).
 fn default_lane_key(addr: u32) -> [u8; 16] {
     let mut k = [0u8; 16];
     for (i, chunk) in k.chunks_mut(4).enumerate() {
@@ -250,7 +251,8 @@ impl Stats {
 /// An armed OTA pairing window (delayed `MgmtResponse`: resolves on join/expiry/cancel).
 struct PairingSession {
     req_id: u16,
-    key: [u8; 16],
+    /// The window's precomputed X25519 ephemeral (zeroized when the session drops).
+    host: PairingHost,
     deadline: Instant,
 }
 
@@ -507,7 +509,7 @@ async fn run(b: Board) {
 
         // 2. Radio: either a pairing-window slice or a receive slice; the two share
         //    the one radio, and pairing mode is explicit + short-lived.
-        if let Some(sess) = pairing.as_ref() {
+        if let Some(sess) = pairing.as_mut() {
             if registry::count(&buckets) >= registry::CAPACITY {
                 // The registry filled while the window was open (a concurrent cable
                 // NodeAdd): close early instead of letting a node complete the JOIN,
@@ -522,9 +524,10 @@ async fn run(b: Board) {
             } else {
                 let slice = PAIR_SLICE.min(sess.deadline.saturating_duration_since(Instant::now()));
                 // `open_pairing` never answers a JOIN_REQ for an already-registered (or reserved,
-                // or our own) address; OTA pairing only adds NEW nodes (docs/gateway.md).
-                if let Some(node_addr) = net.open_pairing(slice, &sess.key).await {
-                    let key = sess.key;
+                // or our own) address; OTA pairing only adds NEW nodes (docs/gateway.md). One
+                // call can outlast the slice by a handshake (~1 s compute + the confirm wait +
+                // ~1 s for the next ephemeral): still far inside the 10 s liveness check-in.
+                if let Some((node_addr, key)) = net.open_pairing(&mut sess.host, slice).await {
                     let req_id = sess.req_id;
                     led.set_background(Some(HEARTBEAT));
                     pairing = None;
@@ -786,7 +789,8 @@ async fn handle_mgmt(
             Some(rec) => respond_record(req_id, &NodeKey { addr, key: rec.key }).await,
             None => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
         },
-        MgmtOp::PairingOpen { window, key } => {
+        // `key` is unused: the link key comes from the X25519 key agreement (docs/radio.md).
+        MgmtOp::PairingOpen { window, key: _ } => {
             if pairing.is_some() {
                 respond_empty(req_id, mgmt::MGMT_BUSY).await;
                 return;
@@ -799,11 +803,18 @@ async fn handle_mgmt(
                 respond_empty(req_id, mgmt::MGMT_FULL).await;
                 return;
             }
+            // The window's first ephemeral (one X25519 scalar multiplication, ~1 s): done now, so
+            // answering a JOIN_REQ costs only the shared secret. No TRNG, no pairing: an
+            // ephemeral from the software fallback would be guessable (logged by the net layer).
+            let Some(host) = PairingHost::prepare() else {
+                respond_empty(req_id, mgmt::MGMT_UNSUPPORTED).await;
+                return;
+            };
             info!(target: "gateway", "pairing window open ({} s)", window);
             led.set_background(Some(PAIRING));
             *pairing = Some(PairingSession {
                 req_id,
-                key,
+                host,
                 deadline: Instant::now() + Duration::from_secs(window as u64),
             });
             // The response is DELAYED: it resolves when the window does.

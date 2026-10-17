@@ -28,6 +28,7 @@
 pub mod ack;
 pub mod addr;
 pub mod epoch;
+pub mod handshake;
 pub mod nonce;
 pub mod pairing;
 pub mod replay;

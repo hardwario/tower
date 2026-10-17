@@ -13,8 +13,9 @@
 //! completion over the air: completion is a per-transport feature the radio doesn't offer.
 //!
 //! Pairing:
-//! * **OTA**: hold the button ≥1 s while unprovisioned: the node runs the 3-way JOIN
-//!   against any gateway with an open window and persists `(gw, key)`.
+//! * **OTA**: hold the button ≥1 s while unprovisioned: the node pairs (an X25519 key
+//!   agreement, both ends log the same `pairing: SAS`) with any gateway that has a window open
+//!   and persists `(gw, key)`.
 //! * **Cable**: on USB, the node serves the management channel: `Describe` (role
 //!   probe), `Provision` (host-minted credentials; key never rides the shell), and
 //!   `JoinOpen` (host-initiated OTA join).
@@ -545,7 +546,7 @@ async fn run(b: Board) {
     }
 }
 
-/// OTA join (button held): run the 3-way JOIN for the standard window, persist the
+/// OTA join (button held): run the pairing handshake for the standard window, persist the
 /// credentials on success.
 async fn ota_join(
     net: &mut Net,
@@ -946,6 +947,7 @@ async fn handle_mgmt(
                     }
                     net.add_peer(gw_addr, &key);
                     *provision = Some(rec);
+                    info!(target: "button", "JOINED gateway {:08X}", gw_addr);
                     respond_record(req_id, &Joined { gw_addr }).await;
                 }
                 None => {

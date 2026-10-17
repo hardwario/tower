@@ -321,7 +321,8 @@ impl RandSource {
     }
 }
 
-/// Source of the most recent [`rand_u32`] draw: 0 = none yet, 1 = TRNG, 2 = fallback.
+/// Source of the most recent draw ([`rand_u32`], or [`trng_fill`]'s TRNG attempt): 0 = none
+/// yet, 1 = TRNG, 2 = fallback / TRNG unavailable.
 static RAND_SOURCE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 /// Which source the most recent [`rand_u32`] used, probing once (one discarded draw) if nothing
@@ -344,9 +345,10 @@ pub fn rand_source() -> RandSource {
 /// usable non-zero value. No `.await` inside, so it runs to completion without another task
 /// racing the RCC.
 ///
-/// One-shot use only (minting a `system settings set addr=random`); the per-packet backoff/pairing
-/// randomness in the net layer stays on its own cheap software PRNG. Network addresses are
-/// not secrets; AES keys remain host-minted by design (see the gateway pairing flow).
+/// One-shot use only (minting a `system settings set addr=random`); the per-packet retransmit
+/// backoff in the net layer stays on its own cheap software PRNG. Network addresses are not
+/// secrets. Key material never comes from here: OTA pairing draws its X25519 ephemerals with
+/// [`trng_fill`], which has no fallback.
 pub fn rand_u32() -> u32 {
     use core::sync::atomic::Ordering::Relaxed;
     match rand_u32_trng() {
@@ -364,7 +366,43 @@ pub fn rand_u32() -> u32 {
     }
 }
 
-/// One conditioned word from the hardware RNG, or `None` if it can't be brought up.
+/// Fill `out` from the hardware **TRNG only** (key material: the OTA-pairing X25519
+/// ephemerals). Never falls back to the software PRNG: `false` means the TRNG could not deliver
+/// (HSI48 never started, a clock error, a stall, or a failed continuous test) and `out` must not
+/// be used. Updates [`rand_source`]. Same bring-up / restore as [`rand_u32`] (see
+/// `trng_words`), one bring-up for the whole buffer; no `.await` inside.
+pub fn trng_fill(out: &mut [u8]) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    let mut ok = true;
+    for chunk in out.chunks_mut(16) {
+        let mut w = [0u32; 4];
+        let n = chunk.len().div_ceil(4);
+        ok &= trng_words(&mut w[..n]);
+        for (dst, word) in chunk.chunks_mut(4).zip(w) {
+            dst.copy_from_slice(&word.to_le_bytes()[..dst.len()]);
+        }
+        w = [0; 4];
+        core::hint::black_box(&w);
+        if !ok {
+            break;
+        }
+    }
+    if !ok {
+        out.fill(0);
+    }
+    RAND_SOURCE.store(if ok { 1 } else { 2 }, Relaxed);
+    ok
+}
+
+/// One conditioned word from the hardware RNG (non-zero, for an address), or `None` if it can't
+/// be brought up.
+fn rand_u32_trng() -> Option<u32> {
+    let mut w = [0u32];
+    (trng_words(&mut w) && w[0] != 0).then_some(w[0])
+}
+
+/// Fill `out` with conditioned words from the hardware RNG; `false` if it can't be brought up
+/// or a word fails the continuous test.
 ///
 /// The L0's RNG is clocked from **HSI48**, and HSI48 only starts with the VREFINT reference routed
 /// to it (`SYSCFG_CFGR3.ENREF_HSI48`, which needs the SYSCFG clock). embassy's L0 RCC init already
@@ -375,7 +413,11 @@ pub fn rand_u32() -> u32 {
 /// bits, HSI48 on/off, the `CLK48SEL` mux, the RNG clock) instead of forcing HSI48 off as it once
 /// did (which fought embassy's clock state until the next STOP exit). STOP power is unaffected
 /// either way: HSI48 stops in STOP, and with `PWR_CR.ULP` set VREFINT is off there too.
-fn rand_u32_trng() -> Option<u32> {
+///
+/// **Continuous test** (the FIPS 140-2 style "stuck output" check): a word equal to the one before
+/// it fails the whole draw. A healthy source repeats a 32-bit word with probability 2⁻³², and a
+/// stuck one must never feed a key.
+fn trng_words(out: &mut [u32]) -> bool {
     use embassy_stm32::pac::rcc::vals::Clk48sel;
     use embassy_stm32::pac::{RCC, RNG, SYSCFG};
 
@@ -390,7 +432,7 @@ fn rand_u32_trng() -> Option<u32> {
     let clk48_was = RCC.ccipr().read().clk48sel();
     RCC.crrcr().modify(|w| w.set_hsi48on(true));
 
-    let mut out = None;
+    let mut ok = false;
     // Bounded wait for HSI48 (it also covers the VREFINT start-up when the reference was off).
     let mut spins = 0u32;
     let mut ready = true;
@@ -406,9 +448,11 @@ fn rand_u32_trng() -> Option<u32> {
         RCC.ahbenr().modify(|w| w.set_rngen(true));
         RNG.cr().write(|w| w.set_rngen(true)); // rngen=1, ie=0, ced=0 (clock-check on)
 
-        // Wait for a conditioned word. A seed error (SEIS) means "clear it, toss a word,
-        // retry"; a clock error (CEIS) or a stall gives up (→ the SW fallback).
-        'read: for _ in 0..64 {
+        // Wait for each conditioned word. A seed error (SEIS) means "clear it, toss a word,
+        // retry"; a clock error (CEIS), a stall or a repeated word gives up (→ `false`).
+        let mut prev: Option<u32> = None;
+        let mut filled = 0;
+        'read: for _ in 0..64 + out.len() {
             spins = 0;
             loop {
                 let sr = RNG.sr().read();
@@ -418,12 +462,22 @@ fn rand_u32_trng() -> Option<u32> {
                 if sr.seis() {
                     RNG.sr().modify(|w| w.set_seis(false));
                     let _ = RNG.dr().read();
+                    prev = None; // the continuous test restarts after a reseed
                     break; // retry the outer loop
                 }
                 if sr.drdy() {
                     let w = RNG.dr().read();
-                    out = (w != 0).then_some(w);
-                    break 'read;
+                    if prev == Some(w) {
+                        break 'read; // stuck output: fail the whole draw
+                    }
+                    prev = Some(w);
+                    out[filled] = w;
+                    filled += 1;
+                    if filled == out.len() {
+                        ok = true;
+                        break 'read;
+                    }
+                    break; // next word
                 }
                 spins += 1;
                 if spins > 100_000 {
@@ -447,7 +501,10 @@ fn rand_u32_trng() -> Option<u32> {
     if !syscfg_was_on {
         RCC.apb2enr().modify(|w| w.set_syscfgen(false));
     }
-    out
+    if !ok {
+        out.fill(0);
+    }
+    ok
 }
 
 /// Software fallback for [`rand_u32`], **not cryptographic**. Mixes the chip UID, the
