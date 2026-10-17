@@ -56,7 +56,7 @@ use tower_protocol::{MsgType, decode_frame};
 
 // --- persistence (NS_APP) --------------------------------------------------------
 
-/// Registry format version marker (`tower_gateway::registry::FORMAT_VERSION`).
+/// Registry format marker (`tower_gateway::registry::FORMAT`).
 const KEY_FORMAT: u8 = 0x00;
 /// Registry buckets, locals `0x10..=0x12` (one `tower-gateway` bucket per KV value;
 /// `registry::BUCKETS` = 3). `0x13..=0x15` stay reserved for bucket growth. The gateway's
@@ -378,21 +378,22 @@ async fn run(b: Board) {
     // UID-derived); set it with `system settings set addr` (e.g. `addr=random`).
     let addr = shell::radio_addr(kv);
     STAT_ID.store(addr, Ordering::Relaxed);
-    // Registry format guard: refuse buckets written by a NEWER format (a firmware
-    // downgrade) instead of mis-decoding them as empty and stamping the marker back,
-    // which would silently discard every pairing. v1-or-unset stamps and proceeds.
+    // Registry format guard: buckets stamped with another marker were written with another
+    // record layout (firmware from another checkout). Refuse them instead of mis-decoding them
+    // as empty and stamping the marker back, which would silently discard every pairing. An
+    // unset marker (a fresh store) is stamped. Nothing is migrated.
     let mut fmt = [0u8; 1];
-    let newer_format =
-        matches!(app_kv.get_bytes(KEY_FORMAT, &mut fmt), Ok(Some(1)) if fmt[0] > registry::FORMAT_VERSION);
-    if newer_format {
+    let foreign_format =
+        matches!(app_kv.get_bytes(KEY_FORMAT, &mut fmt), Ok(Some(1)) if fmt[0] != registry::FORMAT);
+    if foreign_format {
         log::error!(
             target: "gateway",
-            "registry format v{} is newer than this firmware understands (v{}), registry left untouched; update the firmware",
+            "registry format {} is not this firmware's ({}), registry left untouched; reflash from the same checkout",
             fmt[0],
-            registry::FORMAT_VERSION
+            registry::FORMAT
         );
     } else {
-        let _ = app_kv.set_bytes(KEY_FORMAT, &[registry::FORMAT_VERSION]);
+        let _ = app_kv.set_bytes(KEY_FORMAT, &[registry::FORMAT]);
     }
 
     let band = read_band_setting(kv);
@@ -435,9 +436,9 @@ async fn run(b: Board) {
     // Install every registered node into the peer table, bucket-at-a-time. CAPACITY ==
     // MAX_PEERS is pinned above, so a refusal here is a real invariant break: a node
     // the registry holds but the radio won't decrypt for. Say so instead of going mute.
-    // (Skipped under the newer-format guard: those buckets must not be interpreted.)
+    // (Skipped under the format guard: those buckets must not be interpreted.)
     let mut node_count = 0u32;
-    if !newer_format {
+    if !foreign_format {
         for i in 0..registry::BUCKETS {
             for rec in registry::load(&buckets, i).iter() {
                 if !net.add_peer(rec.addr, &rec.key) {

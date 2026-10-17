@@ -17,15 +17,17 @@
 //! Registry churn (add / remove / rename) is operator-rate, so a bucket rewrite per
 //! change is wear-trivial next to the net layer's counter traffic. The encoded worst
 //! case is pinned by test against [`MAX_BUCKET_BYTES`] ≤ tower-kv's 256-byte value
-//! cap. The record layout is **persisted**: field order is load-bearing; evolve it
-//! append-only and bump [`FORMAT_VERSION`] on any change (the app stores the version
-//! at its own key and refuses buckets from a newer format).
+//! cap. The record layout is **persisted**: field order is load-bearing, and any layout
+//! change moves [`FORMAT`] (the app stores it at its own key and refuses buckets stamped
+//! with another marker; nothing is migrated).
 
 use heapless::{String, Vec};
 use serde::{Deserialize, Serialize};
 
-/// Persisted-format version (the app stores this next to the buckets).
-pub const FORMAT_VERSION: u8 = 1;
+/// Persisted-format marker (the app stores it next to the buckets). Not a version: nothing
+/// negotiates or migrates it. A registry stamped with another marker was written with another
+/// record layout and is refused, never decoded.
+pub const FORMAT: u8 = 1;
 /// Records per bucket. 6 × ~39 B encoded ≈ 235 B, one tower-kv value.
 pub const PER_BUCKET: usize = 6;
 /// Bucket count. 3 × [`PER_BUCKET`] = 18 slots ≥ the 16-peer capacity.
@@ -231,12 +233,12 @@ mod tests {
     /// The persisted `NodeRecord` postcard layout IS the on-EEPROM format: a serde field
     /// reorder or a postcard bump would silently mis-decode every stored bucket on upgrade
     /// (the same silent-drift class the protocol's schema tags guard on the wire). Pin the exact bytes
-    /// AND the format marker, so a layout change is a conscious, versioned decision.
+    /// AND the format marker, so a layout change is a conscious decision that moves the marker.
     #[test]
     fn node_record_golden_bytes() {
         assert_eq!(
-            FORMAT_VERSION, 1,
-            "if the record layout changes, bump FORMAT_VERSION deliberately"
+            FORMAT, 1,
+            "if the record layout changes, change FORMAT deliberately"
         );
         let mut name: String<MAX_NAME> = String::new();
         name.push_str("kitchen").unwrap();
