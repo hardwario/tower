@@ -142,8 +142,17 @@ it. Details: `crates/protocol/AGENTS.md`, "Changing the wire".
 
 - `cli-vX.Y.Z` releases the `tower` binary: `.github/workflows/release-cli.yml` checks that the
   tag matches `cli/Cargo.toml`, the commit is on `main` and CI is green for it, then builds
-  cross-platform archives (`tower-cli-vX.Y.Z-<target>`) with checksums and signed
+  cross-platform archives (`tower-cli-vX.Y.Z-<target>`, every Linux target in a cross image so
+  the binary needs glibc 2.18 at most) plus `tower-firmware-cli-vX.Y.Z.zip` (the product
+  firmware of the same commit, the matched set for that binary), with checksums and signed
   build-provenance attestations.
+- Tags are immutable (a ruleset), so a release whose build fails burns its version. Before
+  tagging, after any change to the build or its dependencies, dry-run the release: run the
+  workflow by hand on `main` (`gh workflow run release-cli.yml --ref main`); it runs the checks
+  and every build and uploads the archives as workflow artifacts, but skips the tag gate and
+  publishes nothing. Bump `cli/Cargo.toml` and `Cargo.lock` together (every build is
+  `--locked`), and tag only a commit whose CI run finished green (not cancelled). Tagging is the
+  user's call.
 - `tower-protocol`, `tower-flasher` and the other `crates/*` are internal path dependencies
   (`0.0.0`, `publish = false`): no releases, no tags. The `protocol-v*` tags already pushed
   (the hand-versioned wire releases), the imported `jolt-v*` tags (tower-flasher's history) and
