@@ -254,6 +254,15 @@ static UNPROVISIONED: led::Pattern = &[
 ];
 /// Fast blink while the OTA join runs.
 static JOINING: led::Pattern = &[led::Step::on(100), led::Step::off(150)];
+/// How long the unpaired double-blink runs before it stops (it costs LED current on a node
+/// that may sit unpaired in a drawer for months); any button press shows it again for as long.
+const UNPAIRED_CUE: Duration = Duration::from_secs(180);
+
+/// Backoff of the accelerometer interrupt wait when its line stays high after the source
+/// register was read (an I²C error left the latch set, or a stuck line): first 1 s, doubling
+/// to 5 min.
+const ACCEL_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const ACCEL_BACKOFF_MAX: Duration = Duration::from_secs(300);
 
 /// Post-uplink RX window when the gateway's ACK advertises a queued downlink. The
 /// gateway transmits ~20 ms after our uplink with one retry (~450 ms worst); 1 s
@@ -347,8 +356,9 @@ type AccelBus = Option<Lis2dh12<GuardedI2c>>;
 
 async fn run(b: Board) {
     // Hardware safety net: a wedged unit resets itself instead of dying in the field. The
-    // feeder wakes the low-power executor even from STOP; the L0 hardware ceiling (~26 s)
-    // keeps those wakes rare on this battery node.
+    // feeder wakes the low-power executor even from STOP; the longest nominal timeout (26 s,
+    // ~15 s on the fastest LSI, so a pet every ~7.4 s) keeps those wakes rare on this
+    // battery node.
     watchdog::enable(b.iwdg, b.spawner, Duration::from_secs(26));
 
     let led = led::init(
@@ -399,7 +409,7 @@ async fn run(b: Board) {
         b.radio_sdn,
         b.radio_irq,
     );
-    let (band, channel, key) = match provision {
+    let (band, channel) = match provision {
         Some(p) => (
             if p.band == mgmt::BAND_US915 {
                 Band::Us915
@@ -407,18 +417,25 @@ async fn run(b: Board) {
                 Band::Eu868
             },
             p.channel,
-            p.key,
         ),
-        None => (Band::DEFAULT, 0, [0u8; 16]),
+        None => (Band::DEFAULT, 0),
     };
     let mut net = match Net::new(
         radio,
         kv,
         NetConfig {
             addr,
-            key,
+            // NOT the link key: the node runs registered peers only, so the default key never
+            // seals or opens anything. The link key here used to be the fallback for a gateway
+            // `add_peer` refused (this node's own `addr` set to the gateway's): `send` then
+            // sealed under the link key with `src` = the gateway's address, the gateway's own
+            // nonces.
+            key: [0u8; 16],
             band,
             channel,
+            // A provisioning record means this store held a TX watermark before: if it is gone
+            // now, fail closed rather than restart the counter under the stored key.
+            keys_stored: provision.is_some(),
         },
     )
     .await
@@ -435,8 +452,23 @@ async fn run(b: Board) {
     // unprovisioned today, but there is no reason to keep that door. Also keeps the default
     // lane's EEPROM record unused.
     net.set_default_lane(false);
-    if let Some(p) = provision {
-        net.add_peer(p.gw_addr, &p.key);
+    // Persist the gateway's replay lane on every accepted downlink. A sleeping node hears a
+    // handful per boot, so the lazy default (every 32 accepts) never wrote it at all, and a
+    // recorded downlink (a `/system reboot`) replayed as fresh after every reboot, while the
+    // remote-shell dedup is RAM-only. Downlinks are rare: the wear is negligible.
+    net.set_lane_persist_period(1);
+    if let Some(p) = provision
+        && !net.add_peer(p.gw_addr, &p.key)
+    {
+        // Refused: the gateway's address is reserved or this node's own (`addr` set to it).
+        // Stay off the air rather than talk to a peer we cannot key (docs/gateway.md).
+        log::error!(
+            target: "button",
+            "gateway {:08X} refused as a peer (this node is {:08X}): radio off; fix the `addr` setting or re-pair",
+            p.gw_addr,
+            addr
+        );
+        provision = None;
     }
     let _ = net.sleep().await; // radio sleeps between events from the start
 
@@ -446,8 +478,11 @@ async fn run(b: Board) {
         addr,
         if provision.is_some() { "paired" } else { "UNPAIRED (hold the button to pair)" }
     );
+    // The unpaired cue runs for `UNPAIRED_CUE`, then stops; a button press shows it again.
+    let mut cue_until: Option<Instant> = None;
     if provision.is_none() {
         led.set_background(Some(UNPROVISIONED));
+        cue_until = Some(Instant::now() + UNPAIRED_CUE);
     }
 
     // Per-kind running counts since boot (RAM: a reset is a reboot, disambiguated
@@ -462,6 +497,13 @@ async fn run(b: Board) {
     // gesture longer, never shorter; a Release queued meanwhile is seen before the timer (the
     // button arm is polled first).
     let mut pressed_at: Option<Instant> = None;
+    // Consecutive undelivered uplinks: the periodic temperature uplink backs off on them
+    // (`tower_radio::uplink_backoff_s`), so a node whose gateway is gone does not spend a
+    // confirmed uplink with every retransmission on every period, forever.
+    let mut misses: u8 = 0;
+    // The accelerometer interrupt wait resumes at this instant (`None` = at once).
+    let mut accel_quiet: Option<Instant> = None;
+    let mut accel_backoff = ACCEL_BACKOFF_MIN;
 
     loop {
         let repair_due = pressed_at
@@ -469,11 +511,18 @@ async fn run(b: Board) {
             .map(|t| t + REPAIR_HOLD);
         let timer_due = next_temp
             .min(next_heartbeat)
-            .min(repair_due.unwrap_or(Instant::MAX));
+            .min(repair_due.unwrap_or(Instant::MAX))
+            .min(cue_until.unwrap_or(Instant::MAX));
+        let accel_wait = async {
+            if let Some(t) = accel_quiet {
+                Timer::at(t).await;
+            }
+            accel_int.wait_for_high().await
+        };
         match select4(
             btn.next_event(),
             Timer::at(timer_due),
-            accel_int.wait_for_high(),
+            accel_wait,
             console::mgmt_next(),
         )
         .await
@@ -499,15 +548,29 @@ async fn run(b: Board) {
                 // long hold always starts the OTA join, regardless of the per-event
                 // enables (which govern normal reporting once paired).
                 if provision.is_none() {
+                    // Someone is at the node: show the unpaired cue again.
+                    led.set_background(Some(UNPROVISIONED));
+                    cue_until = Some(Instant::now() + UNPAIRED_CUE);
                     if matches!(ev, button::Event::Hold) {
                         pressed_at = None; // this press is spent on the join
                         if let PairOutcome::Paired { rec, .. } =
                             pair(&mut net, addr, band, channel, kv, &led, PAIRING_WINDOW, None).await
                         {
                             provision = Some(rec);
+                            cue_until = None;
+                            misses = 0;
+                        } else {
+                            cue_until = Some(Instant::now() + UNPAIRED_CUE);
                         }
                     }
                     continue; // unpaired: no gateway to report events to
+                }
+                // Someone is at the node: end any backoff, so the next periodic uplink tries
+                // the gateway again on its normal period.
+                if misses > 0 {
+                    misses = 0;
+                    let period = read_u32_setting(kv, SET_THERM_PERIOD, 60).max(5) as u64;
+                    next_temp = next_temp.min(Instant::now() + Duration::from_secs(period));
                 }
 
                 // The per-event enable is the master switch: a disabled event is
@@ -526,10 +589,11 @@ async fn run(b: Board) {
                     kind,
                     count: counts[idx],
                 };
-                uplink(&mut net, provision, &msg, reps).await;
+                note(&mut misses, uplink(&mut net, provision, &msg, reps).await);
             }
 
-            // --- periodic: temperature and/or heartbeat due; or the re-pair gesture ---
+            // --- periodic: temperature and/or heartbeat due; the re-pair gesture; the end of the
+            // unpaired cue ---
             Either4::Second(()) => {
                 if repair_due.is_some_and(|due| Instant::now() >= due) {
                     // Held REPAIR_HOLD while paired (no Release seen): pair again. The current
@@ -540,37 +604,47 @@ async fn run(b: Board) {
                         pair(&mut net, addr, band, channel, kv, &led, PAIRING_WINDOW, provision).await
                     {
                         provision = Some(rec);
+                        misses = 0; // a fresh link: no backoff
                     }
                 }
                 let now = Instant::now();
+                if cue_until.is_some_and(|t| now >= t) {
+                    cue_until = None;
+                    led.set_background(None);
+                }
                 if now >= next_temp {
-                    let period = read_u32_setting(kv, SET_THERM_PERIOD, 60) as u64;
-                    next_temp = now + Duration::from_secs(period.max(5));
+                    let period = (read_u32_setting(kv, SET_THERM_PERIOD, 60) as u64).max(5);
+                    let heartbeat = (read_u32_setting(kv, SET_HEARTBEAT, 900) as u64).max(60);
                     if let Some(millic) = measure_temp(&mut bus).await {
                         let delta_mc = read_u32_setting(kv, SET_THERM_DELTA, 50) as i32 * 10;
-                        let heartbeat = read_u32_setting(kv, SET_HEARTBEAT, 900) as u64;
                         let changed = last_temp_sent.is_none_or(|last| (millic - last).abs() >= delta_mc);
                         let stale = last_temp_tx.elapsed() >= Duration::from_secs(heartbeat);
                         if provision.is_some() && (changed || stale) {
                             let msg = NodeMsg::Temperature { millic };
-                            if uplink(&mut net, provision, &msg, 3).await {
+                            let delivered = uplink(&mut net, provision, &msg, 3).await;
+                            if delivered {
                                 last_temp_sent = Some(millic);
                                 last_temp_tx = Instant::now();
                             }
+                            note(&mut misses, delivered);
                         }
                     }
+                    // The period, doubled per undelivered uplink in a row, capped at the heartbeat.
+                    let wait = tower_radio::uplink_backoff_s(period, heartbeat, misses);
+                    next_temp = Instant::now() + Duration::from_secs(wait);
                 }
                 if now >= next_heartbeat {
                     let heartbeat = read_u32_setting(kv, SET_HEARTBEAT, 900) as u64;
                     next_heartbeat = now + Duration::from_secs(heartbeat.max(60));
                     if provision.is_some() {
-                        send_info(&mut net, provision).await;
+                        note(&mut misses, send_info(&mut net, provision).await);
                     }
                 }
             }
 
             // --- accelerometer tilt interrupt ---
             Either4::Third(()) => {
+                accel_quiet = None;
                 if let Some(face) = handle_tilt(&mut bus).await
                     && provision.is_some()
                 {
@@ -578,7 +652,21 @@ async fn run(b: Board) {
                         kind: AccelKind::Motion,
                         face,
                     };
-                    uplink(&mut net, provision, &msg, 3).await;
+                    note(&mut misses, uplink(&mut net, provision, &msg, 3).await);
+                }
+                // Reading the source register clears the latch, so a line still high here is no
+                // fresh event: the read failed (an I²C error) or the line is stuck. Back off
+                // before waiting on it again: `wait_for_high` returns at once on a high line,
+                // and looping on it without an await starved the executor until the watchdog
+                // reset the node, a boot loop that rewrote the TX watermark every boot.
+                if accel_int.is_high() {
+                    if accel_backoff == ACCEL_BACKOFF_MIN {
+                        warn!(target: "button", "accel interrupt stuck high (I2C error?), backing off");
+                    }
+                    accel_quiet = Some(Instant::now() + accel_backoff);
+                    accel_backoff = (accel_backoff * 2).min(ACCEL_BACKOFF_MAX);
+                } else {
+                    accel_backoff = ACCEL_BACKOFF_MIN;
                 }
             }
 
@@ -593,10 +681,20 @@ async fn run(b: Board) {
                 handle_mgmt(req, &mut net, &mut provision, addr, band, channel, kv, &led).await;
                 if provision.is_some() {
                     led.set_background(None);
+                    cue_until = None;
+                } else {
+                    // Someone is on the cable (a failed JoinOpen too): show the cue again.
+                    led.set_background(Some(UNPROVISIONED));
+                    cue_until = Some(Instant::now() + UNPAIRED_CUE);
                 }
             }
         }
     }
+}
+
+/// Count one uplink outcome into the consecutive-miss counter the periodic uplink backs off on.
+fn note(misses: &mut u8, delivered: bool) {
+    *misses = if delivered { 0 } else { misses.saturating_add(1) };
 }
 
 /// How an OTA pairing attempt ([`pair`]) ended.
@@ -612,6 +710,9 @@ enum PairOutcome {
     NoWindow,
     /// A handshake completed but the gateway never acknowledged the new key: discarded.
     Unconfirmed,
+    /// The handshake named a gateway the peer table refuses (a reserved address, or this
+    /// node's own): discarded, nothing sent under the key.
+    Refused,
 }
 
 /// OTA pairing (a button hold, the re-pair gesture or the cable's `JoinOpen`): run the handshake
@@ -672,8 +773,15 @@ async fn pair(
     };
 
     // The commit round: provisional key in RAM, confirmed NodeInfo uplinks until one is ACKed.
-    // (`add_peer` refuses only a reserved or our own address, which `join` never returns.)
-    let _ = net.add_peer(rec.gw_addr, &rec.key);
+    // The provisional peer is a registered one (the commit uplink is refused for anyone else,
+    // registered peers only), and its lane is persisted on every accept like the paired one's.
+    // A refusal (a reserved address, or our own) leaves the peer table as it was: never fall
+    // back to another key for that address, and persist nothing.
+    if !net.add_peer(rec.gw_addr, &rec.key) {
+        warn!(target: "button", "join: gateway {:08X} refused as a peer, discarded", rec.gw_addr);
+        led.set_background(idle_led);
+        return PairOutcome::Refused;
+    }
     Timer::after_millis(COMMIT_SETTLE_MS as u64).await;
     let mut attempt = 0u8;
     loop {
@@ -746,8 +854,14 @@ async fn handle_tilt(bus: &mut AccelBus) -> Option<u8> {
     let Some(accel) = bus else {
         return None; // bus mid-swap (can't happen: swaps are scoped to measure_temp)
     };
-    if !accel.tilt_triggered().unwrap_or(false) {
-        return None; // spurious edge / rate-limited by the driver's min_interval
+    match accel.tilt_triggered() {
+        Ok(true) => {}
+        Ok(false) => return None, // spurious edge / rate-limited by the driver's min_interval
+        Err(_) => {
+            // The latch stays set: the caller backs off on the still-high line.
+            warn!(target: "button", "accel interrupt source read failed (I2C)");
+            return None;
+        }
     }
     // Let the unit settle, then read which face is up for the event's context.
     Timer::after_millis(300).await;
@@ -768,8 +882,8 @@ fn encode_info(buf: &mut [u8; MAX_RADIO_PAYLOAD]) -> Option<usize> {
 }
 
 /// Send the identity/heartbeat `Info` (also the delivery opportunity for queued
-/// downlinks on an otherwise idle node).
-async fn send_info(net: &mut Net, provision: Option<Provisioned>) {
+/// downlinks on an otherwise idle node). Returns whether it was delivered.
+async fn send_info(net: &mut Net, provision: Option<Provisioned>) -> bool {
     let name = console::firmware_name();
     let msg = NodeMsg::Info(NodeInfo {
         firmware_name: name.as_str(),
@@ -777,7 +891,7 @@ async fn send_info(net: &mut Net, provision: Option<Provisioned>) {
         session_id: console::session_id(),
         sleeping: true,
     });
-    uplink(net, provision, &msg, 3).await;
+    uplink(net, provision, &msg, 3).await
 }
 
 /// One commit attempt of [`pair`]: the `Info` (the host auto-names the node from it), confirmed,
@@ -1076,6 +1190,12 @@ async fn handle_mgmt(
                 return;
             }
             let app_kv = kv.scope(NS_APP);
+            // The key must be minted for this provision (the host's cable pairing mints one each
+            // time): it rides this board's TX counter from wherever it stands now, and an old
+            // key on a counter that restarted (a replacement board pinned to the old node's
+            // address, given the key the gateway revealed) would repeat that key's nonces. Only
+            // the node that used a key knows its counter history, and keys never leave a node,
+            // so nothing could carry a floor for it here (docs/security-model.md, 4.1).
             let rec = Provisioned {
                 gw_addr: p.gw_addr,
                 key: p.key,
@@ -1136,6 +1256,7 @@ async fn handle_mgmt(
                 PairOutcome::NoWindow | PairOutcome::Unconfirmed => {
                     respond_empty(req_id, mgmt::MGMT_TIMEOUT).await;
                 }
+                PairOutcome::Refused => respond_empty(req_id, mgmt::MGMT_BAD_ARG).await,
             }
         }
         // Gateway-side ops: this device is a node.

@@ -184,8 +184,12 @@ watermark is persisted *ahead* in blocks of `RESERVE=1024`, so after a reboot th
 device resumes **at or above** the last value it could have sent, never reusing
 one (at most one block is skipped per reboot). A receiver accepts only a strictly
 higher counter than it has seen from that sender and lazy-persists the last-seen
-every `P=32` accepts (replay window ≤ P across a receiver reboot). CCM verify
-happens *before* the replay comparison, so a forged frame can't poison the state.
+every `P=32` accepts (replay window ≤ P across a receiver reboot), or on every accept after
+`net.set_lane_persist_period(1)`: what a sleeping node does (the push-button), since it hears a
+handful of downlinks per boot and a lazy lane would never be written at all (a recorded
+`/system reboot` downlink then replayed after every reboot). The gateway keeps `P`: its lanes see
+every uplink, and its host drops a replayed uplink by counter instead (docs/gateway.md). CCM
+verify happens *before* the replay comparison, so a forged frame can't poison the state.
 
 Every TX path (DATA, ACK, FHSS beacon, bulk announce/session/request, JOIN frames) takes its
 counter from **one allocator** (`TxCounter::alloc` in `tower-net`, driven by
@@ -194,10 +198,28 @@ awaits anything. A future dropped mid-flight (a `select(send, Timer)` timing out
 bulk) therefore can't leave its counter for the next transfer to seal different plaintext under
 the same nonce (`fhss_send`, `afa_send` and bulk used to advance only after their awaits). If
 the watermark record is ever missing on a store that shows *any* other network-layer record
-(a peer lane, the default-lane last-seen, the FHSS epoch), the boot fails **closed** (TX locked)
-rather than resuming at 1. A receiver re-ACKs a retransmit of a peer's last confirmed counter at
-most `MAX_REPS − 1 = 9` times (the most a legitimate sender can ask for), so replaying a
-captured frame (no key needed) can't drain the duty budget or TX counters through ACKs.
+(a peer lane, the default-lane last-seen, the FHSS epoch), or whose app says it holds stored keys
+(`NetConfig::keys_stored`: the node's provisioning record, the gateway's non-empty registry), the
+boot fails **closed** (TX locked) rather than resuming at 1. The keys are written once, early in
+the EEPROM log, while the watermark and the lanes are rewritten often and sit late in it, so one
+corrupt record can orphan every network record at once and leave only the keys: without the
+app's word that store looked virgin. A receiver re-ACKs a retransmit of a peer's last confirmed
+counter at most `MAX_REPS − 1 = 9` times (the most a legitimate sender can ask for), so replaying
+a captured frame (no key needed) can't drain the duty budget or TX counters through ACKs.
+
+**A key's counter history moves with the key.** The TX counter belongs to the device, the key does
+not: a key a gateway exports (`NodeRevealKey`) and a gateway at the same address imports after its
+counter restarted (a wiped store, a replacement dongle pinned to the old address) would repeat
+every `(key, src, counter)` nonce of its earlier life. So the export carries two **floors**:
+`Net::tx_floor()` (the durable watermark, above every counter the exporter sent under any key;
+`u32::MAX` when its history is unknown after a lost watermark) and the node's last-seen. The
+importer raises its counter to the TX floor **durably** before it stores or uses the key
+(`Net::raise_tx_floor`, the `TxCounter::raise_to` kernel: the watermark is written and read back,
+and the key is refused if that fails) and starts the node's lane at the other one
+(`Net::raise_peer_floor`). A freshly minted key carries 0 for both. Floors are a snapshot: they
+cover what was sent until the export, so they are read from the live gateway when its keys move.
+A node key is never moved onto another node's counter: only the node knows its own history and
+keys never leave a node, so every `Provision` carries a key minted for it.
 
 **Peer table & topologies.** Keys are per-peer. `add_peer(peer_addr, &key)` binds
 a peer address to its own AES key and its own replay lane; an unregistered peer falls
@@ -208,7 +230,11 @@ directions, so a peer at our address would collide nonces).
 
 **Registered peers only.** `net.set_default_lane(false)` turns the default lane off: `recv`
 drops a frame from any unregistered `src` on its clear header: before CCM, before any ACK,
-without touching the default lane's EEPROM record. **A gateway must run this way** (the product
+without touching the default lane's EEPROM record, and `send` (likewise `afa_send`, `fhss_send`,
+bulk) refuses an unregistered `dest` (`RadioError::NotRegistered`) before it takes a counter:
+nothing is ever sealed under the default key, which is then no link key (the product node's is
+all-zero, so a peer `add_peer` refused can never fall back to its link key with a colliding `src`).
+**A gateway must run this way** (the product
 gateway and the `radio_gateway` example do): a default key that is not secret (the product
 derives it from the gateway's own, cleartext address) would otherwise let anyone seal frames
 from an unregistered address (say, a removed node) that the gateway ACKs and forwards as
@@ -402,8 +428,8 @@ if let Some(peer) = net.join(addr, PAIRING_WINDOW).await {
 instead, with no window and no key on air. The host registered it with `add_peer` (the
 gateway's `NodeAdd`). The two cases it is for: a node whose key was provisioned by cable or in
 the factory, which finds its gateway on air without a pairing window; and a replacement
-gateway that imported the node keys (`NodeAdd` of each registry entry), which the nodes re-join
-without re-pairing:
+gateway that imported the node keys (`NodeAdd` of each registry entry, with the counter floors its
+`NodeRevealKey` export carried), which the nodes re-join without re-pairing:
 
 ```
 node  JOIN_REQ  flags KEYED, src = node, dest = 0,    payload node(4 LE)          under the node key
@@ -430,8 +456,13 @@ host  JOIN_RESP flags KEYED, src = host, dest = node, payload req counter(4 LE) 
   `JoinError::WrongMode` without transmitting, and the host leaves the request unanswered.
 - **Re-keying composes with the lane rule.** A node re-provisioned under a **new** key (cable
   `NodeAdd`) gets a fresh replay lane on the host (the lane record's key-check value no
-  longer matches), so it can keyed-join even with a restarted counter. A node whose counter
-  restarted under the **same** key is refused (`stale counter`): re-add it under a new key.
+  longer matches), so it can keyed-join even with a restarted counter. A counter that restarted
+  under the **same** key is not a refused join but nonce reuse, already on air by the time the
+  host refuses it (`stale counter` is detection, not protection), so it is prevented where
+  counters restart: `Net::new` fails closed when the app holds stored keys but the watermark is
+  gone, cable provisioning always mints a fresh key, and a key moved to another gateway carries
+  its counter floors (*A key's counter history moves with the key*, above). A replacement gateway
+  that imports the registry this way has its counter above the old one's, and the nodes accept it.
 - **Hosting is opt-in; operator switch.** A device answers keyed joins only after
   `net.set_keyed_join(true)`; until then `recv` ignores keyed JOIN_REQs silently, and an image
   that never calls it does not link the responder at all (it is a function pointer installed
@@ -589,7 +620,7 @@ separate ~20 ms deaf window.
 | Replay-lane record (`NS_NET` 0x10-0x1F) | 12 B `addr ‖ last_seen ‖ KCV` (any other length is invalid) |
 | Confirmed latency (N=3 / N=10) | ≈ 1.06 s / ≈ 3.55 s worst case |
 | Replay counter | 32-bit; starts at 1; **saturating** at 2³²−1 (fail-closed, not wrap); re-key well before |
-| Reserve block `RESERVE` / lazy-persist `P` | 1024 / 32 transfers |
+| Reserve block `RESERVE` / lazy-persist `P` | 1024 / 32 transfers (`P` = 1 on a sleeping node, `set_lane_persist_period`) |
 | Max bulk / chunk index | 16 MiB (streamed) / 24-bit |
 | Bulk idle timeout | 30 s |
 | Star nodes / P2P peers | ≤ 16 / ≤ 8 |

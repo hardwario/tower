@@ -47,6 +47,7 @@ async fn run(b: Board) {
             key: KEY,
             band: tower::radio::config::Band::Us915,
             channel: 0,
+            keys_stored: false,
         },
     )
     .await

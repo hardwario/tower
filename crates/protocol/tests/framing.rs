@@ -455,6 +455,8 @@ fn every_mgmt_op_roundtrips() {
             key,
             name: "kitchen",
             flags: NODE_FLAG_SLEEPING,
+            tx_floor: 2049,
+            rx_floor: 77,
         },
         MgmtOp::NodeRemove { addr: 7 },
         MgmtOp::NodeUpdate {
@@ -540,6 +542,8 @@ fn every_mgmt_record_roundtrips() {
     let nk = NodeKey {
         addr: 6,
         key: [0xA5; 16],
+        tx_floor: 0x0001_0400,
+        rx_floor: u32::MAX,
     };
     assert_eq!(rec_roundtrip(&nk, &mut buf), nk);
     let paired = Paired { addr: 7, sas: 12_345 };

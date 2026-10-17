@@ -121,23 +121,32 @@ fn dispatch(cmd: NodesCmd, opts: &MqttOpts) -> Result<u8> {
             let Some(n) = nodes.iter().find(|n| n.addr == topics::node_hex(id)) else {
                 bail!("node vanished from the registry");
             };
+            // The key with the counter floors that must travel with it (a `node_add` of this key
+            // on another gateway passes them back: without them that gateway could repeat the
+            // key's nonces). A snapshot: read it when the key moves, from the live gateway.
             let key = if keys {
                 let data = s.rpc_ok("reveal_key", serde_json::json!({ "addr": topics::node_hex(id) }))?;
-                data.get("key").and_then(|v| v.as_str()).map(String::from)
+                let floor = |name: &str| data.get(name).and_then(|v| v.as_u64()).unwrap_or(0);
+                data.get("key")
+                    .and_then(|v| v.as_str())
+                    .map(|k| (k.to_string(), floor("tx_floor"), floor("rx_floor")))
             } else {
                 None
             };
             if json {
                 let mut v = serde_json::to_value(n)?;
-                if let Some(k) = &key {
+                if let Some((k, tx_floor, rx_floor)) = &key {
                     v["key"] = serde_json::Value::String(k.clone());
+                    v["tx_floor"] = (*tx_floor).into();
+                    v["rx_floor"] = (*rx_floor).into();
                 }
                 println!("{}", serde_json::to_string_pretty(&v)?);
             } else {
                 print_table(std::slice::from_ref(n));
-                if let Some(k) = &key {
+                if let Some((k, tx_floor, rx_floor)) = &key {
                     eprintln!("[tower] key material follows; treat this line as a secret");
                     println!("key: {}", sanitize_line(k));
+                    println!("tx_floor: {tx_floor}  rx_floor: {rx_floor}");
                 }
             }
             Ok(EXIT_OK)

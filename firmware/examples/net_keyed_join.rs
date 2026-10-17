@@ -64,6 +64,7 @@ async fn run(b: Board) {
             key: NODE_KEY,
             band: Band::DEFAULT,
             channel: 0,
+            keys_stored: false,
         },
     )
     .await

@@ -81,6 +81,9 @@ impl Net {
         if self.txc.locked() {
             return false; // fail closed (nonce safety): can't reserve the session counter
         }
+        if !self.may_send_to(dest) {
+            return false; // registered peers only: never seal under the default key
+        }
         let key = self.key_for(dest);
         let total_len = source.total_len();
         let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
@@ -183,6 +186,9 @@ impl Net {
     pub async fn bulk_fetch_into<S: BulkSink>(&mut self, src: u32, sink: &mut S) -> Option<usize> {
         if self.txc.locked() {
             return None; // fail closed (nonce safety): BULK_REQ frames consume TX counters
+        }
+        if !self.may_send_to(src) {
+            return None; // registered peers only: never seal under the default key
         }
         let key = self.key_for(src);
         // Wait for the bulk-announce.

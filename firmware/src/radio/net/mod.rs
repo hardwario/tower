@@ -240,6 +240,15 @@ pub struct NetConfig {
     pub key: [u8; 16],
     pub band: Band,
     pub channel: u8,
+    /// The app holds **persisted keys** from an earlier boot (a provisioning record, a
+    /// non-empty node registry). Then a store without a TX watermark is not a fresh device but
+    /// a damaged one: the boot fails closed (TX locked) instead of starting the counter at 1
+    /// under the old keys. Those records are written once and early in the EEPROM log, while
+    /// the watermark and the lanes are rewritten often and sit late in it, so one corrupt
+    /// record can orphan every network record at once and leave only the keys standing.
+    /// `false` for compiled-in keys (the examples), where a first boot and a lost store look
+    /// the same.
+    pub keys_stored: bool,
 }
 
 /// The network layer over one SPIRIT1 radio.
@@ -258,6 +267,8 @@ pub struct Net {
     peers: [Option<Peer>; MAX_PEERS],
     /// Replay lane for senders not in the peer table (the single-link lane).
     default_lane: ReplayLane,
+    /// Lazy-persist period of every replay lane ([`set_lane_persist_period`](Self::set_lane_persist_period)).
+    lane_persist: u8,
     /// The TX-counter kernel: monotonic counter + reserve-ahead watermark + the fail-closed
     /// lock (`tower_net::txctr`: the CCM nonce anti-reuse invariant lives there; this
     /// module owns its EEPROM persistence). See [`alloc_counter`](Self::alloc_counter)
@@ -323,7 +334,10 @@ impl Net {
         // last-seen (the original rule) left "watermark lost → fail closed" dead exactly where
         // it matters: a lost watermark there resumed at counter 1 under the same keys (nonce
         // reuse). `has_record` takes any length, so a malformed record still counts.
-        let prior_use = has_record(nkv, KEY_LASTSEEN)
+        // The app's stored keys count too (`NetConfig::keys_stored`): they can outlive every
+        // network record, and resuming at 1 under them would reuse their nonces.
+        let prior_use = cfg.keys_stored
+            || has_record(nkv, KEY_LASTSEEN)
             || has_record(nkv, KEY_FHSS_EPOCH)
             || (0..MAX_PEERS as u8).any(|l| has_record(nkv, KEY_LASTSEEN_BASE + l));
         let (mut txc, boot_watermark) = TxCounter::resume(stored_watermark, prior_use);
@@ -353,6 +367,7 @@ impl Net {
             default_lane_enabled: true,
             peers: [None; MAX_PEERS],
             default_lane: ReplayLane::new(last_seen),
+            lane_persist: tower_net::replay::P as u8,
             txc,
             kv,
             duty,
@@ -385,6 +400,19 @@ impl Net {
         self.default_lane_enabled = enabled;
     }
 
+    /// Persist every replay lane once per `period` accepted frames (default
+    /// [`P`](tower_net::replay::P) = 32; rounded to a power of two in `1..=P`). A receiver
+    /// restored from EEPROM after a reboot is up to `period - 1` frames behind, so that many
+    /// recorded frames replay into it as fresh. `1` closes that window at one small EEPROM
+    /// record per accepted frame: what a **sleeping node** wants (it hears a handful of
+    /// downlinks per boot, so a lazy lane would never be persisted at all and a recorded
+    /// `/system reboot` downlink could be replayed after every reboot). A gateway keeps the
+    /// default: its lanes see every uplink, and per-frame writes would wear the part
+    /// (docs/storage.md); its host drops replayed uplinks by counter instead.
+    pub fn set_lane_persist_period(&mut self, period: u8) {
+        self.lane_persist = tower_net::replay::persist_period(period);
+    }
+
     /// The active spectrum-access mode ([`Access::Duty`] unless AFA/FHSS was enabled).
     #[must_use]
     pub fn access(&self) -> Access {
@@ -414,6 +442,47 @@ impl Net {
     #[must_use]
     pub fn reserve_watermark(&self) -> u32 {
         self.txc.reserve_limit()
+    }
+
+    /// This device's TX counter floor: every counter it has sent, under any key, is below it
+    /// (`u32::MAX` = unknown, after a lost watermark). It travels with an exported key (the
+    /// gateway's `NodeRevealKey`), see [`raise_tx_floor`](Self::raise_tx_floor).
+    #[must_use]
+    pub fn tx_floor(&self) -> u32 {
+        self.txc.floor()
+    }
+
+    /// Raise the TX counter to at least `floor`, **durably** (watermark written and read back),
+    /// before a key that another device (or this one, before its store was lost) already used is
+    /// installed: the counter is per device and the nonce is `src ‖ counter ‖ …`, so a key
+    /// installed where the counter restarted would repeat its old nonces. Returns `false` when
+    /// the floor could not be made durable (TX is then locked): do NOT install the key, a
+    /// reboot would resume below the floor. The decision is [`TxCounter::raise_to`].
+    pub fn raise_tx_floor(&mut self, floor: u32) -> bool {
+        let nkv = self.kv.scope(NS_NET);
+        self.txc.raise_to(floor, |watermark| {
+            nkv.set_bytes(KEY_WATERMARK, &watermark.to_le_bytes()).is_ok()
+                && read_u32(nkv, KEY_WATERMARK) == Some(watermark)
+        })
+    }
+
+    /// Raise a registered peer's replay lane to `seen` (the last-seen an exported key carried):
+    /// none of that peer's recorded frames at or below it is accepted any more. Never lowers a
+    /// lane; persists it when it moved. `false` if the peer is not registered.
+    pub fn raise_peer_floor(&mut self, peer_addr: u32, seen: u32) -> bool {
+        let Some(i) = self.peer_slot(peer_addr) else {
+            return false;
+        };
+        let p = self.peers[i].as_mut().unwrap();
+        if p.lane.raise(seen) {
+            let (local, key) = (p.lane_local, p.key);
+            let kcv = self.ccm.key_check(&key);
+            let _ = self
+                .kv
+                .scope(NS_NET)
+                .set_bytes(local, &lane_record(peer_addr, seen, kcv));
+        }
+        true
     }
 
     /// Current last-seen counter on the default lane (single-link diagnostics).
@@ -577,6 +646,16 @@ impl Net {
             .position(|p| matches!(p, Some(pe) if pe.addr == peer_addr))
     }
 
+    /// Whether a frame may be sealed for `dest`: a registered peer, or anyone while the default
+    /// lane serves unregistered peers. Registered-peers-only holds in both directions: with the
+    /// default lane off the default key is no link key (a gateway derives it from its public
+    /// address; a node's is all-zero), and a frame sealed under it for an unregistered `dest`
+    /// (a peer `add_peer` refused, e.g. one at our own address) would be readable by anyone,
+    /// or collide with that address's own nonces.
+    fn may_send_to(&self, dest: u32) -> bool {
+        self.default_lane_enabled || self.peer_slot(dest).is_some()
+    }
+
     /// AES key for `peer_addr`: the peer's key if registered, else the default key.
     fn key_for(&self, peer_addr: u32) -> [u8; 16] {
         match self.peer_slot(peer_addr) {
@@ -595,13 +674,16 @@ impl Net {
     }
 
     /// Record acceptance of `counter` from `src`: advance that lane's last-seen
-    /// and lazy-persist every `P` accepts (replay window ≤ P across a reboot, docs/radio.md).
-    /// The cadence decision is the lane kernel's ([`ReplayLane::accept`]); the EEPROM write is ours.
+    /// and lazy-persist every `P` accepts (replay window ≤ P across a reboot, docs/radio.md),
+    /// or every [`set_lane_persist_period`](Self::set_lane_persist_period) accepts.
+    /// The cadence decision is the lane kernel's ([`ReplayLane::accept_every`]); the EEPROM
+    /// write is ours.
     fn lane_accept(&mut self, src: u32, counter: u32) {
+        let every = self.lane_persist;
         match self.peer_slot(src) {
             Some(i) => {
                 let p = self.peers[i].as_mut().unwrap();
-                if p.lane.accept(counter) {
+                if p.lane.accept_every(counter, every) {
                     let (peer_addr, local, key) = (p.addr, p.lane_local, p.key); // addr-bound local
                     // The KCV is recomputed (one AES block per P accepts) rather than kept
                     // resident: 4 B × MAX_PEERS of statics is stack the gateway can't spare.
@@ -613,7 +695,7 @@ impl Net {
                 }
             }
             None => {
-                if self.default_lane.accept(counter) {
+                if self.default_lane.accept_every(counter, every) {
                     let _ = self
                         .kv
                         .scope(NS_NET)
@@ -674,6 +756,9 @@ impl Net {
         }
         if data.len() > MAX_PAYLOAD {
             return SendResult::Error(RadioError::TooLong); // MTU: use bulk for >74 B (docs/radio.md)
+        }
+        if !self.may_send_to(dest) {
+            return SendResult::Error(RadioError::NotRegistered); // registered peers only
         }
         // Consume the counter NOW, before sealing, before anything goes on air or awaits.
         // The nonce is derived from `counter`, so the counter must be spent even if this

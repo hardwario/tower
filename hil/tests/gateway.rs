@@ -81,6 +81,8 @@ fn gateway_bridges_push_button_end_to_end() {
                 key,
                 name: "bench",
                 flags: mgmt::NODE_FLAG_SLEEPING,
+                tx_floor: 0,
+                rx_floor: 0,
             },
             Duration::from_secs(4),
         )
@@ -228,6 +230,8 @@ fn gateway_stack_high_water_within_budget() {
                     key,
                     name: "n",
                     flags: mgmt::NODE_FLAG_SLEEPING,
+                    tx_floor: 0,
+                    rx_floor: 0,
                 },
                 Duration::from_secs(6),
             )

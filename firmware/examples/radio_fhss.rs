@@ -68,6 +68,7 @@ async fn run(b: Board) {
             key: KEY,
             band: Band::Us915,
             channel: 0,
+            keys_stored: false,
         },
     )
     .await

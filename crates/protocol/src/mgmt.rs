@@ -121,14 +121,24 @@ pub enum MgmtOp<'a> {
     Describe,
     /// Stream the registry as [`NodeEntry`] records. Gateway.
     NodeList,
-    /// Install a node paired over the cable: persist `(addr, key, name, flags)` and
-    /// start accepting its traffic. The host minted `key` and provisioned the node
-    /// on its own serial port. Gateway.
+    /// Install a node: persist `(addr, key, name, flags)` and start accepting its traffic.
+    /// Either a key the host just minted (cable pairing: it provisioned the node on its own
+    /// serial port; both floors `0`) or a key moved from another gateway, with the two counter
+    /// floors its [`NodeKey`] export carried: the CCM nonce is `src ‖ counter ‖ …` and the
+    /// counter belongs to the device, so a key installed on a device whose counter restarted
+    /// would repeat that key's nonces. Gateway.
     NodeAdd {
         addr: u32,
         key: [u8; 16],
         name: &'a str,
         flags: u8,
+        /// Raise this gateway's own TX counter to at least this (durably) before the key is
+        /// stored or used: the exporting gateway's [`NodeKey::tx_floor`]. `u32::MAX` (an unknown
+        /// history) is refused with [`MGMT_BAD_ARG`]: re-key that node instead.
+        tx_floor: u32,
+        /// Start the node's replay lane at this counter: the exporting gateway's
+        /// [`NodeKey::rx_floor`], so the node's recorded frames do not replay into the new one.
+        rx_floor: u32,
     },
     /// Forget a node: registry, RAM peer slot, and its queued downlinks. Gateway.
     NodeRemove { addr: u32 },
@@ -229,11 +239,20 @@ pub struct NodeEntry<'a> {
     pub queued: u8,
 }
 
-/// Reply record for [`MgmtOp::NodeRevealKey`].
+/// Reply record for [`MgmtOp::NodeRevealKey`]: the key plus the counter history that must
+/// travel with it, for a [`MgmtOp::NodeAdd`] on another gateway (or on this one after its store
+/// was lost). Both floors are a snapshot taken when the key was read: they cover only what had
+/// been sent until then, so read them from the live gateway at the moment its keys move, and
+/// let it send nothing more under them.
 #[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub struct NodeKey {
     pub addr: u32,
     pub key: [u8; 16],
+    /// The gateway's TX counter floor: every counter it has sent, under any key, is below it.
+    /// `u32::MAX` = its counter history is unknown (a lost watermark): the key cannot move.
+    pub tx_floor: u32,
+    /// The highest counter the gateway accepted from this node (`0` if never heard).
+    pub rx_floor: u32,
 }
 
 /// Delayed reply record for [`MgmtOp::PairingOpen`]: a node joined the window (its handshake

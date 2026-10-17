@@ -302,6 +302,10 @@ struct NodeMirror {
     session_id: Option<u32>,
     /// Live remote-shell queue entries (ref = gateway queue item id).
     pending: Vec<PendingShell>,
+    /// The highest radio counter of this node's uplinks published by this process (`None`
+    /// until the first, and again after a `node_add` re-key). An uplink at or below it is a
+    /// replay and is dropped: see [`Engine::on_uplink`].
+    last_counter: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -636,8 +640,17 @@ impl Engine {
     /// mirror aside) is dropped and counted, not published, whatever let it through the
     /// gateway. Before the first registry sync the mirror is simply empty, so those
     /// uplinks are parked and replayed once it lands.
+    ///
+    /// **Replays across a gateway reboot.** The dongle persists each node's replay lane only
+    /// every 32 accepted frames (EEPROM wear), so after a reboot it accepts up to 31 of a
+    /// node's already-seen counters once more: recorded uplinks an attacker replays would be
+    /// published as new events. The host keeps the node's highest published counter and drops
+    /// anything at or below it. A node's counter only grows (it jumps to its next reserved block
+    /// across a node reboot), so nothing genuine is lost; a re-keyed node (a `node_add`, a new
+    /// pairing) starts over. RAM-only: a host restarted together with the dongle has no record
+    /// (docs/security-model.md, 4.1).
     fn on_uplink(&mut self, u: HeldUplink, out: &mut Vec<Output>) {
-        if self.nodes.iter().all(|n| n.entry.addr != u.src) {
+        let Some(node) = self.nodes.iter_mut().find(|n| n.entry.addr == u.src) else {
             if !self.registry_synced {
                 if self.held.len() < HELD_UPLINKS {
                     self.held.push(u);
@@ -651,7 +664,16 @@ impl Engine {
                 rssi: u.rssi,
             })));
             return self.drop_unregistered(u.src, out);
+        };
+        if let Some(last) = node.last_counter.filter(|&last| u.counter <= last) {
+            out.push(Output::Event(Event::Log(format!(
+                "dropped uplink from {}: counter {} <= {last} already published (a replay, e.g. after a gateway reboot)",
+                topics::node_hex(u.src),
+                u.counter
+            ))));
+            return;
         }
+        node.last_counter = Some(u.counter);
         let HeldUplink {
             src,
             counter,
@@ -1034,6 +1056,10 @@ impl Engine {
                     0
                 };
                 self.provisional_node(*id, name, flags);
+                // A (re-)added key may come with a counter that restarted: forget the old one.
+                if let Some(n) = self.nodes.iter_mut().find(|n| n.entry.addr == *id) {
+                    n.last_counter = None;
+                }
                 self.rpc_ok(out, &p, serde_json::Value::Null);
                 self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
             }
@@ -1067,10 +1093,17 @@ impl Engine {
             (OpKind::RevealKey { id }, None) => match postcard::from_bytes::<NodeKey>(&p.data) {
                 Ok(k) => {
                     let hex: String = k.key.iter().map(|b| format!("{b:02x}")).collect();
+                    // The counter floors travel with the key: a `node_add` of it elsewhere
+                    // passes them back (the firmware's NodeAdd docs).
                     self.rpc_ok(
                         out,
                         &p,
-                        serde_json::json!({ "addr": topics::node_hex(*id), "key": hex }),
+                        serde_json::json!({
+                            "addr": topics::node_hex(*id),
+                            "key": hex,
+                            "tx_floor": k.tx_floor,
+                            "rx_floor": k.rx_floor,
+                        }),
                     );
                 }
                 Err(_) => self.rpc_err(out, &p, "malformed key record"),
@@ -1406,12 +1439,26 @@ impl Engine {
             "node_list" => self.issue(out, OpKind::NodeList, MgmtOp::NodeList, rpc),
             "node_add" => {
                 // Cable pairing: the client provisioned the node on its own serial
-                // port and registers (id, key, name) here.
+                // port and registers (id, key, name) here, with a freshly minted key (no
+                // floors). A key moved from another gateway (a `reveal_key` there) must bring
+                // that answer's `tx_floor` / `rx_floor` along, or this gateway may repeat the
+                // key's old nonces.
                 let id = params
                     .get("addr")
                     .and_then(|v| v.as_str())
                     .and_then(topics::parse_node_hex);
                 let key = params.get("key").and_then(|v| v.as_str()).and_then(parse_key_hex);
+                let floor = |name: &str| match params.get(name) {
+                    None | Some(serde_json::Value::Null) => Some(0),
+                    Some(v) => v.as_u64().and_then(|f| u32::try_from(f).ok()),
+                };
+                let (Some(tx_floor), Some(rx_floor)) = (floor("tx_floor"), floor("rx_floor")) else {
+                    return self.rpc_err_direct(
+                        out,
+                        &me,
+                        "node_add: tx_floor / rx_floor must be u32 numbers",
+                    );
+                };
                 let name = params
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -1435,6 +1482,8 @@ impl Engine {
                     key,
                     name: name.as_str(),
                     flags,
+                    tx_floor,
+                    rx_floor,
                 };
                 self.issue(
                     out,
@@ -1870,6 +1919,7 @@ impl Engine {
             kind: String::new(),
             session_id: None,
             pending: Vec::new(),
+            last_counter: None,
         });
     }
 
@@ -1948,12 +1998,14 @@ impl Engine {
                     kind: o.kind.clone(),
                     session_id: o.session_id,
                     pending: std::mem::take(&mut o.pending),
+                    last_counter: o.last_counter,
                 }),
                 None => next.push(NodeMirror {
                     entry,
                     kind: String::new(),
                     session_id: None,
                     pending: Vec::new(),
+                    last_counter: None,
                 }),
             }
         }
@@ -2721,7 +2773,13 @@ mod tests {
         let key = [
             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
         ];
-        let rec = postcard::to_stdvec(&NodeKey { addr: 0xAB12, key }).unwrap();
+        let rec = postcard::to_stdvec(&NodeKey {
+            addr: 0xAB12,
+            key,
+            tx_floor: 3073,
+            rx_floor: 42,
+        })
+        .unwrap();
         let out = reply(&mut e, req_id, MGMT_OK, &rec);
         let raw = publishes(&out, "tower/gateway/rsp/u-rk");
         assert_eq!(raw.len(), 1);
@@ -2729,6 +2787,91 @@ mod tests {
         assert!(rsp.ok);
         assert_eq!(rsp.data["addr"], "0x0000ab12");
         assert_eq!(rsp.data["key"], "0123456789abcdef0001020304050607");
+        // The counter history travels with the key.
+        assert_eq!(rsp.data["tx_floor"], 3073);
+        assert_eq!(rsp.data["rx_floor"], 42);
+    }
+
+    /// `node_add` hands a moved key's counter floors to the gateway (absent = 0, a freshly
+    /// minted key) and refuses floors that are not u32 numbers.
+    #[test]
+    fn node_add_carries_the_counter_floors() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-a1","op":"node_add","params":{"addr":"0x0000ef56","key":"00112233445566778899aabbccddeeff","tx_floor":3073,"rx_floor":42}}"#,
+        ));
+        let (_, op) = out.iter().find_map(sent_op).expect("NodeAdd issued");
+        assert!(
+            op.contains("tx_floor: 3073") && op.contains("rx_floor: 42"),
+            "{op}"
+        );
+        // The first is in flight, so this one waits its turn in the queue (one request at a time).
+        e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-a2","op":"node_add","params":{"addr":"0x0000ef57","key":"00112233445566778899aabbccddeeff"}}"#,
+        ));
+        let op = queued_ops(&e)
+            .into_iter()
+            .find(|op| op.contains("addr: 61271")) // 0x0000ef57
+            .expect("NodeAdd queued");
+        assert!(op.contains("tx_floor: 0") && op.contains("rx_floor: 0"), "{op}");
+        for (i, bad) in [r#""12""#, "-1", "4294967296", "1.5"].into_iter().enumerate() {
+            let req = format!(
+                r#"{{"id":"u-b{i}","op":"node_add","params":{{"addr":"0x0000ef58","key":"00112233445566778899aabbccddeeff","tx_floor":{bad}}}}}"#
+            );
+            let out = e.handle(mqtt_in("tower/gateway/cmd", req.as_bytes()));
+            assert!(out.iter().find_map(sent_op).is_none(), "{bad} must be refused");
+            assert!(
+                rpc_rsp(&out, &format!("u-b{i}"))
+                    .error
+                    .unwrap()
+                    .contains("tx_floor")
+            );
+        }
+    }
+
+    fn click_uplink(src: u32, counter: u32) -> Input {
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(
+            &NodeMsg::Button {
+                kind: radio::ButtonKind::Click,
+                count: 1,
+            },
+            &mut env,
+        )
+        .unwrap();
+        Input::SerialFrame(SerialMsg::Uplink {
+            src,
+            counter,
+            rssi: -60,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        })
+    }
+
+    /// Replays across a gateway reboot: the dongle's lanes are persisted lazily, so it may
+    /// forward an already-seen counter again; the host publishes each counter once, in order,
+    /// and a re-key (`node_add`) lets a restarted counter through.
+    #[test]
+    fn uplink_at_or_below_the_last_counter_is_dropped() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let button = "tower/nodes/0x0000ab12/event/button";
+        assert_eq!(publishes(&e.handle(click_uplink(0xAB12, 40)), button).len(), 1);
+        assert!(publishes(&e.handle(click_uplink(0xAB12, 40)), button).is_empty());
+        assert!(publishes(&e.handle(click_uplink(0xAB12, 12)), button).is_empty());
+        // A node reboot jumps its counter to the next reserved block: still published.
+        assert_eq!(publishes(&e.handle(click_uplink(0xAB12, 1065)), button).len(), 1);
+        // Re-keyed: the node may restart at 1.
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-rk2","op":"node_add","params":{"addr":"0x0000ab12","key":"00112233445566778899aabbccddeeff","name":"kitchen"}}"#,
+        ));
+        let (req_id, _) = out.iter().find_map(sent_op).expect("NodeAdd issued");
+        reply(&mut e, req_id, MGMT_OK, &[]);
+        assert_eq!(publishes(&e.handle(click_uplink(0xAB12, 1)), button).len(), 1);
     }
 
     #[test]

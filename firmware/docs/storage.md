@@ -156,7 +156,8 @@ The SDK is deliberately frugal (nothing writes per radio message):
 | State (namespace) | When it writes | Frequency |
 |---|---|---|
 | TX-counter watermark (`NS_NET`) | reserve-ahead: once per `RESERVE` = 1024 sends, and once at boot | amortized to ~nothing |
-| Per-lane last-seen (`NS_NET`) | lazy: once per `P` = 32 *accepted receives* on a lane | **∝ RX traffic** |
+| Per-lane last-seen (`NS_NET`) | lazy: once per `P` = 32 *accepted receives* on a lane (every accept on a sleeping node: `set_lane_persist_period(1)`) | **∝ RX traffic** |
+| Registry format marker (`NS_APP`, gateway) | once, on a fresh store (never rewritten per boot) | once |
 | Session id (`NS_SYS`) | once per boot (suppressed while boot-looping) | ∝ boots |
 | FHSS epoch (`NS_NET`) | once per gateway (master) boot | ∝ gateway boots |
 | Settings (`NS_SHELL`) | on an explicit setting change | user-driven, rare |
@@ -175,7 +176,14 @@ Both live in the host-tested `tower-net` decision crate (`crates/net`: `txctr::R
   fewer last-seen writes, but a **larger replay window across a reboot**: after a reset a
   receiver can accept up to `P` already-seen counters before the persisted last-seen catches up.
   Smaller `P` tightens that window at the cost of more writes. It is a security/wear trade-off,
-  not a free dial.
+  not a free dial, and it is per `Net` (`set_lane_persist_period`): the push-button persists
+  on every accept (it hears a few downlinks per boot, so a lazy lane was never written and a
+  recorded downlink replayed after every reboot), the gateway keeps 32 (its host drops replayed
+  uplinks by counter).
+
+`tower-kv` appends a record on every write, identical value or not (no read-compare skip): a
+value that rarely changes is written only when it does (the gateway's registry format marker is
+stamped once on a fresh store, not on every boot).
 
 ## Wear telemetry
 

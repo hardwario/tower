@@ -258,7 +258,7 @@ the TLS flags and `--prefix`; `<node>` is a `0xHHHHHHHH` address or a friendly n
 
 ```sh
 tower nodes list                                   # the gateway's registered nodes
-tower nodes show <node> [--keys]                   # one node (--keys reveals its AES key)
+tower nodes show <node> [--keys]                   # one node (--keys: its AES key + counter floors)
 tower nodes add --ota [--window 60] [--name N]     # pair over the air (node held in join mode)
 tower nodes add --port <SERIAL> [--name N]         # pair a node over its USB cable
 tower nodes rename <node> <name>
@@ -285,6 +285,18 @@ hold**: remove it on its gateway first (`tower nodes remove <node>`; OTA pairing
 registered address), open a window, then hold. Its old pairing stays in force unless the new one
 commits. The RPC waits the window plus 15 s; a join the gateway reports even later is logged as
 such and published, not dropped.
+
+**Moving a node key to another gateway** (a replacement dongle, or this one after a factory
+reset): `tower nodes show <node> --keys --json` on the live gateway gives the key and its two
+counter floors, `tx_floor` (the gateway's TX counter, above everything it sent) and `rx_floor`
+(the node's last counter it accepted). Register the node on the new gateway with the `node_add`
+RPC carrying all three (`{"addr", "key", "tx_floor", "rx_floor", "name"}`): the CCM nonce is
+`src ‖ counter`, the counter belongs to the gateway, not to the key, so without the floor a
+gateway at the same address would repeat the key's old nonces. The floors are a snapshot: read
+them right before the move and let the old gateway send nothing more. A key read earlier (a
+backup) is not safe on a gateway at the old address, and neither is one whose `tx_floor` is
+`4294967295` (that gateway lost its counter history; `node_add` refuses it): re-pair those nodes
+instead (`docs/security-model.md`).
 
 ### Exit codes
 

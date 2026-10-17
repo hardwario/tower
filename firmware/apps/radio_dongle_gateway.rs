@@ -67,15 +67,24 @@ const KEY_BUCKET_BASE: u8 = 0x10;
 #[derive(Clone, Copy)]
 struct EepromBuckets {
     kv: Scoped,
+    /// `false` under the registry format guard (buckets stamped by another firmware): they
+    /// are neither interpreted nor overwritten, so every write fails (`MGMT_STORAGE`).
+    writable: bool,
 }
 
 impl BucketIo for EepromBuckets {
     fn load(&self, index: usize, out: &mut [u8]) -> Result<Option<usize>, IoError> {
+        if !self.writable {
+            return Ok(None); // another layout: never decoded (reads as an empty registry)
+        }
         self.kv
             .get_bytes(KEY_BUCKET_BASE + index as u8, out)
             .map_err(|_| IoError)
     }
     fn store(&mut self, index: usize, bytes: &[u8]) -> Result<(), IoError> {
+        if !self.writable {
+            return Err(IoError); // "left untouched" means untouched, also by a later NodeAdd
+        }
         self.kv
             .set_bytes(KEY_BUCKET_BASE + index as u8, bytes)
             .map_err(|_| IoError)
@@ -351,8 +360,10 @@ fn read_band_setting(kv: Nv) -> Band {
 }
 
 async fn run(b: Board) {
-    // Hardware safety net: a hung gateway takes the whole network down; reset it within
-    // ~26 s (the L0 hardware ceiling) rather than waiting for someone to notice. Liveness-
+    // Hardware safety net: a hung gateway takes the whole network down; reset it rather than
+    // waiting for someone to notice. 26 s is the longest nominal timeout (embassy's 32 kHz LSI
+    // arithmetic); the real one is ~15 s to ~32 s across the LSI's datasheet spread, and the
+    // feeder pets at half the short end (~7.4 s; see `watchdog`). Liveness-
     // gated on the main loop below: the feeder task alone only proves the executor runs,
     // and the 2026-07-13 wedge (main loop parked on console backpressure after a lost
     // TC flag; LED blinking, IWDG fed, gateway deaf) sailed right past an ungated feeder.
@@ -378,7 +389,10 @@ async fn run(b: Board) {
 
     let kv = b.kv;
     let app_kv = kv.scope(NS_APP);
-    let mut buckets = EepromBuckets { kv: app_kv };
+    let mut buckets = EepromBuckets {
+        kv: app_kv,
+        writable: true,
+    };
 
     // The gateway's own radio address = the `addr` base setting (pinned or
     // UID-derived); set it with `system settings set addr` (e.g. `addr=random`).
@@ -387,19 +401,26 @@ async fn run(b: Board) {
     // Registry format guard: buckets stamped with another marker were written with another
     // record layout (firmware from another checkout). Refuse them instead of mis-decoding them
     // as empty and stamping the marker back, which would silently discard every pairing. An
-    // unset marker (a fresh store) is stamped. Nothing is migrated.
+    // unset marker (a fresh store), or a value of another size at that local (another app's
+    // record: a board re-flashed from the node app), is stamped, once: the marker is NOT
+    // rewritten on every boot when it is already there (tower-kv appends a record per write,
+    // identical value or not). Nothing is migrated.
     let mut fmt = [0u8; 1];
-    let foreign_format =
-        matches!(app_kv.get_bytes(KEY_FORMAT, &mut fmt), Ok(Some(1)) if fmt[0] != registry::FORMAT);
+    let foreign_format = match app_kv.get_bytes(KEY_FORMAT, &mut fmt) {
+        Ok(Some(1)) => fmt[0] != registry::FORMAT,
+        Ok(_) => {
+            let _ = app_kv.set_bytes(KEY_FORMAT, &[registry::FORMAT]);
+            false
+        }
+        Err(_) => false, // unreadable: write nothing now
+    };
     if foreign_format {
         log::error!(
             target: "gateway",
-            "registry format {} is not this firmware's ({}), registry left untouched; reflash from the same checkout",
-            fmt[0],
+            "registry format marker is not this firmware's ({}): registry left untouched, node changes refused; reflash from the same checkout",
             registry::FORMAT
         );
-    } else {
-        let _ = app_kv.set_bytes(KEY_FORMAT, &[registry::FORMAT]);
+        buckets.writable = false;
     }
 
     let band = read_band_setting(kv);
@@ -423,6 +444,9 @@ async fn run(b: Board) {
             key: default_lane_key(addr),
             band,
             channel,
+            // Registered nodes mean this store held a TX watermark before: if it is gone now,
+            // fail closed rather than restart the counter under their keys.
+            keys_stored: registry::count(&buckets) > 0,
         },
     )
     .await
@@ -686,6 +710,13 @@ async fn handle_mgmt(
     let req_id = req.req_id;
     let now_ms = Instant::now().as_millis();
     let gw_addr = addr; // the arms below destructure their own `addr`
+    // Under the registry format guard nothing may join: a node could not be committed (the
+    // buckets refuse every write) and would be left half-paired.
+    if !buckets.writable && matches!(req.op, MgmtOp::NodeAdd { .. } | MgmtOp::PairingOpen { .. }) {
+        warn!(target: "gateway", "registry of another format: node changes refused");
+        respond_empty(req_id, mgmt::MGMT_STORAGE).await;
+        return;
+    }
     match req.op {
         MgmtOp::Describe => {
             let name = console::firmware_name();
@@ -745,13 +776,27 @@ async fn handle_mgmt(
             key,
             name,
             flags,
+            tx_floor,
+            rx_floor,
         } => {
             // Same address rules as OTA pairing and `Net::add_peer`: not reserved (0 /
             // broadcast) and not the gateway's own address (a node sharing it would collide CCM
             // nonces under its key). A cable NodeAdd MAY overwrite an existing node; it is an
-            // authenticated host action (re-provision), unlike an OTA join.
-            if !peer_addr_valid(addr, gw_addr) || name.len() > mgmt::MAX_NODE_NAME {
+            // authenticated host action (re-provision), unlike an OTA join. A `tx_floor` of
+            // `u32::MAX` is a key whose counter history is unknown (its gateway lost its
+            // watermark): it cannot move safely, the node must be re-keyed.
+            if !peer_addr_valid(addr, gw_addr) || name.len() > mgmt::MAX_NODE_NAME || tx_floor == u32::MAX {
                 respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
+                return;
+            }
+            // The key's counter history FIRST, durably, before the key is stored or used: our TX
+            // counter is per device and the nonce is `src ‖ counter ‖ …`, so a key some gateway
+            // at this address already used (this one, before its store was wiped and the
+            // registry re-imported) would otherwise repeat its old nonces from counter 1. A fresh
+            // key carries 0 (nothing to do). Refused if the raise cannot be made durable.
+            if !net.raise_tx_floor(tx_floor) {
+                warn!(target: "gateway", "node {:08X}: TX counter floor {} not durable, not added", addr, tx_floor);
+                respond_empty(req_id, mgmt::MGMT_STORAGE).await;
                 return;
             }
             let mut n: heapless::String<{ registry::MAX_NAME }> = heapless::String::new();
@@ -769,6 +814,9 @@ async fn handle_mgmt(
                     if !net.add_peer(addr, &key) {
                         warn!(target: "gateway", "peer table refused {:08X}, node will not decrypt", addr);
                     }
+                    // A moved key's replay lane resumes where its old gateway left it, so the
+                    // node's recorded frames do not replay into this one (0 = nothing to do).
+                    let _ = net.raise_peer_floor(addr, rx_floor);
                     STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
                     info!(target: "gateway", "node {:08X} added ({})", addr, name);
                     respond_empty(req_id, mgmt::MGMT_OK).await;
@@ -804,8 +852,18 @@ async fn handle_mgmt(
         }
         MgmtOp::NodeRevealKey { addr } => match registry::find(buckets, addr) {
             // The one deliberate key-disclosure path (host asked explicitly; keys are
-            // otherwise never emitted on any interface).
-            Some(rec) => respond_record(req_id, &NodeKey { addr, key: rec.key }).await,
+            // otherwise never emitted on any interface). With the counter history that must
+            // travel with the key: our TX floor (above everything we sent, under any key) and
+            // the node's last-seen, for a `NodeAdd` elsewhere (docs/gateway.md).
+            Some(rec) => {
+                let record = NodeKey {
+                    addr,
+                    key: rec.key,
+                    tx_floor: net.tx_floor(),
+                    rx_floor: net.peer_last_seen(addr).unwrap_or(0),
+                };
+                respond_record(req_id, &record).await
+            }
             None => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
         },
         // No key in the request: the link key comes from the X25519 key agreement (docs/radio.md).

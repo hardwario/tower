@@ -71,9 +71,9 @@ Two **separately tagged** schemas ride these frames:
 |---|---|---|
 | `Describe` | both | `DeviceInfo` (role probe: the authoritative "is this a gateway?"; also the firmware name + version, for a host that missed the boot `Hello`) |
 | `NodeList` | gateway | `NodeEntry` × N (chunked) |
-| `NodeAdd {addr,key,name,flags}` | gateway | none (install a cable-paired node) |
+| `NodeAdd {addr,key,name,flags,tx_floor,rx_floor}` | gateway | none (install a cable-paired node, or a moved key with its counter floors) |
 | `NodeRemove {addr}` / `NodeUpdate {addr,name?,flags?}` | gateway | none |
-| `NodeRevealKey {addr}` | gateway | `NodeKey` (the only path that discloses a stored key) |
+| `NodeRevealKey {addr}` | gateway | `NodeKey` (the only path that discloses a stored key; with its counter floors) |
 | `PairingOpen {window}` / `PairingCancel` | gateway | `Paired {addr, sas}` (delayed; `sas` = the handshake's 6-digit SAS) / `MGMT_TIMEOUT` |
 | `QueuePush {node_addr,ttl,data}` | gateway | `QueueId` |
 | `QueueList {node_addr}` / `QueueDrop {node_addr,item?}` | gateway | `QueueEntry` × N / none |
@@ -155,9 +155,24 @@ define what the physical input *means*; the LED feedback is a separate fixed ind
   distinct shape is deliberate: a quick tap fires Press on the down edge and Release+Click
   together on the up edge, so a shared shape would blend on the one LED. The LED reacts only to
   *enabled* events.
-- **Pairing:** unpaired = a double-blink every 2 s (the background); pairing (the handshake and
-  the commit round) = a fast blink; afterwards the background goes dark when paired, or back to
-  the double-blink when the attempt left the node unpaired.
+- **Pairing:** unpaired = a double-blink every 2 s (the background) for 3 minutes after boot,
+  then dark (the cue costs LED current, and an unpaired node may sit in a drawer); any button
+  press, or a management request on the cable, shows it again for 3 minutes. Pairing (the
+  handshake and the commit round) = a fast blink; afterwards the background goes dark when
+  paired, or back to the double-blink (for 3 minutes) when the attempt left the node unpaired.
+
+### Radio duty and backoff
+
+The temperature is measured every `therm-period` and sent when it changed or the heartbeat is
+due. While uplinks go undelivered (the gateway switched off, out of range, the node removed),
+the period doubles per consecutive miss up to `heartbeat`, so an orphaned node no longer spends
+a confirmed uplink with every retransmission and ACK window on every period, forever. A delivery,
+a button press or a new pairing ends the backoff. The accelerometer's interrupt line backs off
+the same way (1 s doubling to 5 min) while it stays high after its source register was read (an
+I²C error, a stuck line), instead of re-reading it in a loop with no await (which starved the
+executor until the watchdog reset the node, a boot loop). A button held past `hold-time`, or
+stuck, waits for the release edge instead of polling every 5 ms (the re-pair gesture's 12 s
+clock runs in the main loop, from the Press, so it does not need the polling).
 
 ### `/button simulate <ms>`
 
@@ -204,9 +219,23 @@ gateway test.
   the node reboots into its new identity; watch for the fresh `Hello`.
   `Provision` answers `BAD_ARG` for a reserved address (`0` / `0xFFFFFFFF`) as either end, or a
   `gw_addr` equal to the node's own (effective) address (a shared `src` would collide CCM nonces).
+  The key must be minted for that provision (the CLI's cable pairing mints one every time): it
+  rides the board's TX counter from where it stands, so an old key on a fresh board (a
+  replacement pinned to the old node's address) would repeat that key's nonces.
 - The node runs its net layer **registered peers only**: it accepts radio frames from its
-  gateway and nothing else, and while pairing accepts host frames only if they are addressed to
-  itself (and, after the first JOIN_RESP, only from that host).
+  gateway and nothing else, sends to nobody else, and while pairing accepts host frames only if
+  they are addressed to itself (and, after the first JOIN_RESP, only from that host). Its
+  `NetConfig::key` is all-zero, not the link key; the commit round's `NodeInfo` goes to the
+  gateway the handshake named, registered in RAM as a peer under the provisional key. A gateway
+  the peer table refuses (a reserved address, or the node's own: its `addr` set to the
+  gateway's) leaves the radio off with an error at boot, and discards a pairing before anything
+  is sent under its key (`JoinOpen` answers `BAD_ARG`): nothing is ever sealed under another key
+  with a colliding `src`.
+- The node persists its gateway's replay lane on **every** accepted downlink (a handful per
+  boot; the provisional peer of a commit round too), so a recorded downlink cannot be replayed
+  after a reboot; a stored provisioning record
+  with no TX watermark beside it boots TX-locked (docs/radio.md, *Counters, replay &
+  persistence*).
 
 ---
 
@@ -223,6 +252,15 @@ secret**; with the default lane on, anyone could seal "uplinks" under it from an
 (e.g. a removed node's). Re-transmits of a node's last confirmed frame are re-ACKed at most 9
 times per counter, so a replayed capture can't drain the EU duty budget through ACKs.
 
+**Replays across a gateway reboot.** The gateway persists each node's replay lane only every
+32 accepted uplinks (EEPROM wear: its lanes see every uplink), so after a reboot it accepts up to
+31 already-seen counters per node once more. Every `Uplink` frame carries the node's counter, and
+the host (`tower gateway`) publishes each node's counters strictly increasing: a replayed uplink
+at or below the highest it published is dropped and logged, not published as a new event. A
+node's counter only grows (it jumps to its next reserved block on a node reboot); a `node_add`
+re-key resets the host's record. The record is RAM-only: a host restarted together with the
+dongle starts without one (docs/security-model.md, 4.1).
+
 ### Node registry (`tower_gateway::registry`, EEPROM)
 
 Paired `(id, key, flags, name)` records, persisted in `NS_APP` postcard **buckets**, never
@@ -230,7 +268,13 @@ RAM-resident (bucket locals are ~270 B of transient stack), mirrored into the ne
 boot. `PER_BUCKET = 6`, `BUCKETS = 3` (18 slots ≥ capacity), **`CAPACITY = 16`** (matches the net
 layer's `MAX_PEERS`), `MAX_NAME = 16`. Written only on add/remove/rename/pairing-commit, never
 per-uplink (that would burn the part). Keys: `KEY_FORMAT = 0x00`, buckets from
-`KEY_BUCKET_BASE = 0x10`.
+`KEY_BUCKET_BASE = 0x10`. The format marker is stamped once, on a fresh store (not rewritten
+on every boot); a marker of another value (firmware from another checkout) leaves the registry
+untouched: it is not
+interpreted, `NodeAdd` and `PairingOpen` answer `MGMT_STORAGE`, and no bucket is written. A
+bucket that is present but cannot be read or decoded reads as empty (its nodes stop working,
+the rest of the network does not) and is never written over: a new node goes to another bucket,
+or the add answers `MGMT_STORAGE`.
 
 ### Downlink queue (`tower_gateway::queue`, RAM-only)
 
@@ -288,22 +332,38 @@ uplink cycle.
   pairing slice, so no stretch between check-ins (the 10 s liveness gate) stacks a PairingOpen's
   ephemeral, a pairing slice's handshake and a commit's EEPROM compaction.
 - **Cable**: the host (which alone can reach the node's serial port) provisions the node
-  directly, then registers it on the gateway with `NodeAdd{addr, key, name, flags}`. `NodeAdd`
-  answers `BAD_ARG` for `0`, `0xFFFFFFFF` or the gateway's own address; for an already-registered
-  address it **overwrites** the record (an authenticated, host-side re-provision). A node re-added
-  under a **new** key starts a fresh replay lane (its counter may have restarted); under the same
-  key it resumes its old one.
+  directly, then registers it on the gateway with `NodeAdd{addr, key, name, flags, tx_floor,
+  rx_floor}` (both floors 0: the key is freshly minted). `NodeAdd` answers `BAD_ARG` for `0`,
+  `0xFFFFFFFF` or the gateway's own address; for an already-registered address it **overwrites**
+  the record (an authenticated, host-side re-provision). A node re-added under a **new** key starts
+  a fresh replay lane (its counter may have restarted); under the same key it resumes its old one.
+- **Moving keys** (a replacement dongle, or this one after a factory reset): `NodeRevealKey`
+  answers the key with two counter floors, `tx_floor` (this gateway's durable TX watermark,
+  above every counter it sent under any key) and `rx_floor` (the node's last-seen). A `NodeAdd`
+  of that key elsewhere passes them back: the gateway first raises its own TX counter to
+  `tx_floor`, durably (watermark written and read back; `MGMT_STORAGE` and nothing stored if that
+  fails), then stores the key and starts the node's lane at `rx_floor`. Without that, a gateway at
+  the same address whose counter restarted would repeat every `(key, gw_addr, counter)` nonce of
+  the old one: a CCM break, invisible on the air, since a node does not check an ACK's own
+  counter. The floors are a **snapshot**: read them from the live gateway when the keys move,
+  and let it send nothing more under them; a key read earlier (a backup), or one exported with
+  `tx_floor = 0xFFFFFFFF` (that gateway lost its watermark; `NodeAdd` answers `BAD_ARG`), cannot
+  move to a gateway at the old address: re-pair those nodes. The CLI side: `tower nodes show
+  <node> --keys --json`, then the `node_add` RPC with `tx_floor` / `rx_floor` (cli/README.md).
 - **Keyed join (E4)**: a node registered with `NodeAdd` may also join on air under its own
   key (docs/radio.md "Keyed join"): the gateway answers it inside the normal receive slice, with
   no window and nothing to commit, and logs `node … joined (keyed)`. The node learns the
   gateway's address that way: a node provisioned by cable or in the factory finds its gateway
   without a pairing window, and a replacement gateway that imported the node keys (`NodeAdd` of
-  each entry of the old registry, read with `NodeRevealKey`) is re-joined without re-pairing. The `keyed-join` setting (default
+  each entry of the old registry, read with `NodeRevealKey`, with its floors: *Moving keys*
+  above) is re-joined without re-pairing. The `keyed-join` setting (default
   `on`) is the operator's switch; a refused keyed join (switched off, unregistered address,
   wrong key, stale counter, ...) is logged as `net: keyed join from XXXXXXXX refused: <reason>`,
   at most one line per 10 s. A node re-provisioned with a new key (and a restarted counter)
-  joins fine after its `NodeAdd`; one that restarted its counter under the unchanged key is
-  refused as stale until it is re-added under a new key.
+  joins fine after its `NodeAdd`. A counter restarted under the unchanged key would show up as
+  `stale counter`, but by then its frames have already reused nonces on air: that is why it must
+  not happen (a fresh key per provision, the fail-closed boot, the floors), not a state to
+  recover from by re-adding.
 
 ### RAM budget
 

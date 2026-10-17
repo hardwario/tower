@@ -47,7 +47,13 @@ pub enum RadioError {
     /// watermark would, after a reboot that resumes at the stale watermark, reuse a
     /// CCM nonce, so we fail **closed** rather than risk it. Recovers on the next
     /// boot once the watermark persists (free EEPROM space) or after a re-key.
+    /// Also set at boot when the watermark is lost (the store shows prior use or the app
+    /// holds stored keys): that needs a factory reset and fresh keys.
     NonceLocked,
+    /// The destination is not a registered peer and the device runs **registered peers
+    /// only** (`Net::set_default_lane(false)`): nothing is sealed under the default key,
+    /// which is not a link key there.
+    NotRegistered,
 }
 
 impl From<SpiError> for RadioError {
@@ -70,8 +76,9 @@ impl core::fmt::Display for RadioError {
             RadioError::FifoError => f.write_str("FIFO under/overflow"),
             RadioError::TooLong => f.write_str("frame longer than the 96-byte FIFO"),
             RadioError::NonceLocked => {
-                f.write_str("TX locked: could not persist the nonce watermark (EEPROM full/faulted)")
+                f.write_str("TX locked: the nonce watermark is lost or could not be persisted")
             }
+            RadioError::NotRegistered => f.write_str("not a registered peer (registered peers only)"),
         }
     }
 }

@@ -124,6 +124,9 @@ impl Net {
         if data.len() > MAX_PAYLOAD {
             return SendResult::Error(RadioError::TooLong);
         }
+        if !self.may_send_to(dest) {
+            return SendResult::Error(RadioError::NotRegistered); // registered peers only
+        }
         let addr = self.addr;
         // Consumed now, before any retune/LBT/TX/ACK await (see `Net::alloc_counter`): this used
         // to advance only after the whole rep loop, so a cancelled afa_send left the counter for

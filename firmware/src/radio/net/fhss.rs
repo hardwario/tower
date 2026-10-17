@@ -463,6 +463,9 @@ impl Net {
         if data.len() > MAX_PAYLOAD {
             return SendResult::Error(RadioError::TooLong);
         }
+        if !self.may_send_to(dest) {
+            return SendResult::Error(RadioError::NotRegistered); // registered peers only
+        }
         let anchor = match self.fhss.anchor {
             Some(a) => a,
             None => return SendResult::NotSynced,

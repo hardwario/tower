@@ -35,7 +35,8 @@ reasoning, and still need an on-air run before a production claim.
   EEPROM. Whoever has a node key can read and forge that node's traffic.
 - **TX counters**: the CCM nonce is `src ‖ counter ‖ bulk_index ‖ 0x0000`, so a counter that ever
   repeats under the same key is a full CCM break (keystream and tag forgery). Counter integrity is
-  as important as key secrecy.
+  as important as key secrecy. The counter belongs to the device and keys move between devices,
+  so a key's counter history must move with it (section 4.1).
 - **The gateway's node registry** (who is allowed to talk) and **downlink queue** (remote shell
   lines queued for sleeping nodes).
 - **Control of the gateway** through MQTT: add, remove or re-key nodes, open pairing windows,
@@ -68,13 +69,42 @@ STM32L0 AES engine, attacks requiring decapping the chip.
   caller seals or awaits anything, so a cancelled transfer can never leave a counter for reuse.
   The counter persists through a reserve-ahead watermark (RESERVE = 1024): boot resumes at the
   last durable watermark. Any network record without a readable watermark (a lost watermark),
-  a failed or unverifiable watermark write, and a watermark at the `u32` ceiling all start TX
-  **locked** (fail closed: receive still works, transmit refuses).
+  stored keys without one (the app says so: a node's provisioning record, a gateway's non-empty
+  registry; keys are written once and early in the EEPROM log, the watermark often and late, so
+  a corrupt record can orphan every network record and leave only the keys), a failed or
+  unverifiable watermark write, and a watermark at the `u32` ceiling all start TX **locked**
+  (fail closed: receive still works, transmit refuses).
+- **Keys move, counters do not.** A key exported from a gateway (`NodeRevealKey`) carries two
+  floors: the gateway's durable watermark (above every counter it sent under any key; `u32::MAX`
+  when its history is unknown) and the node's last-seen. A gateway importing the key
+  (`NodeAdd`) first raises its own counter to the TX floor, durably (written and read back,
+  refused otherwise), then stores the key and starts the node's lane at the other floor; an
+  unknown history (`u32::MAX`) is refused. Without it, a gateway at the same address whose
+  counter restarted (a wiped store, a replacement dongle pinned to the old address) re-imported
+  its registry and repeated every `(key, gw_addr, counter)` nonce of its earlier life, invisibly
+  (a node does not lane-check an ACK's own counter). A node key never moves to another node's
+  counter: only that node knows its history and keys never leave a node, so every `Provision`
+  carries a freshly minted key (the CLI mints one per cable pairing).
+- **No default-key fallback.** With registered peers only (both products), `send` refuses an
+  unregistered destination before taking a counter: nothing is sealed under the default key. (The
+  push-button used its link key as the default key: with its own address set to the gateway's,
+  `add_peer(gateway)` was refused and every uplink went out under the link key with the
+  gateway's `src`, colliding with the gateway's nonces. Its default key is now all-zero and
+  unused, and a refused gateway keeps the radio off.)
 - **Replay protection**: a per-peer replay lane (highest accepted counter) persisted in EEPROM,
   each lane record carrying a 4-byte key-check value (first 4 bytes of AES_K(0^128); CCM never
   encrypts an all-zero block, so it leaks nothing usable). A lane is restored only under the same
   key, so a re-keyed node starts a fresh window instead of being dropped as a replay. Counter 0 is
   always a replay. Re-ACKs of a retransmitted frame are capped per counter.
+- **Replay across a reboot.** A lane record lags the live lane by up to its persist period, and
+  that many recorded frames replay into a rebooted receiver. The period is per device: a node
+  persists its gateway's lane on **every** accepted frame (it hears a few downlinks per boot; with
+  the lazy period of 32 its lane was never written, and a recorded `/system reboot` downlink could
+  be replayed after every reboot of the node, repeatedly, since the remote-shell dedup is
+  RAM-only). The gateway keeps 32 (wear), so after a gateway reboot up to 31 recorded uplinks per
+  node are accepted again; the host bridge drops every uplink whose counter is not above the
+  highest it published for that node (counters only grow; a re-key resets it), so they never reach
+  MQTT as new events.
 - **Registered peers only**: the gateway and the push-button drop any sender that is not in the
   peer table on its cleartext header, before CCM work, before any ACK and before any EEPROM write.
   (A shared default-lane key existed and was computable from public data; it is disabled in the
@@ -83,11 +113,14 @@ STM32L0 AES engine, attacks requiring decapping the chip.
 
 ### 4.2 Getting a key onto a node
 
-Three paths; each refuses an address that is already registered, reserved (0, broadcast) or the
-gateway's own.
+Three paths; each refuses a reserved address (0, broadcast) or the gateway's own. OTA pairing
+also refuses an address that is already registered (the key agreement is unauthenticated until
+the SAS is compared, so a re-pair needs a `NodeRemove` first); a cable `NodeAdd` **overwrites** a
+registered address by design (an authenticated host action: the re-provision path).
 
 1. **Cable provisioning** (`tower nodes add --port`): the host generates the key with the OS
-   CSPRNG and writes it to the node and the gateway over USB. Nothing crosses the air.
+   CSPRNG and writes it to the node and the gateway over USB. Nothing crosses the air. The key is
+   fresh for every provision (a node's counter restarts with its store).
 2. **OTA pairing v3** (`tower nodes add --ota`, an operator-opened window): X25519 key agreement
    with a commitment round modelled on Bluetooth LE Secure Connections numeric comparison:
 
@@ -113,7 +146,8 @@ gateway's own.
    multiplication per side during the exchange (measured 1175 ms at the firmware's clock; RFC 7748
    vectors verified on hardware by `crypto_x25519_kat`).
 3. **Keyed join** (E4): a node that already holds its per-node key (cable or factory
-   provisioned, or a replacement gateway that imported the node keys) finds its gateway with two
+   provisioned, or a replacement gateway that imported the node keys with their counter floors,
+   section 4.1) finds its gateway with two
    frames sealed under that key; both ends prove the key, nothing secret travels, and a recorded
    request is a replay. The responder is opt-in per device and switchable on the gateway
    (`keyed-join` setting). Duty-cycle mode only.
@@ -244,12 +278,25 @@ gateway's own.
 9. **Lane eviction**: after more distinct peers than the 16 lane slots have ever been registered,
    a removed peer's lane can be evicted; re-adding that peer under the same key restarts its
    replay window. Re-add under a fresh key.
+10. **Counter floors are snapshots.** A key's export covers the counters its gateway had sent when
+    it was read. Imported after that gateway kept transmitting (a key kept as a backup, restored
+    onto a wiped gateway at the same address), the floor is too low and the counters sent in
+    between are reused. Nothing can detect it: export at the moment the keys move and retire the
+    old gateway, or re-pair the nodes. A node key re-provisioned onto a board whose counter
+    restarted is the same break; only the cable path's fresh key per provision prevents it (the
+    `Provision` op accepts any key a host sends).
+11. **Replay windows left.** The host's per-node counter check is RAM-only: a host restarted
+    together with the dongle publishes up to 31 recorded uplinks per node as new once (until the
+    node's next genuine uplink). The gateway queue is at-least-once: if every ACK of a delivered
+    downlink is lost, the gateway delivers it again under a fresh counter, and a node that
+    rebooted in between (a `/system reboot`) runs it again, bounded by the item's TTL. A failed
+    lane write on a node (EEPROM fault) leaves its persisted lane behind the live one.
 
 ## 6. Questions for the reviewer
 
 1. The nonce uniqueness argument (section 4.1): one allocator, consumed before any await,
-   reserve-ahead watermark, fail-closed boot conditions. Is there a path that reuses
-   `(key, src, counter, bulk_index)`?
+   reserve-ahead watermark, fail-closed boot conditions, counter floors on a moved key. Is there
+   a path that reuses `(key, src, counter, bulk_index)`?
 2. Pairing v3 (section 4.2): is the adaptation of BLE Secure Connections numeric comparison (SHA-256
    / HMAC-SHA256 / HKDF in place of AES-CMAC f4/f5/g2, our frame sequence) sound? Is the transcript
    binding complete? Does the refusal logic leave a window for registry takeover?
