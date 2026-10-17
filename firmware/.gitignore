@@ -1,0 +1,5 @@
+.DS_Store
+/target
+# Python tooling bytecode (tools/protocol_pin_check.py, tools/hwtest).
+__pycache__/
+*.pyc

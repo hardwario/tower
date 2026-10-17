@@ -1,0 +1,251 @@
+# CI for the HARDWARIO TOWER firmware SDK.
+#
+# The crate is an embedded `no_std` library for the STM32L083CZ (Cortex-M0+), so the workspace
+# default target is thumbv6m-none-eabi (see .cargo/config.toml). There is no hardware in CI, so we
+# BUILD the firmware (lib + examples + product bins), but the actual host-side unit tests live in
+# the extracted no_std leaf crates (tower-kv, tower-net-core, tower-radio-core, tower-gw-core,
+# tower-shell-core), run via `just test`, which builds those for the host triple.
+#
+# The `lockstep` job enforces the golden rule: tower-protocol is pinned by git tag in TWO
+# manifests here AND in the sibling consumer repos (tower-cli, tower-hil), and postcard is not
+# self-describing, so a tag mismatch silently mis-decodes the wire rather than erroring. It must
+# be caught in CI.
+#
+# Supply chain: every action is pinned to a full commit SHA (the comment names the release;
+# Dependabot keeps them current), the workflow token is read-only, checkouts don't persist it,
+# every cargo invocation is `--locked` to the committed Cargo.lock, and RustSec advisories are
+# checked (`audit`).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # MUST equal `channel` in rust-toolchain.toml (the `audit` job enforces it), so CI builds with
+  # exactly the toolchain a local checkout uses. Each job installs the file's full component +
+  # target set, so rustup never has to auto-install anything. Bump both together.
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  # 1. Build the embedded artifacts for thumbv6m (the workspace default target). The committed
+  #    .cargo/config.toml sets the target, so a bare `cargo build` cross-compiles for the L0.
+  embedded-build:
+    name: embedded build (thumbv6m)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml pin) + thumbv6m
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: thumbv6m-none-eabi
+          components: rustfmt, clippy, llvm-tools
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The committed .cargo/config.toml sets `linker = "flip-link"` (stack-overflow protection),
+      # so every embedded link needs the binary on PATH. Exact version + its own lockfile.
+      - name: Install flip-link (the workspace linker)
+        run: cargo install --locked --version 0.1.12 flip-link
+      # Lib + product bins + educational examples. Target defaults to thumbv6m
+      # (see .cargo/config.toml).
+      - name: Build lib + product bins + examples
+        run: cargo build --locked --release --lib --bins --examples
+      # flip-link puts the stack below the statics on the 20 KB part; guard that every
+      # product bin still leaves enough stack (see tools/check_ram_budget.py + docs/gateway.md).
+      - name: RAM budget guard
+        run: python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor
+      # The ~20 two-board examples gate their sender/node/peer halves behind role features, so a
+      # default-feature build leaves that half of the matrix compile-unchecked. Build each role
+      # so an API change that only a role-gated branch uses can't merge green (and then fail
+      # mid-bench-session or in the HIL harness's build_and_flash).
+      - name: Build role-gated example variants
+        run: |
+          cargo build --locked --release --examples --features role-node
+          cargo build --locked --release --examples --features role-node,node-2
+          cargo build --locked --release --examples --features role-gateway
+          cargo build --locked --release --examples --features role-peer-a
+          cargo build --locked --release --examples --features role-peer-b
+
+  # 2. Host-side unit tests: the extracted no_std cores. `just test` builds these for the host
+  #    triple (the firmware itself can't test).
+  host-test:
+    name: host tests (just test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml pin) + thumbv6m
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: thumbv6m-none-eabi
+          components: rustfmt, clippy, llvm-tools
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: 1.59.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # tower-kv + tower-net-core + tower-radio-core + tower-gw-core + tower-shell-core host tests
+      # (`just test` forwards extra args to each `cargo test`).
+      - name: just test
+        run: just test --locked
+      # `just examples` / `just apps` are hand-maintained (OS-independent recipes, no ls/sed);
+      # fail when they drift from the files on disk so the list can't silently go stale again.
+      - name: just examples / just apps match examples/*.rs / apps/*.rs
+        run: |
+          for kind in examples apps; do
+            diff -u <(for f in "$kind"/*.rs; do basename "$f" .rs; done | LC_ALL=C sort) \
+                    <(just "$kind" | LC_ALL=C sort)
+          done
+
+  # 3. Lint. clippy can't run `--all-targets` on thumbv6m (the tests need host libtest, which the
+  #    bare-metal target lacks), so the embedded clippy covers the buildable targets.
+  clippy:
+    name: clippy (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml pin) + clippy + thumbv6m
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: thumbv6m-none-eabi
+          components: rustfmt, clippy, llvm-tools
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: clippy (thumbv6m; lib, examples, bins)
+        run: cargo clippy --locked --lib --examples --bins -- -D warnings
+      # Lint the role-gated halves too: without these, a warning inside a
+      # #[cfg(feature = "role-…")] branch never fails CI (the build job compiles
+      # them, but only the default-feature set is linted above).
+      - name: clippy (role-gated example variants)
+        run: |
+          cargo clippy --locked --examples --features role-node -- -D warnings
+          cargo clippy --locked --examples --features role-node,node-2 -- -D warnings
+          cargo clippy --locked --examples --features role-gateway -- -D warnings
+          cargo clippy --locked --examples --features role-peer-a -- -D warnings
+          cargo clippy --locked --examples --features role-peer-b -- -D warnings
+
+  # 3b. Formatting. rustfmt.toml commits the house style (110 cols, stable options only;
+  #     comment content is never reflowed) exactly so this can gate; see its header.
+  fmt:
+    name: rustfmt (--check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml pin) + rustfmt
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: thumbv6m-none-eabi
+          components: rustfmt, clippy, llvm-tools
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  # 3c. The rustdoc story is part of the SDK surface: fail on broken intra-doc links or
+  #     malformed docs so the (extensive) API documentation can't rot silently.
+  docs:
+    name: rustdoc (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml pin) + thumbv6m
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: thumbv6m-none-eabi
+          components: rustfmt, clippy, llvm-tools
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # --document-private-items: the module docs deliberately narrate the internals
+      # (writer_loop, TX_CHANNEL, …) with intra-doc links; building the private items keeps
+      # those links live, and the -A silences the corresponding lint (everything else, i.e. broken
+      # links, bare URLs, malformed HTML, still fails the build).
+      - name: cargo doc (no deps, incl. private items)
+        run: cargo doc --locked --no-deps --lib --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings -A rustdoc::private-intra-doc-links
+      # The host-testable crates are published API in their own right (and their docs point at
+      # each other): their public docs must resolve too, with no private-link allowance.
+      - name: cargo doc (host-testable crates)
+        run: >-
+          cargo doc --locked --no-deps -p tower-kv -p tower-net-core -p tower-radio-core
+          -p tower-gw-core -p tower-shell-core
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # 4. RustSec advisories. Vulnerabilities fail the job; informational warnings (unmaintained /
+  #    unsound / yanked) are printed but do not, notably `bare-metal` (unmaintained,
+  #    RUSTSEC-2026-0110), pulled in by cortex-m 0.7 with no maintained replacement upstream yet.
+  audit:
+    name: cargo audit (RustSec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: CI toolchain == rust-toolchain.toml
+        run: |
+          want="$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' rust-toolchain.toml)"
+          if [ "$want" != "$RUST_TOOLCHAIN" ]; then
+            echo "::error::rust-toolchain.toml pins '$want' but the workflow uses RUST_TOOLCHAIN='$RUST_TOOLCHAIN'; bump both together"
+            exit 1
+          fi
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-audit@0.22.2
+      # `cargo-audit audit`, not `cargo audit`: it only reads Cargo.lock, so no toolchain is
+      # needed (the `cargo` proxy would otherwise resolve rust-toolchain.toml).
+      - name: cargo audit
+        run: cargo-audit audit
+
+  # 5. The golden rule: tower-protocol must be pinned to the SAME git tag in all in-repo
+  #    manifests AND in the sibling consumer repos (tower-cli, tower-hil), and every lockfile must
+  #    resolve that tag to the SAME commit: the one the tag names upstream right now. postcard
+  #    is not self-describing; a mismatch mis-decodes the wire without a build error, so it has
+  #    to be checked explicitly. tools/protocol_pin_check.py is the shared implementation:
+  #    tower-cli's and tower-hil's CI check out this repo and run the same file.
+  lockstep:
+    name: tower-protocol lockstep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The peers' default branches, as full trees (every manifest + Cargo.lock + .cargo config),
+      # under a hidden dir the manifest walk skips.
+      - name: Check out tower-cli (main)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: hardwario/tower-cli
+          ref: main
+          path: .lockstep/tower-cli
+          persist-credentials: false
+      - name: Check out tower-hil (main)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: hardwario/tower-hil
+          ref: main
+          path: .lockstep/tower-hil
+          persist-credentials: false
+      - name: Verify tower-protocol pin (firmware + tower-cli + tower-hil)
+        run: python3 tools/protocol_pin_check.py . .lockstep/tower-cli .lockstep/tower-hil --resolve-remote

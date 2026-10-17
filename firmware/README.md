@@ -1,0 +1,270 @@
+# HARDWARIO TOWER Firmware SDK (Embassy)
+
+An [Embassy](https://embassy.dev) firmware SDK for the **HARDWARIO TOWER Core
+Module** (STM32L083CZ). The crate is a **library** of reusable blocks (LED,
+button, TMP112 thermometer, LIS2DH12 accelerometer, addressable-LED strip, a
+framed host↔target **console** (logs/events/shell), EEPROM storage, USB-gated low
+power) plus a **SPIRIT1 sub-GHz radio stack** (secured AES-128-CCM network layer:
+confirmed delivery, replay protection, bulk transfer, OTA pairing); flashable
+programs live in [`examples/`](examples) and are built/flashed by name with
+[`just`](https://just.systems). Apps link to the full 192 KB flash at `0x0800_0000`.
+Each subsystem has a guide: [`docs/console.md`](docs/console.md),
+[`docs/radio.md`](docs/radio.md), [`docs/storage.md`](docs/storage.md), and
+[`docs/gateway.md`](docs/gateway.md) (the push-button + gateway product).
+
+| | |
+|---|---|
+| MCU | STM32L083CZ (Arm Cortex-M0+) |
+| Target | `thumbv6m-none-eabi` |
+| Clock | sysclk = HSI16 (16 MHz); RTC ← LSE 32.768 kHz crystal (PC14/PC15), STOP-mode wake |
+| LED | PH1, active-high |
+| Button | PA8, active-high (external pull-down), EXTI |
+| I2C | I2C2, PB10/PB11 (AF6), 100 kHz; TMP112 @ `0x49`, LIS2DH12 @ `0x19` |
+| Accelerometer | LIS2DH12, INT1 → PB6 (EXTI); orientation/dice + tilt |
+| Console | USART1, TX PA9 / RX PA10, 115200 8N1; framed host↔target link (logs/events/shell), see [`docs/console.md`](docs/console.md) |
+| RGB strip | WS2812B/SK6812 on PA1 (TIM2_CH2 PWM + DMA1_CH3) |
+| EEPROM | 6 KB byte-addressable data EEPROM @ `0x0808_0000` (no erase, ~100k+ cycles) |
+| USB sense | VBUS on PA12; gates STOP (stay awake while plugged in) |
+| Radio | SPIRIT1 (SPSGRF), SPI1 on PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 (EXTI); EU 868 / US 915 (runtime-switchable); see [`docs/radio.md`](docs/radio.md) |
+
+## Quick start
+
+```sh
+# One-time: cargo install --locked just flip-link cargo-binutils
+#           (Rust 1.99.1 + thumbv6m + llvm-tools come from rust-toolchain.toml via rustup)
+#           install the `tower` CLI for UART flashing + console (github.com/hardwario/tower-cli)
+#           (add probe-rs-tools only for SWD `cargo run`; tower UART flashing doesn't need it)
+just examples                  # list example names      (just apps → product names)
+just run example thermometer    # build + flash an example, then open the console TUI from boot
+just run app radio_push_button  # same, for a ready-made TOWER IoT Kit product (apps/)
+tower logs                      # re-attach to a running MCU's framed console (no reset)
+```
+
+## Module layout
+
+The library (`src/lib.rs`) exposes these reusable blocks:
+
+| Module | Responsibility |
+|---|---|
+| `src/button.rs` | Debounced button driver (click/hold) over any GPIO; `init_exti` (low-power, sleeps when idle) or `init_polled` (when the EXTI line is taken) |
+| `src/console.rs` | Framed host↔target console (`tower-protocol`): `log` backend, `print!`/`println!`, structured `event`s, and chunked shell responses over an interrupt-driven UART, paired with the `tower` host CLI; see [`docs/console.md`](docs/console.md) |
+| `src/shell.rs` | RouterOS-style shell with target-authoritative TAB completion and a declarative, EEPROM-backed settings framework (`Str`/`Uint`/`Int`/`Bool`/`Enum`/`Addr`); apps deep-merge their own commands + settings via `serve_ext`; see [`docs/console.md`](docs/console.md) |
+| `src/led.rs` | Non-blocking LED blink dispatcher (background pattern + priority instant sequences) |
+| `src/lis2dh12.rs` | LIS2DH12 accelerometer (HAL-independent): 10 Hz/normal mode, `dice()` orientation (1-6), and a hardware tilt/movement interrupt with selectable sensitivity + report `min_interval` |
+| `src/power.rs` | Notes on the SDK's low-power (STOP) policy; the USB-presence gating itself lives in `console::manager` (see [`docs/console.md`](docs/console.md)) |
+| `src/storage.rs` | Non-volatile storage in the data EEPROM: a raw byte area (`read`/`write` at offset) and a key-value store (`Kv`); values are raw scalars or postcard structs, CRC-framed, updated in place |
+| `src/strip.rs` | LED-strip effects over `ws2812`: solid/compound/gradient + rainbow, chase, breathe, scanner, sparkle; brightness 0-100 % with gamma |
+| `src/tmp112.rs` | TMP112 driver, generic over `embedded_hal::i2c::I2c` (HAL-independent) |
+| `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1): TIM2 PWM + DMA, RGB & RGBW, arbitrary length |
+| `src/radio/` | SPIRIT1 sub-GHz radio stack: chip driver (SPI/state machine/CSMA/sleep), RF config, hardware AES-128-CCM, frame codec, EU duty governor, and a secured network layer (`net`) with per-peer keys, confirmed delivery, replay protection, bulk transfer and OTA pairing; see [`docs/radio.md`](docs/radio.md) |
+| `src/board.rs` | `Board::take()` + `app!`, the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns the USB-gated `console::manager`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
+
+The shared wire-format crate
+**`tower-protocol`** lives in [its own repo](https://github.com/hardwario/tower-protocol),
+pinned here by git tag, the **same tag** the [`tower-cli`](https://github.com/hardwario/tower-cli)
+host and the [`tower-hil`](https://github.com/hardwario/tower-hil) bench harness pin (postcard is
+not self-describing, so all three move together; CI's `lockstep` job checks all three repos with
+`tools/protocol_pin_check.py`). To co-develop it locally without re-tagging, add a `paths` override to your
+`~/.cargo/config.toml` (the repo's `.cargo/config.toml` is committed for the build target, so
+the override can't live there): `paths = ["/path/to/tower-protocol"]`.
+
+### LED indication
+
+[`led`](src/led.rs) runs a dispatcher task that owns the pin (any GPIO via
+embassy's type-erased `Output`, with an `active_high` polarity flag). The app
+holds a cheap, copyable [`Led`] handle:
+
+- `set_background(Some(pattern))`: a looping status pattern (`None` clears it).
+- `play(sequence)`: a one-shot sequence that **preempts** the background, plays
+  once, then the background resumes.
+- `set_switch_delay(d)`: the off-gap inserted before an instant sequence
+  interrupts a running background, so the two read as distinct (default 250 ms).
+
+Patterns are `'static` slices of `Step` (`Step::on(ms)` / `Step::off(ms)`). The
+`blinky` example sets a ~2 s heartbeat background and plays a double-blink every
+5 s that preempts it; `button` flashes the LED on click/hold. A background
+pattern wakes the MCU once per period even on battery, so clear it when
+minimizing STOP power.
+
+## Low power
+
+The firmware runs on embassy-stm32's STOP-mode thread executor instead of the
+default `embassy-executor` one. It is selected with the `executor`/`entry`
+arguments on the `#[embassy_executor::main]` attribute, and enabled by the
+`executor-thread` + `low-power` features on `embassy-stm32` (with the matching
+features **removed** from `embassy-executor`, so there is only one `__pender`).
+
+Whenever every task is idle, the executor drops the core into the deepest
+available STOP mode. A general-purpose timer keeps `embassy-time` while the core
+runs; on entering STOP that time is handed off to the **RTC**, which is clocked
+from the LSE crystal (`config.rcc.ls = LsConfig::default_lse()`) and programmed
+to fire the wake-up. So during an idle gap the MCU draws ~µA rather than
+running continuously (~hundreds of µA). The TMP112 is independently low-power:
+one-shot + shutdown keeps it at ~1 µA between conversions.
+
+While USB is connected the board keeps itself awake instead, but via the console
+rather than a separate task: [`Board::take`](src/board.rs) auto-spawns the USB-gated
+[`console::manager`](src/console.rs), which builds the console UART whenever VBUS (PA12)
+is high. On the STM32L0 an enabled USART holds embassy's STOP refcount, so idle drops to
+plain Sleep (clocks live, so the console and EXTI stay responsive) rather than STOP.
+Unplug and the manager **drops** the UART, releasing the refcount so the executor returns
+to STOP; a PA12 edge (or the manager's ~500 ms poll) brings the console back on plug-in.
+Every app gets this for free; see [`docs/console.md`](docs/console.md).
+
+Two settings in [`board::init`](src/board.rs) matter here:
+
+- `config.min_stop_pause` (`0`): STOP threshold. **In embassy-stm32 0.6.0 a
+  nonzero value is a hard floor on the shortest awaitable delay, not a power
+  knob:** if the next alarm is sooner than the threshold, the time driver skips
+  arming the RTC wake-up but the executor still enters STOP, leaving no wake
+  source (the TIM is clock-gated) → the core hangs. Setting it to zero hands
+  every idle off to the RTC, so any wait length is safe; the RTC alarm clamps
+  sub-tick requests to a ~61 µs floor and wakes slightly early (the executor
+  re-sleeps), so correctness holds and power stays optimal for realistic waits.
+  See the long comment at the `min_stop_pause` assignment for how to turn this
+  back into a tunable power knob (requires a fixed/newer embassy-stm32).
+- `config.enable_debug_during_sleep` (`false`): gating the debug clock domain
+  is what actually lowers STOP current. Set it to `true` if you need SWD/RTT to
+  stay alive while stopped (e.g. for `probe-rs`), at much higher STOP current.
+
+> Keeping the blocking `I2c` alive does not block STOP on the L0: an enabled I2C
+> only raises the *minimum* stop refcount, which still permits the L0's single
+> STOP mode (it would only forbid the deeper STOP2 that the L0 doesn't have).
+> A debug probe attached with `enable_debug_during_sleep = false` will lose the
+> core during STOP; measure real current standalone.
+
+## Examples and applications
+
+Flashable programs come in two kinds:
+
+- **Examples**: each file in [`examples/`](examples) is a complete program that demonstrates
+  one block. Add your own by dropping a `.rs` there. Cargo picks it up automatically
+  (`just build example <name>`); also add an `@echo <name>` line to the `examples` recipe in the
+  [`justfile`](justfile) so `just examples` lists it (that list is hand-maintained to keep the
+  recipe OS-independent; CI fails if it drifts from `examples/*.rs`).
+- **Applications**: TOWER IoT Kit **products** in [`apps/`](apps). `radio_push_button`
+  (a sleeping sensor node: button events, thermometer, accelerometer) and
+  `radio_dongle_gateway` (a radio↔serial bridge + node coordinator) are **complete,
+  HW-verified radio products**; `radio_climate_monitor` is still a **starter skeleton** whose
+  radio wiring is a TODO you fill in following the `net_*` examples. They're Cargo binaries:
+  list them with `just apps`, build with `just build app <name>`. Add one by dropping
+  `apps/<name>.rs` and a matching `[[bin]]` in `Cargo.toml`.
+
+| Example | Demonstrates |
+|---|---|
+| `blinky` | The `led` block: background heartbeat + priority instant blink |
+| `button` | The `button` block: log press/release/click/hold, flash the LED |
+| `thermometer` | `tmp112`: log the temperature every 2 s |
+| `accelerometer` | `lis2dh12`: report die face 1-6 as you turn the board; opt-in tilt alert |
+| `strip` | `ws2812` + `strip`: a scrolling rainbow on PA1 |
+| `storage` | `storage`: a key-value store in EEPROM (a raw boot counter + a postcard settings struct), surviving reset |
+| `i2cscan` | Probe the I2C2 bus and log responding addresses (diagnostic) |
+| `lowpower` | Measure the SDK's STOP-mode idle floor: VBUS-gated STOP, parked forever; flash over SWD + measure VDD (probe detached) |
+| `watchdog` | The independent watchdog (IWDG): periodic pet, and a deliberate stall to show the reset |
+
+The radio stack adds 34 more (`radio_*`, `net_*`, `crypto_*`, `edge_*`, `fhss_*`). The
+reference apps `radio_gateway`/`radio_node` are the happy path; see the full table
+and protocol guide in [`docs/radio.md`](docs/radio.md). Two-board examples are one
+file built twice with a role feature, e.g. `TOWER_FEATURES=role-gateway just flash
+example net_confirmed`. The console examples (`console_demo`, `console_full`,
+`console_panic`, `events_demo`, `shell_demo`) exercise the framed console / shell (see
+[`docs/console.md`](docs/console.md)), and three are bench/diagnostic tools: `kv_wipe`
+(factory-reset the EEPROM key-value store), `led_on` (a deliberately high-current anchor for
+power measurements) and `lse_probe` (per-boot reset-cause / RTC-domain forensics).
+`just examples` lists all 51.
+
+### Writing an app
+
+The `app!` macro supplies the entry point and the always-on board setup:
+clock, the serial console, the TMP112 put into one-shot (shutdown) mode, and
+USB-aware low power (see above). It logs a uniform `Example booted: <name>` line,
+then hands you a [`Board`](src/board.rs) of ready resources. A whole app is just:
+
+```rust
+#![no_std]
+#![no_main]
+use tower::{app, board::Board};
+
+async fn run(mut b: Board) {
+    // b.spawner, b.tmp112 (shut down), b.led, b.button, b.accel_int, b.kv (EEPROM), b.strip_* …
+    loop {
+        if let Ok(raw) = b.tmp112.oneshot().await {
+            log::info!("{} raw", raw);
+        }
+    }
+}
+app!(run);
+```
+
+See `thermometer.rs` (≈12 lines of logic) for the minimal real example.
+
+## Build / flash / logs
+
+> **Firmware updates are wired, by design.** A device is programmed over its USB
+> serial link (the STM32 system bootloader, driven by `tower flash`) or over SWD;
+> there is no over-the-air update path. The trade is deliberate: the L083's full
+> 192 KB flash goes to the application instead of being split into update slots,
+> and the SDK carries no updater/bootloader code. Plan deployments accordingly:
+> updating a fielded unit means plugging into it.
+
+Prerequisites (one-time): `cargo install --locked just flip-link cargo-binutils`.
+`flip-link` is the linker `.cargo/config.toml` selects (nothing links without it) and
+`cargo-binutils` provides the `cargo objcopy`/`cargo size` that `just build` runs. The Rust
+toolchain itself (1.99.1, the `thumbv6m-none-eabi` target, `rustfmt`/`clippy`/`llvm-tools`) is
+pinned in [`rust-toolchain.toml`](rust-toolchain.toml) and installed by rustup. Add
+`probe-rs-tools` only for SWD flashing (`cargo run`). `just check` compile-checks the library,
+every app and every example for the MCU (what CI's embedded build runs).
+
+`build`/`flash`/`run`/`size` take a kind (`example` or `app`) then the name:
+
+```sh
+just examples                        # list example names      (just apps → product names)
+just build example blinky            # → target/firmware.bin (+ size)
+just flash example blinky            # build + flash over the UART bootloader (tower)
+just flash app radio_push_button     # same, for a ready-made TOWER IoT Kit product (apps/)
+just run   example thermometer       # build + flash, then open the console TUI (logs+events+shell)
+tower logs                           # stream the framed console from the running MCU (the CLI directly)
+just flash example blinky --no-verify  # extra args pass through to `tower flash`
+```
+
+Flashing + console use the [`tower`](https://github.com/hardwario/tower-cli) CLI (it
+programs the STM32L0 over the UART bootloader and decodes the framed console); install it
+on your `PATH`. Set `TOWER_DEVICE=/dev/cu.usbserial-XXXX` if more than one serial port is
+present. `cargo run --release --example blinky` also flashes via the SWD probe-rs runner
+in `.cargo/config.toml` if you use a J-Link/ST-Link instead.
+
+`just build KIND NAME` runs `cargo objcopy` (`--example NAME` for `example`, `--bin NAME`
+for `app`) → `target/firmware.bin` (linked at `0x08000000`). The console is **framed** (COBS+CRC+postcard), so use
+`tower logs`; a raw serial terminal shows binary. `tower logs` reads without resetting
+the MCU; **close it before flashing** (`tower flash` needs exclusive port access).
+
+## Tweaking
+
+App-level constants (sensor address, intervals, pixel count, LED patterns, …)
+live in each `examples/*.rs` and are meant to be edited or copied. Common knobs:
+
+- **TMP112 address**: `Tmp112::new(i2c, tmp112::ADDR_VPLUS)` (`0x49`, this board
+  straps ADD0 → V+); also `ADDR_GND` (`0x48`), `ADDR_SDA`, `ADDR_SCL`.
+- **LED / button polarity**: `led::Polarity::ActiveHigh` / `ActiveLow` (same for
+  `button::Polarity`).
+- **Accelerometer**: `Lis2dh12::new(i2c, lis2dh12::ADDR_DEFAULT)` (`0x19`);
+  `Accel::dice()` → face 1-6; tilt is opt-in via the example's `TILT` const
+  (`TiltConfig { sensitivity: Sensitivity::{Low,Medium,High,Ultra}, min_interval }`).
+  The accelerometer shares the I2C bus with the TMP112; reclaim it with
+  `b.tmp112.release()`.
+- **Strip**: `Strip::new(.., LedKind::Rgb | Rgbw, brightness)`; effects take a
+  frame counter you advance.
+- **Storage**: `b.kv` is a shared `Nv` handle over the EEPROM; take your app's own
+  namespaced view with `let kv = b.kv.scope(NS_APP);` (a `Scoped`, keyed by a `u8`
+  local so it can't collide with the SDK's namespaces). Then `kv.set_bytes(local,
+  &x.to_le_bytes())` / `kv.get_bytes` for scalars, or `kv.set(local, &value)` /
+  `kv.get::<T>(local)` (postcard) for structs. Add a new `u8` local to persist new
+  data without disturbing existing keys. See `examples/storage.rs`.
+- **I2C speed / pull-ups**: `i2c_config.frequency`, `scl_pullup`/`sda_pullup`.
+- **Clock & low power**: all in [`board::init`](src/board.rs): sysclk, RTC
+  source, `min_stop_pause`, debug-during-sleep.
+- **TMP112 conversion-wait**: `POLL_MS` × `POLL_TRIES` in `src/tmp112.rs`.
+
+## License
+
+MIT (see [LICENSE](LICENSE)). © 2026 HARDWARIO a.s.

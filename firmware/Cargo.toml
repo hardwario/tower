@@ -1,0 +1,182 @@
+[package]
+name = "tower"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT"
+repository = "https://github.com/hardwario/tower-firmware"
+description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (STM32L083CZ): reusable blocks (LED, button, TMP112, LIS2DH12, WS2812 strip, console, EEPROM storage, low power) and a SPIRIT1 sub-GHz radio stack (AES-128-CCM secured network layer), plus runnable examples."
+
+# This package is also the workspace root. `tower-protocol` (the shared no_std wire-format
+# crate) lives in its own repo now (github.com/hardwario/tower-protocol), pinned by git tag
+# below and depended on (out-of-tree) by `tower-cli`. To co-develop it locally without
+# re-tagging, add a `paths` override to your `~/.cargo/config.toml` (see crates README/docs).
+[workspace]
+members = [
+    "crates/tower-gw-core",
+    "crates/tower-kv",
+    "crates/tower-net-core",
+    "crates/tower-radio-core",
+    "crates/tower-shell-core",
+]
+resolver = "2"
+
+[dependencies]
+# Async executor. The Cortex-M *platform* (the `__pender` + thread-mode loop) is
+# provided by embassy-stm32's low-power executor below, NOT by embassy-executor,
+# so this dependency must NOT enable `platform-cortex-m`/`executor-thread` (doing
+# so would define a second `__pender` and conflict). We only need its `Spawner`,
+# `raw` executor and the `#[main]` macro, all available with no features.
+embassy-executor = { version = "0.10.0" }
+
+# Async timekeeping. tick-hz-32_768 matches the rate produced by the STM32L0 time driver.
+embassy-time = { version = "0.5.1", features = ["tick-hz-32_768"] }
+
+# STM32 HAL. The chip feature selects the STM32L083CZ:
+#   - memory-x        : generates the linker memory layout (192 KB Flash / 20 KB RAM)
+#   - time-driver-any : timer backing embassy-time (a general-purpose TIM while
+#                       awake; handed off to the RTC across STOP, see below)
+#   - executor-thread : STM32-specific thread executor that drops the core into
+#                       the deepest available STOP mode when idle (low_power::sleep)
+#   - low-power       : enables STOP-mode support; while stopped, timekeeping is
+#                       kept by the RTC clocked from the 32.768 kHz LSE crystal.
+#                       Pulls in the `time` + `chrono` features transitively.
+embassy-stm32 = { version = "0.6.0", features = [
+    "stm32l083cz",
+    "memory-x",
+    "time-driver-any",
+    "executor-thread",
+    "low-power",
+    # EXTI line interrupts, used to wake from STOP on the VBUS_SENSE edge (PA12)
+    # and on the SPIRIT1 nIRQ (PA7, EXTI line 7).
+    "exti",
+    # Expose `embassy_stm32::pac` so the radio's register-level L0 AES driver
+    # (src/radio/aes.rs) can drive the AES peripheral, which the HAL doesn't wrap.
+    "unstable-pac",
+] }
+# Note: the SPI HAL (used for the SPIRIT1 radio bus, SPI1 on PB3/PB5/PB4) needs
+# no feature: embassy-stm32 always compiles `spi`. The radio uses blocking SPI
+# (Spi::new_blocking): FIFO bursts are ≤96 B at ≤10 MHz (~80 µs), and SPI1's DMA
+# channel (DMA1_CH3) is already owned by the WS2812 strip.
+
+cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7.0"
+# Panic handler is provided by the SDK itself (src/console.rs records a reset-surviving crash
+# breadcrumb, prints the panic to the console if it is up, then RESETS; it does not halt), so
+# no external panic-handler crate is needed.
+
+# Critical-section API (Mutex/with) for the global serial console. The single-core
+# implementation is provided by the cortex-m feature above.
+critical-section = "1.2"
+
+# Blocking I2C trait that device drivers (e.g. the TMP112) are written against,
+# keeping them HAL-independent. embassy-stm32's blocking `I2c` implements it.
+embedded-hal = "1.0"
+
+# Async primitives for inter-task messaging: the LED dispatcher's command queue
+# (embassy-sync Channel) and select! over a timer vs. an incoming command.
+embassy-sync = "0.8.0"
+embassy-futures = "0.1.1"
+
+# Logging facade. The console module provides the backend (level + uptime
+# timestamp over the UART); modules just use `info!`/`warn!`/`error!`/etc.
+log = "0.4"
+
+# Typed non-volatile storage (src/storage.rs): postcard serializes any
+# `#[derive(Serialize, Deserialize)]` value into the L0 data EEPROM. Both are
+# no_std, no-alloc (fixed-buffer (de)serialization).
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+postcard = { version = "1.0", default-features = false }
+
+# The EEPROM key-value codec (record format / scan / in-place update / compaction). Extracted
+# into its own no_std crate so the firmware can keep using it on thumbv6m AND the logic can be
+# unit-tested on the host (`just test`); the firmware itself can't `cargo test`. `storage.rs`
+# is the thin adapter that implements `tower_kv::Eeprom` over the L0 data EEPROM.
+tower-kv = { path = "crates/tower-kv" }
+
+# The pure integer radio-timing/compliance core (EU/US/FHSS duty token-bucket math, frame
+# time-on-air, the fixed FHSS hop permutation). Extracted like `tower-kv` so the regulatory
+# arithmetic can be unit-tested on the host (`just test`); the firmware re-exports it from
+# `src/radio` (the `Instant`-based `try_tx` wrapper stays in src/radio/duty.rs). no_std.
+tower-radio-core = { path = "crates/tower-radio-core" }
+
+# The pure decision core of the radio network layer's security invariants (replay rule,
+# TX-counter reserve-ahead watermark / fail-closed nonce safety, ACK resolution, FHSS
+# beacon-epoch acceptance, pairing-confirm freshness, CCM nonce construction). Extracted like
+# `tower-kv`/`tower-radio-core` so the security-critical accept/reject arithmetic can be
+# unit-tested on the host (`just test`); the firmware keeps all I/O/async/radio/EEPROM flow and
+# delegates each decision to these kernels. no_std, dependency-free.
+tower-net-core = { path = "crates/tower-net-core" }
+
+# The pure registry/queue decision core of the gateway app (EEPROM node-registry bucket
+# codec + RAM downlink-queue policy). Extracted like the other `crates/` so the gateway's
+# bookkeeping can be unit-tested on the host (`just test`). no_std.
+tower-gw-core = { path = "crates/tower-gw-core" }
+
+# Pure kernels behind the `addr` shell setting (value parse + the `addr random`
+# xorshift). Extracted like the other `crates/` so the parse/PRNG logic is host-tested
+# (`just test`); the firmware `src/` is no_std and can't cargo test. no_std.
+tower-shell-core = { path = "crates/tower-shell-core" }
+
+# Shared console wire protocol (framing + CRC + message schema). Its own repo, pinned by tag
+# (bump in lockstep with `tower-cli` on any wire change).
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.5.1" }
+
+# Bounded buffers for the framed console (the TX queue item, log/print scratch).
+# Matches the version already in the lockfile (pulled transitively by embassy).
+heapless = "0.9"
+
+# Build-time role selection for the two-board radio examples: one source file is
+# built twice with different roles, e.g. `TOWER_FEATURES=role-gateway just flash
+# net_confirmed`. These affect only the examples, never the library.
+#   role-node / role-gateway : node vs gateway (gateway = absence of role-node)
+#   role-peer-a / role-peer-b : P2P peers in net_p2p (peer-a = absence of role-peer-b)
+#   node-1 / node-2          : which node identity in net_star (node-1 = absence of node-2)
+# (peer-a / node-1 are the feature-absent defaults, listed so the flash commands
+# read symmetrically; the examples branch on the presence of peer-b / node-2.)
+[features]
+default = []
+role-node = []
+role-gateway = []
+role-peer-a = []
+role-peer-b = []
+node-1 = []
+node-2 = []
+# LSE (32 kHz crystal) drive strength override; default (no feature) = embassy's MediumHigh.
+# Higher drive = more oscillation robustness for ~0.1-0.5 µA extra STOP current (bench-swept
+# 2026-07-05: no effect on the bimodal-boot delay, which is the KV compaction stall; see
+# docs/storage.md; knob kept for marginal-crystal experiments). See board::init.
+lse-drive-low = []
+lse-drive-medium-low = []
+lse-drive-high = []
+
+# Ready-made product firmwares for the TOWER IoT Kit, distinct from the educational
+# `examples/` (which demonstrate one block each). These are full applications, so they are
+# Cargo binaries (`--bin`), built/flashed by name + kind: `just build app radio_push_button`
+# (vs `just build example blinky`). They live in `apps/` (not the default `src/bin/`), so each
+# needs an explicit path here. Like examples, they get the firmware linker args from build.rs
+# (the un-suffixed `rustc-link-arg` applies to bins too) and use the `app!` macro / `Board`.
+# NOTE: binaries cannot use `[dev-dependencies]` (those are examples/tests/benches only); apps
+# use the library's regular dependencies. Add a product by dropping `apps/<name>.rs` + a `[[bin]]`.
+[[bin]]
+name = "radio_dongle_gateway"
+path = "apps/radio_dongle_gateway.rs"
+
+[[bin]]
+name = "radio_push_button"
+path = "apps/radio_push_button.rs"
+
+[[bin]]
+name = "radio_climate_monitor"
+path = "apps/radio_climate_monitor.rs"
+
+# Optimize for size; an L0 has only 192 KB of flash. Debug info is kept (it does
+# not end up in the flashed binary, only in the ELF) so a debugger stays useful.
+[profile.release]
+opt-level = "s"
+lto = true
+debug = 2
+codegen-units = 1
+
+[profile.dev]
+opt-level = "s"
