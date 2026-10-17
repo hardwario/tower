@@ -235,4 +235,58 @@ mod tests {
             assert!(!keyed_resp_matches(&full[..len], 88), "len {len}");
         }
     }
+
+    /// The keyed join composes with the key-checked lane restore (`replay::assign_lane`): a node
+    /// re-provisioned with a NEW key and a RESTARTED counter (factory reset, then a cable
+    /// `NodeAdd` under the new key) can keyed-join, also after a gateway reboot, while a restart
+    /// under the UNCHANGED key is refused as stale (re-add it under a fresh key).
+    #[test]
+    fn keyed_join_after_rekey_with_restarted_counter() {
+        use crate::replay::{LaneRecord, ReplayLane, assign_lane};
+        const NODE: u32 = 0x0000_00BB;
+        const KCV_OLD: u32 = 0x1111_1111;
+        const KCV_NEW: u32 = 0x2222_2222;
+        // The gateway has tracked NODE under the old key up to counter 5000 (persisted).
+        let mut records = [None; 4];
+        records[2] = Some(LaneRecord {
+            addr: NODE,
+            seen: 5000,
+            kcv: Some(KCV_OLD),
+        });
+
+        // Re-provisioned under a new key: the lane binds fresh at 0, so the node's first
+        // request (counter 1, the TX counter restarts at 1 on a wiped EEPROM) is admitted, and
+        // its echo check is independent of the lane.
+        let bind = assign_lane(NODE, KCV_NEW, &records, 0).unwrap();
+        assert!(bind.fresh && bind.seen == 0 && bind.index == 2);
+        let mut lane = ReplayLane::new(bind.seen);
+        assert!(keyed_req_admit(true, lane.classify(1)));
+        let _ = lane.accept(1);
+        assert!(keyed_resp_matches(&1u32.to_le_bytes(), 1));
+        // The same request replayed is refused (the lane advanced).
+        assert!(!keyed_req_admit(true, lane.classify(1)));
+
+        // After a gateway reboot the lane record (now carrying the new key's KCV) is restored,
+        // and the node's next request is still fresh.
+        records[bind.index] = Some(LaneRecord {
+            addr: NODE,
+            seen: lane.last_seen(),
+            kcv: Some(KCV_NEW),
+        });
+        let bind = assign_lane(NODE, KCV_NEW, &records, 0).unwrap();
+        assert!(!bind.fresh && bind.seen == 1);
+        assert!(keyed_req_admit(true, ReplayLane::new(bind.seen).classify(2)));
+
+        // Contrast: re-added under the OLD key, the restored lane (5000) refuses the restarted
+        // counter as a replay. That is the documented rule: a node that restarts its counter
+        // must come back under a fresh key.
+        records[2] = Some(LaneRecord {
+            addr: NODE,
+            seen: 5000,
+            kcv: Some(KCV_OLD),
+        });
+        let bind = assign_lane(NODE, KCV_OLD, &records, 0).unwrap();
+        assert!(!bind.fresh && bind.seen == 5000);
+        assert!(!keyed_req_admit(true, ReplayLane::new(bind.seen).classify(1)));
+    }
 }
