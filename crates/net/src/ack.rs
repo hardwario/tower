@@ -8,8 +8,9 @@
 //! the rest of the window rather than treating it as a failed delivery. Once resolved, further
 //! (duplicate) ACKs are ignored too: a delivery resolves at most once.
 
-/// ACK payload length: `acked(4 LE) ‖ rssi(1, i8) ‖ flags(1)`. Every ACK carries all three
-/// fields; a shorter payload is not an ACK. Bytes beyond this are ignored.
+/// ACK payload length: `acked(4 LE) ‖ rssi(1, i8) ‖ flags(1)`. Every ACK is exactly this long; a
+/// payload of any other length is not an ACK (a layout change then fails loudly as "no ACK"
+/// instead of being half-read).
 pub const ACK_LEN: usize = 6;
 
 /// ACK payload flags byte (byte 5).
@@ -30,11 +31,13 @@ pub struct AckMeta {
 }
 
 /// Parse the metadata bytes of an ACK payload (pure; the caller has already matched the ACK
-/// via [`AckWait::offer`], so `payload` is the accepted ACK's). `None` for a payload shorter
-/// than [`ACK_LEN`], which [`AckWait::offer`] never resolves.
+/// via [`AckWait::offer`], so `payload` is the accepted ACK's). `None` for a payload that is not
+/// [`ACK_LEN`] long, which [`AckWait::offer`] never resolves.
 #[must_use]
 pub fn ack_meta(payload: &[u8]) -> Option<AckMeta> {
-    let (&rssi, &flags) = (payload.get(4)?, payload.get(5)?);
+    let &[_, _, _, _, rssi, flags] = payload else {
+        return None;
+    };
     Some(AckMeta {
         rssi: rssi as i8,
         pending: flags & ack_flags::PENDING != 0,
@@ -79,7 +82,7 @@ impl AckWait {
     /// Offer one authenticated frame heard in the window: its type (`is_ack`), clear-header
     /// `src`/`dest`, and decrypted payload.
     ///
-    /// ACK payload: [`ACK_LEN`] bytes, the acked counter first; a shorter payload never
+    /// ACK payload: exactly [`ACK_LEN`] bytes, the acked counter first; any other length never
     /// resolves. A valid ACK for a *different* counter (a stale/duplicate ACK) also isn't ours;
     /// keep waiting for the right one.
     pub fn offer(&mut self, is_ack: bool, src: u32, dest: u32, payload: &[u8]) -> AckVerdict {
@@ -89,13 +92,12 @@ impl AckWait {
         if !is_ack || src != self.peer || dest != self.me {
             return AckVerdict::Ignore;
         }
-        if payload.len() >= ACK_LEN
-            && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == self.counter
-        {
-            self.resolved = true;
-            AckVerdict::Resolved
-        } else {
-            AckVerdict::Ignore
+        match payload {
+            &[a, b, c, d, _, _] if u32::from_le_bytes([a, b, c, d]) == self.counter => {
+                self.resolved = true;
+                AckVerdict::Resolved
+            }
+            _ => AckVerdict::Ignore,
         }
     }
 }
@@ -177,35 +179,26 @@ mod tests {
         assert_eq!(w.offer(true, PEER, ME, &ack_payload(42, 0)), AckVerdict::Resolved);
     }
 
-    /// A payload shorter than [`ACK_LEN`] never resolves, even with the right counter: every
-    /// ACK carries the rssi and flags bytes (there are no 4- or 5-byte ACKs to accept).
+    /// Only an exactly [`ACK_LEN`]-byte payload resolves, even with the right counter: a
+    /// shorter one lacks the rssi / flags bytes, a longer one is some other layout.
     #[test]
-    fn short_payload_ignored() {
-        let full = ack_payload(42, 0);
-        for len in 0..ACK_LEN {
+    fn payload_of_any_other_length_ignored() {
+        let mut long = [0u8; ACK_LEN + 3];
+        long[..ACK_LEN].copy_from_slice(&ack_payload(42, 0));
+        for len in (0..long.len()).filter(|&l| l != ACK_LEN) {
             let mut w = AckWait::new(ME, PEER, 42);
             assert_eq!(
-                w.offer(true, PEER, ME, &full[..len]),
+                w.offer(true, PEER, ME, &long[..len]),
                 AckVerdict::Ignore,
                 "len {len}"
             );
+            assert_eq!(ack_meta(&long[..len]), None, "len {len}");
         }
-    }
-
-    /// The rule is `len >= ACK_LEN`: exactly 6 bytes resolves, and trailing bytes beyond them
-    /// are tolerated; pin the current contract.
-    #[test]
-    fn payload_length_rule_is_at_least_ack_len() {
         let mut w = AckWait::new(ME, PEER, 42);
-        assert_eq!(w.offer(true, PEER, ME, &ack_payload(42, 0)), AckVerdict::Resolved);
-        let mut w2 = AckWait::new(ME, PEER, 42);
-        let mut long = [0u8; 8];
-        long[..ACK_LEN].copy_from_slice(&ack_payload(42, 0));
-        assert_eq!(w2.offer(true, PEER, ME, &long), AckVerdict::Resolved);
+        assert_eq!(w.offer(true, PEER, ME, &long[..ACK_LEN]), AckVerdict::Resolved);
     }
 
-    /// `ack_meta` reads the rssi and flags bytes; unknown flag bits never read as pending, and a
-    /// payload too short to be an ACK has no metadata.
+    /// `ack_meta` reads the rssi and flags bytes; unknown flag bits never read as pending.
     #[test]
     fn ack_meta_fields() {
         let mut p = ack_payload(42, -67i8 as u8);
@@ -226,26 +219,6 @@ mod tests {
         );
         p[5] = 0xFE; // every other bit
         assert_eq!(ack_meta(&p).map(|m| m.pending), Some(false));
-        for len in 0..ACK_LEN {
-            assert_eq!(ack_meta(&p[..len]), None, "len {len}");
-        }
-    }
-
-    /// A full `ACK_LEN` (6-byte) ACK resolves the wait, and bytes past the flags byte are
-    /// ignored: a longer payload with an arbitrary tail parses the same and resolves too.
-    #[test]
-    fn full_ack_resolves_and_tail_is_ignored() {
-        let mut p6 = [0u8; 6];
-        p6[..4].copy_from_slice(&42u32.to_le_bytes());
-        p6[5] = ack_flags::PENDING;
-        let mut w = AckWait::new(ME, PEER, 42);
-        assert_eq!(w.offer(true, PEER, ME, &p6), AckVerdict::Resolved);
-        let mut p9 = [0u8; 9];
-        p9[..6].copy_from_slice(&p6);
-        p9[6..].copy_from_slice(&[0xA5, 0x5A, 0xFF]);
-        assert_eq!(ack_meta(&p9), ack_meta(&p6));
-        let mut w = AckWait::new(ME, PEER, 42);
-        assert_eq!(w.offer(true, PEER, ME, &p9), AckVerdict::Resolved);
     }
 
     /// Counter matching is exact over the full u32 range (LE decode of the payload).

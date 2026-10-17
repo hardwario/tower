@@ -125,8 +125,8 @@ Little-endian frame, fits the 96-byte FIFO:
   `bulk_index` is 0 for non-bulk frames, so each (key, frame) nonce is unique.
 - MTU: ≤ 74 B payload (non-bulk), ≤ 64 B per bulk chunk.
 - **ACK payload** (`tower_net::ack`): `acked(4 LE) ‖ rssi(1, i8) ‖ flags(1)`, `ACK_LEN` = 6 B.
-  Every ACK carries all three fields; a shorter payload never resolves a wait, and bytes past
-  the flags byte are ignored (`len >= ACK_LEN`). ACK flag bits (`ack_flags`):
+  Every ACK is exactly `ACK_LEN` bytes; a payload of any other length never resolves a wait.
+  ACK flag bits (`ack_flags`):
   - bit 0 `PENDING`: the ACKer (a gateway) holds a queued downlink for the ACKed sender.
   - bits 1-7: unassigned; a receiver ignores unknown bits.
 
