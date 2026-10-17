@@ -5,12 +5,21 @@
 //!
 //! **Low-power aware.** The STM32L0 IWDG clocks from the LSI and *keeps counting in STOP*, so a
 //! naive watchdog would reset a healthy battery node the moment it idled past the timeout. Instead
-//! [`enable`] spawns a feeder task that pets the watchdog every `timeout/2`: the low-power executor
-//! wakes for that timer even from STOP, pets, and drops back to STOP, so an idle node stays alive
-//! while a genuinely hung one (its executor no longer running the feeder) is reset after `timeout`.
+//! [`enable`] spawns a feeder task that pets the watchdog at half its shortest real timeout (below):
+//! the low-power executor wakes for that timer even from STOP, pets, and drops back to STOP, so an
+//! idle node stays alive while a genuinely hung one (its executor no longer running the feeder) is
+//! reset.
 //!
-//! The L0 IWDG maxes out near ~28 s (12-bit reload / 256 prescaler at the ~37 kHz LSI); [`enable`]
-//! clamps `timeout` to a safe ceiling so an over-long request can't trip embassy's prescaler assert.
+//! **The timeout is nominal; the LSI spreads it.** The IWDG counts the LSI divided by the prescaler
+//! into a 12-bit reload, and embassy converts the requested timeout into those registers assuming a
+//! 32 kHz LSI (`rcc::LSI_FREQ` on the L0). The STM32L0 datasheets give the LSI as 26 kHz min, 38 kHz
+//! typ, 56 kHz max (LSI oscillator characteristics), so the real timeout is the nominal one times
+//! 32/56 (0.57, fast corner) to 32/26 (1.23, slow corner): a nominal 26 s fires anywhere between
+//! ~15 s and ~32 s. The feeder runs on the LSE time base (accurate), so it pets at half the
+//! fast-corner timeout (~7.4 s for 26 s): every part keeps a full half-timeout of margin. (It used
+//! to pet at half the nominal, 13 s, which a 56 kHz part's ~15 s timeout left under 2 s of slack.)
+//! At 256 prescale the nominal ceiling is 4096 × 256 / 32 kHz = 32.8 s; [`enable`] clamps `timeout`
+//! below it so an over-long request can't trip embassy's prescaler assert.
 //!
 //! **Liveness gating.** The feeder alone only proves the *executor* runs; a single wedged task
 //! (the 2026-07-13 gateway: its main loop parked forever on console backpressure while the feeder
@@ -34,9 +43,20 @@ use embassy_stm32::peripherals::IWDG;
 use embassy_stm32::wdg::IndependentWatchdog;
 use embassy_time::{Duration, Instant, Timer};
 
-/// Hardware ceiling for the L0 IWDG timeout, with margin below the ~28 s max so embassy's
-/// prescaler computation never asserts.
+/// Ceiling for the requested (nominal) IWDG timeout, with margin below the 32.8 s that a 12-bit
+/// reload at the 256 prescaler reaches in embassy's 32 kHz arithmetic, so its prescaler
+/// computation never asserts.
 const MAX_TIMEOUT_US: u32 = 26_000_000;
+/// The LSI frequency embassy's IWDG driver assumes when it programs the timeout (L0).
+const LSI_ASSUMED_HZ: u64 = 32_000;
+/// The fastest LSI the STM32L0 datasheets allow (26 kHz min, 38 kHz typ, 56 kHz max): the corner
+/// where the real timeout is shortest, `nominal × 32 / 56`.
+const LSI_MAX_HZ: u64 = 56_000;
+
+/// The shortest real timeout (µs) a nominal `timeout_us` can give across the LSI's spread.
+const fn fast_corner_us(timeout_us: u32) -> u64 {
+    timeout_us as u64 * LSI_ASSUMED_HZ / LSI_MAX_HZ
+}
 
 /// Max check-in age (ticks) before the feeder withholds the pet; 0 = liveness gating off.
 /// Load/store only (M0+ has no CAS). Tick-truncated to u32 and wrapping-compared, same as
@@ -49,7 +69,7 @@ static ARMED: AtomicBool = AtomicBool::new(false);
 /// Tick timestamp (low 32 bits) of the feeder's most recent pet: the anchor that bounds
 /// [`pet_during_stall`].
 static LAST_FEED: AtomicU32 = AtomicU32::new(0);
-/// The feeder's pet interval in ticks (`timeout / 2`), for [`pet_during_stall`]'s bound.
+/// The feeder's pet interval in ticks (half the fast-corner timeout), for [`pet_during_stall`]'s bound.
 static FEED_INTERVAL_TICKS: AtomicU32 = AtomicU32::new(0);
 
 /// Longest synchronous stall [`pet_during_stall`] will cover past the feeder's schedule:
@@ -61,8 +81,9 @@ const STALL_MAX: Duration = Duration::from_secs(10);
 /// latest [`checkin`] is younger than `max_age`; a main loop parked past that lets the
 /// hardware reset fire. Call after [`enable`], then [`checkin`] from the loop being
 /// guarded. `max_age` should comfortably exceed the loop's longest legitimate iteration
-/// (radio slices, EEPROM writes), and the worst-case reset lands ~`timeout × 1.5` after
-/// the hang (one already-fed period + the unfed one).
+/// (radio slices, EEPROM writes), and the reset lands at most `max_age` + one feed interval +
+/// the real timeout after the hang (the real timeout is up to 1.23 × nominal at the slow LSI
+/// corner; see the module docs).
 pub fn require_checkin(max_age: Duration) {
     checkin(); // arm fresh so the gate can't fire before the first loop iteration
     CHECKIN_MAX_TICKS.store(max_age.as_ticks().max(1) as u32, Ordering::Relaxed);
@@ -110,11 +131,13 @@ fn live() -> bool {
     age <= max
 }
 
-/// Arm the independent watchdog with `timeout`, then spawn a task that pets it every `timeout/2`.
+/// Arm the independent watchdog with the nominal `timeout`, then spawn a task that pets it at half
+/// the shortest real timeout the LSI's spread allows (`timeout × 32/56 / 2`; module docs).
 ///
 /// Call once, early in the app (before any long-running work). After this, the firmware must keep
-/// the async executor alive: a hang that stops the feeder triggers a hardware reset after
-/// `timeout`. `timeout` is clamped to the L0 hardware maximum (~26 s).
+/// the async executor alive: a hang that stops the feeder triggers a hardware reset after the real
+/// timeout, between `0.57 ×` and `1.23 × timeout` depending on the part's LSI. `timeout` is
+/// clamped to 26 s nominal.
 ///
 /// ```ignore
 /// let b = Board::take(spawner);
@@ -124,8 +147,9 @@ pub fn enable(iwdg: Peri<'static, IWDG>, spawner: Spawner, timeout: Duration) {
     let us = (timeout.as_micros().min(MAX_TIMEOUT_US as u64)) as u32;
     let mut wdg = IndependentWatchdog::new(iwdg, us);
     wdg.unleash();
-    // Pet at half the (clamped) timeout so a healthy system always has a full period of margin.
-    let interval = Duration::from_micros((us / 2) as u64);
+    // Pet at half the SHORTEST real timeout (a 56 kHz LSI), on the accurate LSE time base, so a
+    // healthy system keeps half a timeout of margin on every part, not just at the nominal LSI.
+    let interval = Duration::from_micros(fast_corner_us(us) / 2);
     FEED_INTERVAL_TICKS.store(interval.as_ticks() as u32, Ordering::Relaxed);
     LAST_FEED.store(Instant::now().as_ticks() as u32, Ordering::Relaxed);
     ARMED.store(true, Ordering::Relaxed);

@@ -25,8 +25,9 @@ const MEASURE_INTERVAL_SECS: u64 = 60;
 
 async fn run(mut b: Board) {
     // Hardware safety net: a wedged unit resets itself instead of dying in the field. The
-    // feeder wakes the low-power executor even from STOP; the L0 hardware ceiling (~26 s)
-    // keeps those wakes rare on this battery node.
+    // feeder wakes the low-power executor even from STOP; the longest nominal timeout (26 s,
+    // ~15 s on the fastest LSI, so a pet every ~7.4 s) keeps those wakes rare on this
+    // battery node.
     watchdog::enable(b.iwdg, b.spawner, Duration::from_secs(26));
     // TODO: bring up the SPIRIT1 radio as a node and pair with the gateway. See the
     // `net_*` examples + the `net` node role in `docs/radio.md`, e.g.:
