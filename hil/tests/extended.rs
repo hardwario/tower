@@ -87,6 +87,12 @@ fn field_hex32(text: &str, key: &str) -> Option<u32> {
     u32::from_str_radix(rest.get(..8)?, 16).ok()
 }
 
+/// The 6-digit SAS from a `pairing: SAS dddddd` line.
+fn field_sas(text: &str) -> Option<u32> {
+    let rest = &text[text.find("pairing: SAS ")? + "pairing: SAS ".len()..];
+    rest.get(..6)?.parse().ok()
+}
+
 // ---------------------------------------------------------------------------
 // Single-board KATs (Dongle slot)
 // ---------------------------------------------------------------------------
@@ -118,6 +124,19 @@ fn ext_crypto_frame_loopback() {
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn ext_fhss_kat() {
     run_kat("fhss_kat", "ALL PASS ***", &["FAIL"], 10);
+}
+
+/// X25519 (pairing v2) vs RFC 7748 §5.2 / §6.1 on the MCU; ~10 s of compute before the verdict,
+/// which repeats every 5 s with the timing and the stack high-water.
+#[test]
+#[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
+fn ext_crypto_x25519_kat() {
+    run_kat(
+        "crypto_x25519_kat",
+        "x25519_kat: ALL PASS ***",
+        &["MISMATCH", "FAILURES"],
+        40,
+    );
 }
 
 /// Duty-cycle governor KAT (the regulatory token-bucket arithmetic, on target).
@@ -225,8 +244,9 @@ fn ext_net_secure_ping_auth() {
     assert_eq!(auth_fail, 0, "gateway saw CCM auth failures");
 }
 
-/// OTA 3-way pairing: host opens a window, joiner joins with its own id; both sides must
-/// log the SAME node id and the same handed-out key prefix (a0a1a2a3).
+/// OTA pairing (v2, X25519 key agreement): host opens a window, joiner joins with its own
+/// address; both sides must log the SAME node address, the same derived key prefix and the same
+/// SAS (`net: pairing: SAS dddddd`, logged just before each side's PAIRED / JOINED line).
 #[test]
 #[ignore = "requires the HIL bench (two TOWER boards in RF range)"]
 fn ext_net_pairing_handshake() {
@@ -240,24 +260,46 @@ fn ext_net_pairing_handshake() {
     host.reset_into_app().expect("reset host");
     joiner.reset_into_app().expect("reset joiner");
 
-    let joined = joiner
+    // The joiner logs its SAS, then JOINED (or `join failed` when the window passed unjoined).
+    let sas = joiner
         .wait_for(Duration::from_secs(70), |f| {
-            frame_text(f).is_some_and(|t| t.contains("JOINED ***") || t.contains("join failed"))
+            frame_text(f).is_some_and(|t| t.contains("pairing: SAS") || t.contains("join failed"))
         })
         .expect("joiner console read")
         .expect("joiner never concluded the handshake within 70 s");
+    let joiner_sas = field_sas(frame_text(&sas).unwrap_or("")).expect("join failed on the joiner");
+    let joined = joiner
+        .wait_for(Duration::from_secs(10), |f| {
+            frame_text(f).is_some_and(|t| t.contains("JOINED ***"))
+        })
+        .expect("joiner console read")
+        .expect("joiner logged a SAS but no JOINED");
     let jt = frame_text(&joined).unwrap_or("").to_string();
-    assert!(jt.contains("JOINED ***"), "join failed on the joiner: {jt:?}");
-    assert!(jt.contains("a0a1a2a3"), "joiner got an unexpected key: {jt:?}");
 
-    let paired = host
+    let sas = host
         .wait_for(Duration::from_secs(15), |f| {
+            frame_text(f).is_some_and(|t| t.contains("pairing: SAS"))
+        })
+        .expect("host console read")
+        .expect("host never logged a SAS");
+    let host_sas = field_sas(frame_text(&sas).unwrap_or("")).expect("host SAS line malformed");
+    let paired = host
+        .wait_for(Duration::from_secs(10), |f| {
             frame_text(f).is_some_and(|t| t.contains("PAIRED ***"))
         })
         .expect("host console read")
         .expect("host never logged PAIRED");
     let ht = frame_text(&paired).unwrap_or("").to_string();
-    assert!(ht.contains("a0a1a2a3"), "host handed an unexpected key: {ht:?}");
+
+    // No key travels on air: both ends DERIVE it, so the prefixes must agree (and differ per
+    // run), and the SAS values must match (a mismatch is what a man in the middle looks like).
+    let host_key = field_hex32(&ht, "key[..4]=").expect("host PAIRED line has no key prefix");
+    let joiner_key = field_hex32(&jt, "key[..4]=").expect("joiner JOINED line has no key prefix");
+    assert_eq!(
+        host_key, joiner_key,
+        "the two ends derived different keys: {ht:?} / {jt:?}"
+    );
+    assert_eq!(host_sas, joiner_sas, "SAS mismatch between the two ends");
 
     // The joiner chooses its address; the host must have learned exactly that address. (The
     // firmware logs `addr=` since the 2026-07-12 radio-address rename; matching the old `id=`
