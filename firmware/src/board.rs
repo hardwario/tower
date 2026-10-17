@@ -9,10 +9,12 @@
 use embassy_executor::Spawner;
 use embassy_stm32::exti::{ExtiInput, InterruptHandler};
 use embassy_stm32::flash::Flash;
-use embassy_stm32::gpio::{Level, Output, Pull, Speed};
+use embassy_stm32::gpio::{Flex, Level, Output, Pull, Speed};
 use embassy_stm32::i2c::{Config as I2cConfig, I2c, Master};
 use embassy_stm32::mode::{Async, Blocking};
-use embassy_stm32::peripherals::{DMA1_CH3, IWDG, PA1, PA15, PB3, PB4, PB5, PB7, PH1, SPI1, TIM2};
+use embassy_stm32::peripherals::{
+    DMA1_CH3, IWDG, PA1, PA15, PB3, PB4, PB5, PB7, PB10, PB11, PH1, SPI1, TIM2,
+};
 use embassy_stm32::rcc::{LsConfig, Sysclk};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::{Peri, Peripherals, bind_interrupts, interrupt};
@@ -145,7 +147,7 @@ impl Board {
     /// the console UART is up (and interrupts responsive) while USB is connected, and is
     /// torn down when unplugged so the executor can reach STOP and idle at µA.
     pub fn take(spawner: Spawner) -> Self {
-        let p = init();
+        let mut p = init();
 
         // Dynamic, USB-presence-gated console. On the STM32L0 an *enabled* USART holds
         // embassy's STOP refcount, so a permanently-on console would keep the low-power
@@ -171,6 +173,7 @@ impl Board {
         // ATSHA sleep is the LAST bus op, since any I2C traffic can re-wake it.
         let mut i2c_config = I2cConfig::default();
         i2c_config.frequency = Hertz::khz(100);
+        i2c_bus_clear(p.PB10.reborrow(), p.PB11.reborrow());
         let i2c = I2c::new_blocking(p.I2C2, p.PB10, p.PB11, i2c_config);
 
         // TMP112 → shutdown (one-shot) so it doesn't free-run.
@@ -594,6 +597,46 @@ pub(crate) fn apply_stop_tuning() {
         w.set_lpsdsr(embassy_stm32::pac::pwr::vals::Mode::LOW_POWER_MODE);
         w.set_ulp(true);
     });
+}
+
+/// Free the I²C2 bus if a slave holds SDA low at boot: a device that was mid-byte when a warm
+/// reset hit the MCU still drives a 0, waiting for clocks that will never come, and every later
+/// transaction then fails until a power cycle (an accelerometer interrupt latched behind such a
+/// bus can never be cleared). The I²C-bus specification's "bus clear" (UM10204): clock SCL up
+/// to nine times until the slave lets SDA go, then send a STOP. A free bus (SDA high, the normal
+/// case) is not touched. The pins are released (disconnected) when this returns, for the I²C
+/// peripheral to take over.
+fn i2c_bus_clear(scl: Peri<'_, PB10>, sda: Peri<'_, PB11>) {
+    // Half an SCL period at the bus's 100 kHz.
+    const HALF: Duration = Duration::from_micros(5);
+    let mut sda = Flex::new(sda);
+    sda.set_high();
+    sda.set_as_input_output_pull(Speed::Low, Pull::Up); // released: reads the bus
+    embassy_time::block_for(HALF);
+    if sda.is_high() {
+        return;
+    }
+    let mut scl = Flex::new(scl);
+    scl.set_high();
+    scl.set_as_input_output_pull(Speed::Low, Pull::Up);
+    for _ in 0..9 {
+        if sda.is_high() {
+            break;
+        }
+        scl.set_low();
+        embassy_time::block_for(HALF);
+        scl.set_high();
+        embassy_time::block_for(HALF);
+    }
+    // STOP: SDA rises while SCL is high.
+    scl.set_low();
+    embassy_time::block_for(HALF);
+    sda.set_low();
+    embassy_time::block_for(HALF);
+    scl.set_high();
+    embassy_time::block_for(HALF);
+    sda.set_high();
+    embassy_time::block_for(HALF);
 }
 
 /// Put the on-board **ATSHA204A** crypto (I²C 0x64) back to Sleep (word address `0x01`,
