@@ -1,22 +1,27 @@
 //! Host-side rendering of the decoded frame stream for the non-TUI commands (`logs`,
 //! `events`, `monitor`). Owns the streaming read loop, sequence/decode-error accounting,
-//! the protocol-version mismatch banner, and the line formatting — which is deliberately
+//! the protocol-version mismatch banner, and the line formatting, which is deliberately
 //! shared with the TUI (`log_line` / `event_fields` / `level_label`) so the two frontends
 //! render a Log or Event identically.
 //!
 //! Output is either human text (optionally ANSI-colored) or NDJSON (`--json`): one JSON
-//! object per line, so `tower logs --json | jq` works. JSON is emitted by hand (no
-//! serializer dep) with minimal string escaping — the fields are small and known.
+//! object per line, so `tower logs --json | jq` works. JSON is emitted by hand with minimal
+//! string escaping: the fields are small and known.
+//!
+//! Every device-supplied string is untrusted: the text renderer routes each one through
+//! [`crate::term`] (escaping terminal controls) and the JSON renderer through [`json_str`]
+//! (lossless `\u` escapes for the same set), so a frame can't drive the user's terminal.
 
+use std::borrow::Cow;
 use std::io::Write;
 
-use anyhow::Result;
 use clap::ValueEnum;
 
 use tower_protocol::msg::{Dropped, Event, Level, Log, Print};
 use tower_protocol::{FrameDecoder, Msg, decode_msg};
 
-use crate::session::Transport;
+use crate::session::{Transport, read_some};
+use crate::term::{sanitize, sanitize_line};
 
 /// Which entity stream to render.
 #[derive(Clone, Copy, PartialEq)]
@@ -26,7 +31,7 @@ pub(crate) enum View {
 }
 
 /// When to emit ANSI color escapes. `Auto` (the default) colors only when stdout is a
-/// real terminal and `NO_COLOR` is unset — so `tower logs > file` / `| grep` stay clean.
+/// real terminal and `NO_COLOR` is unset, so `tower logs > file` / `| grep` stay clean.
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
 pub(crate) enum ColorMode {
     Auto,
@@ -94,26 +99,41 @@ fn level_ansi(level: Level) -> u8 {
     }
 }
 
-/// Format a Log's body **without** the leading wall-clock time or color, so both the CLI and
-/// the TUI lay a Log out the same way: `[uptime] LEVEL module: message`. The caller prepends
-/// its own timestamp and applies its own coloring.
+/// Format a Log's body **without** the leading wall-clock time or color: `[uptime] LEVEL
+/// module: message`. The caller prepends its own timestamp and applies its own coloring. A Log
+/// is one record per line, so `module` and `message` are escaped as single-line fields: an
+/// embedded newline can't forge a second, fake log record.
 pub(crate) fn log_line(l: &Log) -> String {
     format!(
         "{} {} {}: {}",
         uptime_prefix(l.uptime_us),
         level_label(l.level),
-        l.module,
-        l.message
+        sanitize_line(l.module),
+        sanitize_line(l.message)
     )
 }
 
-/// Format an Event's `key=value` fields into one space-joined string (shared CLI/TUI).
+/// Format an Event's `key=value` fields into one space-joined string (shared CLI/TUI). Keys
+/// and values are single-line fields (escaped), so a value can't fake another `key=value`
+/// column or line.
 pub(crate) fn event_fields(e: &Event) -> String {
     e.fields
         .iter()
-        .map(|(k, v)| format!("{k}={v}"))
+        .map(|(k, v)| format!("{}={}", sanitize_line(k), sanitize_line(v)))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Free-form multi-line device text (`print!` output, shell responses) made terminal-safe. The
+/// firmware ends lines with CRLF (its `println!` and shell output are terminal-friendly), so a CR
+/// that closes a line is folded into the LF first; only a *bare* CR (the one that can rewind
+/// the cursor and overprint an earlier line) is left for [`sanitize`] to escape.
+pub(crate) fn device_text(s: &str) -> Cow<'_, str> {
+    if s.contains("\r\n") {
+        Cow::Owned(sanitize(&s.replace("\r\n", "\n")).into_owned())
+    } else {
+        sanitize(s)
+    }
 }
 
 /// Wrap `s` in an ANSI SGR color if `colors`, else return it plain.
@@ -131,7 +151,12 @@ fn now() -> String {
 
 // ---- JSON (NDJSON) ----
 
-/// Minimal JSON string escaping for the small, known fields we emit.
+/// Minimal JSON string escaping for the small, known fields we emit. Beyond the C0 controls
+/// JSON requires escaping, DEL, the C1 block (U+0080-U+009F; 0x9B is an 8-bit CSI) and the
+/// bidi controls are `\u`-escaped too: that's still the *same* string to any JSON parser (no
+/// data is altered, unlike the text renderer's visible escapes), but `tower logs --json` read
+/// straight off a terminal can't be made to execute a control sequence. (serde_json would only
+/// escape C0, so it isn't used here.)
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -142,7 +167,11 @@ fn json_str(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c.is_control()
+                || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') =>
+            {
+                out.push_str(&format!("\\u{:04x}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -169,40 +198,58 @@ pub(crate) struct RenderState {
 
 /// Emit the loud, persistent protocol-mismatch banner (stderr). `device` is the version the
 /// firmware announced in its `Hello`; we compare against the version this binary was built
-/// against. A mismatch means postcard will silently mis-decode — see the lockstep rule.
+/// against. A mismatch means postcard will silently mis-decode; see the lockstep rule.
 pub(crate) fn warn_protocol_mismatch(device: u8) {
     eprintln!("[tower] ============================================================");
     eprintln!(
         "[tower] PROTOCOL VERSION MISMATCH: device speaks v{device}, this `tower` was built for v{}.",
         tower_protocol::PROTOCOL_VERSION
     );
-    eprintln!("[tower] postcard is NOT self-describing — frames will silently mis-decode. Rebuild");
+    eprintln!("[tower] postcard is NOT self-describing: frames will silently mis-decode. Rebuild");
     eprintln!(
         "[tower] `tower` and the firmware against the SAME tower-protocol tag (the lockstep rule)."
     );
     eprintln!("[tower] ============================================================");
 }
 
-/// Stream the framed link to stdout until the port errors, rendering `view` in `mode`.
-pub(crate) fn read_loop(
-    sp: &mut (impl Transport + ?Sized),
+/// One connection's worth of stream rendering: the deframer plus the render state, so bytes
+/// can be fed from more than one source in order (the boot transcript captured while waiting
+/// for the `Hello` (`logs --reset --send`), then the live port) without a seam between them.
+pub(crate) struct Renderer {
+    dec: FrameDecoder,
+    st: RenderState,
     mode: OutputMode,
     view: View,
-) -> Result<()> {
-    let mut dec = FrameDecoder::new();
-    let mut buf = [0u8; 512];
-    let mut st = RenderState::default();
-    loop {
-        let n = match sp.read(&mut buf) {
-            Ok(0) => continue,
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
-            Err(e) => return Err(e.into()),
-        };
-        for &b in &buf[..n] {
-            if let Some(inner) = dec.push(b) {
-                render(inner, mode, view, &mut st);
+}
+
+impl Renderer {
+    pub(crate) fn new(mode: OutputMode, view: View) -> Self {
+        Renderer {
+            dec: FrameDecoder::new(),
+            st: RenderState::default(),
+            mode,
+            view,
+        }
+    }
+
+    /// Deframe and render `bytes` (any split; frames may straddle calls).
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            if let Some(inner) = self.dec.push(b) {
+                render(inner, self.mode, self.view, &mut self.st);
             }
+        }
+    }
+}
+
+/// Stream the framed link to stdout through `r` until the port fails, and return that failure
+/// (a live link never ends the loop; the caller decides whether to reconnect or give up).
+pub(crate) fn read_loop(sp: &mut (impl Transport + ?Sized), r: &mut Renderer) -> std::io::Error {
+    let mut buf = [0u8; 512];
+    loop {
+        match read_some(sp, &mut buf) {
+            Ok(n) => r.feed(&buf[..n]),
+            Err(e) => return e,
         }
     }
 }
@@ -211,7 +258,7 @@ pub(crate) fn read_loop(
 /// (Kept `pub(crate)` so unit tests can drive it directly with synthesized frames.)
 pub(crate) fn render(inner: &[u8], mode: OutputMode, view: View, st: &mut RenderState) {
     // `decode_msg` does the version + CRC check (like `decode_frame`) AND deserializes the
-    // payload into the typed `Msg` in one step — the consumer no longer hand-writes a
+    // payload into the typed `Msg` in one step: the consumer no longer hand-writes a
     // `MsgType` match + `from_bytes` per arm. A CRC-valid body that fails to deserialize
     // surfaces as `Error::Malformed` here, same drop path as a version/CRC failure.
     let (seq, msg) = match decode_msg(inner) {
@@ -219,7 +266,7 @@ pub(crate) fn render(inner: &[u8], mode: OutputMode, view: View, st: &mut Render
         Err(e) => {
             st.decode_failures += 1;
             // A header-level BadVersion IS the lockstep mismatch (it's rejected before any
-            // Hello payload could parse, so the Hello-based banner below would never fire) —
+            // Hello payload could parse, so the Hello-based banner below would never fire):
             // escalate to the full remediation banner, once.
             if let tower_protocol::Error::BadVersion { got } = e
                 && !st.warned_mismatch
@@ -238,7 +285,7 @@ pub(crate) fn render(inner: &[u8], mode: OutputMode, view: View, st: &mut Render
                     st.decode_failures
                 ),
                 OutputMode::Text { .. } => eprintln!(
-                    "[tower] dropped a corrupt frame: {e:?} ({} undecodable frame(s) — version mismatch?)",
+                    "[tower] dropped a corrupt frame: {e:?} ({} undecodable frame(s); version mismatch?)",
                     st.decode_failures
                 ),
             }
@@ -274,11 +321,11 @@ pub(crate) fn render(inner: &[u8], mode: OutputMode, view: View, st: &mut Render
             st.last_session = Some(h.session_id);
             eprintln!(
                 "[tower] hello: {} {} (protocol v{}, session {}){}",
-                h.firmware_name,
-                h.firmware_version,
+                sanitize_line(h.firmware_name),
+                sanitize_line(h.firmware_version),
                 h.protocol_version,
                 h.session_id,
-                if rebooted { " — device rebooted" } else { "" }
+                if rebooted { "; device rebooted" } else { "" }
             );
             if h.protocol_version != tower_protocol::PROTOCOL_VERSION && !st.warned_mismatch {
                 warn_protocol_mismatch(h.protocol_version);
@@ -317,7 +364,7 @@ fn emit_log(l: &Log, mode: OutputMode) {
 fn emit_print(p: &Print, mode: OutputMode) {
     match mode {
         OutputMode::Text { .. } => {
-            print!("{}", p.text);
+            print!("{}", device_text(p.text));
             let _ = std::io::stdout().flush();
         }
         OutputMode::Json => println!("{{\"type\":\"print\",\"text\":{}}}", json_str(p.text)),
@@ -341,7 +388,7 @@ fn emit_event(e: &Event, mode: OutputMode) {
             "{} {} {}  {}",
             now(),
             paint("EVENT", 35, colors),
-            e.name,
+            sanitize_line(e.name),
             event_fields(e)
         ),
         OutputMode::Json => {
@@ -438,7 +485,7 @@ mod tests {
     #[test]
     fn render_counts_decode_failures() {
         // A frame that COBS-decodes but fails CRC must be counted as a decode failure (the
-        // symptom we surface as "N undecodable frames — version mismatch?"). Flip the CRC
+        // symptom we surface as "N undecodable frames; version mismatch?"). Flip the CRC
         // byte just before the trailing 0x00: it stays a data byte in the COBS stream, so
         // COBS still decodes, but the CRC check then fails. XOR 0x80 avoids making a 0x00.
         let mut st = RenderState::default();
@@ -462,7 +509,7 @@ mod tests {
     #[test]
     fn json_mode_emits_and_counts_decode_error() {
         // In JSON mode a corrupt frame becomes a `decode_error` NDJSON record on stdout (like
-        // the device-side `dropped` record) rather than only a human stderr line — here we pin
+        // the device-side `dropped` record) rather than only a human stderr line; here we pin
         // that it still runs the JSON branch and keeps the running count.
         let mut st = RenderState::default();
         let mut bytes = log_frame(0, "ok");
@@ -515,5 +562,67 @@ mod tests {
     #[test]
     fn hexline_is_contiguous_lowercase() {
         assert_eq!(hexline(&[0x00, 0xAB, 0x0f]), "00ab0f");
+    }
+
+    // ---- terminal safety: device strings can't drive the terminal (CLI-6) ----
+
+    #[test]
+    fn device_text_folds_crlf_but_escapes_bare_cr() {
+        // The firmware's CRLF line endings are plain newlines, not an attack…
+        assert_eq!(device_text("a: 1\r\nb: 2\r\n"), "a: 1\nb: 2\n");
+        assert!(matches!(device_text("plain\n\tok"), Cow::Borrowed(_)));
+        // …but a bare CR (overprint an earlier line) and an OSC title write are escaped.
+        assert_eq!(device_text("ok\r[tower] fake\r\n"), "ok\\x0d[tower] fake\n");
+        assert_eq!(device_text("\x1b]0;pwn\x07"), "\\x1b]0;pwn\\x07");
+    }
+
+    #[test]
+    fn text_formatters_escape_device_controls() {
+        // A Log is one record per line: module + message can't clear the screen or forge a
+        // second record with an embedded newline.
+        let l = Log {
+            level: Level::Info,
+            uptime_us: 0,
+            module: "m\x1b[2J",
+            message: "a\n00:00:00.000 [    0.000] ERROR auth: fake",
+        };
+        let line = log_line(&l);
+        assert!(!line.contains('\x1b') && !line.contains('\n'), "{line}");
+        assert!(line.contains("m\\x1b[2J: a\\n00:00"), "{line}");
+        // Event keys/values are single-line fields too.
+        let mut fields: heapless::Vec<(&str, &str), 8> = heapless::Vec::new();
+        fields.push(("k\u{9b}", "v\nx=1")).unwrap();
+        let e = Event { name: "n", fields };
+        assert_eq!(event_fields(&e), "k\\u{9b}=v\\nx=1");
+    }
+
+    #[test]
+    fn json_escapes_c1_del_and_bidi_losslessly() {
+        // Beyond JSON's mandatory C0 escapes, DEL / C1 / bidi controls are \u-escaped too…
+        assert_eq!(
+            json_str("a\u{9b}b\x7fc\u{202e}d"),
+            r#""a\u009bb\u007fc\u202ed""#
+        );
+        // …which a JSON parser decodes back to the identical string: nothing is altered.
+        let raw = "x\u{9b}\x1b[31m\u{2066}y\r\n";
+        let back: String = serde_json::from_str(&json_str(raw)).unwrap();
+        assert_eq!(back, raw);
+    }
+
+    // ---- Renderer: one deframer across feeds (CLI-7 replay seam) ----
+
+    #[test]
+    fn renderer_carries_a_frame_across_feeds() {
+        // The boot transcript and the live port are fed separately; a frame straddling the two
+        // must still decode (no seam, no spurious decode failure).
+        let mut bytes = hello_frame(tower_protocol::PROTOCOL_VERSION);
+        bytes.extend(log_frame(1, "boot"));
+        let cut = bytes.len() - 4;
+        let mut r = Renderer::new(TEXT, View::Logs);
+        r.feed(&bytes[..cut]);
+        assert_eq!(r.st.last_seq, Some(0)); // the Hello so far
+        r.feed(&bytes[cut..]);
+        assert_eq!(r.st.last_seq, Some(1));
+        assert_eq!(r.st.decode_failures, 0);
     }
 }

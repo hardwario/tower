@@ -1,14 +1,23 @@
-//! `tower gateway --service` — the headless frontend: engine events become
+//! `tower gateway --service`, the headless frontend: engine events become
 //! timestamped stderr lines (systemd/journald-friendly), MQTT is the only real
 //! interface. Runs until the process is signalled (Ctrl-C kills us; the LWT then
-//! flips `gateway/status` to `offline` on the broker's timeout).
+//! flips `gateway/status` to `offline` on the broker's timeout), or until the engine
+//! thread dies, which the caller turns into a non-zero exit.
 
 use std::sync::mpsc::Receiver;
 
 use super::engine::{Event, RadioSample};
+use crate::term::sanitize_line;
 
+/// The single choke point for every service line. Device logs, node names, shell ids and
+/// errors are attacker-influenced text: escape terminal controls AND newlines, so nothing
+/// can drive the operator's terminal or forge an extra journal line.
 fn line(msg: &str) {
-    eprintln!("[tower] {} {msg}", chrono::Local::now().format("%H:%M:%S"));
+    eprintln!(
+        "[tower] {} {}",
+        chrono::Local::now().format("%H:%M:%S"),
+        sanitize_line(msg)
+    );
 }
 
 pub(crate) fn run(events: Receiver<Event>) {
@@ -46,7 +55,7 @@ pub(crate) fn run(events: Receiver<Event>) {
                     ));
                 }
             }
-            // The graph feed is TUI food — too chatty for a service log.
+            // The graph feed is TUI food, too chatty for a service log.
             Event::Radio(RadioSample::Ambient { .. }) => {}
             Event::Radio(RadioSample::Rx { src, rssi }) => {
                 line(&format!("rx {src:08x} {rssi} dBm"));
@@ -59,7 +68,7 @@ pub(crate) fn run(events: Receiver<Event>) {
             }
             // In-process RPCs only exist in TUI mode.
             Event::Rpc(_) => {}
-            // The mirrored MQTT stream is TUI feed food — a service operator can
+            // The mirrored MQTT stream is TUI feed food; a service operator can
             // watch the broker directly (`mosquitto_sub -t 'tower/#'`).
             Event::Mqtt(_) => {}
             Event::Pairing(p) => match p.remaining {

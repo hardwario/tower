@@ -1,8 +1,10 @@
 //! The gateway's MQTT **clients**: `tower nodes …` and `tower net …` talk to any
-//! running `tower gateway` (local TUI or remote service) through the broker — never
+//! running `tower gateway` (local TUI or remote service) through the broker, never
 //! the serial port (except `nodes add --port`, which additionally drives the *node's*
-//! port for cable provisioning). One RPC = subscribe `gateway/rsp/{uuid}`, publish
-//! `gateway/cmd`, wait. Synchronous rumqttc throughout.
+//! port for cable provisioning). One RPC = publish `gateway/cmd` with a fresh uuid, wait
+//! for the matching id on the session's ONE shared `gateway/rsp/+` subscription (a
+//! per-RPC filter cost the embedded broker a never-freed commit log per call).
+//! Synchronous rumqttc throughout.
 
 pub(crate) mod net;
 pub(crate) mod nodes;
@@ -12,10 +14,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use rumqttc::{Client, Connection, Event as MqttEvent, Incoming, MqttOptions, QoS};
+use rumqttc::{Client, Connection, Event as MqttEvent, Incoming, QoS};
 
+use crate::gateway::mqtt;
 use crate::gateway::payload::{RpcRequest, RpcResponse};
 use crate::gateway::topics;
+use crate::term::sanitize_line;
 
 /// Shared broker flags for every client command.
 #[derive(Args, Debug, Clone)]
@@ -28,8 +32,8 @@ pub(crate) struct MqttOpts {
         global = true
     )]
     pub mqtt: String,
-    /// Broker username.
-    #[arg(long, global = true)]
+    /// Broker username (required by an embedded broker bound off-loopback).
+    #[arg(long, env = "TOWER_MQTT_USER", global = true)]
     pub mqtt_user: Option<String>,
     /// Broker password (prefer the TOWER_MQTT_PASSWORD env var).
     #[arg(
@@ -62,9 +66,12 @@ pub(crate) struct Session {
     pub connection: Connection,
     pub prefix: String,
     timeout: Duration,
+    /// The shared `gateway/rsp/+` subscription is in place (made on the first RPC, kept
+    /// for the session's life, never one filter per call).
+    rsp_subscribed: bool,
 }
 
-/// The gateway didn't answer an RPC in time — exit 124 territory (mirrors the serial
+/// The gateway didn't answer an RPC in time: exit 124 territory (mirrors the serial
 /// device-timeout code so scripts branch the same way on both transports).
 #[derive(Debug)]
 pub(crate) struct RpcTimeout;
@@ -77,21 +84,15 @@ impl std::fmt::Display for RpcTimeout {
 impl std::error::Error for RpcTimeout {}
 
 pub(crate) fn connect(opts: &MqttOpts) -> Result<Session> {
-    let (host, port) = match opts.mqtt.rsplit_once(':') {
-        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
-            (h.to_string(), p.parse().unwrap_or(1883))
-        }
-        _ => (opts.mqtt.clone(), 1883),
-    };
-    let mut mo = MqttOptions::new(
+    topics::check_prefix(&opts.prefix).map_err(anyhow::Error::msg)?;
+    let creds = mqtt::credentials(opts.mqtt_user.as_deref(), opts.mqtt_password.as_deref())?;
+    let (host, port) = crate::gateway::split_host_port(&opts.mqtt);
+    let mo = mqtt::options(
         format!("tower-cli-{}", std::process::id()),
         host.clone(),
         port,
+        creds.as_ref(),
     );
-    mo.set_keep_alive(Duration::from_secs(15));
-    if let (Some(u), Some(p)) = (&opts.mqtt_user, &opts.mqtt_password) {
-        mo.set_credentials(u.clone(), p.clone());
-    }
     let (client, mut connection) = Client::new(mo, 32);
     // Wait for the ConnAck so a refused/unreachable broker fails fast and clean.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -99,7 +100,10 @@ pub(crate) fn connect(opts: &MqttOpts) -> Result<Session> {
         match connection.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Ok(MqttEvent::Incoming(Incoming::ConnAck(_)))) => break,
             Ok(Ok(_)) => continue,
-            Ok(Err(e)) => bail!("broker {host}:{port}: {e}"),
+            Ok(Err(e)) => bail!(
+                "broker {host}:{port}: {e}{}",
+                connect_hint(&e, creds.is_some())
+            ),
             Err(_) => bail!("broker {host}:{port}: connect timeout"),
         }
     }
@@ -108,7 +112,27 @@ pub(crate) fn connect(opts: &MqttOpts) -> Result<Session> {
         connection,
         prefix: opts.prefix(),
         timeout: opts.timeout(),
+        rsp_subscribed: false,
     })
+}
+
+/// What to check after a failed broker connect. rumqttd drops a refused login without a
+/// CONNACK reason (the client only sees the connection close), so anything past the TCP
+/// connect may be an authentication failure; say so.
+fn connect_hint(e: &rumqttc::ConnectionError, have_login: bool) -> &'static str {
+    use rumqttc::ConnectionError as E;
+    match e {
+        E::Io(io) if io.kind() == std::io::ErrorKind::ConnectionRefused => {
+            "; is a broker (or `tower gateway`) running there?"
+        }
+        E::ConnectionRefused(_) | E::Io(_) | E::MqttState(_) if have_login => {
+            " (check the --mqtt-user / TOWER_MQTT_PASSWORD login)"
+        }
+        E::ConnectionRefused(_) | E::Io(_) | E::MqttState(_) => {
+            " (if the broker requires a login: --mqtt-user + TOWER_MQTT_PASSWORD)"
+        }
+        _ => "",
+    }
 }
 
 impl Session {
@@ -116,9 +140,14 @@ impl Session {
     pub(crate) fn rpc(&mut self, op: &str, params: serde_json::Value) -> Result<RpcResponse> {
         let id = uuid::Uuid::new_v4().to_string();
         let rsp_topic = topics::gateway_rsp(&self.prefix, &id);
-        self.client
-            .subscribe(&rsp_topic, QoS::AtLeastOnce)
-            .context("subscribing to the response topic")?;
+        if !self.rsp_subscribed {
+            // Ordered before the request on this connection, so the broker has the
+            // filter in place before the gateway can answer.
+            self.client
+                .subscribe(topics::gateway_rsp_filter(&self.prefix), QoS::AtLeastOnce)
+                .context("subscribing to the response topic")?;
+            self.rsp_subscribed = true;
+        }
         self.client
             .publish(
                 topics::gateway_cmd(&self.prefix),
@@ -138,6 +167,8 @@ impl Session {
                 return Err(RpcTimeout.into());
             }
             match self.connection.recv_timeout(remaining) {
+                // The shared filter also carries other clients' (and stale) responses:
+                // correlate on topic AND id.
                 Ok(Ok(MqttEvent::Incoming(Incoming::Publish(p)))) if p.topic == rsp_topic => {
                     match serde_json::from_slice::<RpcResponse>(&p.payload) {
                         Ok(r) if r.id == id => break r,
@@ -149,7 +180,6 @@ impl Session {
                 Err(_) => return Err(RpcTimeout.into()),
             }
         };
-        let _ = self.client.unsubscribe(&rsp_topic);
         Ok(rsp)
     }
 
@@ -211,14 +241,14 @@ impl Session {
             }
         }
         bail!(
-            "no node named \"{arg}\" (known: {})",
+            "no node named \"{}\" (known: {})",
+            sanitize_line(arg),
             nodes
                 .iter()
-                .map(|n| if n.name.is_empty() {
-                    n.addr.clone()
-                } else {
-                    n.name.clone()
-                })
+                .map(
+                    |n| sanitize_line(if n.name.is_empty() { &n.addr } else { &n.name })
+                        .into_owned()
+                )
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -230,7 +260,7 @@ pub(crate) fn key_hex(key: &[u8; 16]) -> String {
     key.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Mint a fresh AES-128 node key — host-side CSPRNG, the only legitimate key source
+/// Mint a fresh AES-128 node key: host-side CSPRNG, the only legitimate key source
 /// in the ecosystem (the device PRNGs are deterministic).
 pub(crate) fn mint_key() -> Result<[u8; 16]> {
     let mut key = [0u8; 16];

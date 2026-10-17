@@ -1,4 +1,4 @@
-//! `tower gateway` — the radio↔MQTT bridge process. One engine (a pure state
+//! `tower gateway`: the radio↔MQTT bridge process. One engine (a pure state
 //! machine, `engine.rs`), plain threads around it:
 //!
 //! ```text
@@ -9,9 +9,10 @@
 //! ```
 //!
 //! Startup is synchronous and fail-fast, *before* any thread or alt-screen: open the
-//! port, `Describe` the device (the role probe — see `crate::mgmt`), and refuse
+//! port, `Describe` the device (the role probe; see `crate::mgmt`), and refuse
 //! non-gateways with the documented exit codes (124 mute / 125 protocol mismatch /
-//! 126 wrong firmware role).
+//! 126 wrong firmware role). The embedded broker is likewise confirmed listening (and its
+//! access policy checked; see `mqtt`) before anything is announced.
 
 pub(crate) mod engine;
 pub(crate) mod mqtt;
@@ -27,39 +28,39 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use rumqttc::QoS;
 use tower_protocol::FrameDecoder;
 use tower_protocol::mgmt::DeviceRole;
 
 use crate::mgmt::{DescribeOutcome, DeviceInfoOwned, describe};
 use crate::port::{open_console_responsive, pick_port};
 use crate::render::warn_protocol_mismatch;
-use crate::{EXIT_DEVICE_TIMEOUT, EXIT_OK, EXIT_PROTOCOL_MISMATCH, EXIT_WRONG_FIRMWARE};
+use crate::term::sanitize_line;
+use crate::{EXIT_DEVICE_TIMEOUT, EXIT_ERROR, EXIT_PROTOCOL_MISMATCH, EXIT_WRONG_FIRMWARE};
 
-use engine::{Engine, Event, Input, Output};
+use engine::{Engine, Event, Input, MqttDir, MqttMsg, Output};
 
 /// `tower gateway` arguments.
 #[derive(Args, Debug)]
 pub(crate) struct GatewayOpts {
     /// Host the embedded MQTT broker on ADDR:PORT (default 127.0.0.1:1883 unless
-    /// --mqtt picks an external broker instead).
+    /// --mqtt picks an external broker instead). A loopback bind is anonymous (any local
+    /// user/process can drive the gateway); any other bind requires --mqtt-user and
+    /// TOWER_MQTT_PASSWORD. No TLS.
     #[cfg(feature = "embedded-broker")]
     #[arg(long, value_name = "ADDR:PORT", conflicts_with = "mqtt")]
     pub broker: Option<Option<std::net::SocketAddr>>,
     /// Connect to an existing MQTT broker at HOST or HOST:PORT instead of hosting one.
     #[arg(long, value_name = "HOST[:PORT]")]
     pub mqtt: Option<String>,
-    /// External-broker username.
-    #[arg(long, requires = "mqtt")]
+    /// MQTT username: the external broker's login, or the one account the embedded
+    /// broker accepts (required for a non-loopback --broker).
+    // No `requires = "mqtt"`: the login applies to the embedded broker too. And clap
+    // counts an env-sourced value as "present" for `requires`, so on the password it made
+    // a bare `tower gateway` a usage error whenever TOWER_MQTT_PASSWORD was exported.
+    #[arg(long, env = "TOWER_MQTT_USER")]
     pub mqtt_user: Option<String>,
-    /// External-broker password (prefer the TOWER_MQTT_PASSWORD env var — argv is
-    /// visible in `ps`).
-    #[arg(
-        long,
-        requires = "mqtt",
-        env = "TOWER_MQTT_PASSWORD",
-        hide_env_values = true
-    )]
+    /// MQTT password (prefer the TOWER_MQTT_PASSWORD env var; argv is visible in `ps`).
+    #[arg(long, env = "TOWER_MQTT_PASSWORD", hide_env_values = true)]
     pub mqtt_password: Option<String>,
     /// MQTT topic prefix.
     #[arg(long, default_value = "tower/")]
@@ -72,23 +73,35 @@ pub(crate) struct GatewayOpts {
     pub reset: bool,
 }
 
-/// Split a `HOST[:PORT]` argument (default port 1883).
-fn split_host_port(s: &str) -> (String, u16) {
+/// Split a `HOST[:PORT]` argument (default port 1883). Shared with the client commands.
+/// IPv6 literals take the bracketed form (`[::1]:1883`); a bare one (`::1`) is all host.
+pub(crate) fn split_host_port(s: &str) -> (String, u16) {
+    if let Some(rest) = s.strip_prefix('[')
+        && let Some((h, tail)) = rest.split_once(']')
+    {
+        let port = tail
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(1883);
+        return (h.to_string(), port);
+    }
     match s.rsplit_once(':') {
-        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
+        Some((h, p))
+            if !h.contains(':') && p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() =>
+        {
             (h.to_string(), p.parse().unwrap_or(1883))
         }
         _ => (s.to_string(), 1883),
     }
 }
 
-/// A verified, open gateway attach — or the exit code refusing it.
+/// A verified, open gateway attach, or the exit code refusing it.
 type Verified = std::result::Result<(Box<dyn serialport::SerialPort>, DeviceInfoOwned), u8>;
 
 /// The terminal decision from one `Describe` role probe, factored out of [`verify_gateway`]
 /// so the role gate is unit-testable without a serial port (the port open + boot-window
 /// retry loop stays in `verify_gateway`). `Accept` = a real gateway; `Reject(code)` =
-/// refuse the attach with that exit code; `Retry` = an inconclusive (mute) probe — the
+/// refuse the attach with that exit code; `Retry` = an inconclusive (mute) probe: the
 /// caller tries once more before giving up as a timeout.
 enum GateDecision {
     Accept(DeviceInfoOwned),
@@ -105,8 +118,9 @@ fn gate_describe(port: &str, outcome: DescribeOutcome) -> GateDecision {
         DescribeOutcome::Info(info) => {
             if info.role != DeviceRole::Gateway {
                 eprintln!(
-                    "[tower] {port} runs \"{}\" (role {:?}), not the gateway firmware — flash apps/radio_dongle_gateway first",
-                    info.firmware_name, info.role
+                    "[tower] {port} runs \"{}\" (role {:?}), not the gateway firmware; flash apps/radio_dongle_gateway first",
+                    sanitize_line(&info.firmware_name),
+                    info.role
                 );
                 GateDecision::Reject(EXIT_WRONG_FIRMWARE)
             } else {
@@ -124,6 +138,12 @@ fn gate_describe(port: &str, outcome: DescribeOutcome) -> GateDecision {
             GateDecision::Reject(EXIT_PROTOCOL_MISMATCH)
         }
         DescribeOutcome::Timeout { bad_version: None } => GateDecision::Retry,
+        // A dead link isn't a mute device: retrying the same broken handle can't help, and
+        // reporting "no answer" would send the operator chasing the firmware.
+        DescribeOutcome::Failed(e) => {
+            eprintln!("[tower] {port}: serial link failed during the role probe: {e}");
+            GateDecision::Reject(EXIT_ERROR)
+        }
     }
 }
 
@@ -149,14 +169,30 @@ pub(crate) fn verify_gateway(port: &str, reset: bool) -> Result<Verified> {
         }
     }
     eprintln!(
-        "[tower] {port}: no answer to the management probe — not a gateway (or pre-v3 firmware)?"
+        "[tower] {port}: no answer to the management probe; not a gateway (or pre-v3 firmware)?"
     );
     Ok(Err(EXIT_DEVICE_TIMEOUT))
 }
 
 pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
-    let port = pick_port(port)?;
+    // Configuration errors first: they need no hardware and must not wait behind it.
+    topics::check_prefix(&opts.prefix).map_err(anyhow::Error::msg)?;
     let prefix = topics::normalize_prefix(&opts.prefix);
+    let creds = mqtt::credentials(opts.mqtt_user.as_deref(), opts.mqtt_password.as_deref())?;
+    // Refuse a non-loopback embedded broker without credentials BEFORE touching the port.
+    #[cfg(feature = "embedded-broker")]
+    let listen = match &opts.mqtt {
+        Some(_) => None,
+        None => {
+            let listen = opts
+                .broker
+                .flatten()
+                .unwrap_or_else(|| "127.0.0.1:1883".parse().unwrap());
+            mqtt::broker_auth(listen, creds.as_ref()).map_err(anyhow::Error::msg)?;
+            Some(listen)
+        }
+    };
+    let port = pick_port(port)?;
 
     // ---- fail-fast verification (before threads, before any TUI) ----
     let (sp, info) = match verify_gateway(&port, opts.reset)? {
@@ -176,13 +212,20 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
         None => {
             #[cfg(feature = "embedded-broker")]
             {
-                let listen = opts
-                    .broker
-                    .flatten()
-                    .unwrap_or_else(|| "127.0.0.1:1883".parse().unwrap());
-                mqtt::embedded_broker(listen)?;
-                eprintln!("[tower] embedded MQTT broker on {listen}");
-                (listen.ip().to_string(), listen.port())
+                let listen = listen.expect("resolved above when --mqtt is absent");
+                mqtt::embedded_broker(listen, creds.as_ref())?;
+                eprintln!(
+                    "[tower] embedded MQTT broker on {listen} ({})",
+                    if creds.is_some() {
+                        "login required"
+                    } else {
+                        "anonymous, loopback only"
+                    }
+                );
+                // A wildcard bind is not a destination: the gateway's own client dials
+                // the matching loopback instead.
+                let to = mqtt::connect_addr(listen);
+                (to.ip().to_string(), to.port())
             }
             #[cfg(not(feature = "embedded-broker"))]
             {
@@ -194,8 +237,7 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
     let params = mqtt::MqttParams {
         host: mqtt_host,
         port: mqtt_port,
-        username: opts.mqtt_user.clone(),
-        password: opts.mqtt_password.clone(),
+        credentials: creds,
         client_id: format!("tower-gateway-{}", topics::node_hex(info.addr)),
     };
     let (client, connection) = mqtt::client(&params, &prefix);
@@ -233,7 +275,7 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
     }
 
     // ---- engine thread: state machine + output execution ----
-    // The TUI's cable-pairing worker provisions nodes toward THIS gateway — its
+    // The TUI's cable-pairing worker provisions nodes toward THIS gateway; its
     // network parameters come from the startup describe (boot-applied, can't drift).
     let gw_params = pair::GwParams {
         addr: info.addr,
@@ -241,57 +283,30 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
         channel: info.channel,
     };
     let mut engine = Engine::new(prefix.clone(), port.clone(), info);
-    // Random per-process dedup epoch: a fresh host must not be mistaken for a
-    // re-delivery a node already ran (the empty "checkmark" reply). See the note.
-    engine.randomize_shell_epoch();
+    // Random per-process dedup epoch + starting cmd_id: a fresh host must not be
+    // mistaken for (or credited with) a previous one's commands. See the note.
+    engine.randomize_shell_ids();
     {
-        let client = client.clone();
+        let mut publisher = mqtt::Publisher::new(client, prefix.clone());
         std::thread::Builder::new()
             .name("engine".into())
             .spawn(move || {
-                let execute = |outputs: Vec<Output>| {
-                    for o in outputs {
-                        match o {
-                            Output::SerialSend(frame) => {
-                                let _ = frame_tx.send(frame);
-                            }
-                            Output::Publish {
-                                topic,
-                                payload,
-                                retain,
-                            } => {
-                                // Mirror every publish to the frontend (the TUI's MQTT
-                                // feed) — the engine stays pure; the runner is the one
-                                // place that sees the whole broker-bound stream.
-                                let _ = event_tx.send(Event::Mqtt(engine::MqttMsg {
-                                    dir: engine::MqttDir::Out,
-                                    topic: topic.clone(),
-                                    payload: payload.clone(),
-                                    retain,
-                                }));
-                                let _ = client.publish(topic, QoS::AtLeastOnce, retain, payload);
-                            }
-                            Output::Subscribe(filter) => {
-                                let _ = client.subscribe(filter, QoS::AtLeastOnce);
-                            }
-                            Output::Event(ev) => {
-                                let _ = event_tx.send(ev);
-                            }
-                        }
-                    }
-                };
-                execute(engine.start());
+                execute(engine.start(), &mut publisher, &frame_tx, &event_tx);
                 while let Ok(input) = input_rx.recv() {
-                    // Mirror inbound broker traffic too (client shell/req + RPCs).
-                    if let Input::MqttIn { topic, payload } = &input {
-                        let _ = event_tx.send(Event::Mqtt(engine::MqttMsg {
-                            dir: engine::MqttDir::In,
-                            topic: topic.clone(),
-                            payload: payload.clone(),
-                            retain: false,
-                        }));
+                    match &input {
+                        // Mirror inbound broker traffic too (client shell/req + RPCs).
+                        Input::MqttIn {
+                            topic,
+                            payload,
+                            retain,
+                        } => {
+                            let _ = event_tx.send(mirror(MqttDir::In, topic, payload, *retain));
+                        }
+                        Input::MqttUp => publisher.set_link(true),
+                        Input::MqttDown { .. } => publisher.set_link(false),
+                        _ => {}
                     }
-                    execute(engine.handle(input));
+                    execute(engine.handle(input), &mut publisher, &frame_tx, &event_tx);
                 }
             })
             .context("spawning the engine thread")?;
@@ -300,10 +315,66 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
     // ---- frontend (owns the main thread) ----
     if opts.service {
         service::run(event_rx);
-        Ok(EXIT_OK)
+        // The event stream only ends when the engine thread is gone (it holds the
+        // sender): a crash, not a shutdown, so exit non-zero so `Restart=on-failure`
+        // brings the bridge back.
+        eprintln!("[tower] gateway engine stopped unexpectedly; exiting");
+        Ok(EXIT_ERROR)
     } else {
         tui::run(event_rx, input_tx, prefix, port, gw_params)
     }
+}
+
+/// Execute one engine output batch: frames to the serial writer queue, publishes through
+/// the non-blocking publisher (mirrored to the frontend first), events to the frontend.
+/// Never blocks: the publisher sheds/coalesces instead of parking the engine thread on a
+/// full rumqttc queue (which used to freeze serial handling and the TUI while the broker
+/// was down).
+fn execute(
+    outputs: Vec<Output>,
+    publisher: &mut mqtt::Publisher<rumqttc::Client>,
+    frames: &mpsc::Sender<Vec<u8>>,
+    events: &mpsc::Sender<Event>,
+) {
+    publisher.flush();
+    for o in outputs {
+        match o {
+            Output::SerialSend(frame) => {
+                let _ = frames.send(frame);
+            }
+            Output::Publish {
+                topic,
+                payload,
+                retain,
+            } => {
+                // Mirror every publish to the frontend (the TUI's MQTT feed); the engine
+                // stays pure; the runner is the one place that sees the whole broker-bound
+                // stream.
+                let _ = events.send(mirror(MqttDir::Out, &topic, &payload, retain));
+                publisher.publish(topic, payload, retain);
+            }
+            Output::Subscribe(filter) => publisher.subscribe(filter),
+            Output::Event(ev) => {
+                let _ = events.send(ev);
+            }
+        }
+    }
+    for note in publisher.take_notes() {
+        let _ = events.send(Event::Log(note));
+    }
+}
+
+/// One MQTT message as the frontend's traffic feed sees it, with every secret value
+/// (`payload::redact_secrets`) blanked. The TUI must never paint a node key just because
+/// it crossed the broker (a `node_add`'s params, a client's `reveal_key` answer); its only
+/// key display is the confirm-then-auto-hide reveal modal.
+fn mirror(dir: MqttDir, topic: &str, payload: &[u8], retain: bool) -> Event {
+    Event::Mqtt(MqttMsg {
+        dir,
+        topic: topic.to_string(),
+        payload: payload::redact_secrets(payload).into_owned(),
+        retain,
+    })
 }
 
 #[cfg(test)]
@@ -423,7 +494,7 @@ mod tests {
     #[test]
     fn wrong_role_node_yields_exit_126() {
         // The role-gate contract: a dongle running node firmware answers the probe honestly
-        // with role Node, and the gate refuses it with EXIT_WRONG_FIRMWARE (126) — distinct
+        // with role Node, and the gate refuses it with EXIT_WRONG_FIRMWARE (126), distinct
         // from 124/125 so a script can say "flash the gateway firmware", not "check the cable".
         assert_eq!(EXIT_WRONG_FIRMWARE, 126);
         match gate_scripted(MGMT_OK, &device_info(DeviceRole::Node)) {
@@ -443,7 +514,7 @@ mod tests {
     #[test]
     fn refused_probe_yields_exit_126() {
         // The device answered the management channel but declined the op (a wrong/older role
-        // returns a non-OK result, no DeviceInfo record) — still "wrong firmware", exit 126.
+        // returns a non-OK result, no DeviceInfo record): still "wrong firmware", exit 126.
         match gate_scripted(MGMT_UNSUPPORTED, &[]) {
             GateDecision::Reject(code) => assert_eq!(code, EXIT_WRONG_FIRMWARE),
             _ => panic!("a refused role probe must be rejected"),
@@ -482,5 +553,40 @@ mod tests {
             ),
             GateDecision::Retry
         ));
+    }
+
+    #[test]
+    fn split_host_port_handles_ipv6_and_defaults() {
+        assert_eq!(split_host_port("host:1884"), ("host".into(), 1884));
+        assert_eq!(split_host_port("host"), ("host".into(), 1883));
+        assert_eq!(split_host_port("[::1]:1884"), ("::1".into(), 1884));
+        assert_eq!(split_host_port("[::1]"), ("::1".into(), 1883));
+        assert_eq!(
+            split_host_port("::1"),
+            ("::1".into(), 1883),
+            "bare v6 is all host"
+        );
+    }
+
+    #[test]
+    fn mqtt_mirror_never_carries_a_node_key() {
+        // Both directions: a client's node_add params (in) and a reveal_key answer (out).
+        let inbound = br#"{"id":"u1","op":"node_add","params":{"addr":"0x0000ab12","key":"00112233445566778899aabbccddeeff"}}"#;
+        let outbound = br#"{"id":"u2","ok":true,"data":{"addr":"0x0000ab12","key":"a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"}}"#;
+        for (dir, payload) in [(MqttDir::In, &inbound[..]), (MqttDir::Out, &outbound[..])] {
+            let Event::Mqtt(m) = mirror(dir, "tower/gateway/cmd", payload, true) else {
+                panic!("an MQTT mirror event");
+            };
+            let text = String::from_utf8(m.payload).unwrap();
+            assert!(
+                !text.contains("0011223344") && !text.contains("a0a1a2a3"),
+                "{text}"
+            );
+            assert!(text.contains(r#""key":"<redacted>""#), "{text}");
+            assert!(
+                m.retain,
+                "the inbound retain flag is mirrored, not hard-coded"
+            );
+        }
     }
 }

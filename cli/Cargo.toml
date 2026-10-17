@@ -1,8 +1,8 @@
 [package]
 name = "tower-cli"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.99.1"
 description = "HARDWARIO TOWER console host CLI (`tower`): renders the framed serial link from the tower firmware."
 license = "MIT"
 repository = "https://github.com/hardwario/tower-cli"
@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [features]
 # The embedded MQTT broker (`tower gateway --broker`, the zero-config default). Default-on;
-# opt out (`--no-default-features`) if rumqttd's dependency weight ever hurts a build target —
+# opt out (`--no-default-features`) if rumqttd's dependency weight ever hurts a build target;
 # external-broker mode (`--mqtt`) keeps working without it.
 default = ["embedded-broker"]
 embedded-broker = ["dep:rumqttd"]
@@ -21,7 +21,7 @@ embedded-broker = ["dep:rumqttd"]
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 serialport = "4"
-rustyline = "18"
+rustyline = "19"
 ratatui = "0.30"
 anyhow = "1"
 # Flash/erase progress bars (same version the standalone `jolt` CLI renders with).
@@ -32,27 +32,30 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 serde = { version = "1", features = ["derive"] }
 # The gateway's MQTT side (`tower gateway` + the `nodes`/`net` client commands). rumqttc's
-# synchronous Client/Connection API keeps the crate's no-async idiom — tokio appears only as
-# an internal dependency of these two crates, never in our code.
-rumqttc = "0.25"
-rumqttd = { version = "0.20", optional = true }
+# synchronous Client/Connection API keeps the crate's no-async idiom: tokio appears only as
+# an internal dependency of these two crates, never in our code. Default features OFF: both
+# default to `use-rustls` (+ rumqttd `websocket`), but every link here is plain TCP (the
+# broker runs with `tls: None`), so the TLS stack was dead weight that only carried
+# advisories (rustls 0.22/0.23, rustls-webpki 0.102, unmaintained rustls-pemfile).
+rumqttc = { version = "0.25", default-features = false }
+rumqttd = { version = "0.20", optional = true, default-features = false }
 serde_json = "1"
 # RPC correlation ids for the MQTT request/response topics.
 uuid = { version = "1", features = ["v4"] }
 # CSPRNG for minting per-node AES keys (the device PRNGs are explicitly
 # non-cryptographic, so the host is the only place keys may be generated).
-getrandom = { version = "0.3", features = ["std"] }
+getrandom = { version = "0.4", features = ["std"] }
 # Single source of truth for the wire format, shared with the firmware (which depends on the
-# same crate + tag). postcard isn't self-describing, so both ends MUST be the same version —
+# same crate + tag). postcard isn't self-describing, so both ends MUST be the same version,
 # pinned to a tag so a standalone clone builds reproducibly. Bump in lockstep with any wire
 # change. For side-by-side development against a local checkout, see `.cargo/config.toml`
-# (gitignored `paths` override) — it doesn't touch Cargo.lock or affect other clones.
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.5.0" }
+# (gitignored `paths` override); it doesn't touch Cargo.lock or affect other clones.
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.5.1" }
 # STM32L0 UART-bootloader engine (flash / erase / reset), shared with the standalone
 # `jolt` CLI. Pinned to a tag so a standalone clone builds reproducibly, like
 # tower-protocol above. For side-by-side dev against a local checkout, see the
 # `.cargo/config.toml` `paths` override.
-jolt = { git = "https://github.com/hardwario/jolt", tag = "v1.4.0", default-features = false }
+jolt = { git = "https://github.com/hardwario/jolt", tag = "v1.5.0", default-features = false }
 
 [dev-dependencies]
 # Tests build wire frames with the protocol's own message types; `ShellCompletions`/`Event`

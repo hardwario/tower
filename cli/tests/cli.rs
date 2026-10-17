@@ -1,7 +1,7 @@
 //! End-to-end CLI tests: drive the compiled `tower` binary with no hardware attached, so
 //! they exercise argument parsing, the `--help`/usage surface, and the exit-code contract
 //! (see `main.rs`: 0 ok, 1 tool error, 2 usage). Anything that would open a serial port is
-//! avoided — `devices` merely enumerates ports (fine with none), and the bad-argument cases
+//! avoided: `devices` merely enumerates ports (fine with none), and the bad-argument cases
 //! fail in clap before any I/O.
 
 use assert_cmd::Command;
@@ -62,7 +62,7 @@ fn color_rejects_invalid_value() {
 
 #[test]
 fn devices_runs_with_no_hardware() {
-    // Enumerating ports must succeed (exit 0) even when none are present — it's the one
+    // Enumerating ports must succeed (exit 0) even when none are present; it's the one
     // command that touches the serial subsystem but never opens a port.
     tower().arg("devices").assert().success();
 }
@@ -71,7 +71,7 @@ fn devices_runs_with_no_hardware() {
 fn no_colors_alias_is_accepted_but_hidden() {
     // The deprecated `--no-colors` alias still parses (help hides it). Pair it with an
     // impossible device so we fail fast on the (now-fatal) open rather than hanging on a real
-    // device — the point is only that the *flag* parses, i.e. we don't get a usage error (2).
+    // device: the point is only that the *flag* parses, i.e. we don't get a usage error (2).
     tower()
         .args([
             "logs",
@@ -166,4 +166,25 @@ fn net_status_fails_fast_without_broker() {
         .args(["net", "status", "--mqtt", "127.0.0.1:1", "--timeout", "500"])
         .assert()
         .code(1);
+}
+
+#[test]
+fn gateway_refuses_an_unauthenticated_non_loopback_broker() {
+    // The access policy: a loopback broker is anonymous, any other bind needs a login. The
+    // check runs before the serial port is opened, so this needs no hardware; the port given
+    // is never touched. Clear the credential env vars so an operator's shell can't leak in.
+    tower()
+        .args([
+            "gateway",
+            "--service",
+            "--broker",
+            "0.0.0.0:18839",
+            "-d",
+            "/dev/null-tower-test",
+        ])
+        .env_remove("TOWER_MQTT_USER")
+        .env_remove("TOWER_MQTT_PASSWORD")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("without authentication"));
 }

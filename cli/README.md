@@ -2,12 +2,13 @@
 
 Host CLI/TUI for the **HARDWARIO TOWER** console link. The `tower` binary connects to a
 TOWER device over the USB serial port and renders the **framed** host↔target protocol
-(COBS + CRC + postcard) emitted by the [tower firmware](https://github.com/hardwario/tower-firmware)
-— logs, events, and an interactive shell. (A plain serial monitor shows that link as raw
+(COBS + CRC + postcard) emitted by the [tower firmware](https://github.com/hardwario/tower-firmware):
+logs, events, and an interactive shell. (A plain serial monitor shows that link as raw
 frame bytes; `tower` decodes it.)
 
-The wire format is shared with the firmware via the `tower-protocol` crate (pinned to a
-firmware tag), so the two cannot drift.
+The wire format is shared with the firmware via the `tower-protocol` crate, pinned to a
+`tower-protocol` git tag (the same tag the firmware pins, enforced by a CI lockstep check),
+so the two cannot drift.
 
 ## Install
 
@@ -74,29 +75,54 @@ tower monitor --hex               # dump every raw received byte as hex
 Colors default to **auto**: on when stdout is a terminal and `NO_COLOR` is unset,
 off when piped or redirected. The first device open is always fatal (a bad `--device`
 exits non-zero rather than retrying); reconnection only kicks in after a successful
-attach, and `--no-reconnect` disables it entirely.
+attach (an auto-detected device is re-detected on each attempt, so a replug that comes
+back under a new name is followed), and `--no-reconnect` disables it entirely: the
+command then exits `1` when the link drops.
 
 The device is selected with `-d`/`--device` (auto-detected when exactly one USB serial
-device is present). List what's connected with `tower devices`.
+device is present). List what's connected with `tower devices`. On macOS each port appears
+once, as its `/dev/cu.*` call-out node (the `/dev/tty.*` dial-in twin is hidden).
 
 ### Gateway & MQTT bridge
 
 With a Radio Dongle running the `radio_dongle_gateway` firmware, `tower gateway` bridges
-its radio network to MQTT — a full-screen TUI by default, or headless with `--service`. It
+its radio network to MQTT: a full-screen TUI by default, or headless with `--service`. It
 hosts an embedded MQTT broker unless pointed at an external one:
 
 ```sh
-tower gateway                       # TUI + embedded broker on 127.0.0.1:1883
+tower gateway                       # TUI + embedded broker on 127.0.0.1:1883 (anonymous)
 tower gateway --service             # headless: MQTT is the only interface, logs to stderr
-tower gateway --broker 0.0.0.0:1883 # embedded broker, bound to a given address
+                                    #   (exits 1 if the bridge dies, for Restart=on-failure)
+tower gateway --broker 0.0.0.0:1883 # embedded broker on every interface; needs a login:
+                                    #   --mqtt-user (or TOWER_MQTT_USER) + TOWER_MQTT_PASSWORD
 tower gateway --mqtt host:1883      # use an existing broker instead of hosting one
-                                    #   (--mqtt-user / TOWER_MQTT_PASSWORD for auth)
+                                    #   (--mqtt-user + TOWER_MQTT_PASSWORD for auth)
 tower gateway --prefix tower/       # MQTT topic prefix (default tower/)
 tower gateway --reset               # NRST-pulse the dongle on attach (clears its RAM queue)
 ```
 
-The MQTT topic tree (under `--prefix`) is the gateway's public API — the full table lives
-in [`src/gateway/topics.rs`](src/gateway/topics.rs).
+**Broker access.** The embedded broker on a **loopback** address (the default
+`127.0.0.1:1883`) is **anonymous by design**: any local user or process on the machine can
+control the gateway: list/rename/remove nodes, read node AES keys (`nodes show --keys`), run
+remote shell commands, just as anyone who can open the dongle's serial port could. A
+**non-loopback** bind (any other address, including `0.0.0.0` / `::`) is refused unless a
+login is configured (`--mqtt-user` or `TOWER_MQTT_USER`, plus the password; prefer
+`TOWER_MQTT_PASSWORD`, argv is visible in `ps`); every client then needs the same login. A
+configured login is enforced on loopback too. There is **no TLS**: the login and all traffic,
+node keys included, cross the network in clear text; for remote access use an SSH tunnel or
+VPN to a loopback broker, or bridge to a properly secured external broker with `--mqtt`. An
+MQTT user without a password is an error; an exported `TOWER_MQTT_PASSWORD` without a user is
+ignored. If the broker port is already taken, `tower gateway` fails instead of silently
+talking to whatever owns it; with a wildcard bind its own client connects via loopback.
+
+The MQTT topic tree (under `--prefix`) is the gateway's public API; the full table lives
+in [`src/gateway/topics.rs`](src/gateway/topics.rs). Rules for clients writing to it:
+commands (`gateway/cmd`, `nodes/{addr}/shell/req`) must not be retained (a retained one is
+ignored and cleared); request ids must be 1-64 characters of `[A-Za-z0-9_.-]` (a uuid), and a
+QoS-1 redelivery of a recent id is dropped; RPC responses arrive on `gateway/rsp/{id}`, so
+subscribe once to `gateway/rsp/+` and match the id. Only nodes in the gateway's registry
+are ever published; at startup the gateway drops downlinks a previous `tower gateway` left
+queued on the dongle (their replies could not be matched).
 
 The **client** commands drive a running gateway over MQTT (they share `--mqtt`/`--prefix`;
 `<node>` is a `0xHHHHHHHH` address or a friendly name):
@@ -124,15 +150,17 @@ the cause of a failure:
 | Code | Meaning |
 |------|---------|
 | `0`  | success |
-| `1`  | tool error (I/O, bad file, encode/decode, truncated/incomplete device response) |
-| `2`  | usage error (bad arguments — emitted by clap) |
-| `124`| device command timed out (no response at all — also: no gateway reply to an MQTT RPC) |
-| `125`| protocol-version mismatch (device speaks a different `tower-protocol` tag — rebuild/re-pin) |
+| `1`  | tool error: I/O (incl. a port that fails mid-command, or a `logs`/`events` link lost under `--no-reconnect`), bad file, encode/decode, truncated/incomplete device response |
+| `2`  | usage error (bad arguments, emitted by clap) |
+| `124`| device command timed out (no response at all to `exec` / `complete`; also: no gateway reply to an MQTT RPC) |
+| `125`| protocol-version mismatch (device speaks a different `tower-protocol` tag; rebuild/re-pin) |
 | `126`| wrong firmware role (`tower gateway`/`nodes add --port` pointed at the wrong kind of device) |
 | `1..=123` | `exec` only: the device-reported shell result (clamped into this range) |
 
-A response that arrives but is missing chunks exits `1`, not `124` — the device *did*
-answer, the output just can't be trusted. `125` is deliberately distinct so CI can
+A response that arrives but is missing chunks (or runs past 256 KiB without ending) exits
+`1`, not `124`: the device *did* answer, the output just can't be trusted. Likewise a port
+that errors out (unplugged mid-command) is `1`: `124` strictly means a live link on which
+the device stayed silent. `125` is deliberately distinct so CI can
 detect the lockstep failure mode (stale `tower` binary vs. freshly flashed firmware)
 instead of misreading it as a timeout.
 

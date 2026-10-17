@@ -14,9 +14,9 @@ use tower_protocol::mgmt::{DeviceInfo, DeviceRole, MgmtOp, NodeEntry, QueueEntry
 use tower_protocol::msg::{MgmtRequest, MgmtResponse};
 use tower_protocol::{Error, FrameDecoder, MAX_WIRE, MsgType, decode_frame, encode_frame};
 
-use crate::session::Transport;
+use crate::session::{Transport, read_some};
 
-/// Owned `DeviceInfo` — what `Describe` answers.
+/// Owned `DeviceInfo`: what `Describe` answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceInfoOwned {
     pub role: DeviceRole,
@@ -48,7 +48,7 @@ impl From<DeviceInfo<'_>> for DeviceInfoOwned {
     }
 }
 
-/// Owned `NodeEntry` — one registry row from `NodeList`.
+/// Owned `NodeEntry`: one registry row from `NodeList`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodeEntryOwned {
     pub addr: u32,
@@ -74,7 +74,7 @@ impl From<NodeEntry<'_>> for NodeEntryOwned {
     }
 }
 
-/// Owned `QueueEntry` — one pending downlink from `QueueList`. (Engine paths decode
+/// Owned `QueueEntry`: one pending downlink from `QueueList`. (Engine paths decode
 /// the borrowed records directly today; this owned mirror serves the HIL-style
 /// consumers and keeps the record set symmetric.)
 #[allow(dead_code)]
@@ -126,11 +126,16 @@ pub(crate) struct MgmtReply {
     pub truncated: bool,
 }
 
-/// The outcome of waiting for a management reply — tri-state like `session::ReadOutcome`
+/// The outcome of waiting for a management reply, tri-state like `session::ReadOutcome`
 /// so a lockstep mismatch is diagnosable (exit 125) instead of reading as a mute device.
 pub(crate) enum MgmtOutcome {
     Reply(MgmtReply),
-    Timeout { bad_version: Option<u8> },
+    Timeout {
+        bad_version: Option<u8>,
+    },
+    /// The transport itself failed (write error, unplugged, EIO, …): a broken link, not a
+    /// silent device; callers must not report it as "no answer".
+    Failed(std::io::Error),
 }
 
 /// Encode one `MgmtRequest` frame (requests always fit a single frame).
@@ -152,7 +157,7 @@ pub(crate) fn encode_mgmt(seq: u16, req_id: u16, op: &MgmtOp<'_>) -> Option<Vec<
 /// Send `op` and reassemble its reply. `timeout` is an *idle* deadline (reset per
 /// matching chunk), like `session::read_response`. Non-matching frames (logs, uplinks,
 /// other req_ids) are ignored. NOT for delayed ops (`PairingOpen`/`JoinOpen` can answer
-/// up to their window later — the engine's event loop owns those).
+/// up to their window later; the engine's event loop owns those).
 pub(crate) fn mgmt_roundtrip(
     sp: &mut (impl Transport + ?Sized),
     dec: &mut FrameDecoder,
@@ -164,8 +169,8 @@ pub(crate) fn mgmt_roundtrip(
     let Some(frame) = encode_mgmt(0, req_id, op) else {
         return MgmtOutcome::Timeout { bad_version };
     };
-    if sp.write_all(&frame).is_err() || sp.flush().is_err() {
-        return MgmtOutcome::Timeout { bad_version };
+    if let Err(e) = sp.write_all(&frame).and_then(|()| sp.flush()) {
+        return MgmtOutcome::Failed(e);
     }
 
     let mut deadline = Instant::now() + timeout;
@@ -174,10 +179,9 @@ pub(crate) fn mgmt_roundtrip(
     let mut truncated = false;
     let mut buf = [0u8; 256];
     while Instant::now() < deadline {
-        let nread = match sp.read(&mut buf) {
+        let nread = match read_some(sp, &mut buf) {
             Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 0,
-            Err(_) => return MgmtOutcome::Timeout { bad_version },
+            Err(e) => return MgmtOutcome::Failed(e),
         };
         for &b in &buf[..nread] {
             let Some(inner) = dec.push(b) else { continue };
@@ -217,15 +221,17 @@ pub(crate) fn mgmt_roundtrip(
 }
 
 /// The role probe: `Describe`, decoded. This is the authoritative "is this a
-/// gateway / node?" check — stronger than `Hello.firmware_name`, which is display-only
+/// gateway / node?" check, stronger than `Hello.firmware_name`, which is display-only
 /// (pre-v3 firmware never answers; a wrong role answers honestly).
 pub(crate) enum DescribeOutcome {
     Info(DeviceInfoOwned),
-    /// The device answered but refused (result code) — malformed/unsupported.
+    /// The device answered but refused (result code): malformed/unsupported.
     Refused(u8),
     Timeout {
         bad_version: Option<u8>,
     },
+    /// The transport failed; see [`MgmtOutcome::Failed`].
+    Failed(std::io::Error),
 }
 
 pub(crate) fn describe(
@@ -243,6 +249,7 @@ pub(crate) fn describe(
         }
         MgmtOutcome::Reply(r) => DescribeOutcome::Refused(r.result),
         MgmtOutcome::Timeout { bad_version } => DescribeOutcome::Timeout { bad_version },
+        MgmtOutcome::Failed(e) => DescribeOutcome::Failed(e),
     }
 }
 

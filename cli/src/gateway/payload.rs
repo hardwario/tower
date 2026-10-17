@@ -1,8 +1,8 @@
-//! JSON payloads for every topic in `topics.rs` — the other half of the gateway's
+//! JSON payloads for every topic in `topics.rs`: the other half of the gateway's
 //! public MQTT API. Golden-string tests pin the serialized shapes (the MQTT analog of
 //! tower-protocol's golden vectors): renaming or reordering a field here breaks
 //! external subscribers, so it must be a conscious change. `Status.schema` versions
-//! the whole tree — clients refuse a mismatch like the serial side refuses a
+//! the whole tree: clients refuse a mismatch like the serial side refuses a
 //! `PROTOCOL_VERSION` mismatch.
 
 use serde::{Deserialize, Serialize};
@@ -12,12 +12,12 @@ use serde::{Deserialize, Serialize};
 /// `id`/`node`→`addr`, and every unit suffix dropped from key names
 /// (`last_seen_s`→`last_seen`, `uptime_s`→`uptime`, `remaining_s`→`remaining`,
 /// `ttl_s`→`ttl`, `age_s`→`age`, `window_s`→`window`, `rssi_dbm`→`rssi`,
-/// `ack_rssi_dbm`→`ack_rssi`) — units live in the field docs, not the names.
+/// `ack_rssi_dbm`→`ack_rssi`); units live in the field docs, not the names.
 /// One bump: schema 2 never shipped in a tagged release between the renames.
 pub(crate) const SCHEMA: u32 = 2;
 
-/// `gateway/status` (retained). The LWT publishes only `{state:"offline", schema}` —
-/// the broker can't know the rest once we're gone — so every other field is
+/// `gateway/status` (retained). The LWT publishes only `{state:"offline", schema}`
+/// (the broker can't know the rest once we're gone), so every other field is
 /// `#[serde(default)]`: without that, `net status` could not even *parse* the one
 /// payload that means "gateway died", which is the state the command exists to report.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -67,7 +67,7 @@ pub(crate) struct Pairing {
     pub joined: Option<String>,
 }
 
-/// `nodes/{addr}` (retained; an empty MQTT payload — not JSON — clears a removed node).
+/// `nodes/{addr}` (retained; an empty MQTT payload, not JSON, clears a removed node).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct Node {
     pub addr: String,
@@ -117,7 +117,7 @@ pub(crate) struct Temperature {
     pub ts: u64,
 }
 
-/// `nodes/{addr}/uplink` — the raw decoded envelope (debug feed).
+/// `nodes/{addr}/uplink`: the raw decoded envelope (debug feed).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct UplinkDebug {
     pub counter: u32,
@@ -148,7 +148,7 @@ pub(crate) struct ShellRsp {
     pub done: bool,
     /// Authoritative only when `done` (mirrors the shell-response discipline).
     pub result: u8,
-    /// A chunk gap was detected — the text is incomplete.
+    /// A chunk gap was detected: the text is incomplete.
     #[serde(default)]
     pub truncated: bool,
     /// Set on gateway-side failures (queue expiry, undeliverable) instead of a node reply.
@@ -159,14 +159,14 @@ pub(crate) struct ShellRsp {
 /// One entry of `nodes/{addr}/shell/pending` (retained; whole queue mirrored per node).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct PendingEntry {
-    /// The gateway's queue item id — the `nodes dequeue` handle.
+    /// The gateway's queue item id, the `nodes dequeue` handle.
     pub r#ref: u16,
     /// The originating request's correlation id.
     pub id: String,
     pub line: String,
 }
 
-/// `radio/rssi` — ambient channel sample.
+/// `radio/rssi`: ambient channel sample.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct RadioRssi {
     pub dbm: i16,
@@ -174,7 +174,7 @@ pub(crate) struct RadioRssi {
     pub ts: u64,
 }
 
-/// `radio/rx` — one received packet (graph marker).
+/// `radio/rx`: one received packet (graph marker).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct RadioRx {
     pub src: String,
@@ -184,7 +184,7 @@ pub(crate) struct RadioRx {
     pub ts: u64,
 }
 
-/// `radio/tx` — one gateway TX attempt (graph marker + queue outcome).
+/// `radio/tx`: one gateway TX attempt (graph marker + queue outcome).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct RadioTx {
     pub dest: String,
@@ -196,7 +196,7 @@ pub(crate) struct RadioTx {
     pub ts: u64,
 }
 
-/// `gateway/cmd` — an RPC request from a client command.
+/// `gateway/cmd`: an RPC request from a client command.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct RpcRequest {
     /// Client-minted uuid; the response arrives on `gateway/rsp/{id}`.
@@ -206,7 +206,7 @@ pub(crate) struct RpcRequest {
     pub params: serde_json::Value,
 }
 
-/// `gateway/rsp/{uuid}` — the RPC response.
+/// `gateway/rsp/{uuid}`: the RPC response.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct RpcResponse {
     pub id: String,
@@ -215,6 +215,140 @@ pub(crate) struct RpcResponse {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
+}
+
+/// Longest accepted request correlation id (`RpcRequest.id` / `ShellReq.id`). A uuid is 36.
+pub(crate) const MAX_REQUEST_ID: usize = 64;
+
+/// Is `id` an acceptable client correlation id? Non-empty, ≤ [`MAX_REQUEST_ID`] bytes,
+/// uuid-ish charset (`[A-Za-z0-9_.-]`). The id is echoed into a response *topic*
+/// (`gateway/rsp/{id}`) and into every response payload, so it is validated before use: a
+/// `/`, `+` or `#` would forge or invalidate the topic, and a multi-KB id would push the
+/// response past the MQTT outgoing packet cap, which makes rumqttc drop the gateway's whole
+/// broker link (last-will "offline") instead of failing the one reply.
+pub(crate) fn valid_request_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_REQUEST_ID
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// JSON object keys whose values are secrets: the AES node `key` (`node_add` params,
+/// `reveal_key` responses), plus the credential names an auth layer would carry.
+const SECRET_FIELDS: &[&str] = &["key", "password", "secret", "token"];
+
+/// What a redacted secret value is replaced with (a JSON string, so the payload stays JSON).
+const REDACTED: &str = "\"<redacted>\"";
+
+/// `payload` with the value of every [`SECRET_FIELDS`] object key replaced by
+/// `"<redacted>"`, for the TUI's MQTT traffic mirror, which must never paint a node key on
+/// screen (the TUI's only key display is the confirm-then-auto-hide reveal modal). Works on
+/// the RAW bytes like the TUI's highlighter (no re-serialization: everything but the secret
+/// values renders byte-identical, key order included) and is total: malformed or partial
+/// JSON still gets every recognizable secret value blanked. Key names are compared
+/// *decoded*, so an escaped spelling (`"key"`) is caught too. Borrows when nothing was
+/// redacted.
+pub(crate) fn redact_secrets(payload: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    use std::borrow::Cow;
+    let Ok(raw) = std::str::from_utf8(payload) else {
+        return Cow::Borrowed(payload); // not JSON text; the mirror shows only "(N B binary)"
+    };
+    let b = raw.as_bytes();
+    // End of the JSON string token starting at `i` (which is a `"`), exclusive.
+    let string_end = |mut i: usize| -> usize {
+        i += 1;
+        while i < b.len() {
+            match b[i] {
+                b'\\' => i += 2,
+                b'"' => return i + 1,
+                _ => i += 1,
+            }
+        }
+        b.len()
+    };
+    // End of the JSON value starting at `i` (string / container / scalar), exclusive.
+    let value_end = |i: usize| -> usize {
+        match b.get(i) {
+            Some(b'"') => string_end(i),
+            Some(b'{' | b'[') => {
+                let mut depth = 0usize;
+                let mut j = i;
+                while j < b.len() {
+                    match b[j] {
+                        b'"' => {
+                            j = string_end(j);
+                            continue;
+                        }
+                        b'{' | b'[' => depth += 1,
+                        b'}' | b']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return j + 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                b.len()
+            }
+            _ => {
+                let mut j = i;
+                while j < b.len() && !matches!(b[j], b',' | b'}' | b']') {
+                    j += 1;
+                }
+                // Keep trailing whitespace outside the replaced span.
+                while j > i && b[j - 1].is_ascii_whitespace() {
+                    j -= 1;
+                }
+                j
+            }
+        }
+    };
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        let end = string_end(i);
+        // An object key is a string followed (after whitespace) by ':'.
+        let mut j = end;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        let is_secret_key = j < b.len()
+            && b[j] == b':'
+            && serde_json::from_str::<String>(&raw[i..end])
+                .is_ok_and(|k| SECRET_FIELDS.contains(&k.as_str()));
+        if !is_secret_key {
+            i = end;
+            continue;
+        }
+        let mut v = j + 1;
+        while v < b.len() && b[v].is_ascii_whitespace() {
+            v += 1;
+        }
+        let v_end = value_end(v);
+        if v_end > v {
+            spans.push((v, v_end));
+        }
+        i = v_end.max(end);
+    }
+    if spans.is_empty() {
+        return Cow::Borrowed(payload);
+    }
+    let mut out = Vec::with_capacity(payload.len());
+    let mut at = 0;
+    for (s, e) in spans {
+        out.extend_from_slice(&b[at..s]);
+        out.extend_from_slice(REDACTED.as_bytes());
+        at = e;
+    }
+    out.extend_from_slice(&b[at..]);
+    Cow::Owned(out)
 }
 
 /// Map a `mgmt::TX_*` outcome code to its wire string.
@@ -249,7 +383,7 @@ pub(crate) fn mgmt_error_str(code: u8) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    /// Golden JSON strings — the public API. Field names/order are load-bearing for
+    /// Golden JSON strings: the public API. Field names/order are load-bearing for
     /// external subscribers; change them consciously (and bump `SCHEMA`).
     #[test]
     fn golden_status() {
@@ -323,7 +457,7 @@ mod tests {
     #[test]
     fn golden_stats() {
         // `Stats` has no `skip_serializing_if`: absent ambient samples serialize as `null`
-        // (present as the value) — pin both so a subscriber sees stable keys.
+        // (present as the value); pin both so a subscriber sees stable keys.
         let s = Stats {
             uptime: 3600,
             nodes: 2,
@@ -509,6 +643,79 @@ mod tests {
             serde_json::to_string(&rsp).unwrap(),
             r#"{"id":"u1","ok":false,"error":"not found"}"#
         );
+    }
+
+    #[test]
+    fn request_id_validation() {
+        assert!(valid_request_id("3f2b8c1e-4d5a-4b6c-8d7e-9f0a1b2c3d4e"));
+        assert!(valid_request_id("tui-cbl-7"));
+        assert!(!valid_request_id(""));
+        assert!(
+            !valid_request_id("a/b"),
+            "a slash would forge the response topic"
+        );
+        assert!(
+            !valid_request_id("a+"),
+            "wildcards are invalid in a publish topic"
+        );
+        assert!(!valid_request_id("#"));
+        assert!(!valid_request_id(&"x".repeat(MAX_REQUEST_ID + 1)));
+        assert!(valid_request_id(&"x".repeat(MAX_REQUEST_ID)));
+    }
+
+    #[test]
+    fn redact_secrets_blanks_key_values_only() {
+        // node_add params (inbound) and a reveal_key response (outbound) carry the AES key.
+        let req = br#"{"id":"u1","op":"node_add","params":{"addr":"0x0000ab12","key":"00112233445566778899aabbccddeeff","name":"k"}}"#;
+        assert_eq!(
+            redact_secrets(req).as_ref(),
+            br#"{"id":"u1","op":"node_add","params":{"addr":"0x0000ab12","key":"<redacted>","name":"k"}}"#
+                .as_slice()
+        );
+        let rsp = br#"{"id":"u2","ok":true,"data":{"addr":"0x0000ab12", "key" : "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf" }}"#;
+        let red = redact_secrets(rsp);
+        let s = std::str::from_utf8(&red).unwrap();
+        assert!(!s.contains("a0a1a2a3"), "{s}");
+        assert!(s.contains(r#""key" : "<redacted>" }"#), "{s}");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(s).is_ok(),
+            "stays JSON"
+        );
+        // A value that merely EQUALS "key" (not an object key) is not a secret.
+        let plain = br#"{"name":"key","line":"/x key"}"#;
+        assert!(matches!(
+            redact_secrets(plain),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn redact_secrets_catches_escaped_names_and_non_string_values() {
+        // An escaped key name decodes to "key": still redacted.
+        let esc = br#"{"key":"deadbeef"}"#;
+        assert_eq!(
+            redact_secrets(esc).as_ref(),
+            br#"{"key":"<redacted>"}"#.as_slice()
+        );
+        // A non-string secret (array of bytes / number) is replaced wholesale.
+        let arr = br#"{"key":[1,2,[3]],"n":1}"#;
+        assert_eq!(
+            redact_secrets(arr).as_ref(),
+            br#"{"key":"<redacted>","n":1}"#.as_slice()
+        );
+        let num = br#"{"password": 1234 ,"x":0}"#;
+        assert_eq!(
+            redact_secrets(num).as_ref(),
+            br#"{"password": "<redacted>" ,"x":0}"#.as_slice()
+        );
+        // Truncated JSON is still scrubbed (the lexer is total).
+        let cut = br#"{"key":"0011223"#;
+        assert_eq!(
+            redact_secrets(cut).as_ref(),
+            br#"{"key":"<redacted>""#.as_slice()
+        );
+        // Non-UTF-8 passes through untouched (rendered as "(N B binary)").
+        assert_eq!(redact_secrets(&[0xFF, 0x00]).as_ref(), &[0xFF, 0x00]);
     }
 
     #[test]

@@ -1,12 +1,12 @@
-//! `tower` — HARDWARIO TOWER host CLI: devices, logs/events, shell/exec, the console TUI,
+//! `tower`, the HARDWARIO TOWER host CLI: devices, logs/events, shell/exec, the console TUI,
 //! and flash/erase/reset (via the jolt engine).
 //!
 //! The firmware's UART is always framed (`tower-protocol`: COBS + CRC + postcard),
-//! so a plain terminal shows binary — this tool decodes it. The same `FrameDecoder`
+//! so a plain terminal shows binary; this tool decodes it. The same `FrameDecoder`
 //! / `decode_frame` run on both ends, so the wire format can't drift.
 
 use std::cell::RefCell;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -30,17 +30,21 @@ mod mgmt;
 mod port;
 mod render;
 mod session;
+mod term;
 mod tui;
 
 use port::{devices, open_console, pick_port};
 use render::{
-    ColorMode, OutputMode, View, hexline, read_loop, resolve_color, warn_protocol_mismatch,
+    ColorMode, OutputMode, Renderer, View, device_text, hexline, read_loop, resolve_color,
+    warn_protocol_mismatch,
 };
 #[cfg(test)]
 use session::await_ready;
 use session::{
-    CompletionOutcome, ReadOutcome, Readiness, await_ready_with, read_response, request_completions,
+    CompletionOutcome, ReadOutcome, Readiness, await_ready_with, completion_start, read_response,
+    read_some, request_completions, result_tag,
 };
+use term::sanitize_line;
 
 // ---- exit-code contract ---------------------------------------------------
 //
@@ -51,13 +55,16 @@ use session::{
 // `result` verbatim (1..=123), which is why the reserved codes start at 124.
 //
 //   0    ok
-//   1    tool error (I/O, bad file, encode/decode)
-//   2    usage error (bad args — emitted by clap itself)
-//   124  device command timed out (no response at all; a truncated response is 1)
+//   1    tool error: I/O (incl. a port that fails mid-command, or a stream link lost under
+//        `--no-reconnect`), bad file, encode/decode, truncated/incomplete device response
+//   2    usage error (bad args, emitted by clap itself)
+//   124  device command timed out (no response at all: `exec`, `complete`, an MQTT RPC; a
+//        truncated response is 1)
 //   125  protocol-version mismatch (device speaks a different tower-protocol tag)
+//   126  wrong firmware role (the role probe found the wrong kind of device, or was refused)
 //
 // So a device `result` can't be confused with the reserved codes, `exec` clamps a
-// device-reported non-zero result into 1..=123 (see `exec_cmd`); 124/125 stay reserved.
+// device-reported non-zero result into 1..=123 (see `exec_cmd`); 124..=126 stay reserved.
 const EXIT_OK: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 const EXIT_DEVICE_TIMEOUT: u8 = 124;
@@ -66,17 +73,17 @@ const EXIT_DEVICE_TIMEOUT: u8 = 124;
 /// from 124/125 so scripts can say "flash the right firmware" instead of "check the cable".
 const EXIT_WRONG_FIRMWARE: u8 = 126;
 /// A freshly-reset device announced (or its frames were tagged with) a `tower-protocol`
-/// version this build doesn't speak — every frame would silently mis-decode, so `exec`
+/// version this build doesn't speak: every frame would silently mis-decode, so `exec`
 /// refuses rather than emitting junk. Distinct from a plain timeout so CI can branch on it.
 const EXIT_PROTOCOL_MISMATCH: u8 = 125;
 
 /// Default per-command response timeout (`--timeout`), in milliseconds.
 ///
 /// Sized above the firmware's worst-case EEPROM compaction stall (~5.2 s with the whole
-/// chip frozen — see tower-firmware docs/storage.md): any command that writes EEPROM
+/// chip frozen; see tower-firmware docs/storage.md): any command that writes EEPROM
 /// (`settings set`, …) can land on the append that fills the KV half and pay for the whole
 /// compaction before it can respond. With the old 1.5 s default such a command *executed*
-/// but the CLI reported "no response (timeout)" — a phantom failure (2026-07-05). It is an
+/// but the CLI reported "no response (timeout)": a phantom failure (2026-07-05). It is an
 /// *idle* timeout, so healthy commands still return in milliseconds; only a genuinely mute
 /// link waits the full 7 s.
 const DEFAULT_TIMEOUT_MS: u64 = 7000;
@@ -399,54 +406,92 @@ fn stream(
     delay: Option<u64>,
     reconnect: bool,
 ) -> Result<()> {
-    let port = pick_port(port)?;
+    // An explicit `--device` is honoured for the whole session; an auto-detected port is
+    // re-detected on every reconnect, since a replugged board can come back under a new name.
+    let explicit = port.is_some();
+    let mut port = pick_port(port)?;
     // The FIRST open is fatal: a nonexistent --device must exit 1, not retry forever
     // (that used to spin silently). Enter the reconnect loop only after one success.
-    // --reset fires once, on that initial attach — not on every auto-reconnect, or a
+    // --reset fires once, on that initial attach, not on every auto-reconnect, or a
     // flaky link would turn into a reboot loop.
-    let mut sp = open_console(&port, reset)?;
+    let mut link = Some(open_console(&port, reset)?);
     let mut first = true;
+    // The last reconnect failure, so a long unplug prints each distinct cause once rather than
+    // the same line every 800 ms.
+    let mut last_err = String::new();
     loop {
-        eprintln!("[tower] connected {port}");
-        // `--send` fires ONCE, on the initial attach (as documented) — not on every
-        // auto-reconnect. Re-sending on each reconnect would double-poke the device and, worse,
-        // skip the readiness wait (which only runs on `first`), racing the boot.
-        if first && let Some(s) = &send {
-            // On a reset attach, wait for the device to come up before poking it — and
-            // surface a version mismatch immediately (the stream continues; render's
-            // decode-failure path keeps counting, but the banner names the cause up front).
-            if reset {
-                let mut dec = FrameDecoder::new();
-                let mut ticker = BootTicker::new();
-                let readiness = await_ready_with(&mut *sp, &mut dec, delay, |el| ticker.tick(el));
-                ticker.finish(&readiness);
-                match readiness {
-                    Readiness::BadVersion(got) => warn_protocol_mismatch(got),
-                    Readiness::Hello(v) if v != tower_protocol::PROTOCOL_VERSION => {
-                        warn_protocol_mismatch(v)
+        if let Some(mut sp) = link.take() {
+            eprintln!("[tower] connected {port}");
+            last_err.clear();
+            let mut out = Renderer::new(mode, view);
+            // `--send` fires ONCE, on the initial attach (as documented), not on every
+            // auto-reconnect. Re-sending on each reconnect would double-poke the device and,
+            // worse, skip the readiness wait (which only runs on `first`), racing the boot.
+            if first && let Some(s) = &send {
+                // On a reset attach, wait for the device to come up before poking it, and
+                // surface a version mismatch immediately (the stream continues; render's
+                // decode-failure path keeps counting, but the banner names the cause up front).
+                if reset {
+                    let mut boot = Vec::new();
+                    let mut ticker = BootTicker::new();
+                    let readiness = await_ready_with(
+                        &mut *sp,
+                        &mut FrameDecoder::new(),
+                        delay,
+                        |el| ticker.tick(el),
+                        Some(&mut boot),
+                    );
+                    ticker.finish(&readiness);
+                    match readiness {
+                        Readiness::BadVersion(got) => warn_protocol_mismatch(got),
+                        Readiness::Hello(v) if v != tower_protocol::PROTOCOL_VERSION => {
+                            warn_protocol_mismatch(v)
+                        }
+                        Readiness::Hello(_) | Readiness::Timeout => {}
                     }
-                    Readiness::Hello(_) | Readiness::Timeout => {}
+                    // Everything the wait consumed (the Hello and the early boot lines) is
+                    // rendered now, in wire order, before the poke; the live stream then picks
+                    // up at the very next byte, so nothing is lost and no frame is cut in half.
+                    out.feed(&boot);
                 }
+                let _ = sp.write_all(s.as_bytes());
+                let _ = sp.flush();
+                eprintln!("[tower] sent {} byte(s)", s.len());
             }
-            let _ = sp.write_all(s.as_bytes());
-            let _ = sp.flush();
-            eprintln!("[tower] sent {} byte(s)", s.len());
-        }
-        if let Err(e) = read_loop(&mut *sp, mode, view) {
+            first = false;
+            let e = read_loop(&mut *sp, &mut out);
+            // Release the dead handle NOW, before sleeping/reopening. Holding it kept the fd
+            // open across every retry: on Linux the stale ttyUSB minor stays claimed so a
+            // replug renumbers (ttyUSB0 → ttyUSB1), and our own exclusive lock blocked
+            // reopening the very same path.
+            drop(sp);
+            if !reconnect {
+                // The link was lost and we were told not to retry: that's a failure (exit 1),
+                // not a clean end of stream; scripts must be able to tell the two apart.
+                return Err(anyhow::Error::new(e).context(format!("{port} lost")));
+            }
             eprintln!("[tower] {port} lost: {e}");
-        }
-        first = false;
-        if !reconnect {
-            return Ok(());
+            eprintln!("[tower] reconnecting…");
         }
         std::thread::sleep(Duration::from_millis(800));
-        eprintln!("[tower] reconnecting…");
         // Reopen without re-resetting; tolerate a transient failure and keep retrying.
-        match open_console(&port, false) {
-            Ok(reopened) => sp = reopened,
+        // "connected" is announced only once an open actually succeeded (top of the loop).
+        let target = if explicit {
+            Ok(port.clone())
+        } else {
+            pick_port(None)
+        };
+        match target.and_then(|p| Ok((open_console(&p, false)?, p))) {
+            Ok((sp, p)) => {
+                port = p;
+                link = Some(sp);
+            }
             Err(e) => {
-                eprintln!("[tower] {e}");
-                continue;
+                let msg = format!("{e:#}");
+                if msg != last_err {
+                    eprintln!("[tower] {msg}");
+                    last_err = msg;
+                }
             }
         }
     }
@@ -454,7 +499,7 @@ fn stream(
 
 // ---- interactive shell ----------------------------------------------------
 
-/// Shared serial connection — the TAB completer and the command loop both use it.
+/// Shared serial connection: the TAB completer and the command loop both use it.
 struct Conn {
     sp: Box<dyn serialport::SerialPort>,
     dec: FrameDecoder,
@@ -487,6 +532,12 @@ impl Completer for ShellHelper {
             Duration::from_millis(800),
         ) {
             CompletionOutcome::Completions(r) => {
+                // rustyline splices the pick into `line[start..pos]`, which panics on a start
+                // past the cursor or inside a UTF-8 scalar, and `token_start` is
+                // device-supplied. Same validation as the TUI; an unusable one offers nothing.
+                let Some(start) = completion_start(line, pos, r.token_start) else {
+                    return Ok((pos, Vec::new()));
+                };
                 let pairs = r
                     .candidates
                     .into_iter()
@@ -497,17 +548,23 @@ impl Completer for ShellHelper {
                             CandidateKind::Arg => "=",
                             CandidateKind::Value => "",
                         };
+                        // rustyline prints the candidate list straight to the terminal, so
+                        // the device's text is escaped before it gets there.
+                        let text = sanitize_line(&text);
                         Pair {
-                            display: text.clone(),
+                            display: text.to_string(),
                             replacement: format!("{text}{sep}"),
                         }
                     })
                     .collect();
-                Ok((r.token_start as usize, pairs))
+                Ok((start, pairs))
             }
-            // Timeout (mismatch or not): offer no candidates. The per-command path
-            // reports a lockstep mismatch loudly; TAB shouldn't spam mid-edit.
-            CompletionOutcome::Timeout { .. } => Ok((pos, Vec::new())),
+            // Timeout (mismatch or not) or a failed link: offer no candidates. The
+            // per-command path reports a lockstep mismatch / dead port loudly; TAB
+            // shouldn't spam mid-edit.
+            CompletionOutcome::Timeout { .. } | CompletionOutcome::Failed(_) => {
+                Ok((pos, Vec::new()))
+            }
         }
     }
 }
@@ -522,16 +579,16 @@ impl Helper for ShellHelper {}
 fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duration) -> Result<u8> {
     let port = pick_port(port)?;
     let mut sp = open_console(&port, reset)?;
-    eprintln!("[tower] shell on {port} — TAB completes; commands start with '/'; 'exit' to quit");
+    eprintln!("[tower] shell on {port}: TAB completes; commands start with '/'; 'exit' to quit");
 
     let mut dec = FrameDecoder::new();
     if reset {
-        // Don't drop into the prompt until the freshly reset device can answer — and refuse
+        // Don't drop into the prompt until the freshly reset device can answer, and refuse
         // to open it at all on a protocol mismatch (same rule as `exec`): every command
         // would otherwise just time out mute, which is exactly how the stale-binary
         // lockstep incident presented.
         let mut ticker = BootTicker::new();
-        let readiness = await_ready_with(&mut *sp, &mut dec, delay, |el| ticker.tick(el));
+        let readiness = await_ready_with(&mut *sp, &mut dec, delay, |el| ticker.tick(el), None);
         ticker.finish(&readiness);
         let mismatch = match readiness {
             Readiness::BadVersion(got) => Some(got),
@@ -541,7 +598,7 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
         if let Some(v) = mismatch {
             warn_protocol_mismatch(v);
             eprintln!(
-                "[tower] protocol version mismatch (device v{v}, tower v{}) — refusing to open the shell; rebuild/repin against the same tower-protocol tag",
+                "[tower] protocol version mismatch (device v{v}, tower v{}); refusing to open the shell; rebuild/repin against the same tower-protocol tag",
                 tower_protocol::PROTOCOL_VERSION
             );
             return Ok(EXIT_PROTOCOL_MISMATCH);
@@ -582,7 +639,7 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
                     Ok(n) => n,
                     Err(_) => {
                         eprintln!(
-                            "[tower] line too long (max ~{} bytes) — not sent",
+                            "[tower] line too long (max ~{} bytes); not sent",
                             tower_protocol::MAX_FRAME - 12
                         );
                         continue;
@@ -593,15 +650,22 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
                 sp.flush()?;
                 match read_response(&mut **sp, dec, cmd_id, timeout) {
                     ReadOutcome::Response(r) => {
-                        print!("{}", r.text);
-                        if !r.text.is_empty() && !r.text.ends_with('\n') {
+                        let text = device_text(&r.text);
+                        print!("{text}");
+                        if !text.is_empty() && !text.ends_with('\n') {
                             println!();
                         }
                         if r.result != 0 {
-                            eprintln!("[result {}]", r.result);
+                            eprintln!("{}", result_tag(r.result));
                         }
                     }
-                    // The device answered — with frames from a different tower-protocol
+                    // The port itself died (unplugged, EIO): every later command would fail
+                    // the same way, so end the session as a tool error instead of answering
+                    // each one with a misleading "no response (timeout)".
+                    ReadOutcome::Failed(e) => {
+                        return Err(anyhow::Error::new(e).context(format!("{port} lost")));
+                    }
+                    // The device answered, with frames from a different tower-protocol
                     // tag. Without this, the interactive shell was the one consumer that
                     // stayed mute on the mismatch the ecosystem got burned by.
                     ReadOutcome::Timeout {
@@ -612,7 +676,7 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
                             warned_mismatch = true;
                         }
                         eprintln!(
-                            "[tower] no response — device speaks protocol v{v}, tower speaks v{} (lockstep mismatch)",
+                            "[tower] no response: device speaks protocol v{v}, tower speaks v{} (lockstep mismatch)",
                             tower_protocol::PROTOCOL_VERSION
                         );
                     }
@@ -624,7 +688,7 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
             }
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
             // A real readline failure (e.g. a broken terminal) is an error, not a clean
-            // exit — propagate it so the shell exits non-zero rather than swallowing it.
+            // exit: propagate it so the shell exits non-zero rather than swallowing it.
             Err(e) => return Err(anyhow::Error::new(e).context("readline")),
         }
     }
@@ -633,8 +697,8 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
 
 /// A per-invocation `cmd_id` for the one-shot `exec`: the low 15 bits of the PID, never 0.
 /// A previous `tower exec` (a *different* process) used a different PID, so its late/queued
-/// `ShellResponse` — which would otherwise carry the same hardcoded `cmd_id` and satisfy this
-/// run's wait — no longer matches. 15 bits keeps clear of the `0` sentinel other paths use.
+/// `ShellResponse` (which would otherwise carry the same hardcoded `cmd_id` and satisfy this
+/// run's wait) no longer matches. 15 bits keeps clear of the `0` sentinel other paths use.
 fn exec_cmd_id() -> u16 {
     let id = (std::process::id() & 0x7FFF) as u16;
     if id == 0 { 1 } else { id }
@@ -642,9 +706,10 @@ fn exec_cmd_id() -> u16 {
 
 /// Run a single shell command non-interactively: send it, print the (reassembled)
 /// response, and return an exit code (see the exit-code contract): a device-reported
-/// non-zero `result` (clamped into 1..=123 so it can't collide with our reserved 124/125),
-/// `EXIT_PROTOCOL_MISMATCH` on a version mismatch, `EXIT_ERROR` on a truncated (chunk-dropped)
-/// response, `EXIT_DEVICE_TIMEOUT` on no/incomplete reply, else `EXIT_OK`.
+/// non-zero `result` (clamped into 1..=123 so it can't collide with our reserved 124..=126),
+/// `EXIT_PROTOCOL_MISMATCH` on a version mismatch, `EXIT_ERROR` on a truncated (chunk-dropped
+/// or over-long) response or a port that fails mid-command, `EXIT_DEVICE_TIMEOUT` on no reply
+/// at all, else `EXIT_OK`.
 fn exec_cmd(
     port: Option<String>,
     line: String,
@@ -659,11 +724,11 @@ fn exec_cmd(
         // Wait for the reset device to boot before issuing the command, so the
         // response we capture is from a known-clean state (the CI use case).
         // Fail fast on a protocol-version mismatch: `exec` feeds CI, and a mismatch means
-        // every subsequent frame silently mis-decodes — better a clear error than junk. A
+        // every subsequent frame silently mis-decodes; better a clear error than junk. A
         // *real* mismatch is caught at the frame header (`Readiness::BadVersion`) before any
         // `Hello` payload parses; the payload-version check below is a secondary guard.
         let mut ticker = BootTicker::new();
-        let readiness = await_ready_with(&mut *sp, &mut dec, delay, |el| ticker.tick(el));
+        let readiness = await_ready_with(&mut *sp, &mut dec, delay, |el| ticker.tick(el), None);
         ticker.finish(&readiness);
         let mismatch = match readiness {
             Readiness::BadVersion(got) => Some(got),
@@ -673,7 +738,7 @@ fn exec_cmd(
         if let Some(v) = mismatch {
             warn_protocol_mismatch(v);
             eprintln!(
-                "[tower] protocol version mismatch (device v{v}, tower v{}) — refusing to exec; rebuild/repin against the same tower-protocol tag",
+                "[tower] protocol version mismatch (device v{v}, tower v{}); refusing to exec; rebuild/repin against the same tower-protocol tag",
                 tower_protocol::PROTOCOL_VERSION
             );
             return Ok(EXIT_PROTOCOL_MISMATCH);
@@ -684,7 +749,7 @@ fn exec_cmd(
 
 /// Send one shell command line over an established session, print its reassembled response,
 /// and map the read outcome to the process exit code (see the exit-code contract). Split out
-/// of [`exec_cmd`] — which owns port selection + the optional `--reset` boot wait — so this
+/// of [`exec_cmd`] (which owns port selection + the optional `--reset` boot wait) so this
 /// send → read → map core runs unchanged over the real port and over an in-memory transport
 /// in tests (the reserved-code mapping, incl. the `result.clamp(1, 123)` guard, is the part
 /// worth pinning and it has no hardware in it).
@@ -707,18 +772,19 @@ fn exec_line(
     sp.flush()?;
     match read_response(&mut *sp, dec, cmd_id, timeout) {
         ReadOutcome::Response(r) => {
-            print!("{}", r.text);
-            if !r.text.is_empty() && !r.text.ends_with('\n') {
+            let text = device_text(&r.text);
+            print!("{text}");
+            if !text.is_empty() && !text.ends_with('\n') {
                 println!();
             }
             if r.incomplete {
-                // Output was silently truncated by a dropped chunk — fail even if the
+                // Output was silently truncated by a dropped chunk: fail even if the
                 // device's `last` chunk said result 0 (the reported result is unreliable).
                 eprintln!("[tower] response incomplete");
                 return Ok(EXIT_ERROR);
             }
             if r.result != 0 {
-                eprintln!("[result {}]", r.result);
+                eprintln!("{}", result_tag(r.result));
                 // Device results share the byte with our exit code; keep them in 1..=123 so
                 // they never masquerade as the reserved timeout (124) code.
                 return Ok(r.result.clamp(1, 123));
@@ -726,14 +792,14 @@ fn exec_line(
             Ok(EXIT_OK)
         }
         // Frames arrived but every one was version-rejected: that's the lockstep failure
-        // (125), not a mute device (124) — even without --reset, where the Hello-based
+        // (125), not a mute device (124), even without --reset, where the Hello-based
         // check above never ran.
         ReadOutcome::Timeout {
             bad_version: Some(v),
         } => {
             warn_protocol_mismatch(v);
             eprintln!(
-                "[tower] no response — device speaks protocol v{v}, tower speaks v{} (lockstep mismatch)",
+                "[tower] no response: device speaks protocol v{v}, tower speaks v{} (lockstep mismatch)",
                 tower_protocol::PROTOCOL_VERSION
             );
             Ok(EXIT_PROTOCOL_MISMATCH)
@@ -742,6 +808,8 @@ fn exec_line(
             eprintln!("[tower] no response (timeout)");
             Ok(EXIT_DEVICE_TIMEOUT)
         }
+        // A hard transport error is a tool error (1), not a mute device (124).
+        ReadOutcome::Failed(e) => Err(anyhow::Error::new(e).context("reading the response")),
     }
 }
 
@@ -750,17 +818,28 @@ fn complete_cmd(port: Option<String>, line: String) -> Result<u8> {
     // No --reset here (completion is a momentary query), but still establish the
     // run baseline so we don't query a device the bridge left held in reset.
     let mut sp = open_console(&port, false)?;
-    let mut dec = FrameDecoder::new();
-    let cursor = line.len() as u16;
-    match request_completions(
+    complete_line(
         &mut *sp,
-        &mut dec,
+        &mut FrameDecoder::new(),
         &line,
-        cursor,
-        1,
         Duration::from_millis(1500),
-    ) {
+    )
+}
+
+/// Ask for completions of `line` (cursor at its end) over an established session, print them,
+/// and map the outcome to the exit code: the hardware-free core of [`complete_cmd`], split out
+/// for the same reason as [`exec_line`].
+fn complete_line(
+    sp: &mut (impl crate::session::Transport + ?Sized),
+    dec: &mut FrameDecoder,
+    line: &str,
+    timeout: Duration,
+) -> Result<u8> {
+    let cursor = line.len() as u16;
+    match request_completions(sp, dec, line, cursor, 1, timeout) {
         CompletionOutcome::Completions(r) => {
+            // `{:?}` already escapes every control (C0/C1/DEL/bidi) in `common_prefix`; the
+            // candidates are printed bare, so they go through the terminal-safety escape.
             println!(
                 "token_start={} common_prefix={:?}{}",
                 r.token_start,
@@ -768,7 +847,7 @@ fn complete_cmd(port: Option<String>, line: String) -> Result<u8> {
                 if r.more { " (more…)" } else { "" }
             );
             for (text, kind) in &r.candidates {
-                println!("  {kind:?}  {text}");
+                println!("  {kind:?}  {}", sanitize_line(text));
             }
             Ok(EXIT_OK)
         }
@@ -778,14 +857,19 @@ fn complete_cmd(port: Option<String>, line: String) -> Result<u8> {
         } => {
             warn_protocol_mismatch(v);
             eprintln!(
-                "[tower] no completions — device speaks protocol v{v}, tower speaks v{} (lockstep mismatch)",
+                "[tower] no completions: device speaks protocol v{v}, tower speaks v{} (lockstep mismatch)",
                 tower_protocol::PROTOCOL_VERSION
             );
             Ok(EXIT_PROTOCOL_MISMATCH)
         }
+        // No answer at all is the documented device timeout (124); exiting 0 told scripts a
+        // mute or absent device had answered with nothing to complete.
         CompletionOutcome::Timeout { bad_version: None } => {
             eprintln!("[tower] no completions (timeout)");
-            Ok(EXIT_OK)
+            Ok(EXIT_DEVICE_TIMEOUT)
+        }
+        CompletionOutcome::Failed(e) => {
+            Err(anyhow::Error::new(e).context("requesting completions"))
         }
     }
 }
@@ -802,12 +886,10 @@ fn monitor(port: Option<String>, hex: bool, reset: bool) -> Result<()> {
     let mut dec = FrameDecoder::new();
     let mut buf = [0u8; 512];
     loop {
-        let n = match sp.read(&mut buf) {
-            Ok(0) => continue,
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
-            Err(e) => return Err(e.into()),
-        };
+        let n = read_some(&mut *sp, &mut buf)?;
+        if n == 0 {
+            continue;
+        }
         if hex {
             for &b in &buf[..n] {
                 print!("{b:02x} ");
@@ -834,7 +916,7 @@ fn monitor(port: Option<String>, hex: bool, reset: bool) -> Result<()> {
 //
 // The console protocol above runs over the firmware's framed UART link; these
 // commands instead drive the STM32 system bootloader (toggling NRST/BOOT0 over
-// the bridge's RTS/DTR). The whole bootloader engine is the `jolt` crate — we
+// the bridge's RTS/DTR). The whole bootloader engine is the `jolt` crate; we
 // only pick the port (reusing the same auto-detect as the other commands) and
 // hand off to it.
 
@@ -893,8 +975,8 @@ fn erase_cmd(port: Option<String>, verbose: bool) -> Result<()> {
 }
 
 /// A jolt flash/erase progress sink. jolt's library is UI-free (it emits `Progress` events);
-/// we render them with `indicatif` progress bars — the same crate the standalone `jolt` CLI
-/// uses — so a ~45 s flash shows live erase/write/verify progress instead of looking hung.
+/// we render them with `indicatif` progress bars (the same crate the standalone `jolt` CLI
+/// uses), so a ~45 s flash shows live erase/write/verify progress instead of looking hung.
 /// `indicatif` auto-detects the terminal, so a redirected stderr (a log, a pipe) stays clean.
 /// `--verbose` dumps the raw events instead.
 fn flash_progress(verbose: bool) -> impl FnMut(jolt::flash::Progress) {
@@ -1005,7 +1087,7 @@ fn reset_cmd(port: Option<String>, bootloader: bool) -> Result<()> {
 // them against an in-memory duplex mock instead of hardware: the "device" side is a queue
 // of bytes the code-under-test reads, and everything the code writes lands in a second
 // queue we can inspect. The mock returns `ErrorKind::TimedOut` when its read queue is
-// drained, exactly as a serial port does on its read timeout — so the read loops exercise
+// drained, exactly as a serial port does on its read timeout, so the read loops exercise
 // their real timeout paths.
 // ===========================================================================
 #[cfg(test)]
@@ -1112,7 +1194,7 @@ mod tests {
         )
     }
 
-    /// Canonical COBS encode of `inner`, plus the trailing `0x00` delimiter — the same wire
+    /// Canonical COBS encode of `inner`, plus the trailing `0x00` delimiter: the same wire
     /// shape `encode_frame` produces. Used to forge a frame the host's own encoder can't (a
     /// mismatched-version header always stamps the *current* version otherwise).
     fn cobs_frame(inner: &[u8]) -> Vec<u8> {
@@ -1142,9 +1224,9 @@ mod tests {
     }
 
     /// A full wire frame whose *header* advertises protocol version `ver` (top 3 bits of
-    /// `ver_type`) — what a firmware built against a different tower-protocol tag actually puts
-    /// on the wire. `decode_frame` rejects it at the version check (before CRC), so the session
-    /// sees `Error::BadVersion` and never parses the Hello payload. `ver` must be 0..=7.
+    /// `ver_type`): what a firmware built against a different tower-protocol tag actually puts
+    /// on the wire, CRC intact. `decode_frame` passes the CRC, then rejects the version, so the
+    /// session sees `Error::BadVersion` and never parses the Hello payload. `ver` must be 0..=7.
     fn hello_wire_bad_version(ver: u8) -> Vec<u8> {
         let mut inner = vec![(ver << 5) | (MsgType::Hello as u8 & 0x1F)];
         inner.extend_from_slice(&0u16.to_le_bytes()); // seq 0
@@ -1181,6 +1263,13 @@ mod tests {
 
     const SHORT: Duration = Duration::from_millis(200);
 
+    #[test]
+    fn result_tag_names_sdk_codes_and_keeps_unknown_bare() {
+        assert_eq!(result_tag(5), "[result 5: denied (console-only command)]");
+        assert_eq!(result_tag(2), "[result 2: bad argument]");
+        assert_eq!(result_tag(42), "[result 42]");
+    }
+
     // ---- read_response: reassembly, cmd_id filtering, chunk gaps ----
 
     #[test]
@@ -1198,7 +1287,7 @@ mod tests {
 
     #[test]
     fn read_response_survives_byte_at_a_time_reads() {
-        // The same three chunks, but delivered one byte per read() — reassembly must not
+        // The same three chunks, but delivered one byte per read(): reassembly must not
         // depend on frame boundaries aligning with read boundaries.
         let mut bytes = shell_resp(1, 0, 0, false, "ab");
         bytes.extend(shell_resp(1, 0, 1, true, "cd"));
@@ -1266,7 +1355,7 @@ mod tests {
 
     #[test]
     fn read_response_timeout_carries_the_mismatched_version() {
-        // The device answers — but every frame is tagged with a different protocol version.
+        // The device answers, but every frame is tagged with a different protocol version.
         // The timeout must carry that version so exec/shell report lockstep (125), not a
         // mute device (124): the exact stale-binary incident this ecosystem had.
         let mut sp = MockPort::new(hello_wire_bad_version(1));
@@ -1274,6 +1363,7 @@ mod tests {
         match read_response(&mut sp, &mut dec, 1, SHORT) {
             ReadOutcome::Timeout { bad_version } => assert_eq!(bad_version, Some(1)),
             ReadOutcome::Response(_) => panic!("a version-rejected frame must not decode"),
+            ReadOutcome::Failed(e) => panic!("the mock never fails: {e}"),
         }
     }
 
@@ -1286,6 +1376,7 @@ mod tests {
             CompletionOutcome::Completions(_) => {
                 panic!("a version-rejected frame must not decode")
             }
+            CompletionOutcome::Failed(e) => panic!("the mock never fails: {e}"),
         }
     }
 
@@ -1306,7 +1397,7 @@ mod tests {
     #[test]
     fn wait_for_hello_reports_mismatched_version() {
         // A REAL mismatched peer tags the frame *header* with its own version, so `decode_frame`
-        // rejects it before the Hello payload parses. Forge that on the wire — the host's own
+        // rejects it before the Hello payload parses. Forge that on the wire: the host's own
         // encoder always stamps the current version, so the old `hello(99)` test (payload-only
         // mismatch, header still valid) decoded fine and never modelled a real mismatch.
         // A device still speaking the previous protocol (v1) is the realistic mismatch.
@@ -1384,7 +1475,7 @@ mod tests {
     //
     // `exec_cmd` opens/selects the port; `exec_line` is its hardware-free core (send →
     // read_response → map to an exit code). These pin the mapping the outcome layer alone
-    // can't — especially the `result.clamp(1, 123)` guard that keeps a device result off the
+    // can't, especially the `result.clamp(1, 123)` guard that keeps a device result off the
     // reserved 124/125 codes.
 
     #[test]
@@ -1451,6 +1542,181 @@ mod tests {
         );
     }
 
+    // ---- hard I/O errors are tool errors (1), not device timeouts (124), CLI-8 ----
+
+    /// A port whose reads fail outright (unplugged / EIO), unlike the mock's benign timeout.
+    struct DeadPort;
+
+    impl Read for DeadPort {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+    }
+
+    impl Write for DeadPort {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn exec_line_hard_io_error_is_a_tool_error() {
+        // `main` maps an `Err` to EXIT_ERROR (1). It used to come back as "no response
+        // (timeout)" → 124, sending CI after a mute firmware when the cable was the problem.
+        let mut dec = FrameDecoder::new();
+        assert!(exec_line(&mut DeadPort, &mut dec, "/x", SHORT).is_err());
+    }
+
+    #[test]
+    fn read_some_treats_a_signal_interrupted_read_as_idle() {
+        // EINTR from the port's poll (a terminal resize mid-read) is "nothing yet", not a dead
+        // link; otherwise the stricter error mapping would end sessions on SIGWINCH.
+        struct Interrupted;
+        impl Read for Interrupted {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            }
+        }
+        let mut buf = [0u8; 8];
+        assert_eq!(read_some(&mut Interrupted, &mut buf).unwrap(), 0);
+        assert!(read_some(&mut DeadPort, &mut buf).is_err());
+    }
+
+    // ---- complete_line: the `tower complete` exit-code mapping (CLI-8) ----
+
+    #[test]
+    fn complete_line_no_answer_is_device_timeout() {
+        // No answer at all is the documented 124; it used to exit 0, as if the device had
+        // answered with nothing to complete.
+        let mut sp = MockPort::new(Vec::new());
+        let mut dec = FrameDecoder::new();
+        assert_eq!(
+            complete_line(&mut sp, &mut dec, "/s", SHORT).unwrap(),
+            EXIT_DEVICE_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn complete_line_maps_answer_mismatch_and_dead_port() {
+        let cands: heapless::Vec<Candidate, 16> = heapless::Vec::new();
+        let answer = frame(
+            MsgType::ShellCompletions,
+            0,
+            &ShellCompletions {
+                req_id: 1, // complete_line always asks with req_id 1
+                token_start: 1,
+                common_prefix: "",
+                candidates: cands,
+                more: false,
+            },
+        );
+        let mut dec = FrameDecoder::new();
+        assert_eq!(
+            complete_line(&mut MockPort::new(answer), &mut dec, "/s", SHORT).unwrap(),
+            EXIT_OK
+        );
+        let mut dec = FrameDecoder::new();
+        let mismatched = MockPort::new(hello_wire_bad_version(1));
+        assert_eq!(
+            complete_line(&mut { mismatched }, &mut dec, "/s", SHORT).unwrap(),
+            EXIT_PROTOCOL_MISMATCH
+        );
+        let mut dec = FrameDecoder::new();
+        assert!(complete_line(&mut DeadPort, &mut dec, "/s", SHORT).is_err());
+        // A line too long to frame is a tool error too, not a "timeout".
+        let mut dec = FrameDecoder::new();
+        let long = "x".repeat(300);
+        assert!(complete_line(&mut MockPort::new(Vec::new()), &mut dec, &long, SHORT).is_err());
+    }
+
+    // ---- completion_start: device token_start can't panic the line editors (CLI-5) ----
+
+    #[test]
+    fn completion_start_rejects_unusable_token_starts() {
+        assert_eq!(completion_start("/sys", 4, 1), Some(1));
+        assert_eq!(completion_start("/sys", 4, 4), Some(4)); // empty token at the cursor
+        assert_eq!(completion_start("/sys", 2, 3), None); // past the cursor
+        assert_eq!(completion_start("/π", 3, 2), None); // inside a UTF-8 scalar
+        assert_eq!(completion_start("ab", 2, 9), None); // past the end of the line
+    }
+
+    // ---- the Hello wait hands on every byte after the Hello (CLI-7) ----
+
+    #[test]
+    fn wait_for_hello_leaves_the_decoder_in_step_with_the_wire() {
+        // The read that completes the Hello also carries a boot line and the first bytes of
+        // the next frame; the rest of that frame comes in the next read. The wait used to
+        // return mid-buffer and drop the remainder, so the next decode began mid-frame and that
+        // frame was lost. Now the remainder still goes through `dec`, which resumes the frame.
+        let mut bytes = hello(tower_protocol::PROTOCOL_VERSION);
+        bytes.extend(log_frame(1, "boot line"));
+        let split = bytes.len() + 5;
+        bytes.extend(shell_resp(9, 0, 0, true, "split across reads"));
+        let mut sp = MockPort::with_read_chunk(bytes, split);
+        let mut dec = FrameDecoder::new();
+        assert_eq!(
+            wait_for_hello(&mut sp, &mut dec, SHORT),
+            Readiness::Hello(tower_protocol::PROTOCOL_VERSION)
+        );
+        let r = read_response(&mut sp, &mut dec, 9, SHORT).unwrap();
+        assert_eq!(r.text, "split across reads");
+    }
+
+    #[test]
+    fn hello_wait_transcript_holds_the_whole_boot() {
+        // `logs --reset --send` renders the stream itself: the transcript is every byte read
+        // during the wait (the Hello and the boot lines behind it) for a seamless replay.
+        let mut bytes = hello(tower_protocol::PROTOCOL_VERSION);
+        bytes.extend(log_frame(1, "early boot line"));
+        let mut sp = MockPort::new(bytes.clone());
+        let mut transcript = Vec::new();
+        let readiness = crate::session::wait_for_hello_with(
+            &mut sp,
+            &mut FrameDecoder::new(),
+            SHORT,
+            |_| {},
+            Some(&mut transcript),
+        );
+        assert!(matches!(readiness, Readiness::Hello(_)));
+        assert_eq!(transcript, bytes);
+    }
+
+    // ---- response cap: a device that never sends `last` (hardening) ----
+
+    #[test]
+    fn endless_response_is_capped_and_flagged() {
+        // Every matching chunk re-arms the idle timeout, so a device streaming without `last`
+        // used to grow the buffer forever. Now it stops at the cap, flagged incomplete → exec 1.
+        let cmd_id = exec_cmd_id();
+        let piece = "x".repeat(200);
+        let mut bytes = Vec::new();
+        for i in 0..(crate::session::MAX_RESPONSE_BYTES / piece.len() + 2) {
+            bytes.extend(shell_resp(cmd_id, 0, i as u16, false, &piece));
+        }
+        let r = read_response(
+            &mut MockPort::new(bytes.clone()),
+            &mut FrameDecoder::new(),
+            cmd_id,
+            SHORT,
+        )
+        .unwrap();
+        assert!(r.incomplete);
+        assert!(r.text.len() <= crate::session::MAX_RESPONSE_BYTES);
+        assert_eq!(
+            exec_line(
+                &mut MockPort::new(bytes),
+                &mut FrameDecoder::new(),
+                "/x",
+                SHORT
+            )
+            .unwrap(),
+            EXIT_ERROR
+        );
+    }
+
     // ---- render: seq-gap detection + Hello re-baseline ----
 
     // (render()/RenderState + ColorMode behavior are unit-tested in `render.rs`, next to
@@ -1461,7 +1727,7 @@ mod tests {
     #[test]
     fn golden_frames_roundtrip_byte_at_a_time() {
         // Synthesize one of each rendered type, concatenate, and feed byte-by-byte through a
-        // single decoder — asserting each decodes to the expected (type, seq) with a valid
+        // single decoder, asserting each decodes to the expected (type, seq) with a valid
         // payload. This pins the encode/decode contract shared with the firmware.
         let mut wire = Vec::new();
         wire.extend(hello(tower_protocol::PROTOCOL_VERSION)); // seq 0

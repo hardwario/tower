@@ -1,4 +1,4 @@
-//! `tower net …` — gateway/network health, over MQTT (retained-topic reads; scripts
+//! `tower net …`: gateway/network health, over MQTT (retained-topic reads; scripts
 //! get a liveness exit code without owning any serial port).
 
 use std::time::Duration;
@@ -8,6 +8,7 @@ use clap::Subcommand;
 
 use crate::gateway::payload::{self, Stats, Status};
 use crate::gateway::topics;
+use crate::term::sanitize_line;
 use crate::{EXIT_ERROR, EXIT_OK, EXIT_PROTOCOL_MISMATCH};
 
 use super::{MqttOpts, connect};
@@ -33,14 +34,14 @@ fn status(opts: &MqttOpts, json: bool) -> Result<u8> {
     let window = Duration::from_secs(2);
     let Some(raw) = s.read_retained(&topics::gateway_status(&prefix), window)? else {
         eprintln!(
-            "[tower] no retained gateway status under \"{prefix}\" — no gateway has ever bridged to this broker"
+            "[tower] no retained gateway status under \"{prefix}\"; no gateway has ever bridged to this broker"
         );
         return Ok(EXIT_ERROR);
     };
     let status: Status = serde_json::from_slice(&raw)?;
     if status.schema != payload::SCHEMA {
         eprintln!(
-            "[tower] gateway publishes MQTT schema v{}, this build speaks v{} — update one side",
+            "[tower] gateway publishes MQTT schema v{}, this build speaks v{}; update one side",
             status.schema,
             payload::SCHEMA
         );
@@ -58,21 +59,31 @@ fn status(opts: &MqttOpts, json: bool) -> Result<u8> {
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
         if status.state == "offline" {
-            // The LWT fired: the broker only knows we're gone — the other fields
+            // The LWT fired: the broker only knows we're gone; the other fields
             // are its defaults, not data. Say the one thing that's true.
             println!(
-                "state:    offline (the gateway's last-will fired — the bridge process is gone)"
+                "state:    offline (the gateway's last-will fired; the bridge process is gone)"
             );
         } else {
-            println!(
-                "gateway:  {} ({} {})",
-                status.gateway, status.firmware, status.firmware_version
-            );
+            // Retained-topic text anyone with broker access can plant: escape it.
+            // The version arrives only in the dongle's boot Hello, which the bridge's startup
+            // probe usually never sees (DeviceInfo carries the name, not the version): show it
+            // when known instead of a blank with a trailing space.
+            let firmware = if status.firmware_version.is_empty() {
+                sanitize_line(&status.firmware).into_owned()
+            } else {
+                format!(
+                    "{} {}",
+                    sanitize_line(&status.firmware),
+                    sanitize_line(&status.firmware_version)
+                )
+            };
+            println!("gateway:  {} ({firmware})", sanitize_line(&status.gateway));
             println!(
                 "state:    {} (serial {} on {})",
-                status.state,
+                sanitize_line(&status.state),
                 if status.serial_up { "up" } else { "DOWN" },
-                status.serial_port
+                sanitize_line(&status.serial_port)
             );
         }
         println!(

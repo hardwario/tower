@@ -1,4 +1,4 @@
-//! Shell command/response syntax highlighting — shared by the `tower console` TUI
+//! Shell command/response syntax highlighting, shared by the `tower console` TUI
 //! (`tui.rs`) and the `tower gateway` remote-shell pane (`gateway/tui.rs`) so the two
 //! never drift. Pure `&str -> ratatui spans`, no state.
 

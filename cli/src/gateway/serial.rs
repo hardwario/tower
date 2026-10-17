@@ -1,10 +1,10 @@
-//! The gateway's serial thread: owns the dongle's port (sole reader AND writer —
+//! The gateway's serial thread: owns the dongle's port (sole reader AND writer;
 //! serial handles don't share), decodes target→host frames into owned
 //! [`SerialMsg`]s for the engine, drains the engine's outbound frame queue between
 //! reads (≤10 ms latency at the responsive read timeout), and reconnects with the
 //! console commands' 800 ms throttle. The first open already happened in `mod.rs`
 //! (startup verification), so this thread never invents the "first open is fatal"
-//! policy — it inherits an open, verified handle.
+//! policy: it inherits an open, verified handle.
 
 use std::io::{Read, Write};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -24,7 +24,7 @@ pub(crate) fn to_serial_msg(inner: &[u8]) -> Option<SerialMsg> {
         // to an older firmware would surface exactly here.
         Err(Error::BadVersion { got }) => {
             return Some(SerialMsg::Log {
-                line: format!("PROTOCOL MISMATCH: device now speaks v{got} — reflash or rebuild"),
+                line: format!("PROTOCOL MISMATCH: device now speaks v{got}; reflash or rebuild"),
             });
         }
         Err(_) => return None,
@@ -126,7 +126,7 @@ pub(crate) fn run(
                     // + resync-on-reconnect own the recovery story.
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return, // engine gone — shut down
+                Err(TryRecvError::Disconnected) => return, // engine gone: shut down
             }
         }
 
@@ -351,13 +351,15 @@ mod tests {
 
     #[test]
     fn bad_version_frame_becomes_protocol_mismatch_log() {
-        // A deframed inner whose header advertises v1 (not the current v3): `decode_frame`
-        // rejects it at the version check (before CRC), and `to_serial_msg` surfaces the
-        // mismatch as a Log line rather than silently dropping it — the mid-session reflash
+        // An intact deframed inner whose header advertises v1 (not the current v3): the CRC
+        // passes, `decode_frame` rejects the version, and `to_serial_msg` surfaces the
+        // mismatch as a Log line rather than silently dropping it: the mid-session reflash
         // to older firmware the doc comment calls out. Build the inner directly (the host's
-        // own encoder always stamps the current version).
+        // own encoder always stamps the current version). The CRC must be valid: since
+        // tower-protocol 1.5.1 a corrupt frame is `BadCrc`, never `BadVersion`.
         let mut inner = vec![(1u8 << 5) | (MsgType::Hello as u8 & 0x1F), 0, 0];
-        inner.extend_from_slice(&[0, 0, 0, 0]); // filler CRC — version fails before it's read
+        let crc = tower_protocol::crc::crc32_ieee(&inner);
+        inner.extend_from_slice(&crc.to_le_bytes());
         match to_serial_msg(&inner).expect("a mismatch surfaces as a Log") {
             SerialMsg::Log { line } => {
                 assert!(line.contains("PROTOCOL MISMATCH"), "{line}");

@@ -1,13 +1,13 @@
-//! The gateway TUI — the interactive frontend of `tower gateway` (the default mode).
+//! The gateway TUI: the interactive frontend of `tower gateway` (the default mode).
 //! Same DNA as the `tower console` TUI (`src/tui.rs`): a single synchronous 33 ms
-//! poll loop, gray header/footer with chip toggles, LightRed focused border — but a
+//! poll loop, gray header/footer with chip toggles, LightRed focused border, but a
 //! layout built for network coordination:
 //!
 //! ```text
 //!  Nodes table (select/remove/rename/reveal) │ Radio chart (ambient bars + RX/TX)
 //!  ──────────────────────────────────────────┼──────────────────────────────────────
 //!  per-node remote-shell dialog (⌛ pending)  │ MQTT feed (JSON-highlighted; F7 = per-
-//!                                            │ node filter, view-only — nothing lost)
+//!                                            │ node filter, view-only: nothing lost)
 //!  ──────────────────────────────────────────┴──────────────────────────────────────
 //!  gateway log strip (full width)
 //! ```
@@ -16,7 +16,7 @@
 //! the MQTT clients hit), so the TUI is a *view* over the bridge, never a second
 //! implementation. The F2 pairing menu offers OTA (countdown popup, Esc cancels),
 //! "catch the cable-connected device" (pairs the first newly plugged port), and a
-//! grow-only port picker — the cable flows run `gateway::pair` on a worker thread
+//! grow-only port picker; the cable flows run `gateway::pair` on a worker thread
 //! (the same five steps as `tower nodes add --port`). Panes focus by **F1 / Shift-F1**
 //! (clockwise / counter-clockwise), a mouse click (when capture is on), or **F3** to zoom
 //! the focused pane borderless; **F9** toggles mouse capture so terminal text selection
@@ -47,9 +47,9 @@ use crate::EXIT_OK;
 const LOG_CAP: usize = 1000;
 const DIALOG_CAP: usize = 500;
 /// MQTT-feed retention (messages, both directions). The per-node filter is a view
-/// predicate over this deque — filtering never drops a message.
+/// predicate over this deque: filtering never drops a message.
 const MQTT_CAP: usize = 500;
-/// Radio-graph retention, in readings (the visible window is the pane width — one
+/// Radio-graph retention, in readings (the visible window is the pane width, one
 /// bar per reading; this only bounds the deques for the widest terminals).
 const CHART_HISTORY: usize = 600;
 
@@ -74,7 +74,7 @@ enum Modal {
         key: String,
         shown: Instant,
     },
-    /// F2 — the pairing submenu (OTA / catch-the-cable / pick-a-port).
+    /// F2: the pairing submenu (OTA / catch-the-cable / pick-a-port).
     PairMenu {
         selected: usize,
     },
@@ -90,13 +90,13 @@ enum Modal {
         deadline: Instant,
     },
     /// Pick a port from the live list. The list only GROWS (new ports append at
-    /// the end — positions never shuffle under the cursor); a removed port is
+    /// the end; positions never shuffle under the cursor); a removed port is
     /// the one exception and shrinks it.
     PairPorts {
         ports: Vec<String>,
         selected: usize,
     },
-    /// A cable-pairing worker is running against `port` — progress streams in.
+    /// A cable-pairing worker is running against `port`; progress streams in.
     /// Success auto-closes; a failure stays until dismissed.
     PairRun {
         port: String,
@@ -128,7 +128,7 @@ struct CableSession {
     rpc_tx: Sender<super::payload::RpcResponse>,
 }
 
-/// Where the panes landed in the last frame — the mouse hit-test targets.
+/// Where the panes landed in the last frame: the mouse hit-test targets.
 #[derive(Default, Clone, Copy)]
 struct PaneZones {
     nodes: Rect,
@@ -158,7 +158,7 @@ struct App {
     /// The node whose dialog the shell pane shows (index into `nodes`).
     shell_node: usize,
     dialogs: HashMap<u32, VecDeque<DialogLine>>,
-    /// Per-node partial shell line — the tail of a chunk that ended mid-line,
+    /// Per-node partial shell line: the tail of a chunk that ended mid-line,
     /// keyed by the response id it belongs to (chunk reassembly, docs above).
     shell_partial: HashMap<u32, (String, String)>,
     line: String,
@@ -168,21 +168,21 @@ struct App {
     log: VecDeque<String>,
     log_scroll: usize,
     /// The broker traffic feed (both directions, capped). Never filtered at
-    /// ingest — `mqtt_filter` is applied at render time only.
+    /// ingest; `mqtt_filter` is applied at render time only.
     mqtt: VecDeque<MqttMsg>,
     mqtt_scroll: usize,
     /// `Some(addr)` = show only that node's `nodes/{addr}/…` topics (visual only).
     mqtt_filter: Option<u32>,
-    /// Ambient readings, newest last — the chart's shift register. One reading =
+    /// Ambient readings, newest last: the chart's shift register. One reading =
     /// one column; the graph moves only when a reading arrives (no wall clock).
     ambient: VecDeque<f64>,
     /// Monotonic count of ambient readings ever received (the newest one's seq).
     ambient_seq: u64,
-    /// Measured reading cadence (EMA, ms) — keeps the chart's time labels honest
+    /// Measured reading cadence (EMA, ms); keeps the chart's time labels honest
     /// for any device `stats-period` (500 ms by default).
     ambient_ema_ms: f64,
     ambient_prev: Option<Instant>,
-    /// RX/TX marks, each pinned to the ambient reading (`seq`) it arrived during —
+    /// RX/TX marks, each pinned to the ambient reading (`seq`) it arrived during,
     /// so marks scroll in lockstep with the trace instead of by wall clock.
     rx_marks: VecDeque<(u64, f64)>,
     tx_marks: VecDeque<(u64, f64)>,
@@ -199,7 +199,7 @@ struct App {
     last_port_poll: Instant,
     /// Last-frame pane rectangles for click-to-focus.
     zones: PaneZones,
-    /// Last-frame footer-chip rectangles — each chip is a button; a click
+    /// Last-frame footer-chip rectangles: each chip is a button; a click
     /// presses the key it carries.
     chips: Vec<(Rect, KeyCode)>,
 }
@@ -285,12 +285,12 @@ impl App {
                     self.dialog_push(node, DialogLine::Err(err));
                 } else {
                     // Chunks split at BYTE offsets (the ≤56 B radio payload), not at
-                    // line breaks — a line can straddle two chunks. Accumulate into a
+                    // line breaks: a line can straddle two chunks. Accumulate into a
                     // per-node partial buffer and only break on real newlines; the
                     // remainder waits for the next chunk (or the done flush).
                     let mut buf = match self.shell_partial.remove(&node) {
                         Some((id, p)) if id == rsp.id => p,
-                        // A different command's tail was left behind — flush it.
+                        // A different command's tail was left behind: flush it.
                         Some((_, p)) => {
                             if !p.is_empty() {
                                 self.dialog_push(node, DialogLine::Text(p));
@@ -318,7 +318,7 @@ impl App {
             Event::Radio(sample) => {
                 // Same pause discipline as the log/MQTT feeds. Unlike those (where pause
                 // freezes a view over retained data), the sample deques ARE the chart's
-                // data — so pause simply stops ingest, and the oscilloscope holds still.
+                // data, so pause simply stops ingest, and the oscilloscope holds still.
                 if self.paused {
                     return;
                 }
@@ -351,7 +351,7 @@ impl App {
                         if self.tx_marks.len() >= CHART_HISTORY {
                             self.tx_marks.pop_front();
                         }
-                        // TX has no receive RSSI — pin the marks to a fixed lane so
+                        // TX has no receive RSSI: pin the marks to a fixed lane so
                         // they read as activity ticks, not measurements.
                         self.tx_marks.push_back((self.ambient_seq, -35.0));
                     }
@@ -376,8 +376,11 @@ impl App {
                 self.pairing = Some(p);
             }
             Event::Rpc(rsp) => {
-                // A cable-pairing worker's RPC — hand the response through; it is
-                // not for the interactive surfaces.
+                // Only this process's own RPCs arrive here: the engine routes responses
+                // by the origin of the request, so an MQTT client can't inject one (not
+                // even by minting a `tui-…` id). Among ours, the prefix picks the
+                // consumer: a cable-pairing worker's RPC is handed through; it is not for
+                // the interactive surfaces.
                 if rsp.id.starts_with("tui-cbl-") {
                     if let Some(c) = &self.cable {
                         let _ = c.rpc_tx.send(rsp);
@@ -390,7 +393,7 @@ impl App {
                         rsp.error.unwrap_or_else(|| "gateway refused".into())
                     ));
                 } else if let Some(key) = rsp.data.get("key").and_then(|v| v.as_str()) {
-                    // A reveal answered — swap the confirm modal for the key view.
+                    // A reveal answered: swap the confirm modal for the key view.
                     let node = rsp
                         .data
                         .get("addr")
@@ -471,7 +474,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
         while let Ok(ev) = app.events.try_recv() {
             app.on_event(ev);
         }
-        // Auto-hide a revealed key after 30 s — screens get walked away from.
+        // Auto-hide a revealed key after 30 s: screens get walked away from.
         if let Some(Modal::Key { shown, .. }) = &app.modal
             && shown.elapsed().as_secs() >= 30
         {
@@ -493,7 +496,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
 }
 
 /// Click-to-focus: a left click inside a pane focuses it (modals keep the
-/// keyboard-only flow — a click just falls through while one is open). The
+/// keyboard-only flow; a click just falls through while one is open). The
 /// footer chips double as buttons: a click presses the chip's key, and a
 /// Shift-click on the F1 chip walks focus counter-clockwise like Shift-F1.
 fn handle_mouse(app: &mut App, m: event::MouseEvent) {
@@ -627,7 +630,7 @@ fn tick_pairing(app: &mut App) {
     } else if let Some(p) = catch_found {
         start_cable(app, p);
     }
-    // Port picker: refresh grow-only (append newcomers at the END — positions
+    // Port picker: refresh grow-only (append newcomers at the END; positions
     // never shuffle under the cursor); a removed port is the one exception.
     if poll_due {
         if let Some(Modal::PairPorts { ports, selected }) = &mut app.modal {
@@ -657,7 +660,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.quit = true,
         // F1 walks the panes clockwise around the layout (Nodes → MQTT → Log →
         // Shell); Shift-F1 walks counter-clockwise. (Some terminals report
-        // Shift-F1 as F13 — accept both.)
+        // Shift-F1 as F13; accept both.)
         (KeyCode::F(1), m) if !m.contains(KeyModifiers::SHIFT) => {
             app.focus = match app.focus {
                 Pane::Nodes => Pane::Radio,
@@ -692,11 +695,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         // F7 toggles the per-node MQTT filter from any pane; `f` on the MQTT and
         // Nodes panes is the pane-local alias (kept off the footer, like `r`/`k`).
         (KeyCode::F(7), _) => toggle_mqtt_filter(app),
-        // The node-action keys advertised on the footer work from any pane —
+        // The node-action keys advertised on the footer work from any pane:
         // they act on the SELECTED node, exactly like their chips.
         (KeyCode::F(4) | KeyCode::F(6), _) => handle_nodes_key(app, code),
         // Del = remove (with confirmation). macOS keyboards send Backspace for
-        // the key labeled "delete", so accept both — except on the Shell pane,
+        // the key labeled "delete", so accept both, except on the Shell pane,
         // where Backspace belongs to line editing.
         (KeyCode::Delete | KeyCode::Backspace, _) if app.focus != Pane::Shell => {
             handle_nodes_key(app, KeyCode::Delete);
@@ -746,13 +749,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 /// Flip the MQTT feed between "everything" and "the selected node only". A pure
-/// view predicate — the underlying deque keeps every message either way.
+/// view predicate: the underlying deque keeps every message either way.
 fn toggle_mqtt_filter(app: &mut App) {
     app.mqtt_filter = match app.mqtt_filter {
         Some(_) => None,
         None => app.selected_node().map(|n| n.addr),
     };
-    app.mqtt_scroll = 0; // the visible tail changed shape — re-anchor
+    app.mqtt_scroll = 0; // the visible tail changed shape: re-anchor
 }
 
 fn handle_nodes_key(app: &mut App, code: KeyCode) {
@@ -884,7 +887,7 @@ fn submit_line(app: &mut App) {
         return;
     }
     let Some(target) = app.shell_target().map(|n| n.addr) else {
-        app.push_log("no node selected — pair one first (F2)".into());
+        app.push_log("no node selected; pair one first (F2)".into());
         return;
     };
     app.history.push(line.clone());
@@ -931,7 +934,9 @@ fn handle_modal_key(app: &mut App, code: KeyCode) {
                 buf.pop();
                 app.modal = Some(Modal::Rename { node, buf });
             }
-            KeyCode::Char(c) if buf.len() < 16 => {
+            // ≤16 *bytes* (the device limit), printable only; the engine refuses the
+            // rest anyway; refusing here keeps the modal honest.
+            KeyCode::Char(c) if buf.len() + c.len_utf8() <= 16 && !c.is_control() => {
                 buf.push(c);
                 app.modal = Some(Modal::Rename { node, buf });
             }
@@ -1211,7 +1216,7 @@ fn render_footer(f: &mut Frame, app: &mut App, area: Rect) {
     for (label, active, key) in chips {
         let text = format!(" {label} ");
         let w = text.chars().count() as u16;
-        // Remember where the chip landed (clipped to the visible row) —
+        // Remember where the chip landed (clipped to the visible row):
         // `handle_mouse` treats these rectangles as buttons.
         if x < area.right() {
             let rect = Rect::new(x, area.y, w.min(area.right() - x), 1);
@@ -1263,7 +1268,7 @@ fn render_nodes(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
             Row::new(vec![
                 topics::node_hex(n.addr),
                 if n.name.is_empty() {
-                    "—".into()
+                    "-".into()
                 } else {
                     n.name.clone()
                 },
@@ -1275,9 +1280,9 @@ fn render_nodes(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
                 n.last_seen
                     .map(|s| format!("{s}s"))
                     .unwrap_or_else(|| "never".into()),
-                n.rssi.map(|r| format!("{r}")).unwrap_or_else(|| "—".into()),
+                n.rssi.map(|r| format!("{r}")).unwrap_or_else(|| "-".into()),
                 if n.pending.is_empty() {
-                    "—".into()
+                    "-".into()
                 } else {
                     format!("⌛{}", n.pending.len())
                 },
@@ -1317,7 +1322,7 @@ fn render_nodes(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
 /// Ambient bars turn from "floor" to "busy" to "hot" at these levels (dBm).
 const CHART_BUSY_DBM: f64 = -85.0;
 const CHART_HOT_DBM: f64 = -70.0;
-/// The chart's y range (dBm) — every bar rises from this floor to its reading.
+/// The chart's y range (dBm): every bar rises from this floor to its reading.
 const CHART_MIN_DBM: f64 = -110.0;
 const CHART_MAX_DBM: f64 = -30.0;
 /// Bar geometry in plot columns: 2 wide + 1 gap (a 2:1 ratio), so each reading
@@ -1331,16 +1336,16 @@ fn render_chart(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
     // the window slid, so history appeared to blend and jump. Indexed slots give
     // every reading one stable bar for its whole life, the level stays
     // pixel-identical while it scrolls, and the graph moves exactly one bar per
-    // reading — nothing animates between readings.
+    // reading; nothing animates between readings.
     //
     // Slots = the plot's column count; each reading owns BAR_STRIDE columns of it
     // (bar + gap), newest at the right edge. MUST equal the Chart's graph width
     // EXACTLY: the canvas maps x → column as round((x−left)·(width−1)/span), which is
-    // 1:1 only when the bounds span slots−1 units over exactly `slots` columns — one
+    // 1:1 only when the bounds span slots−1 units over exactly `slots` columns; one
     // column off and the rounding drifts, rendering ragged bars/gaps (seen 2026-07-13).
     // ratatui-widgets 0.3 layout: left gutter = max(y-label width, first-x-label
-    // width − 1) + 1 for the axis line — both terms held at 4 here ("-110" is 4 chars;
-    // the time labels are clamped to ≤5 below) — plus the pane's 2 border columns when
+    // width − 1) + 1 for the axis line (both terms held at 4 here: "-110" is 4 chars;
+    // the time labels are clamped to ≤5 below), plus the pane's 2 border columns when
     // not zoomed. The x-label/axis rows cost height only, never columns.
     let slots = (area.width.saturating_sub(if zoomed { 5 } else { 7 }) as usize).max(2);
     // Bar `back` fills columns x = -(back·BAR_STRIDE) .. and BAR_W-1 more to the
@@ -1374,7 +1379,7 @@ fn render_chart(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
             bucket.push((x, top)); // the exact top, wherever the 1 dBm steps landed
         }
     }
-    // Marks ride the reading they arrived during, so they scroll in lockstep —
+    // Marks ride the reading they arrived during, so they scroll in lockstep,
     // widened to the bar's columns so they cap the bar they belong to.
     let newest = app.ambient_seq;
     let marks = |points: &VecDeque<(u64, f64)>| -> Vec<(f64, f64)> {
@@ -1389,7 +1394,7 @@ fn render_chart(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
     };
     let rx = marks(&app.rx_marks);
     let tx = marks(&app.tx_marks);
-    // Unnamed: the level buckets are one visual series — keep the legend to rx/tx.
+    // Unnamed: the level buckets are one visual series; keep the legend to rx/tx.
     fn trace(data: &[(f64, f64)], color: Color) -> Dataset<'_> {
         Dataset::default()
             .marker(symbols::Marker::HalfBlock)
@@ -1414,7 +1419,7 @@ fn render_chart(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
             .style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD))
             .data(&tx),
     ];
-    // Live readout in the title — the number you'd otherwise squint at the bars for.
+    // Live readout in the title: the number you'd otherwise squint at the bars for.
     let paused = if app.paused { " (paused)" } else { "" };
     let title = match app.last_ambient {
         Some((dbm, ch)) => format!(" Radio · {dbm} dBm · ch {ch}{paused} "),
@@ -1423,7 +1428,7 @@ fn render_chart(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
     let dim = |s: String| Span::styled(s, Style::new().fg(Color::DarkGray));
     // One reading per BAR_STRIDE columns; the time labels come from the MEASURED
     // cadence (`ambient_ema_ms`), so they stay honest for any device stats-period.
-    // Clamped to ≤5 chars — the FIRST x label's width sets the chart's left gutter,
+    // Clamped to ≤5 chars: the FIRST x label's width sets the chart's left gutter,
     // and a wider gutter would break the exact column mapping `slots` relies on.
     let window_s = (slots - 1) as f64 * app.ambient_ema_ms / (BAR_STRIDE as f64 * 1000.0);
     let ago = |s: f64| -> String {
@@ -1503,7 +1508,7 @@ fn render_shell(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
         if let Some(n) = app.nodes.iter().find(|n| n.addr == addr) {
             for p in &n.pending {
                 lines.push(Line::from(Span::styled(
-                    format!("⌛ {} (ref {} — p→Del dequeues)", p.line, p.r#ref),
+                    format!("⌛ {} (ref {}; p→Del dequeues)", p.line, p.r#ref),
                     Style::new().fg(Color::Yellow).add_modifier(Modifier::DIM),
                 )));
             }
@@ -1514,9 +1519,7 @@ fn render_shell(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
             Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED)),
         ]));
     } else {
-        lines.push(Line::from(
-            "pair a node first — F2 opens the pairing window",
-        ));
+        lines.push(Line::from("pair a node first: F2 opens the pairing window"));
     }
     // Bottom-anchor: show the tail that fits (no border rows when zoomed).
     let inner_h = area.height.saturating_sub(if zoomed { 0 } else { 2 }) as usize;
@@ -1552,7 +1555,7 @@ fn mqtt_line<'a>(prefix: &str, m: &'a MqttMsg) -> Line<'a> {
     Line::from(spans)
 }
 
-/// Syntax-highlight a JSON payload into spans — a tiny byte lexer over the RAW
+/// Syntax-highlight a JSON payload into spans: a tiny byte lexer over the RAW
 /// bytes (never re-serialized), so the display shows exactly what crossed the
 /// wire, key order included. Total: anything non-JSON still renders, just dim.
 /// Byte-index slicing is UTF-8-safe: every boundary sits before an ASCII byte
@@ -1599,7 +1602,7 @@ fn json_spans(payload: &[u8]) -> Vec<Span<'_>> {
                     }
                 }
                 let i = i.min(b.len());
-                // A string followed by ':' is an object key — color it apart.
+                // A string followed by ':' is an object key; color it apart.
                 let mut j = i;
                 while j < b.len() && b[j].is_ascii_whitespace() {
                     j += 1;
@@ -1643,7 +1646,7 @@ fn json_spans(payload: &[u8]) -> Vec<Span<'_>> {
                 out.push(Span::styled(&raw[start..i], Style::new().fg(PUNCT)));
             }
             _ => {
-                // Anything else (multi-byte text outside strings — not valid JSON,
+                // Anything else (multi-byte text outside strings; not valid JSON,
                 // but render it): advance to the next ASCII-interesting byte.
                 while i < b.len() && !b[i].is_ascii() {
                     i += 1;
@@ -1658,7 +1661,7 @@ fn json_spans(payload: &[u8]) -> Vec<Span<'_>> {
 
 fn render_mqtt(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
     let inner_h = area.height.saturating_sub(if zoomed { 0 } else { 2 }) as usize;
-    // The filter is applied HERE and only here — the deque retains everything.
+    // The filter is applied HERE and only here; the deque retains everything.
     let shown: Vec<&MqttMsg> = app
         .mqtt
         .iter()
@@ -1675,14 +1678,14 @@ fn render_mqtt(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
         .collect();
     let title = match app.mqtt_filter {
         Some(n) => format!(
-            " MQTT ▶ {} · {}/{} msgs{} — F7 = all ",
+            " MQTT ▶ {} · {}/{} msgs{} · F7 = all ",
             topics::node_hex(n),
             shown.len(),
             app.mqtt.len(),
             if app.paused { " (paused)" } else { "" },
         ),
         None => format!(
-            " MQTT · {} msgs{} — F7 = filter node ",
+            " MQTT · {} msgs{} · F7 = filter node ",
             app.mqtt.len(),
             if app.paused { " (paused)" } else { "" },
         ),
@@ -1751,7 +1754,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
         ),
         Modal::Rename { node, buf } => {
             // A classic input field: a shaded fixed-width strip with a block
-            // cursor — the earlier bare quoted string read as a label, and the
+            // cursor: the earlier bare quoted string read as a label, and the
             // missing cursor made it non-obvious this is an editor.
             let field = Style::new().bg(Color::DarkGray).fg(Color::White);
             let pad = 17usize.saturating_sub(buf.chars().count());
@@ -1769,7 +1772,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
                         Span::styled(" ".repeat(pad), field),
                     ]),
                     Line::from(""),
-                    Line::from("≤16 bytes — Enter = save, Esc = cancel"),
+                    Line::from("≤16 bytes; Enter = save, Esc = cancel"),
                 ],
             )
         }
@@ -1805,7 +1808,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
             let items: [(&str, &str); 3] = [
                 (
                     "Start over-the-air pairing",
-                    "60 s window — the node joins by holding its button",
+                    "60 s window: the node joins by holding its button",
                 ),
                 (
                     "Catch the cable-connected device",
@@ -1836,7 +1839,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
                 )));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from("↑/↓ select — Enter = run, Esc = close"));
+            lines.push(Line::from("↑/↓ select, Enter = run, Esc = close"));
             (" Pair a node ".into(), lines)
         }
         Modal::PairOta { seen_open, .. } => {
@@ -1844,7 +1847,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
             match &app.pairing {
                 Some(p) if p.state == "open" => {
                     lines.push(Line::from(vec![
-                        Span::raw("window open — "),
+                        Span::raw("window open, "),
                         Span::styled(
                             format!("{} s", p.remaining.unwrap_or(0)),
                             Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -1869,7 +1872,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
             (
                 " Catch cable device ".into(),
                 vec![
-                    Line::from("connect the node over USB now —"),
+                    Line::from("connect the node over USB now:"),
                     Line::from("the first new device pairs automatically"),
                     Line::from(""),
                     Line::from(vec![
@@ -1887,7 +1890,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
         Modal::PairPorts { ports, selected } => {
             let mut lines = Vec::new();
             if ports.is_empty() {
-                lines.push(Line::from("(no serial ports visible — plug the node in)"));
+                lines.push(Line::from("(no serial ports visible; plug the node in)"));
             }
             for (i, p) in ports.iter().enumerate() {
                 let (marker, style) = if i == *selected {
@@ -1904,7 +1907,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
                 ]));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from("↑/↓ select — Enter = pair, Esc = close"));
+            lines.push(Line::from("↑/↓ select, Enter = pair, Esc = close"));
             (" Pair via serial port ".into(), lines)
         }
         Modal::PairRun {
@@ -2123,7 +2126,7 @@ mod tests {
     fn key_reveal_flow_needs_confirm_and_autohides() {
         let (mut app, _etx, irx) = test_app();
         app.on_event(Event::Registry(vec![node(0xAB12, "kitchen", 0)]));
-        // F4 opens the confirm modal — nothing sent yet.
+        // F4 opens the confirm modal; nothing sent yet.
         handle_key(&mut app, KeyCode::F(4), KeyModifiers::NONE);
         assert!(matches!(app.modal, Some(Modal::ConfirmReveal(0xAB12))));
         assert!(irx.try_recv().is_err(), "no RPC before confirmation");
@@ -2201,7 +2204,7 @@ mod tests {
         assert_eq!(app.mqtt_filter, None);
         let grid = render(&mut app);
         assert!(grid.contains("nodes/0x0000bb34"));
-        // F7 is the global binding — it toggles from any pane, not just MQTT/Nodes.
+        // F7 is the global binding: it toggles from any pane, not just MQTT/Nodes.
         app.focus = Pane::Log;
         handle_key(&mut app, KeyCode::F(7), KeyModifiers::NONE);
         assert_eq!(app.mqtt_filter, Some(0xAB12));
@@ -2285,7 +2288,7 @@ mod tests {
     fn node_action_keys_are_global_except_shell_editing() {
         let (mut app, _etx, _irx) = test_app();
         app.on_event(Event::Registry(vec![node(0xAB12, "kitchen", 0)]));
-        // Delete works from any pane — it acts on the selected node…
+        // Delete works from any pane: it acts on the selected node…
         app.focus = Pane::Log;
         handle_key(&mut app, KeyCode::Delete, KeyModifiers::NONE);
         assert!(matches!(app.modal, Some(Modal::ConfirmRemove(0xAB12))));
@@ -2295,7 +2298,7 @@ mod tests {
         handle_key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
         assert!(matches!(app.modal, Some(Modal::ConfirmRemove(0xAB12))));
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-        // On the Shell pane both stay line-editing keys — no modal.
+        // On the Shell pane both stay line-editing keys: no modal.
         app.focus = Pane::Shell;
         app.line = "ab".into();
         app.cursor = 2;
@@ -2396,7 +2399,7 @@ mod tests {
             truncated: false,
             error: None,
         };
-        // "therm-delta = 50" straddles the chunk boundary — the ≤56 B radio chunks
+        // "therm-delta = 50" straddles the chunk boundary: the ≤56 B radio chunks
         // split at byte offsets, not line breaks (the broken-lines screenshot bug).
         app.on_event(Event::Shell {
             node: 0xAB12,

@@ -1,18 +1,18 @@
-//! `tower console` — the ratatui TUI.
+//! `tower console`: the ratatui TUI.
 //!
 //! One synchronous loop owns the serial port: it polls the keyboard (short timeout),
 //! drains all incoming frames through one `FrameDecoder`, and redraws. Everything is
-//! async-via-drain — TAB sends a `ShellComplete` and Enter sends a `ShellCommand`; the
+//! async-via-drain: TAB sends a `ShellComplete` and Enter sends a `ShellCommand`; the
 //! responses (`ShellCompletions` / `ShellResponse`) are handled when they arrive in the
 //! drain, so nothing blocks. Layout/keys follow `docs/console.md` (in the firmware repo).
 //!
-//! Caveat: a TUI needs a real terminal — this is build- + clippy-verified, but NOT
+//! Caveat: a TUI needs a real terminal; this is build- + clippy-verified, but NOT
 //! interactively driven here (no TTY available). The completion/command round-trips
 //! reuse the protocol paths proven in the non-TUI commands, so behaviour is by
 //! construction; run `tower console` on a real terminal to confirm the UI.
 
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -28,7 +28,21 @@ use tower_protocol::msg::{
 };
 use tower_protocol::{FrameDecoder, MsgType, decode_frame, encode_frame};
 
+use crate::session::{MAX_RESPONSE_BYTES, completion_start, read_some};
+
 const CAP: usize = 5000; // scrollback per pane
+
+/// How long an in-flight command may wait with no response activity before it's closed with a
+/// "no response … (timed out)" marker. The same idle budget as `exec`/`shell`'s default
+/// `--timeout` (sized above the firmware's ~5.2 s EEPROM-compaction stall), so a slow but
+/// healthy command is never written off early.
+const PENDING_IDLE: Duration = Duration::from_millis(crate::DEFAULT_TIMEOUT_MS);
+
+/// A boot `Hello` orphans the commands sent to the *previous* device session, but a command
+/// typed in the same instant may already have reached the new one: the Hello is read up to a
+/// drain tick (+ UART transit) after the device emitted it. Only commands older than this when
+/// the Hello is processed are written off; younger ones wait for their answer (or the timeout).
+const HELLO_RACE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Pane {
@@ -42,7 +56,7 @@ struct App {
     port_name: String,
     sp: Option<Box<dyn serialport::SerialPort>>,
     dec: FrameDecoder,
-    /// Device log lines as (colored prefix `clock [uptime] LEVEL`, rest, level color) — only
+    /// Device log lines as (colored prefix `clock [uptime] LEVEL`, rest, level color); only
     /// the prefix is tinted, so message text stays readable at every severity.
     logs: VecDeque<(String, String, Color)>,
     events: VecDeque<String>,
@@ -58,10 +72,12 @@ struct App {
     cmd_id: u16,
     req_id: u16,
     seq: u16,
-    /// In-flight commands, oldest first (the device's shell serializes, so responses arrive
-    /// in send order and always match the FRONT entry). A queue — not a single slot — so a
-    /// slow response never blocks typing/sending the next command: its lines simply keep
-    /// landing in the scrollback, right above the prompt, whenever they arrive.
+    /// In-flight commands, oldest first. A queue, not a single slot, so a slow response never
+    /// blocks typing/sending the next command: its lines simply keep landing in the scrollback,
+    /// right above the prompt, whenever they arrive. Responses match by `cmd_id` ANYWHERE in the
+    /// queue (see [`on_shell_response`]); an entry that will never be answered (superseded by
+    /// a later answer, idle past [`PENDING_IDLE`], orphaned by a device restart or a lost link)
+    /// is closed with a visible marker instead of silently wedging everything behind it.
     pending: VecDeque<PendingCmd>,
     /// The last scrollback line is an incomplete (no trailing newline yet) piece of the
     /// front in-flight response; the next chunk continues it in place. Cleared by an echo
@@ -74,7 +90,7 @@ struct App {
     /// Last frame `seq` seen (any type), for gap detection; re-baselined on every `Hello`.
     last_seq: Option<u16>,
     /// Frames the codec refused to decode (`BadVersion`/`BadCrc`/`BadType`/…). A burst of these
-    /// on a live link is the classic tag-mismatch symptom — shown in the header, not swallowed.
+    /// on a live link is the classic tag-mismatch symptom: shown in the header, not swallowed.
     decode_failures: u64,
     /// Count of `seq` discontinuities (a decoded frame whose `seq` wasn't `prev + 1`).
     seq_gaps: u64,
@@ -88,10 +104,10 @@ struct App {
     last_open_attempt: Instant,
     /// Set when the session opened with `--reset`: the moment the pulse released. Cleared by
     /// the first `Hello`; while set, the header animates "booting…" so a slow boot (a fallback
-    /// EEPROM compaction can hold the chip ~5 s — docs/storage.md in tower-firmware) reads as
+    /// EEPROM compaction can hold the chip ~5 s; docs/storage.md in tower-firmware) reads as
     /// progress, not a dead UI. Past the CLI's 8 s Hello ceiling it escalates to a warning.
     boot_wait: Option<Instant>,
-    /// High-water mark of hint rows ever rendered under the prompt — once TAB completion
+    /// High-water mark of hint rows ever rendered under the prompt: once TAB completion
     /// allocates rows they STAY allocated (blank when no hint), so the prompt never jumps
     /// up and down as hints come and go. Reset by `Shift-F8`.
     hint_rows_reserved: u16,
@@ -101,9 +117,33 @@ struct App {
 /// One in-flight shell command awaiting its (possibly multi-chunk) response.
 struct PendingCmd {
     cmd_id: u16,
+    /// The command line as sent, named in the marker if the command is abandoned.
+    line: String,
     /// Expected `chunk` index of the next `ShellResponse` frame; a gap means a middle chunk
     /// was CRC-dropped, so the streamed output is truncated.
     next_chunk: u16,
+    /// Response bytes streamed so far, capped at [`MAX_RESPONSE_BYTES`] (a device that never
+    /// sends `last` mustn't grow the scrollback, or one open partial line, without bound).
+    received: usize,
+    /// When the command went out (decides which session a `Hello` orphans it from).
+    sent: Instant,
+    /// Start of the current idle stretch: the send, restarted whenever the device streams a
+    /// chunk for any in-flight command (it serializes, so the ones queued behind a busy
+    /// command are progressing too). [`PENDING_IDLE`] past this, the command is written off.
+    idle_since: Instant,
+}
+
+impl PendingCmd {
+    fn new(cmd_id: u16, line: String, now: Instant) -> Self {
+        PendingCmd {
+            cmd_id,
+            line,
+            next_chunk: 0,
+            received: 0,
+            sent: now,
+            idle_since: now,
+        }
+    }
 }
 
 impl App {
@@ -157,7 +197,7 @@ fn push_cap<T>(buf: &mut VecDeque<T>, item: T) {
 }
 
 /// Append to Device Logs. While paused (F5), bump the scroll offset so the visible window
-/// stays anchored — capture continues, only the view is frozen.
+/// stays anchored: capture continues, only the view is frozen.
 fn push_log(app: &mut App, item: (String, String, Color)) {
     push_cap(&mut app.logs, item);
     if app.paused {
@@ -165,12 +205,59 @@ fn push_log(app: &mut App, item: (String, String, Color)) {
     }
 }
 
-/// Append to Device Events — same paused-anchor rule as [`push_log`].
+/// Append to Device Events: same paused-anchor rule as [`push_log`].
 fn push_event(app: &mut App, item: String) {
     push_cap(&mut app.events, item);
     if app.paused {
         app.scroll[1] = app.scroll[1].saturating_add(1);
     }
+}
+
+/// Close the oldest in-flight command without (the rest of) its response, leaving a visible
+/// marker in the scrollback; `why` is an optional ` (reason)` suffix. A command dropped
+/// silently is exactly how the shell used to look dead.
+fn abandon_front(app: &mut App, why: &str) {
+    let Some(p) = app.pending.pop_front() else {
+        return;
+    };
+    app.resp_partial = false; // whatever it streamed so far ends here
+    let what = if p.next_chunk == 0 {
+        "no response to"
+    } else {
+        "incomplete response to"
+    };
+    push_cap(
+        &mut app.responses,
+        format!("[tower] {what} `{}`{why}", p.line),
+    );
+}
+
+/// Close every in-flight command (see [`abandon_front`]).
+fn abandon_all(app: &mut App, why: &str) {
+    while !app.pending.is_empty() {
+        abandon_front(app, why);
+    }
+}
+
+/// Write off in-flight commands that have gone [`PENDING_IDLE`] with no response activity.
+/// Commands are queued in send order and activity restarts every clock at once, so the queue
+/// stays ordered by `idle_since` and expiry only ever peels from the front.
+fn expire_pending(app: &mut App, now: Instant) {
+    while app
+        .pending
+        .front()
+        .is_some_and(|p| now.saturating_duration_since(p.idle_since) >= PENDING_IDLE)
+    {
+        abandon_front(app, " (timed out)");
+    }
+}
+
+/// The port failed: drop the handle (the next tick reconnects) and close every in-flight
+/// command and completion: their remaining frames can never arrive on a new connection.
+fn drop_link(app: &mut App) {
+    app.sp = None;
+    abandon_all(app, " (link lost)");
+    app.pending_req = None;
 }
 
 /// Stream a response chunk's text into the shell scrollback line by line, continuing the
@@ -196,7 +283,7 @@ fn append_response_text(app: &mut App, text: &str) {
 }
 
 pub fn run(port: String, reset: bool) -> Result<()> {
-    // The FIRST open is fatal — same contract as the streaming commands: a bad `--device`
+    // The FIRST open is fatal (same contract as the streaming commands): a bad `--device`
     // (typo, EBUSY, EACCES) must exit 1 with the real OS error, not silently spin in the
     // reconnect loop behind an empty four-pane UI. Open BEFORE ratatui grabs the terminal so
     // the error prints normally. `--reset` is consumed here, on the initial attach; the
@@ -225,6 +312,7 @@ fn run_loop(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
             handle_key(&mut app, key.code, key.modifiers);
         }
         drain_serial(&mut app);
+        expire_pending(&mut app, Instant::now());
     }
     Ok(())
 }
@@ -238,7 +326,7 @@ fn ensure_connected(app: &mut App) {
     }
     app.last_open_attempt = Instant::now();
     // Reconnect without re-resetting (never re-reset on a flaky link). Unlike the fatal first
-    // open in `run`, a later failure isn't fatal — we keep retrying — but we no longer drop it
+    // open in `run`, a later failure isn't fatal (we keep retrying), but we no longer drop it
     // on the floor: stash it so the header can show *why* (EBUSY, EACCES, ENOENT, …) next to
     // the reconnect indicator instead of a bare "reconnecting…" with a green-looking UI.
     match crate::port::open_console_responsive(&app.port_name, false) {
@@ -246,9 +334,11 @@ fn ensure_connected(app: &mut App) {
             app.sp = Some(sp);
             app.last_open_error = None;
             app.dec.reset();
-            // Drop any in-flight commands from the previous connection: their remaining
-            // chunks will never arrive, and the new session restarts `cmd_id`/`chunk` at 1/0.
-            app.pending.clear();
+            // Nothing from the previous connection can still be answered (`drop_link` already
+            // closed it all when the port failed; this is belt-and-braces). `cmd_id`
+            // deliberately keeps counting across reconnects rather than restarting at 1, so a
+            // late answer to an old command can never be mistaken for a new one's.
+            abandon_all(app, " (link lost)");
             app.resp_partial = false;
             app.pending_req = None;
         }
@@ -261,8 +351,9 @@ fn drain_serial(app: &mut App) {
     let Some(mut sp) = app.sp.take() else {
         return;
     };
-    match sp.read(&mut buf) {
-        Ok(0) => app.sp = Some(sp),
+    // `read_some` folds the idle read timeout and a signal-interrupted poll (a terminal resize
+    // delivers SIGWINCH) into "nothing yet"; only a real port failure drops the link.
+    match read_some(&mut *sp, &mut buf) {
         Ok(n) => {
             app.sp = Some(sp);
             for &b in &buf[..n] {
@@ -273,8 +364,7 @@ fn drain_serial(app: &mut App) {
                 }
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => app.sp = Some(sp),
-        Err(_) => { /* drop sp → reconnect on next tick */ }
+        Err(_) => drop_link(app), // `sp` is dropped here → reconnect on the next tick
     }
 }
 
@@ -295,7 +385,7 @@ fn handle_frame(app: &mut App, inner: &[u8]) {
                         (
                             format!(
                                 "✖ PROTOCOL MISMATCH: device frames are tagged v{got}, but this \
-                                 `tower` was built for v{} — every frame will mis-decode. Rebuild \
+                                 `tower` was built for v{}; every frame will mis-decode. Rebuild \
                                  the firmware and `tower` against the SAME tower-protocol tag \
                                  (the lockstep rule).",
                                 tower_protocol::PROTOCOL_VERSION
@@ -314,10 +404,21 @@ fn handle_frame(app: &mut App, inner: &[u8]) {
     // Sequence-gap accounting (mirrors the plain-CLI renderer): a `Hello` marks a new device
     // session and re-baselines `seq` (the console re-emits `Hello` on every USB plug-in), so a
     // fresh 0 isn't a spurious gap. Done before the pause check because frames still arrive
-    // while paused — only their *display* is frozen.
+    // while paused; only their *display* is frozen.
     if matches!(mt, MsgType::Hello) {
         app.boot_wait = None;
         app.last_seq = None;
+        // A new device session: commands sent to the old one died with it (the shell
+        // restarted), so close them now instead of letting them sit out the idle timeout.
+        // Commands younger than the Hello race window may already belong to the new session.
+        let now = Instant::now();
+        while app
+            .pending
+            .front()
+            .is_some_and(|p| now.saturating_duration_since(p.sent) > HELLO_RACE)
+        {
+            abandon_front(app, " (device restarted)");
+        }
     }
     if let Some(prev) = app.last_seq {
         // Wrapping u16 distance minus one: nonzero means at least one frame went missing.
@@ -329,7 +430,7 @@ fn handle_frame(app: &mut App, inner: &[u8]) {
 
     match mt {
         // Decode the Hello (the TUI otherwise ignores it) purely to enforce the lockstep rule:
-        // a payload-version mismatch is a secondary guard — a *real* tag mismatch is caught at
+        // a payload-version mismatch is a secondary guard: a *real* tag mismatch is caught at
         // the frame header above and never parses a Hello.
         MsgType::Hello => match postcard::from_bytes::<Hello>(payload) {
             Ok(h) => {
@@ -338,7 +439,7 @@ fn handle_frame(app: &mut App, inner: &[u8]) {
                         &mut app.logs,
                         (
                             format!(
-                                "⚠ PROTOCOL MISMATCH: device v{}, tower built for v{} — frames \
+                                "⚠ PROTOCOL MISMATCH: device v{}, tower built for v{}: frames \
                                  will mis-decode; rebuild both against the same tower-protocol \
                                  tag.",
                                 h.protocol_version,
@@ -396,39 +497,10 @@ fn handle_frame(app: &mut App, inner: &[u8]) {
             ),
             Err(_) => app.payload_errors += 1,
         },
-        // Reassemble chunks (`chunk`/`last`) into one response before splitting it into lines,
-        // so a chunk boundary mid-line doesn't fragment the display.
+        // Chunks (`chunk`/`last`) stream into the scrollback line by line as they arrive; a
+        // chunk boundary mid-line continues the open line in place (see `append_response_text`).
         MsgType::ShellResponse => match postcard::from_bytes::<ShellResponse>(payload) {
-            // Chunks stream into the scrollback AS THEY ARRIVE (no wait for `last`), matched
-            // against the OLDEST in-flight command — the device's shell serializes, so
-            // responses complete in send order. A stale/unknown cmd_id is ignored.
-            Ok(r) if app.pending.front().map(|p| p.cmd_id) == Some(r.cmd_id) => {
-                let expected = app.pending.front().map(|p| p.next_chunk).unwrap_or(0);
-                // A `chunk` gap means a middle chunk was CRC-dropped (the decoder silently
-                // discards corrupt frames): flag the truncation in place.
-                if r.chunk != expected {
-                    app.resp_partial = false;
-                    push_cap(
-                        &mut app.responses,
-                        format!(
-                            "[tower] response chunk dropped (expected #{}, got #{}) — output truncated",
-                            expected, r.chunk
-                        ),
-                    );
-                }
-                if let Some(front) = app.pending.front_mut() {
-                    front.next_chunk = r.chunk.wrapping_add(1);
-                }
-                append_response_text(app, r.text);
-                if r.last {
-                    app.resp_partial = false;
-                    if r.result != 0 {
-                        push_cap(&mut app.responses, format!("[result {}]", r.result));
-                    }
-                    app.pending.pop_front();
-                }
-            }
-            Ok(_) => {} // a response for a different cmd_id — ignore
+            Ok(r) => on_shell_response(app, &r),
             Err(_) => app.payload_errors += 1,
         },
         MsgType::ShellCompletions => match postcard::from_bytes::<ShellCompletions>(payload) {
@@ -436,21 +508,88 @@ fn handle_frame(app: &mut App, inner: &[u8]) {
                 apply_completion(app, &c);
                 app.pending_req = None;
             }
-            Ok(_) => {} // a completion for a stale req_id — ignore
+            Ok(_) => {} // a completion for a stale req_id: ignore
             Err(_) => app.payload_errors += 1,
         },
         _ => {}
     }
 }
 
-fn apply_completion(app: &mut App, c: &ShellCompletions) {
-    let start = (c.token_start as usize).min(app.input.len());
-    // `token_start` is device-supplied: validate it's a char boundary and doesn't run past
-    // the cursor before using it in `replace_range` (a mid-UTF-8-scalar index would panic).
-    // `app.cursor` is always kept on a boundary by the key handlers, so it needs no check.
-    if start > app.cursor || !app.input.is_char_boundary(start) {
+/// Route one `ShellResponse` chunk to its in-flight command, streaming its text into the
+/// scrollback as it arrives (no wait for `last`).
+///
+/// Matched by `cmd_id` ANYWHERE in the queue, not just at the front. The device's shell
+/// serializes, so an answer for entry `i` proves every older entry is finished: its command was
+/// lost on the way in, its `last` chunk was CRC-dropped, or the device reset mid-command.
+/// Matching only the front let one such stale entry swallow every later response: the shell
+/// went permanently mute. Now the stale ones are closed with a marker and the stream carries
+/// on. An unknown `cmd_id` (a late chunk of an abandoned command) is ignored.
+fn on_shell_response(app: &mut App, r: &ShellResponse) {
+    let Some(idx) = app.pending.iter().position(|p| p.cmd_id == r.cmd_id) else {
+        return;
+    };
+    for _ in 0..idx {
+        abandon_front(app, "");
+    }
+    // The device is demonstrably working through the queue: restart every waiter's idle clock
+    // (the commands behind this one can't be answered before it finishes).
+    let now = Instant::now();
+    for p in &mut app.pending {
+        p.idle_since = now;
+    }
+    let Some(front) = app.pending.front_mut() else {
+        return;
+    };
+    let expected = front.next_chunk;
+    front.next_chunk = r.chunk.wrapping_add(1);
+    front.received += r.text.len();
+    let over_cap = front.received > MAX_RESPONSE_BYTES;
+    // A `chunk` gap means a middle chunk was CRC-dropped (the decoder silently discards
+    // corrupt frames): flag the truncation in place.
+    if r.chunk != expected {
+        app.resp_partial = false;
+        push_cap(
+            &mut app.responses,
+            format!(
+                "[tower] response chunk dropped (expected #{}, got #{}); output truncated",
+                expected, r.chunk
+            ),
+        );
+    }
+    if over_cap {
+        // A device streaming one response without end: stop showing it (bounded memory: the
+        // open partial line can't grow forever either) and let the queue move on. Its
+        // remaining chunks match nothing any more and are ignored.
+        if let Some(p) = app.pending.pop_front() {
+            app.resp_partial = false;
+            push_cap(
+                &mut app.responses,
+                format!(
+                    "[tower] response to `{}` exceeded {} KiB; truncated",
+                    p.line,
+                    MAX_RESPONSE_BYTES / 1024
+                ),
+            );
+        }
         return;
     }
+    append_response_text(app, r.text);
+    if r.last {
+        app.resp_partial = false;
+        if r.result != 0 {
+            push_cap(&mut app.responses, crate::session::result_tag(r.result));
+        }
+        app.pending.pop_front();
+    }
+}
+
+fn apply_completion(app: &mut App, c: &ShellCompletions) {
+    // `token_start` is device-supplied: the shared validation (`tower shell` uses it too) keeps
+    // it on a char boundary and not past the cursor before it reaches `replace_range`, which
+    // would panic. `app.cursor` is always kept on a boundary by the key handlers.
+    let Some(start) = completion_start(&app.input, app.cursor, c.token_start) else {
+        return;
+    };
     if c.candidates.len() == 1 {
         let cand = &c.candidates[0];
         let sep = match cand.kind {
@@ -480,7 +619,7 @@ fn apply_completion(app: &mut App, c: &ShellCompletions) {
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     // Ctrl+C always quits (any focus). F10 works too, but many terminals swallow F10, so a
-    // universally-available quit key matters — and without this, Ctrl+C used to fall through
+    // universally-available quit key matters, and without this, Ctrl+C used to fall through
     // to `handle_command_key` and insert a literal 'c'.
     if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
         app.quit = true;
@@ -497,7 +636,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             return;
         }
         KeyCode::F(5) => {
-            // Pause freezes the streaming VIEWPORTS only — frames keep arriving and keep
+            // Pause freezes the streaming VIEWPORTS only: frames keep arriving and keep
             // being captured (the paused-anchor in push_log/push_event holds the view
             // still). Unpausing jumps back to the live tail.
             app.paused = !app.paused;
@@ -525,7 +664,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             return;
         }
         // F1 walks the panes clockwise; Shift-F1 counter-clockwise. (Some
-        // terminals report Shift-F1 as F13 — accept both.)
+        // terminals report Shift-F1 as F13; accept both.)
         KeyCode::F(1) if !mods.contains(KeyModifiers::SHIFT) => {
             app.focus = match app.focus {
                 Pane::Shell => Pane::Events,
@@ -570,10 +709,16 @@ fn handle_scroll_key(app: &mut App, pane: Pane, code: KeyCode) {
 }
 
 fn handle_command_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
-    // Control/Alt-modified keys are commands, not text: handle the readline-style editing
+    // AltGr is text, not a command. Windows reports it as Ctrl+Alt, so on CZ/DE/PL/… layouts
+    // `@ { } [ ] \ | ~ €` all arrive with both modifiers set; dropping them made those
+    // characters untypeable. AltGr yields a printable char that is never a plain ASCII
+    // letter/digit (a real Ctrl+Alt+<key> chord reports the bare key), which tells the two apart.
+    let altgr_text = mods.contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && matches!(code, KeyCode::Char(c) if !c.is_control() && !c.is_ascii_alphanumeric());
+    // Other Control/Alt-modified keys are commands, not text: handle the readline-style editing
     // bindings and drop the rest, so e.g. a stray Ctrl+<x> can't insert a literal control
-    // character into the command line. (Plain Shift is fine — it just gives capitals.)
-    if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+    // character into the command line. (Plain Shift is fine; it just gives capitals.)
+    if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !altgr_text {
         match code {
             KeyCode::Char('u') => kill_to_start(app), // Ctrl+U: clear to line start
             KeyCode::Char('w') => kill_word(app),     // Ctrl+W: delete previous word
@@ -719,7 +864,7 @@ fn send_command(app: &mut App) {
     let cmd_id = app.cmd_id;
     // Try to send FIRST; only commit UI state (echo, arm reassembly, history, clear the input)
     // if the frame actually went out. A too-long line fails to encode and a dropped link fails
-    // to write — in either case keep the typed line so the user can edit/retry, don't arm a
+    // to write; in either case keep the typed line so the user can edit/retry, don't arm a
     // reassembly for a command that never left, and explain why in the hint.
     if !send_frame(
         app,
@@ -735,24 +880,23 @@ fn send_command(app: &mut App) {
                 tower_protocol::MAX_FRAME - 12
             )
         } else {
-            "send failed: link lost — reconnecting…".to_string()
+            "send failed: link lost; reconnecting…".to_string()
         };
         return;
     }
     app.cmd_id = app.cmd_id.wrapping_add(1);
+    // Queue (don't replace): a slow response must not block the next command. Bounded so a
+    // dead device can't grow it without limit; the evicted oldest gets its marker, which
+    // lands just above this command's echo.
+    if app.pending.len() >= 8 {
+        abandon_front(app, " (too many in flight)");
+    }
     // The echo closes any in-flight partial line; a late response continues on a fresh line
-    // under this echo — right above the prompt, in arrival order.
+    // under this echo, right above the prompt, in arrival order.
     app.resp_partial = false;
     push_cap(&mut app.responses, format!("> {line}"));
-    // Queue (don't replace): a slow response must not block the next command. Bounded so a
-    // dead device can't grow it without limit.
-    if app.pending.len() >= 8 {
-        app.pending.pop_front();
-    }
-    app.pending.push_back(PendingCmd {
-        cmd_id,
-        next_chunk: 0,
-    });
+    app.pending
+        .push_back(PendingCmd::new(cmd_id, line.clone(), Instant::now()));
     if app.history.last().map(|h| h.as_str()) != Some(line.as_str()) {
         app.history.push(line);
     }
@@ -772,7 +916,7 @@ fn send_frame<T: serde::Serialize>(app: &mut App, mt: MsgType, payload: &T) -> b
     };
     app.seq = app.seq.wrapping_add(1);
     if sp.write_all(&buf[..n]).and_then(|_| sp.flush()).is_err() {
-        app.sp = None; // trigger reconnect
+        drop_link(app); // trigger reconnect
         return false;
     }
     true
@@ -828,7 +972,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let on_bar = |fg: Color| Style::new().bg(Color::Gray).fg(fg);
     let mut spans = vec![Span::styled(
         format!(
-            " HARDWARIO TOWER Console v{} — {} ",
+            " HARDWARIO TOWER Console v{} ({}) ",
             env!("CARGO_PKG_VERSION"),
             app.port_name
         ),
@@ -848,7 +992,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     }
     // Post-reset boot wait: animated while the device is (possibly slowly) booting, loud once
     // it exceeds the 8 s worst case the CLI tolerates (a fallback EEPROM compaction can
-    // legitimately hold the chip ~5 s — see tower-firmware docs/storage.md).
+    // legitimately hold the chip ~5 s; see tower-firmware docs/storage.md).
     if let Some(t0) = app.boot_wait {
         let el = t0.elapsed();
         if el < Duration::from_secs(8) {
@@ -861,14 +1005,14 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         } else {
             spans.push(Span::styled(
                 format!(
-                    "  ✗ no boot Hello after {:.0}s — wedged or console-less?",
+                    "  ✗ no boot Hello after {:.0}s; wedged or console-less?",
                     el.as_secs_f32()
                 ),
                 on_bar(Color::Red).add_modifier(Modifier::BOLD),
             ));
         }
     }
-    // Decode-failure / seq-gap / payload-error tally — the tag-mismatch smoking gun, kept in
+    // Decode-failure / seq-gap / payload-error tally: the tag-mismatch smoking gun, kept in
     // view so a live-but-garbled link can't masquerade as healthy.
     if let Some(diag) = header_diagnostics(app) {
         spans.push(Span::styled(
@@ -1022,7 +1166,7 @@ fn render_text_pane<T>(
 
     // Materialize each candidate line lazily from the back, accumulating its wrapped row
     // count until we've covered the visible window plus the requested scroll-up. `want` can
-    // exceed what exists (short buffer) — that's fine, we just render everything.
+    // exceed what exists (short buffer); that's fine, we just render everything.
     let want = inner_h + scrollback;
     let mut collected: Vec<Line> = Vec::new();
     let mut rows_by_line: Vec<usize> = Vec::new();
@@ -1183,20 +1327,39 @@ mod tests {
         App::new("/dev/mock".to_string())
     }
 
+    /// A freshly sent in-flight command `cmd_id` (its line is `/c<cmd_id>`).
+    fn pending(cmd_id: u16) -> PendingCmd {
+        PendingCmd::new(cmd_id, format!("/c{cmd_id}"), Instant::now())
+    }
+
+    /// The deframed inner bytes of a well-formed boot `Hello`.
+    fn hello_inner() -> Vec<u8> {
+        let payload = postcard::to_allocvec(&Hello {
+            protocol_version: tower_protocol::PROTOCOL_VERSION,
+            firmware_name: "app",
+            firmware_version: "test",
+            session_id: 2,
+        })
+        .unwrap();
+        valid_inner(MsgType::Hello, 0, &payload)
+    }
+
     /// A COBS-framed wire frame whose header advertises protocol version `ver` (top 3 bits of
-    /// `ver_type`) — i.e. what a firmware built against a *different* tower-protocol tag puts on
-    /// the wire. `decode_frame` rejects it at the version check (before CRC), so `handle_frame`
-    /// sees `Error::BadVersion`. Returns the deframed *inner* bytes (what `handle_frame` takes).
+    /// `ver_type`), i.e. what a firmware built against a *different* tower-protocol tag puts on
+    /// the wire. Its CRC is valid: `decode_frame` checks the CRC first (tower-protocol
+    /// ≥ 1.5.1), so only an intact frame from another version is `Error::BadVersion` (a corrupt
+    /// one is `BadCrc`), and `handle_frame` sees `BadVersion`. Returns the deframed *inner*
+    /// bytes (what `handle_frame` takes).
     fn bad_version_inner(ver: u8) -> Vec<u8> {
-        // inner = ver_type(1) | seq(2) | payload | crc(4); min length is HDR+CRC = 7. The
-        // version check fires before CRC, so the payload/crc contents are irrelevant here.
+        // inner = ver_type(1) | seq(2) | payload | crc(4); min length is HDR+CRC = 7.
         let mut inner = vec![(ver << 5) | (MsgType::Hello as u8 & 0x1F), 0, 0];
-        inner.extend_from_slice(&[0, 0, 0, 0]);
+        let crc = tower_protocol::crc::crc32_ieee(&inner);
+        inner.extend_from_slice(&crc.to_le_bytes());
         inner
     }
 
     /// A deframed inner frame with a *valid* header version + CRC but a caller-supplied raw
-    /// payload — so `decode_frame` succeeds and the postcard parse is what's exercised (e.g.
+    /// payload, so `decode_frame` succeeds and the postcard parse is what's exercised (e.g.
     /// an empty payload for a `Log` fails to parse → a payload error, not a frame error).
     fn valid_inner(mt: MsgType, seq: u16, payload: &[u8]) -> Vec<u8> {
         let mut inner = vec![(tower_protocol::PROTOCOL_VERSION << 5) | (mt as u8 & 0x1F)];
@@ -1233,12 +1396,12 @@ mod tests {
     }
 
     /// Render `ui()` into an 80x24 test terminal and return the whole screen as text (rows
-    /// joined by newlines), trailing spaces trimmed — enough to assert on visible content.
+    /// joined by newlines), trailing spaces trimmed: enough to assert on visible content.
     fn render_to_text(app: &mut App) -> String {
         render_to_text_sized(app, 80, 24)
     }
 
-    /// Like [`render_to_text`] but at an explicit size — some assertions (the footer hint)
+    /// Like [`render_to_text`] but at an explicit size; some assertions (the footer hint)
     /// need a wide terminal so the right-aligned clock doesn't overwrite the region.
     fn render_to_text_sized(app: &mut App, w: u16, h: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -1515,10 +1678,7 @@ mod tests {
     #[test]
     fn handle_frame_ignores_wrong_cmd_id() {
         let mut app = test_app();
-        app.pending.push_back(PendingCmd {
-            cmd_id: 5,
-            next_chunk: 0,
-        });
+        app.pending.push_back(pending(5));
         // A response for a different command must not populate this one (C18).
         handle_frame(&mut app, &resp_frame(9, 0, true, "stale"));
         assert!(app.responses.is_empty());
@@ -1528,12 +1688,9 @@ mod tests {
     #[test]
     fn handle_frame_reassembles_matching_cmd_id() {
         let mut app = test_app();
-        app.pending.push_back(PendingCmd {
-            cmd_id: 5,
-            next_chunk: 0,
-        });
+        app.pending.push_back(pending(5));
         handle_frame(&mut app, &resp_frame(5, 0, false, "line one\n"));
-        // Chunks stream in as they arrive — line one is visible BEFORE `last`.
+        // Chunks stream in as they arrive: line one is visible BEFORE `last`.
         assert_eq!(app.responses.back().unwrap(), "line one");
         handle_frame(&mut app, &resp_frame(5, 1, true, "line two"));
         let joined: Vec<String> = app.responses.iter().cloned().collect();
@@ -1544,19 +1701,13 @@ mod tests {
     #[test]
     fn slow_response_lands_under_the_newer_echo() {
         // SSH flow: cmd A is sent, then cmd B is typed before A's response arrives. A's
-        // (and then B's) lines land in arrival order right above the prompt — nothing
+        // (and then B's) lines land in arrival order right above the prompt; nothing
         // blocks, nothing is dropped.
         let mut app = test_app();
-        app.pending.push_back(PendingCmd {
-            cmd_id: 1,
-            next_chunk: 0,
-        });
+        app.pending.push_back(pending(1));
         push_cap(&mut app.responses, "> first".to_string());
         push_cap(&mut app.responses, "> second".to_string()); // typed before A answered
-        app.pending.push_back(PendingCmd {
-            cmd_id: 2,
-            next_chunk: 0,
-        });
+        app.pending.push_back(pending(2));
         handle_frame(&mut app, &resp_frame(1, 0, true, "answer A"));
         handle_frame(&mut app, &resp_frame(2, 0, true, "answer B"));
         let joined: Vec<String> = app.responses.iter().cloned().collect();
@@ -1567,10 +1718,7 @@ mod tests {
     #[test]
     fn partial_chunk_line_is_continued_in_place() {
         let mut app = test_app();
-        app.pending.push_back(PendingCmd {
-            cmd_id: 3,
-            next_chunk: 0,
-        });
+        app.pending.push_back(pending(3));
         handle_frame(&mut app, &resp_frame(3, 0, false, "hello "));
         assert_eq!(app.responses.back().unwrap(), "hello ");
         handle_frame(&mut app, &resp_frame(3, 1, true, "world"));
@@ -1581,14 +1729,170 @@ mod tests {
     #[test]
     fn handle_frame_flags_chunk_gap() {
         let mut app = test_app();
-        app.pending.push_back(PendingCmd {
-            cmd_id: 2,
-            next_chunk: 0,
-        });
+        app.pending.push_back(pending(2));
         handle_frame(&mut app, &resp_frame(2, 0, false, "a"));
         handle_frame(&mut app, &resp_frame(2, 2, true, "c")); // chunk 1 missing → gap (C19)
         let joined: String = app.responses.iter().cloned().collect::<Vec<_>>().join("\n");
         assert!(joined.contains("chunk dropped"));
+    }
+
+    // ---- pending queue: one lost answer must not mute the shell (CLI-1) ----
+
+    fn scrollback(app: &App) -> Vec<String> {
+        app.responses.iter().cloned().collect()
+    }
+
+    #[test]
+    fn answer_for_a_later_command_closes_the_stale_one() {
+        // cmd 1's answer never arrives (lost command / CRC-dropped frame). cmd 2's answer used
+        // to be dropped because only the FRONT entry could match; the shell went mute for
+        // good. Now cmd 2 is answered and cmd 1 is closed with a visible marker.
+        let mut app = test_app();
+        app.pending.push_back(pending(1));
+        app.pending.push_back(pending(2));
+        handle_frame(&mut app, &resp_frame(2, 0, true, "answer B"));
+        assert_eq!(
+            scrollback(&app),
+            vec!["[tower] no response to `/c1`", "answer B"]
+        );
+        assert!(app.pending.is_empty());
+        // And the shell keeps working afterwards.
+        app.pending.push_back(pending(3));
+        handle_frame(&mut app, &resp_frame(3, 0, true, "answer C"));
+        assert_eq!(app.responses.back().unwrap(), "answer C");
+    }
+
+    #[test]
+    fn stale_command_with_lost_last_chunk_is_marked_incomplete() {
+        let mut app = test_app();
+        app.pending.push_back(pending(1));
+        app.pending.push_back(pending(2));
+        handle_frame(&mut app, &resp_frame(1, 0, false, "half a li")); // `last` never comes
+        handle_frame(&mut app, &resp_frame(2, 0, true, "next"));
+        assert_eq!(
+            scrollback(&app),
+            vec!["half a li", "[tower] incomplete response to `/c1`", "next"]
+        );
+        assert!(!app.resp_partial);
+    }
+
+    #[test]
+    fn idle_commands_time_out_with_a_marker() {
+        let mut app = test_app();
+        app.pending.push_back(pending(1));
+        let sent = app.pending[0].idle_since;
+        expire_pending(&mut app, sent + PENDING_IDLE / 2);
+        assert_eq!(app.pending.len(), 1, "still within its idle budget");
+        expire_pending(&mut app, sent + PENDING_IDLE);
+        assert!(app.pending.is_empty());
+        assert_eq!(
+            scrollback(&app),
+            vec!["[tower] no response to `/c1` (timed out)"]
+        );
+    }
+
+    #[test]
+    fn activity_restarts_every_waiters_idle_clock() {
+        // cmd 2 waits behind a long-running cmd 1; while cmd 1 keeps streaming, cmd 2 must not
+        // be written off: the device can't answer it before cmd 1 finishes.
+        let mut app = test_app();
+        app.pending.push_back(pending(1));
+        app.pending.push_back(pending(2));
+        let sent = app.pending[1].idle_since;
+        std::thread::sleep(Duration::from_millis(5));
+        handle_frame(&mut app, &resp_frame(1, 0, false, "still working\n"));
+        expire_pending(&mut app, sent + PENDING_IDLE);
+        assert_eq!(
+            app.pending.len(),
+            2,
+            "streaming activity keeps the queue alive"
+        );
+    }
+
+    #[test]
+    fn hello_closes_commands_from_the_previous_session() {
+        let mut app = test_app();
+        let mut old = pending(1);
+        old.sent -= Duration::from_secs(1); // well before the device rebooted
+        app.pending.push_back(old);
+        app.pending.push_back(pending(2)); // typed in the very instant of the Hello
+        handle_frame(&mut app, &hello_inner());
+        assert_eq!(
+            scrollback(&app),
+            vec!["[tower] no response to `/c1` (device restarted)"]
+        );
+        assert_eq!(
+            app.pending.len(),
+            1,
+            "a command inside the Hello race may be answered"
+        );
+        handle_frame(&mut app, &resp_frame(2, 0, true, "ok"));
+        assert!(app.pending.is_empty());
+    }
+
+    #[test]
+    fn lost_link_closes_everything_in_flight() {
+        let mut app = test_app();
+        app.pending.push_back(pending(1));
+        app.pending_req = Some(4);
+        drop_link(&mut app);
+        assert!(app.pending.is_empty() && app.pending_req.is_none());
+        assert_eq!(
+            scrollback(&app),
+            vec!["[tower] no response to `/c1` (link lost)"]
+        );
+    }
+
+    #[test]
+    fn endless_response_is_capped() {
+        // A device streaming one response forever (no `last`, no newline) must not grow the
+        // open partial line (or anything else) without bound.
+        let mut app = test_app();
+        let mut p = pending(1);
+        p.received = MAX_RESPONSE_BYTES - 1;
+        app.pending.push_back(p);
+        handle_frame(&mut app, &resp_frame(1, 0, false, "xx"));
+        assert!(app.pending.is_empty());
+        assert!(!app.resp_partial);
+        assert_eq!(
+            scrollback(&app),
+            vec!["[tower] response to `/c1` exceeded 256 KiB; truncated"]
+        );
+        handle_frame(&mut app, &resp_frame(1, 1, false, "more")); // the rest is ignored
+        assert_eq!(app.responses.len(), 1);
+    }
+
+    // ---- AltGr (reported as Ctrl+Alt on Windows) is text (CLI-10) ----
+
+    #[test]
+    fn altgr_characters_are_typed() {
+        let mut app = test_app();
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        for ch in ['@', '{', '[', '|', '\\', '~', '€'] {
+            handle_key(&mut app, KeyCode::Char(ch), altgr);
+        }
+        handle_key(&mut app, KeyCode::Char('}'), altgr | KeyModifiers::SHIFT);
+        assert_eq!(app.input, "@{[|\\~€}");
+    }
+
+    #[test]
+    fn real_ctrl_and_ctrl_alt_chords_stay_commands() {
+        let mut app = test_app();
+        // A Ctrl+Alt+<letter> chord is not AltGr text…
+        handle_key(
+            &mut app,
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert_eq!(app.input, "");
+        // …and plain Ctrl shortcuts still edit the line.
+        for ch in "/a b".chars() {
+            handle_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        handle_key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(app.input, "/a ");
+        handle_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.quit);
     }
 
     // ---- handle_frame: decode-failure surfacing + seq gaps + payload errors ----
@@ -1624,8 +1928,8 @@ mod tests {
     fn handle_frame_counts_seq_gaps() {
         let mut app = test_app();
         handle_frame(&mut app, &log_inner(10));
-        handle_frame(&mut app, &log_inner(11)); // contiguous — no gap
-        handle_frame(&mut app, &log_inner(20)); // jump — one gap
+        handle_frame(&mut app, &log_inner(11)); // contiguous: no gap
+        handle_frame(&mut app, &log_inner(20)); // jump: one gap
         assert_eq!(app.seq_gaps, 1);
         assert_eq!(app.last_seq, Some(20));
     }

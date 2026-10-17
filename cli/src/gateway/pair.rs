@@ -1,8 +1,8 @@
-//! Cable pairing from inside the gateway TUI — the same five-step flow as
+//! Cable pairing from inside the gateway TUI: the same five-step flow as
 //! `tower nodes add --port` (`client/pair_cable.rs`), reshaped for the bridge
 //! process: the node's serial port is driven directly on a worker thread, while
 //! the gateway-side steps (`node_add`, rollback `node_remove`) ride the engine's
-//! own in-process RPC surface — the exact code path an MQTT client would hit.
+//! own in-process RPC surface, the exact code path an MQTT client would hit.
 //!
 //! Wiring: the worker sends `FrontendCmd::Rpc` with `tui-cbl-*` ids into the
 //! engine; the TUI event loop forwards the matching `Event::Rpc` responses back
@@ -36,9 +36,9 @@ pub(crate) struct GwParams {
 pub(crate) enum CableMsg {
     /// One human-readable step line for the modal.
     Progress(String),
-    /// Paired — the node's address (the modal closes; the log records it).
+    /// Paired: the node's address (the modal closes; the log records it).
     Done { addr: u32 },
-    /// Terminal failure — shown in the modal until dismissed.
+    /// Terminal failure, shown in the modal until dismissed.
     Failed(String),
 }
 
@@ -116,11 +116,14 @@ fn run(
             bad_version: Some(got),
         } => {
             return Err(format!(
-                "protocol mismatch: device speaks v{got} — rebuild/reflash"
+                "protocol mismatch: device speaks v{got}; rebuild/reflash"
             ));
         }
         DescribeOutcome::Timeout { bad_version: None } => {
-            return Err("no answer — is this a v3 TOWER node?".into());
+            return Err("no answer; is this a v3 TOWER node?".into());
+        }
+        DescribeOutcome::Failed(e) => {
+            return Err(format!("serial link failed during the role probe: {e}"));
         }
     };
     if node_info.role != DeviceRole::Node {
@@ -135,13 +138,13 @@ fn run(
         topics::node_hex(node_addr),
         node_info.firmware_name,
         if node_info.provisioned {
-            " — already provisioned, re-pairing"
+            ": already provisioned, re-pairing"
         } else {
             ""
         }
     ));
 
-    // 2. Mint the AES key (host CSPRNG — the only legitimate key source).
+    // 2. Mint the AES key (host CSPRNG, the only legitimate key source).
     let key = mint_key().map_err(|e| e.to_string())?;
 
     // 3. Register on the gateway FIRST (a node provisioned toward a gateway that
@@ -164,7 +167,7 @@ fn run(
             .unwrap_or_else(|| "gateway refused node_add".into()));
     }
 
-    // 4. Install the credentials on the node — it acks and reboots. A failure
+    // 4. Install the credentials on the node; it acks and reboots. A failure
     //    rolls the gateway registration back (no phantom peers).
     say("provisioning the node…".into());
     let outcome = mgmt_roundtrip(
@@ -191,11 +194,14 @@ fn run(
             );
             Err(match other {
                 MgmtOutcome::Reply(r) => format!(
-                    "node refused provisioning ({}) — registration rolled back",
+                    "node refused provisioning ({}); registration rolled back",
                     super::payload::mgmt_error_str(r.result).unwrap_or("unknown")
                 ),
                 MgmtOutcome::Timeout { .. } => {
-                    "node did not ack provisioning — registration rolled back".into()
+                    "node did not ack provisioning; registration rolled back".into()
+                }
+                MgmtOutcome::Failed(e) => {
+                    format!("serial link to the node failed ({e}); registration rolled back")
                 }
             })
         }

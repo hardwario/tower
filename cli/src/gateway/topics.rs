@@ -1,7 +1,7 @@
-//! MQTT topic construction/parsing — the single source of truth for the gateway's
+//! MQTT topic construction/parsing: the single source of truth for the gateway's
 //! topic tree (the public API surface of `tower gateway`). Everything lives under a
 //! configurable prefix (default `tower/`); node topics address nodes by **fixed hex
-//! addr** (`nodes/0x0000ab12/…`) — names are mutable metadata and live only in payloads.
+//! addr** (`nodes/0x0000ab12/…`); names are mutable metadata and live only in payloads.
 //!
 //! | topic (under prefix)            | dir | retain | payload (`payload.rs`)        |
 //! |---------------------------------|-----|--------|-------------------------------|
@@ -9,7 +9,7 @@
 //! | `gateway/stats`                 | gw→ | yes    | `Stats`                       |
 //! | `gateway/pairing`               | gw→ | yes    | `Pairing`                     |
 //! | `gateway/cmd`                   | →gw | no     | `RpcRequest`                  |
-//! | `gateway/rsp/{uuid}`            | gw→ | no     | `RpcResponse`                 |
+//! | `gateway/rsp/{uuid}`            | gw→ | no     | `RpcResponse` (clients share the `gateway/rsp/+` filter) |
 //! | `nodes/{addr}`                    | gw→ | yes    | `Node` (empty = removed)      |
 //! | `nodes/{addr}/event/button`       | gw→ | no     | `ButtonEvent`                 |
 //! | `nodes/{addr}/event/accel`        | gw→ | no     | `AccelEvent`                  |
@@ -29,6 +29,19 @@ pub(crate) fn normalize_prefix(prefix: &str) -> String {
         String::new()
     } else {
         format!("{p}/")
+    }
+}
+
+/// Refuse a prefix that cannot form valid topics: the MQTT wildcards `+`/`#` are illegal in a
+/// publish topic (every publish would be refused) and a NUL is illegal anywhere.
+pub(crate) fn check_prefix(prefix: &str) -> Result<(), String> {
+    if prefix.contains(['+', '#', '\0']) {
+        Err(format!(
+            "invalid MQTT topic prefix \"{}\": `+`, `#` and NUL are not allowed",
+            prefix.escape_debug()
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -60,6 +73,17 @@ pub(crate) fn gateway_cmd(prefix: &str) -> String {
 }
 pub(crate) fn gateway_rsp(prefix: &str, rpc_id: &str) -> String {
     format!("{prefix}gateway/rsp/{rpc_id}")
+}
+/// The ONE response filter every client shares (`gateway/rsp/+`), correlating by id. A
+/// per-RPC `gateway/rsp/{uuid}` subscription would cost the embedded broker a fresh commit
+/// log per call that rumqttd never frees on unsubscribe: unbounded growth for a long-lived
+/// broker. One shared filter = one bounded log.
+pub(crate) fn gateway_rsp_filter(prefix: &str) -> String {
+    format!("{prefix}gateway/rsp/+")
+}
+/// The gateway's remote-shell request subscription (`nodes/+/shell/req`).
+pub(crate) fn shell_req_filter(prefix: &str) -> String {
+    format!("{prefix}nodes/+/shell/req")
 }
 pub(crate) fn node(prefix: &str, addr: u32) -> String {
     format!("{prefix}nodes/{}", node_hex(addr))
@@ -95,14 +119,25 @@ pub(crate) fn radio_tx(prefix: &str) -> String {
     format!("{prefix}radio/tx")
 }
 
+/// Pure radio diagnostics (`radio/rssi|rx|tx` and the raw `nodes/{addr}/uplink` debug feed):
+/// high-rate, superseded within a second, worthless once stale. The publisher drops these
+/// first when the broker link is down or backlogged; events, replies and retained state are
+/// never in this class.
+pub(crate) fn is_diagnostic(prefix: &str, topic: &str) -> bool {
+    let Some(rest) = topic.strip_prefix(prefix) else {
+        return false;
+    };
+    rest.starts_with("radio/") || (rest.starts_with("nodes/") && rest.ends_with("/uplink"))
+}
+
 /// What an inbound (subscribed) topic means to the gateway engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Inbound {
-    /// `gateway/cmd` — an RPC request.
+    /// `gateway/cmd`: an RPC request.
     Cmd,
-    /// `nodes/{addr}/shell/req` — a remote-shell enqueue for `addr`.
+    /// `nodes/{addr}/shell/req`: a remote-shell enqueue for `addr`.
     ShellReq(u32),
-    /// Anything else (our own publishes echoed back, foreign topics) — ignore.
+    /// Anything else (our own publishes echoed back, foreign topics): ignore.
     Other,
 }
 
@@ -180,6 +215,27 @@ mod tests {
         assert_eq!(node_of(p, "tower/radio/rssi"), None);
         assert_eq!(node_of(p, "other/nodes/0x0000ab12"), None);
         assert_eq!(node_of(p, "tower/nodes/garbage"), None);
+    }
+
+    #[test]
+    fn prefix_check_and_shared_filters() {
+        assert!(check_prefix("tower/").is_ok());
+        assert!(check_prefix("").is_ok());
+        assert!(check_prefix("a/+/").is_err());
+        assert!(check_prefix("a/#").is_err());
+        assert_eq!(gateway_rsp_filter("tower/"), "tower/gateway/rsp/+");
+        assert_eq!(shell_req_filter("tower/"), "tower/nodes/+/shell/req");
+    }
+
+    #[test]
+    fn diagnostics_classification() {
+        let p = "tower/";
+        assert!(is_diagnostic(p, "tower/radio/rssi"));
+        assert!(is_diagnostic(p, "tower/radio/tx"));
+        assert!(is_diagnostic(p, "tower/nodes/0x0000ab12/uplink"));
+        assert!(!is_diagnostic(p, "tower/nodes/0x0000ab12/event/button"));
+        assert!(!is_diagnostic(p, "tower/gateway/rsp/u1"));
+        assert!(!is_diagnostic(p, "tower/nodes/0x0000ab12"));
     }
 
     #[test]

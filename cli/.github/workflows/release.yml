@@ -5,18 +5,32 @@ on:
     tags:
       - 'v[0-9]+.*'
 
+# Least privilege: everything is read-only except the final `publish` job, which alone gets
+# the release-write + attestation (OIDC) permissions.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # MUST equal `channel` in rust-toolchain.toml (ci.yml's `audit` job enforces it).
+  RUST_TOOLCHAIN: "1.99.1"
 
+# Every action is pinned to a full commit SHA (the comment names the release); Dependabot keeps
+# the pins current.
 jobs:
-  create-release:
-    name: Create release
+  # Gate 1: only a tag that names a commit already on main, whose CI went green, may release:
+  # pushing a tag must not be a way to ship an unreviewed or red commit.
+  verify:
+    name: Verify tag (version, on main, CI green)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read   # read the CI workflow's runs for the tagged commit
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # full history + origin/main for the ancestry check
+          persist-credentials: false
 
       - name: Verify tag matches Cargo.toml
         run: |
@@ -28,78 +42,102 @@ jobs:
             exit 1
           fi
 
-      # Gate the release on the protocol lockstep too: publishing a `tower` binary that pins a
-      # different tower-protocol tag than the deployed firmware ships a silent wire mis-decode to
-      # every user who downloads it. The build/publish jobs `need` this one, so a broken pin can't
-      # produce release archives.
-      - name: Verify tower-protocol lockstep (vs firmware)
+      - name: Verify the tagged commit is on main
         run: |
-          python3 - <<'PY'
-          import re, sys, urllib.request
-          PIN = re.compile(r'tower-protocol\s*=\s*\{[^}]*?\btag\s*=\s*"([^"]+)"')
-          def tag(text, where):
-              m = PIN.search(text)
-              if not m:
-                  sys.exit(f"lockstep: no tower-protocol tag found in {where}")
-              return m.group(1)
-          with open("Cargo.toml", encoding="utf-8") as f:
-              cli = tag(f.read(), "cli/Cargo.toml")
-          url = "https://raw.githubusercontent.com/hardwario/tower-firmware/main/Cargo.toml"
-          fw = tag(urllib.request.urlopen(url, timeout=30).read().decode("utf-8"), "firmware Cargo.toml")
-          print(f"cli pins {cli}; tower-firmware pins {fw}")
-          if cli != fw:
-              sys.exit(f"ERROR: refusing to release — tower-protocol LOCKSTEP BROKEN: cli pins {cli} "
-                       f"but firmware pins {fw}. Align both before tagging a release.")
-          print(f"lockstep OK: releasing with tower-protocol {cli}")
-          PY
+          sha="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null \
+            || { echo "::error::origin/main not fetched"; exit 1; }
+          if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+            echo "::error::${GITHUB_REF_NAME} -> $sha is not an ancestor of origin/main; release only commits that landed on main"
+            exit 1
+          fi
+          echo "$sha is on main"
 
-      # Gate the release on formatting so a lint failure can't ship in a tag
-      # (the build/publish jobs `need` this one). fmt only parses source, so no
-      # libudev/compile is required here.
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      # Waits (up to 60 min) for ci.yml on the tagged commit: the tag is usually pushed right
+      # after main, so CI may still be running. Any successful CI run for this exact commit
+      # passes; a run that finished red/cancelled with none pending fails; no run at all after
+      # 10 min fails (CI runs per push HEAD; tag a commit that was the head of a push).
+      - name: Verify CI succeeded for the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          while :; do
+            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100")"
+            ok="$(jq '[.workflow_runs[] | select(.conclusion == "success")] | length' <<<"$runs")"
+            pending="$(jq '[.workflow_runs[] | select(.status != "completed")] | length' <<<"$runs")"
+            total="$(jq '.workflow_runs | length' <<<"$runs")"
+            if [ "$ok" -gt 0 ]; then echo "CI succeeded for $sha"; break; fi
+            if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+              echo "::error::CI finished for $sha without success: fix main (or re-run CI), then re-run this release"
+              exit 1
+            fi
+            if [ "$total" -eq 0 ] && [ "$SECONDS" -gt 600 ]; then
+              echo "::error::no CI run exists for $sha; tag a commit CI ran on"
+              exit 1
+            fi
+            if [ "$SECONDS" -gt 3600 ]; then echo "::error::timed out waiting for CI on $sha"; exit 1; fi
+            echo "CI for $sha: $pending of $total run(s) still in progress, waiting"
+            sleep 30
+          done
+
+  # Gate 2: publishing a `tower` binary that pins a different tower-protocol than the deployed
+  # firmware ships a silent wire mis-decode to every user who downloads it. Same shared checker
+  # as ci.yml's `lockstep` job (tower-firmware's tools/protocol_pin_check.py over checkouts of
+  # all three consumers: every manifest, the locked commits, the tag's current upstream commit).
+  lockstep:
+    name: Verify tower-protocol lockstep (vs firmware + hil)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: rustfmt
+          persist-credentials: false
+      - name: Check out tower-firmware (main)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: hardwario/tower-firmware
+          ref: main
+          path: .lockstep/tower-firmware
+          persist-credentials: false
+      - name: Check out tower-hil (main)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: hardwario/tower-hil
+          ref: main
+          path: .lockstep/tower-hil
+          persist-credentials: false
+      - name: Verify tower-protocol lockstep (cli + firmware + hil)
+        run: >-
+          python3 .lockstep/tower-firmware/tools/protocol_pin_check.py
+          .lockstep/tower-firmware . .lockstep/tower-hil --resolve-remote
 
+  # Gate 3: fmt + clippy + tests on the exact tagged tree (like jolt's release gate).
+  checks:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - name: Install Rust (rust-toolchain.toml pin)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
 
-      # Create the release as a draft up front so users never see a
-      # half-populated release while the matrix builds are still uploading.
-      - name: Create draft release
-        uses: softprops/action-gh-release@v3
-        with:
-          draft: true
-          generate_release_notes: true
-          body: |
-            ## tower-cli ${{ github.ref_name }}
-
-            Host CLI/TUI for the HARDWARIO TOWER console link — the `tower` binary
-            decodes the framed serial protocol from the
-            [tower firmware](https://github.com/hardwario/tower-firmware) (logs, events,
-            shell), which a plain serial monitor shows only as raw frame bytes.
-
-            ### Install
-            Download the archive for your platform, extract it, and put `tower` on your `PATH`:
-            ```sh
-            tar -xzf tower-${{ github.ref_name }}-<target>.tar.gz   # .zip on Windows
-            sudo mv tower-*/tower /usr/local/bin/                   # macOS / Linux
-            ```
-            Each archive ships with a matching `.sha256` for verification.
-
-            ### Assets
-            | Platform | Target |
-            |----------|--------|
-            | Linux x86_64 | `x86_64-unknown-linux-gnu` |
-            | Linux ARM64 | `aarch64-unknown-linux-gnu` |
-            | Linux ARMv7 (Raspberry Pi) | `armv7-unknown-linux-gnueabihf` |
-            | macOS Intel | `x86_64-apple-darwin` |
-            | macOS Apple Silicon | `aarch64-apple-darwin` |
-            | Windows x86_64 | `x86_64-pc-windows-msvc` |
-
+  # Build + package each target with a read-only token; archives travel to `publish` as
+  # workflow artifacts (nothing here can write to the release).
   build:
     name: Build ${{ matrix.target }}
-    needs: create-release
+    needs: [verify, lockstep, checks]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -124,50 +162,59 @@ jobs:
             os: windows-latest
             cross: false
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - name: Install Rust (rust-toolchain.toml pin + target)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
+          components: rustfmt, clippy
 
       # Native Linux build needs host libudev; cross builds get it from Cross.toml.
       - name: Install libudev (native Linux)
         if: matrix.os == 'ubuntu-latest' && !matrix.cross
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
 
       - name: Install cross
         if: matrix.cross
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
-          tool: cross
+          tool: cross@0.2.5
 
       - name: Build
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          USE_CROSS: ${{ matrix.cross }}
         run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+          if [ "$USE_CROSS" = "true" ]; then
+            cross build --locked --release --target "$TARGET"
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --locked --release --target "$TARGET"
           fi
 
       - name: Package
         id: package
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          staging="tower-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          staging="tower-${GITHUB_REF_NAME}-${TARGET}"
           mkdir "$staging"
           cp README.md "$staging/"
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/tower.exe" "$staging/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "target/${TARGET}/release/tower.exe" "$staging/"
             7z a "$staging.zip" "$staging" >/dev/null
             asset="$staging.zip"
           else
-            cp "target/${{ matrix.target }}/release/tower" "$staging/"
+            cp "target/${TARGET}/release/tower" "$staging/"
             tar -czf "$staging.tar.gz" "$staging"
             asset="$staging.tar.gz"
           fi
@@ -179,21 +226,85 @@ jobs:
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
           echo "checksum=$asset.sha256" >> "$GITHUB_OUTPUT"
 
-      - name: Upload assets to release
-        uses: softprops/action-gh-release@v3
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          draft: true
-          files: |
+          name: release-${{ matrix.target }}
+          path: |
             ${{ steps.package.outputs.asset }}
             ${{ steps.package.outputs.checksum }}
-          fail_on_unmatched_files: true
+          if-no-files-found: error
+          retention-days: 7
 
+  # The only job with write access: attest build provenance for every archive (verifiable with
+  # `gh attestation verify <archive> --repo hardwario/tower-cli`), then create the release as a
+  # draft, upload, and publish, so users never see a half-populated release, and assets are
+  # attached before publication (required once immutable releases are enabled).
   publish:
-    name: Publish release
+    name: Attest + publish release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write       # create the release + upload assets
+      id-token: write       # OIDC token for the Sigstore signing certificate
+      attestations: write   # persist the provenance attestation
     steps:
-      - name: Mark release as published
-        uses: softprops/action-gh-release@v3
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify checksums
+        working-directory: dist
+        run: |
+          ls -l
+          for f in *.sha256; do sha256sum -c "$f"; done
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+      - name: Create draft release + upload assets
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            ## tower-cli ${{ github.ref_name }}
+
+            Host CLI/TUI for the HARDWARIO TOWER console link. The `tower` binary
+            decodes the framed serial protocol from the
+            [tower firmware](https://github.com/hardwario/tower-firmware) (logs, events,
+            shell), which a plain serial monitor shows only as raw frame bytes.
+
+            ### Install
+            Download the archive for your platform, extract it, and put `tower` on your `PATH`:
+            ```sh
+            tar -xzf tower-${{ github.ref_name }}-<target>.tar.gz   # .zip on Windows
+            sudo mv tower-*/tower /usr/local/bin/                   # macOS / Linux
+            ```
+            Each archive ships with a matching `.sha256`, and every archive carries a signed
+            build-provenance attestation:
+            ```sh
+            gh attestation verify tower-${{ github.ref_name }}-<target>.tar.gz --repo hardwario/tower-cli
+            ```
+
+            ### Assets
+            | Platform | Target |
+            |----------|--------|
+            | Linux x86_64 | `x86_64-unknown-linux-gnu` |
+            | Linux ARM64 | `aarch64-unknown-linux-gnu` |
+            | Linux ARMv7 (Raspberry Pi) | `armv7-unknown-linux-gnueabihf` |
+            | macOS Intel | `x86_64-apple-darwin` |
+            | macOS Apple Silicon | `aarch64-apple-darwin` |
+            | Windows x86_64 | `x86_64-pc-windows-msvc` |
+
+      - name: Publish release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: false
