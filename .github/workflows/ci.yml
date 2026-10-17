@@ -25,10 +25,11 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs of a pull request. Runs on main always finish: a release needs a
-# successful CI run on the exact commit it tags, and a cancelled run is not one.
+# Cancel superseded runs of a pull request. Every commit pushed to main gets its own group, so
+# its run always finishes: a release needs a successful CI run on the exact commit it tags, and
+# GitHub cancels a run that waits in a group behind a newer one even without cancel-in-progress.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
