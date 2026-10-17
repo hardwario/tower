@@ -39,6 +39,7 @@ use tower_net::pairing::{
 };
 
 use super::{ACK_TURNAROUND, Net, TX_TIMEOUT, is_reserved_addr};
+use crate::radio::ccm::TAG_LEN;
 use crate::radio::duty;
 use crate::radio::frame::{self, FrameType, Header, MAX_FRAME, flags};
 
@@ -205,13 +206,28 @@ impl Net {
     /// match (or `None` on timeout). Nothing is committed here: the caller already has the key
     /// and installs the host with `add_peer(gw_addr, key)`. Each attempt uses a fresh TX
     /// counter, which is what makes the echo a freshness proof (`keyed_resp_matches`).
+    ///
+    /// Counter discipline (as in `send_ack`): the duty gate runs first (a refused attempt
+    /// burns no counter and no watermark wear), then each attempt takes its counter from
+    /// [`alloc_counter`](Net::alloc_counter) and seals the request **before** the first await,
+    /// so a caller that drops this future mid-TX or mid-window (a `select` timeout) can never
+    /// leave the counter for the next transfer to seal different plaintext under the same
+    /// nonce. The allocation also re-checks the TX lock on every attempt.
     pub async fn join_keyed(&mut self, addr: u32, key: &[u8; 16], timeout: Duration) -> Option<u32> {
         if self.txc.locked() {
             return None; // fail closed (nonce safety): JOIN_REQ consumes TX counters
         }
         let deadline = Instant::now().checked_add(timeout)?;
         while Instant::now() < deadline {
-            let req_counter = self.txc.counter();
+            // The request's length is fixed (header + 4 B addr + tag), so the duty gate can run
+            // before anything is allocated or sealed.
+            if !self.duty.try_tx(duty::frame_toa_ms(frame::HDR_LEN + 4 + TAG_LEN)) {
+                // Duty-limited: back off one response window, don't spin.
+                Timer::after(JOIN_RESP_WINDOW).await;
+                continue;
+            }
+            // None = TX locked (fail closed, nonce safety): stop, don't retry.
+            let req_counter = self.alloc_counter()?;
             let req_hdr = Header {
                 frame_type: FrameType::JoinReq,
                 flags: flags::KEYED,
@@ -220,10 +236,12 @@ impl Net {
                 counter: req_counter,
                 bulk_index: None,
             };
-            let sent = self.tx_pair(key, &req_hdr, &addr.to_le_bytes()).await;
-            let _ = self.alloc_counter();
-            if !sent {
-                // Duty-limited or a radio error: back off one response window, don't spin.
+            let mut req = [0u8; MAX_FRAME];
+            let Ok(n) = frame::seal_frame(&mut self.ccm, key, &req_hdr, &addr.to_le_bytes(), &mut req) else {
+                return None;
+            };
+            if self.radio.tx(&req[..n], false, TX_TIMEOUT).await.is_err() {
+                // A radio error: back off one response window, don't spin.
                 Timer::after(JOIN_RESP_WINDOW).await;
                 continue;
             }
@@ -256,6 +274,11 @@ impl Net {
     /// the KEYED JOIN_RESP echoing the request's counter after `ACK_TURNAROUND`. Returns the
     /// joiner's address when a response went out. Called from [`Net::recv`]; nothing else
     /// changes: the peer, its key and its lane were already installed.
+    ///
+    /// The response follows `send_ack`'s discipline: duty gate, then the counter from
+    /// [`alloc_counter`](Net::alloc_counter) (which re-checks the TX lock), then the seal, all
+    /// before the turnaround await, so dropping `recv` mid-response cannot leave the counter
+    /// unconsumed.
     pub(super) async fn answer_keyed_join(&mut self, frame: &mut [u8]) -> Option<u32> {
         if self.txc.locked() {
             return None; // fail closed (nonce safety): the JOIN_RESP consumes a TX counter
@@ -274,17 +297,31 @@ impl Net {
         }
         self.lane_accept(hdr.src, hdr.counter);
 
+        // Fixed length (header + 4 B echo + tag): gate on the duty budget before the counter,
+        // so a refused response burns no counter (the joiner simply retries).
+        if !self.duty.try_tx(duty::frame_toa_ms(frame::HDR_LEN + 4 + TAG_LEN)) {
+            return None;
+        }
+        let counter = self.alloc_counter()?; // None = TX locked: fail closed
         let resp_hdr = Header {
             frame_type: FrameType::JoinResp,
             flags: flags::KEYED,
             src: self.addr,
             dest: hdr.src,
-            counter: self.txc.counter(),
+            counter,
             bulk_index: None,
         };
+        let mut resp = [0u8; MAX_FRAME];
+        let n = frame::seal_frame(
+            &mut self.ccm,
+            &key,
+            &resp_hdr,
+            &hdr.counter.to_le_bytes(),
+            &mut resp,
+        )
+        .ok()?;
         Timer::after(ACK_TURNAROUND).await;
-        let sent = self.tx_pair(&key, &resp_hdr, &hdr.counter.to_le_bytes()).await;
-        let _ = self.alloc_counter();
+        let sent = self.radio.tx(&resp[..n], false, TX_TIMEOUT).await.is_ok();
         sent.then_some(hdr.src)
     }
 
