@@ -1,64 +1,38 @@
-//! HIL extended group: the full example-matrix sweep a two-Dongle bench can exercise
+//! HIL extended group: the full example-matrix sweep the two-board bench can exercise
 //! (tower-firmware docs/test-plan.md scope, beyond the committed smoke/radio groups).
 //!
 //! Single-board KATs (crypto, FHSS, duty governor, frame-codec edges) run on the Dongle slot;
 //! two-board RF scenarios (P2P, secure ping, OTA pairing, bulk pull, rapid-fire ordering) use
-//! the `core` slot as the second radio peer — on this bench both slots are Radio Dongles, both
-//! flashed over the UART bootloader, so the J-Link/PPK2 wiring the power group needs is not
-//! required here.
+//! the `core` slot as the second radio peer: the bench's TOWER Core Module, alongside the TOWER
+//! Radio Dongle. Both are flashed over the UART bootloader via their FTDI (`tower flash`), so the
+//! J-Link/PPK2 wiring the power group needs is not required here.
 //!
 //! `#[ignore]`d like the other groups: `cargo test` only compiles them; run on the bench with
-//! `just hil ext` (`--test-threads=1` — the serial ports are exclusive).
+//! `just hil ext` (`--test-threads=1`; the serial ports are exclusive).
 
-use std::process::Command;
 use std::time::{Duration, Instant};
 
-use tower_hil::{bench_or_fail, firmware_dir, frame_text, Console, Frame};
+use tower_hil::{Bench, Console, Frame, Role, bench_or_fail, build_image, frame_text};
 
-/// Build an example (optionally with TOWER_FEATURES) and flash it to `port`. Sequential by
-/// design — concurrent FTDI flashing is unreliable (see tower-firmware's tools/hwtest/README.md).
-fn build_and_flash(port: &str, example: &str, features: &str) -> Result<(), String> {
-    let repo = firmware_dir()?;
-    let mut build = Command::new("just");
-    build.current_dir(&repo).args(["build", "example", example]);
-    if !features.is_empty() {
-        build.env("TOWER_FEATURES", features);
-    }
-    let out = build.output().map_err(|e| format!("HIL: spawn just build {example}: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "HIL: build {example} ({features}) failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    let bin = repo.join("target/firmware.bin");
-    let out = Command::new("tower")
-        .args(["-d", port, "flash"])
-        .arg(&bin)
-        .output()
-        .map_err(|e| format!("HIL: spawn tower flash: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "HIL: flash {example} to {port} failed:\n{}\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        ))
-    }
+/// Build an example (`features` empty = none; `build_image` always sets TOWER_FEATURES explicitly)
+/// and flash it to the board in `role`, identity re-checked right before the erase. Sequential by
+/// design: concurrent FTDI flashing is unreliable (see tower-firmware's tools/hwtest/README.md).
+fn build_and_flash(bench: &Bench, role: Role, example: &str, features: &str) -> Result<(), String> {
+    let bin = build_image("example", example, features)?;
+    bench.flash(role, &bin)
 }
 
-/// Flash a one-shot KAT to the Dongle, reset, and await its verdict: pass if a frame contains
-/// `pass`, fail fast on any frame containing one of `fails`. Tracks the device's `Dropped`
-/// markers so a verdict lost to the console writer's drop-newest queue (TX_DEPTH) is diagnosed
-/// as such, not as "did it boot?". Also asserts gap-free transport (seq gaps ≠ writer drops:
+/// Flash a one-shot KAT to the Dongle, reset, and await its verdict: pass only if a frame contains
+/// `pass` AND none of `fails` (so a pass token that is the tail of a fail token, like `MATCH ***` in
+/// `MISMATCH ***`, can never pass), fail fast on any frame containing one of `fails`. Tracks the
+/// device's `Dropped` markers so a verdict lost to the console writer's drop-newest queue
+/// (TX_DEPTH) is diagnosed as such, not as "did it boot?". Also asserts gap-free transport (seq gaps ≠ writer drops:
 /// the writer assigns seq at encode, so its drops surface ONLY via the Dropped marker).
 fn run_kat(example: &str, pass: &str, fails: &[&str], secs: u64) {
     let bench = bench_or_fail();
-    build_and_flash(&bench.dongle.serial, example, "").expect("build+flash KAT");
+    build_and_flash(&bench, Role::Dongle, example, "").expect("build+flash KAT");
 
     let mut console = Console::open(&bench.dongle.serial).expect("open Dongle console");
-    console.resync();
     console.reset_into_app().expect("reset the Dongle into the app");
 
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -83,14 +57,14 @@ fn run_kat(example: &str, pass: &str, fails: &[&str], secs: u64) {
         if dropped > 0 {
             panic!(
                 "{example}: no verdict within {secs} s, and the device reported {dropped} \
-                 dropped console frame(s) — the verdict line likely fell to the writer's \
+                 dropped console frame(s); the verdict line likely fell to the writer's \
                  drop-newest queue (src/console.rs TX_DEPTH); re-emit the verdict periodically"
             )
         }
-        panic!("{example}: no verdict within {secs} s — did it boot?")
+        panic!("{example}: no verdict within {secs} s; did it boot?")
     });
     assert!(
-        text.contains(pass),
+        text.contains(pass) && !fails.iter().any(|n| text.contains(n)),
         "{example} reported a failure: {text:?}"
     );
     assert_eq!(console.seq_gaps(), 0, "{example}: transport dropped frames during the KAT");
@@ -117,7 +91,8 @@ fn field_hex32(text: &str, key: &str) -> Option<u32> {
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn ext_crypto_aes_kat() {
-    run_kat("crypto_aes_kat", "MATCH ***", &["MISMATCH"], 8);
+    // The full verdict prefix, not a bare "MATCH ***" (the tail of a "MISMATCH ***").
+    run_kat("crypto_aes_kat", "vector: MATCH ***", &["MISMATCH"], 8);
 }
 
 /// Frame codec + nonce + CCM loopback, incl. tamper + wrong-key rejection.
@@ -150,7 +125,7 @@ fn ext_edge_frame_limits() {
     run_kat("edge_frame_limits", "ALL PASS ***", &["FAIL"], 10);
 }
 
-/// Radio state machine recovery — must never wedge.
+/// Radio state machine recovery: must never wedge.
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn ext_edge_recovery() {
@@ -162,18 +137,16 @@ fn ext_edge_recovery() {
 // ---------------------------------------------------------------------------
 
 /// Bidirectional confirmed P2P: A pings (Delivered), B receives + pongs (Delivered),
-/// A receives the pong — both directions of the half-duplex link with per-link keys.
+/// A receives the pong: both directions of the half-duplex link with per-link keys.
 #[test]
 #[ignore = "requires the HIL bench (two TOWER boards in RF range)"]
 fn ext_net_p2p_bidirectional() {
     let bench = bench_or_fail();
-    build_and_flash(&bench.dongle.serial, "net_p2p", "role-peer-b").expect("flash peer B");
-    build_and_flash(&bench.core.serial, "net_p2p", "role-peer-a").expect("flash peer A");
+    build_and_flash(&bench, Role::Dongle, "net_p2p", "role-peer-b").expect("flash peer B");
+    build_and_flash(&bench, Role::Core, "net_p2p", "role-peer-a").expect("flash peer A");
 
     let mut a = Console::open(&bench.core.serial).expect("open A console");
     let mut b = Console::open(&bench.dongle.serial).expect("open B console");
-    a.resync();
-    b.resync();
     b.reset_into_app().expect("reset B");
     a.reset_into_app().expect("reset A");
 
@@ -208,13 +181,11 @@ fn ext_net_p2p_bidirectional() {
 #[ignore = "requires the HIL bench (two TOWER boards in RF range)"]
 fn ext_net_secure_ping_auth() {
     let bench = bench_or_fail();
-    build_and_flash(&bench.dongle.serial, "net_secure_ping", "").expect("flash gateway");
-    build_and_flash(&bench.core.serial, "net_secure_ping", "role-node").expect("flash node");
+    build_and_flash(&bench, Role::Dongle, "net_secure_ping", "").expect("flash gateway");
+    build_and_flash(&bench, Role::Core, "net_secure_ping", "role-node").expect("flash node");
 
     let mut node = Console::open(&bench.core.serial).expect("open node console");
     let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
-    node.resync();
-    gw.resync();
     gw.reset_into_app().expect("reset gateway");
     node.reset_into_app().expect("reset node");
 
@@ -235,13 +206,11 @@ fn ext_net_secure_ping_auth() {
 #[ignore = "requires the HIL bench (two TOWER boards in RF range)"]
 fn ext_net_pairing_handshake() {
     let bench = bench_or_fail();
-    build_and_flash(&bench.dongle.serial, "net_pairing", "").expect("flash host (gateway role)");
-    build_and_flash(&bench.core.serial, "net_pairing", "role-node").expect("flash joiner");
+    build_and_flash(&bench, Role::Dongle, "net_pairing", "").expect("flash host (gateway role)");
+    build_and_flash(&bench, Role::Core, "net_pairing", "role-node").expect("flash joiner");
 
     let mut host = Console::open(&bench.dongle.serial).expect("open host console");
     let mut joiner = Console::open(&bench.core.serial).expect("open joiner console");
-    host.resync();
-    joiner.resync();
     // Host first: it opens the pairing window the joiner's JOIN_REQ must land in.
     host.reset_into_app().expect("reset host");
     joiner.reset_into_app().expect("reset joiner");
@@ -265,10 +234,12 @@ fn ext_net_pairing_handshake() {
     let ht = frame_text(&paired).unwrap_or("").to_string();
     assert!(ht.contains("a0a1a2a3"), "host handed an unexpected key: {ht:?}");
 
-    // The joiner chooses its id; the host must have learned exactly that id.
-    let host_id = field_hex32(&ht, "id=").expect("host PAIRED line has no id=");
-    let joiner_id = field_hex32(&jt, "id=").expect("joiner JOINED line has no id=");
-    assert_eq!(host_id, joiner_id, "host installed a different node id than the joiner chose");
+    // The joiner chooses its address; the host must have learned exactly that address. (The
+    // firmware logs `addr=` since the 2026-07-12 radio-address rename; matching the old `id=`
+    // key would panic here on the bench.)
+    let host_addr = field_hex32(&ht, "addr=").expect("host PAIRED line has no addr=");
+    let joiner_addr = field_hex32(&jt, "addr=").expect("joiner JOINED line has no addr=");
+    assert_eq!(host_addr, joiner_addr, "host installed a different node address than the joiner chose");
 }
 
 /// Bulk pull: requester fetches the 200-byte blob in ≤64 B chunks and verifies the pattern.
@@ -276,22 +247,22 @@ fn ext_net_pairing_handshake() {
 #[ignore = "requires the HIL bench (two TOWER boards in RF range)"]
 fn ext_net_bulk_pull() {
     let bench = bench_or_fail();
-    build_and_flash(&bench.dongle.serial, "net_bulk", "").expect("flash sender (gateway role)");
-    build_and_flash(&bench.core.serial, "net_bulk", "role-node").expect("flash requester");
+    build_and_flash(&bench, Role::Dongle, "net_bulk", "").expect("flash sender (gateway role)");
+    build_and_flash(&bench, Role::Core, "net_bulk", "role-node").expect("flash requester");
 
     let mut req = Console::open(&bench.core.serial).expect("open requester console");
     let mut snd = Console::open(&bench.dongle.serial).expect("open sender console");
-    req.resync();
-    snd.resync();
 
     // RF flake tolerance: a chunked bulk session can die to a single lost window mid-air
-    // ("bulk_fetch failed/timeout" — observed once on 2026-07-05, clean on retry). The boards
-    // are flashed once; a retry is just a re-reset + re-observe. One retry keeps a real
-    // regression loud: two consecutive full-session failures is not RF luck.
-    let mut last = String::from("<no verdict frame within 40 s>");
+    // ("bulk_fetch failed/timeout", observed once on 2026-07-05, clean on retry). The boards
+    // are flashed once; a retry is just a re-reset + re-observe. ONLY that transport failure is
+    // retried: a `MISMATCH` is corrupted data (never RF luck) and no verdict at all means the
+    // requester never ran; both fail at once. One retry keeps a real regression loud: two
+    // consecutive full-session failures is not RF luck.
+    let mut last = String::new();
     for attempt in 0..2 {
         if attempt > 0 {
-            eprintln!("HIL: bulk pull attempt 1 failed ({last:?}) — resetting both boards for one retry");
+            eprintln!("HIL: bulk pull attempt 1 failed ({last:?}); resetting both boards for one retry");
         }
         snd.reset_into_app().expect("reset sender");
         req.reset_into_app().expect("reset requester");
@@ -302,32 +273,31 @@ fn ext_net_bulk_pull() {
                     t.contains("verify OK ***") || t.contains("MISMATCH") || t.contains("bulk_fetch failed")
                 })
             })
-            .expect("requester console read");
-        if let Some(v) = verdict {
-            let t = frame_text(&v).unwrap_or("");
-            if t.contains("verify OK ***") {
-                assert!(t.contains("fetched 200 bytes"), "unexpected blob size: {t:?}");
-                return;
-            }
-            last = t.to_string();
+            .expect("requester console read")
+            .expect("bulk pull: no verdict frame within 40 s; did the requester run?");
+        let t = frame_text(&verdict).unwrap_or("");
+        if t.contains("verify OK ***") {
+            assert!(t.contains("fetched 200 bytes"), "unexpected blob size: {t:?}");
+            return;
         }
+        assert!(t.contains("bulk_fetch failed"), "bulk pull returned corrupted data (not a flake): {t:?}");
+        last = t.to_string();
     }
     panic!("bulk pull failed twice in a row (not a flake): {last:?}");
 }
 
-/// Rapid-fire confirmed sends: the gateway must accept counters strictly monotonically —
+/// Rapid-fire confirmed sends: the gateway must accept counters strictly monotonically:
 /// an out-of-order or replayed counter is a latched ORDER VIOLATION.
 #[test]
 #[ignore = "requires the HIL bench (two TOWER boards in RF range)"]
 fn ext_edge_rapid_monotonic() {
     let bench = bench_or_fail();
-    build_and_flash(&bench.dongle.serial, "edge_rapid", "").expect("flash gateway");
-    build_and_flash(&bench.core.serial, "edge_rapid", "role-node").expect("flash node");
+    build_and_flash(&bench, Role::Dongle, "edge_rapid", "").expect("flash gateway");
+    build_and_flash(&bench, Role::Core, "edge_rapid", "role-node").expect("flash node");
 
     let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
-    gw.resync();
     gw.reset_into_app().expect("reset gateway");
-    // Reset the node WITHOUT keeping its console open — the gateway capture is the assertion.
+    // Reset the node WITHOUT keeping its console open; the gateway capture is the assertion.
     tower_hil::reset_into_app(&bench.core.serial).expect("reset node");
 
     let frames = gw.collect_for(Duration::from_secs(30)).expect("gateway console read");
@@ -343,15 +313,17 @@ fn ext_edge_rapid_monotonic() {
 }
 
 /// TX-counter persistence: across a reset, the counter must resume AT the persisted reserve
-/// watermark (jump ahead, never reuse) — the EEPROM anti-replay contract (docs/radio.md).
+/// watermark (jump ahead, never reuse): the EEPROM anti-replay contract (docs/radio.md).
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn ext_net_persist_counter_resumes() {
     let bench = bench_or_fail();
-    build_and_flash(&bench.dongle.serial, "net_persist", "").expect("flash net_persist");
+    build_and_flash(&bench, Role::Dongle, "net_persist", "").expect("flash net_persist");
 
+    // reset_into_app drops everything buffered while the chip is held in reset, so boot 1's banner
+    // below can't be the post-flash boot's (which `tower flash` started before this console
+    // attached); wm1 is boot 1's own watermark.
     let mut console = Console::open(&bench.dongle.serial).expect("open console");
-    console.resync();
     console.reset_into_app().expect("reset (boot 1)");
 
     let boot1 = console
@@ -370,7 +342,6 @@ fn ext_net_persist_counter_resumes() {
         console.wait_for_text(Duration::from_secs(10), "sent; tx_counter now").expect("read"),
         "net_persist never sent (boot 1)"
     );
-    console.resync();
     console.reset_into_app().expect("reset (boot 2)");
 
     let boot2 = console
@@ -384,7 +355,7 @@ fn ext_net_persist_counter_resumes() {
     let wm2 = field_u64(&t2, "reserve_watermark=").expect("boot 2: no watermark");
     assert!(
         cnt2 >= wm1,
-        "boot 2 resumed at {cnt2}, BELOW boot 1's watermark {wm1} — counter reuse (replay hazard): {t2:?}"
+        "boot 2 resumed at {cnt2}, BELOW boot 1's watermark {wm1}: counter reuse (replay hazard): {t2:?}"
     );
     assert!(wm2 > cnt2, "boot 2 watermark not re-reserved: {t2:?}");
 }

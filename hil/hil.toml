@@ -1,20 +1,32 @@
 # HIL bench fixture (tower-firmware docs/test-plan.md §2). Serial names re-enumerate between sessions, so these
-# are only the STARTING guess — the harness re-resolves against the live `tower devices` roster at
-# startup (Bench::resolve) and fails fast if a board is missing. Update these to match the current
-# session's ports (or fix cabling) when the roster message fires.
+# are only the STARTING guess: the harness re-resolves against the live port roster (the list `tower devices`
+# prints, plus each port's USB serial number) at startup (Bench::resolve) and fails fast if a board is missing.
+# Update these to match the current session's ports (or fix cabling) when the roster message fires.
+#
+# Identity (so `tower flash` can never erase the wrong device): HARDWARIO programs each board's on-board FTDI with
+# a board-type USB serial number: `hio-core-module-<id>` for a Core Module, `bc-usb-dongle-<rev>-<id>` for a
+# Radio Dongle. The harness checks that tag before flashing: a dongle in the [core] slot (cables swapped) or an
+# untagged FTDI at a fixture path is refused, and so is one board filling both slots. Optionally pin a board by
+# its exact USB serial number (`usb_serial = "…"`, as listed in the roster message): it then survives
+# re-enumeration, `serial` becomes only a hint, and it is the way to vouch for a board on a third-party adapter.
 
-# TOWER Core Module — wired to a SEGGER J-Link (SWD flash via probe-rs) and a Nordic PPK2
-# (scriptable current supply/measure). The power tests flash it over SWD and cycle the PPK2.
+# TOWER Core Module: wired to a SEGGER J-Link (SWD flash via probe-rs) and a Nordic PPK2
+# (scriptable current supply/measure). The power tests flash it over SWD and cycle the PPK2. Supported power
+# topology: the board is PPK2-powered and its FTDI adapter is DATA-ONLY (no VBUS), so the FTDI may stay plugged.
+# A VBUS-carrying USB back-feeds VDD through the LDO (the PPK2 then reads ~0 µA); the power test's plausibility
+# floor (median ≥ 1 µA) catches that and fails.
 [core]
 serial = "/dev/cu.usbserial-140"
+# usb_serial = "hio-core-module-…"
 
-# TOWER Radio Dongle — USB-powered, flashed over the UART bootloader with `tower flash`. The
+# TOWER Radio Dongle: USB-powered, flashed over the UART bootloader with `tower flash`. The
 # smoke + radio-peer tests use this board (it can hold a KAT example or the gateway role).
 [dongle]
 serial = "/dev/cu.usbserial-120"
+# usb_serial = "bc-usb-dongle-…"
 
-# Nordic PPK2 source-measure. Measure at the 1.8 V knee, NOT 3 V: the Core's regulator/brown-out
-# knee sits near ~2 V, so a 3 V reading can read low while 1.8 V is the honest deep-sleep floor
-# (one of the three confounders the sidecar encodes — see ppk2d.py).
+# Nordic PPK2 source-measure. The bench standardises on 1.8 V: the documented true STOP floor is 5.1 µA @ 1.8 V
+# (6.1 µA @ 3.0 V: ordinary CMOS leakage, honest at both rails; firmware examples/lowpower.rs), and one pinned
+# rail keeps runs comparable (see confounder #2 in ppk2d.py).
 [ppk2]
 supply_mv = 1800

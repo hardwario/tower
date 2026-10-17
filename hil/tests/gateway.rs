@@ -1,58 +1,33 @@
-//! HIL gateway group: the full wire-v3 product path on two boards — Dongle =
+//! HIL gateway group: the full wire-v3 product path on two boards: Dongle =
 //! `radio_dongle_gateway`, Core = `radio_push_button`. Exercises cable provisioning
 //! (typed mgmt frames on both consoles), the transparent uplink bridge (typed
 //! `Frame::Uplink` with a decodable `radio::NodeMsg`), the downlink queue with the
 //! ACK-pending delivery window (remote shell round-trip), and the RadioStat stream.
 //!
-//! The node's "finger" is its `/button simulate <ms>` shell command — the bench has no
+//! The node's "finger" is its `/button simulate <ms>` shell command; the bench has no
 //! actuator, and a simulated press runs the exact recognition + count/radio path a real
 //! press does (a 100 ms press = a click: > debounce, < click-timeout).
 //!
 //! Sequential flash, sequential per-step captures. `#[ignore]`d: needs the bench +
 //! two boards in RF range; run with `just hil` (`--test-threads=1`, exclusive ports).
 
-use std::process::Command;
 use std::time::Duration;
 
-use tower_hil::{Console, Frame, bench_or_fail, firmware_dir};
+use tower_hil::{Bench, Console, Frame, Role, bench_or_fail, build_image};
 use tower_protocol::mgmt::{self, DeviceInfo, DeviceRole, MgmtOp, Provision, QueueId};
 use tower_protocol::radio::{self, NodeCmd, NodeMsg};
 
-/// Build a product app (`just build app <name>`) and flash it to `port`.
-fn build_and_flash_app(port: &str, app: &str) -> Result<(), String> {
-    let repo = firmware_dir()?;
-    let out = Command::new("just")
-        .current_dir(&repo)
-        .args(["build", "app", app])
-        .output()
-        .map_err(|e| format!("HIL: spawn just build: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "HIL: build app {app} failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    let bin = repo.join("target/firmware.bin");
-    let out = Command::new("tower")
-        .args(["-d", port, "flash"])
-        .arg(&bin)
-        .output()
-        .map_err(|e| format!("HIL: spawn tower flash: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "HIL: flash {port} failed:\n{}\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        ))
-    }
+/// Build a product app (`just build app <name>`, TOWER_FEATURES explicitly empty) and flash it to
+/// the board in `role`, identity re-checked right before the erase.
+fn build_and_flash_app(bench: &Bench, role: Role, app: &str) -> Result<(), String> {
+    let bin = build_image("app", app, "")?;
+    bench.flash(role, &bin)
 }
 
 fn describe_full(console: &mut Console, req_id: u16) -> (DeviceRole, u32, u8, u8) {
     // 10 s, not 4: this is the FIRST mgmt op after a reset, and a gateway with a full registry
     // spends several seconds at boot arming one radio lane per node before its main loop drains
-    // mgmt — so a near-full store legitimately delays the reply past 4 s (the `tower` CLI uses the
+    // mgmt, so a near-full store legitimately delays the reply past 4 s (the `tower` CLI uses the
     // same generous window). A too-tight timeout here was a real cross-run flake when a prior test
     // left phantom nodes in the registry. Later mgmt ops (below) run once the gateway is up, so
     // they keep the tighter 4 s.
@@ -71,15 +46,14 @@ fn describe_full(console: &mut Console, req_id: u16) -> (DeviceRole, u32, u8, u8
 fn gateway_bridges_push_button_end_to_end() {
     let bench = bench_or_fail();
 
-    build_and_flash_app(&bench.dongle.serial, "radio_dongle_gateway").expect("flash gateway");
-    build_and_flash_app(&bench.core.serial, "radio_push_button").expect("flash push-button");
+    build_and_flash_app(&bench, Role::Dongle, "radio_dongle_gateway").expect("flash gateway");
+    build_and_flash_app(&bench, Role::Core, "radio_push_button").expect("flash push-button");
 
     let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
     let mut node = Console::open(&bench.core.serial).expect("open node console");
+    // Each reset drops pre-reset input while the chip is held in reset and re-baselines seq.
     gw.reset_into_app().expect("reset gateway");
     node.reset_into_app().expect("reset node");
-    gw.resync();
-    node.resync();
     // Both boots settle (Hello + possible compaction stall).
     let _ = gw.wait_for(Duration::from_secs(10), |f| matches!(f, Frame::Hello { .. }));
     let _ = node.wait_for(Duration::from_secs(10), |f| matches!(f, Frame::Hello { .. }));
@@ -112,7 +86,7 @@ fn gateway_bridges_push_button_end_to_end() {
     assert_eq!(result, mgmt::MGMT_OK, "node accepts the credentials");
     assert!(!data.is_empty(), "ProvisionAck record present");
 
-    // The node reboots into its new identity — wait for the fresh Hello.
+    // The node reboots into its new identity; wait for the fresh Hello.
     node.resync();
     let hello = node
         .wait_for(Duration::from_secs(12), |f| matches!(f, Frame::Hello { .. }))
@@ -185,22 +159,22 @@ fn stack_bytes(text: &str, prefix: &str) -> Option<u32> {
 
 /// Measured gateway stack **high-water** on its console-reachable deep paths, replacing the
 /// ~7.5 KB estimate in the budget (docs/gateway.md) with a bench number. Fills the node registry
-/// across all EEPROM buckets (each `NodeAdd` loads/rewrites one ~270 B bucket stack-local — the
-/// deepest registry-codec path — and can trigger a KV compaction flip), pushes downlink-queue
+/// across all EEPROM buckets (each `NodeAdd` loads/rewrites one ~270 B bucket stack-local, the
+/// deepest registry-codec path, and can trigger a KV compaction flip), pushes downlink-queue
 /// items, and lists the whole registry (the mgmt-response chunking path over many entries), then
 /// reads `/system stack print` (painted at boot by `stack::paint`) and asserts the peak stays
 /// under the 8 KB budget floor. Single board (the Dongle in the gateway role) so it is
 /// deterministic; the radio-bridge path is separately exercised by
 /// `gateway_bridges_push_button_end_to_end` (which reaches `net.send` on the same firmware).
+/// Removes the nodes it registered at the end (best-effort), so runs don't accumulate them.
 #[test]
 #[ignore = "requires the HIL bench (Dongle in the gateway role)"]
 fn gateway_stack_high_water_within_budget() {
     let bench = bench_or_fail();
-    build_and_flash_app(&bench.dongle.serial, "radio_dongle_gateway").expect("flash gateway");
+    build_and_flash_app(&bench, Role::Dongle, "radio_dongle_gateway").expect("flash gateway");
 
     let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
     gw.reset_into_app().expect("reset gateway");
-    gw.resync();
     let _ = gw.wait_for(Duration::from_secs(10), |f| matches!(f, Frame::Hello { .. }));
     std::thread::sleep(Duration::from_millis(300)); // post-Hello boot-burst guard
 
@@ -239,7 +213,7 @@ fn gateway_stack_high_water_within_budget() {
         req += 1;
     }
 
-    // List the whole registry — mgmt-response chunking over all N entries.
+    // List the whole registry: mgmt-response chunking over all N entries.
     let (result, list) = gw
         .mgmt_roundtrip(req, &MgmtOp::NodeList, Duration::from_secs(6))
         .expect("NodeList reply");
@@ -255,9 +229,24 @@ fn gateway_stack_high_water_within_budget() {
     let total = stack_bytes(&text, "stack:").unwrap_or(0);
 
     eprintln!("gateway stack high-water: {used} B used / {total} B total (after {n} NodeAdd + queue + NodeList)");
+    let gaps = gw.seq_gaps();
+
+    // Best-effort cleanup BEFORE asserting: remove the nodes this test registered, so the
+    // registry doesn't carry 14 phantoms into the next run (a near-full store slows the gateway's
+    // boot (see describe_full) and leaves only 2 of 16 slots). Deliberately NOT an EEPROM wipe:
+    // its reboot's boot burst trips the seq-gap check (tried, reverted). Queued items for these
+    // addrs expire on their 60 s TTL.
+    for i in 0..n {
+        req += 1;
+        match gw.mgmt_roundtrip(req, &MgmtOp::NodeRemove { addr: 0x1000_0000 + i }, Duration::from_secs(6)) {
+            Ok((result, _)) if result == mgmt::MGMT_OK => {}
+            other => eprintln!("HIL: cleanup NodeRemove {i} → {other:?} (best-effort, continuing)"),
+        }
+    }
+
     assert!(
         used < 8192,
-        "gateway stack high-water {used} B ≥ 8 KB budget floor — deep-path regression (total {total} B)"
+        "gateway stack high-water {used} B ≥ 8 KB budget floor: deep-path regression (total {total} B)"
     );
-    assert_eq!(gw.seq_gaps(), 0, "no frames lost on the gateway console");
+    assert_eq!(gaps, 0, "no frames lost on the gateway console");
 }

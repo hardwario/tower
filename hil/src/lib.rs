@@ -10,12 +10,15 @@
 //! - a **TOWER Radio Dongle** on a second FTDI port, USB-powered, flashed over the UART
 //!   bootloader with `tower flash`, for the smoke + radio-peer tests.
 //!
+//! Each slot is identity-checked against the live roster (the board-type tag in the FTDI's USB
+//! serial number, or a pinned `usb_serial`) before anything is flashed (see [`Bench::resolve`]).
+//!
 //! The images under test are built from a `tower-firmware` checkout located by
-//! [`firmware_dir`] (default `../firmware` — the control-plane layout; override with
+//! [`firmware_dir`] (default `../firmware`, the control-plane layout; override with
 //! `TOWER_FIRMWARE_DIR`).
 //!
 //! The value over tower-firmware's old `tools/hwtest` shell scripts (`strings | grep`) is that this decodes
-//! the framed console **natively** with `tower-protocol` — so a test asserts on typed
+//! the framed console **natively** with `tower-protocol`, so a test asserts on typed
 //! [`Frame::Log`] / [`Frame::Event`] payloads and on **sequence gaps** (dropped/duplicated
 //! frames the byte-grep can't see), against the exact same wire version the firmware ships.
 //!
@@ -32,7 +35,7 @@ use tower_protocol::mgmt::MgmtOp;
 use tower_protocol::msg::{Event, Hello, Level, Log, MgmtRequest, MgmtResponse, Print, RadioStat, Uplink};
 use tower_protocol::{FrameDecoder, MsgType, decode_frame, encode_frame};
 
-/// The framed-console baud rate (USART1, 115200 8N1) — the rate `tower logs` / the SDK use.
+/// The framed-console baud rate (USART1, 115200 8N1): the rate `tower logs` / the SDK use.
 pub const CONSOLE_BAUD: u32 = 115_200;
 
 // ---------------------------------------------------------------------------
@@ -40,7 +43,7 @@ pub const CONSOLE_BAUD: u32 = 115_200;
 // ---------------------------------------------------------------------------
 
 /// Locate the `tower-firmware` checkout the bench tests build images from (`just build
-/// example …`). Default: a `firmware` checkout NEXT TO this repo — the TOWER control-plane
+/// example …`). Default: a `firmware` checkout NEXT TO this repo: the TOWER control-plane
 /// layout, where `hil/` and `firmware/` are sibling submodules of one root. For any other
 /// layout, point `TOWER_FIRMWARE_DIR` at the checkout. Validated by the presence of its
 /// `justfile` (the harness drives builds through `just`), so a wrong path fails HERE with
@@ -67,8 +70,9 @@ pub fn firmware_dir() -> Result<PathBuf, String> {
 // ---------------------------------------------------------------------------
 
 /// The bench roster, loaded from `hil.toml`. Serial names re-enumerate between sessions, so the
-/// fixture is only the *starting* guess — [`Bench::resolve`] re-checks the live roster and
-/// fails fast with a human-readable message if a board is missing.
+/// fixture is only the *starting* guess; [`Bench::resolve`] re-checks the live roster, verifies
+/// each slot holds the right KIND of board, and fails fast with a human-readable message if a
+/// board is missing, swapped, or not a TOWER board.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Bench {
     pub core: Board,
@@ -79,17 +83,165 @@ pub struct Bench {
 /// One board's fixture entry.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Board {
-    /// FTDI serial device path, e.g. `/dev/cu.usbserial-2120`.
+    /// FTDI serial device path, e.g. `/dev/cu.usbserial-2120`. After [`Bench::resolve`] this is the
+    /// board's LIVE path (re-derived from `usb_serial` when that is pinned).
     pub serial: String,
+    /// Optional: the board's USB serial number (the FTDI's iSerial, e.g. `hio-core-module-2416969388`
+    /// as shown per port in the roster message). Stable across re-enumeration, so when set it is the
+    /// key and `serial` is only a fallback/hint. Also the only way to vouch for a board on a
+    /// third-party adapter whose serial number carries no TOWER board-type tag.
+    #[serde(default)]
+    pub usb_serial: Option<String>,
 }
 
 /// PPK2 supply/measure configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Ppk2Config {
-    /// Source-measure voltage (mV). The bench measures at **1800 mV**: the Core's brown-out /
-    /// regulator "knee" sits near ~2 V, so a reading taken at 3 V can read low while 1.8 V is the
-    /// honest deep-sleep floor (one of the three confounders — see `ppk2d.py`).
+    /// Source-measure voltage (mV). The bench standardises on **1800 mV** (the rail the documented
+    /// STOP floor (5.1 µA, examples/lowpower.rs) was measured at; 3.0 V reads ~1 µA higher from
+    /// ordinary CMOS leakage, honest at both rails). Pinning one rail keeps runs comparable.
     pub supply_mv: u32,
+}
+
+/// Which bench slot a board fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The TOWER Core Module slot (`[core]`).
+    Core,
+    /// The TOWER Radio Dongle slot (`[dongle]`).
+    Dongle,
+}
+
+impl Role {
+    /// The fixture section name (`core` / `dongle`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Core => "core",
+            Role::Dongle => "dongle",
+        }
+    }
+
+    /// The board-type tag HARDWARIO programs into each board's on-board FT231X USB serial number
+    /// (`hio-core-module-<id>`, `bc-usb-dongle-r1.0-<id>`). The OS reports it from the cached USB
+    /// descriptor (no port is opened), so it identifies the board TYPE before anything is flashed.
+    fn usb_tag(self) -> &'static str {
+        match self {
+            Role::Core => "core-module",
+            Role::Dongle => "usb-dongle",
+        }
+    }
+
+    fn board_name(self) -> &'static str {
+        match self {
+            Role::Core => "TOWER Core Module",
+            Role::Dongle => "TOWER Radio Dongle",
+        }
+    }
+
+    fn other(self) -> Role {
+        match self {
+            Role::Core => Role::Dongle,
+            Role::Dongle => Role::Core,
+        }
+    }
+}
+
+/// One live serial port, as the OS enumerates it (the same list `tower devices` prints).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LivePort {
+    /// Device path, e.g. `/dev/cu.usbserial-2110`.
+    pub path: String,
+    /// Enumerated as a USB serial port.
+    pub usb: bool,
+    /// The USB bridge's serial number (iSerial), when the OS reports one.
+    pub usb_serial: Option<String>,
+}
+
+/// The live serial-port roster with USB identity, via the `serialport` enumeration (the very list
+/// `tower devices` prints, plus each port's USB serial number). Enumeration reads cached USB
+/// descriptors; it never opens a port. An enumeration failure yields an empty roster, which
+/// [`Bench::resolve`] then reports as "none present": the right fail-fast.
+pub fn live_ports() -> Vec<LivePort> {
+    serialport::available_ports()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| match p.port_type {
+            serialport::SerialPortType::UsbPort(info) => {
+                LivePort { path: p.port_name, usb: true, usb_serial: info.serial_number }
+            }
+            _ => LivePort { path: p.port_name, usb: false, usb_serial: None },
+        })
+        .collect()
+}
+
+/// macOS lists every USB-UART twice: `/dev/cu.X` (callout) and `/dev/tty.X` (dial-in). They are
+/// one device, so compare paths with the `tty.` spelling folded onto `cu.`.
+fn same_device(a: &str, b: &str) -> bool {
+    let fold = |p: &str| p.strip_prefix("/dev/tty.").map(|rest| format!("/dev/cu.{rest}"));
+    a == b || fold(a).as_deref().unwrap_or(a) == fold(b).as_deref().unwrap_or(b)
+}
+
+/// Resolve one fixture slot against the live roster: returns the board's live path, or a one-line
+/// problem. Identity, strongest first:
+///
+/// 1. `usb_serial` pinned → the port with exactly that USB serial number (path is only a hint);
+/// 2. otherwise the fixture path must be present, and the port's USB serial number must carry THIS
+///    role's board-type tag ([`Role::usb_tag`]): the other role's tag means the cables/slots are
+///    swapped, no TOWER tag means some other FTDI sits at the path; either way `tower flash` would
+///    erase the wrong device, so refuse. A USB port that reports no serial number can't be checked
+///    and is accepted with a warning; a non-USB port (Bluetooth, PCI) is never a TOWER board.
+fn resolve_board(role: Role, board: &Board, live: &[LivePort]) -> Result<String, String> {
+    let r = role.name();
+    if let Some(sn) = &board.usb_serial {
+        if sn.contains(role.other().usb_tag()) {
+            return Err(format!(
+                "{r}: pinned usb_serial {sn} is a {}; it belongs in [{}]",
+                role.other().board_name(),
+                role.other().name()
+            ));
+        }
+        let mut hits: Vec<&LivePort> = live.iter().filter(|p| p.usb_serial.as_deref() == Some(sn)).collect();
+        // One device = one hit after folding the macOS tty./cu. twins (prefer the cu. node).
+        hits.sort_by_key(|p| p.path.starts_with("/dev/tty."));
+        hits.dedup_by(|a, b| same_device(&a.path, &b.path));
+        return match hits.as_slice() {
+            [one] => Ok(one.path.clone()),
+            [] => Err(format!("{r}: no port with USB serial {sn} (fixture path hint {})", board.serial)),
+            many => Err(format!(
+                "{r}: USB serial {sn} matches several devices ({}): ambiguous, refusing to guess",
+                many.iter().map(|p| p.path.as_str()).collect::<Vec<_>>().join(", ")
+            )),
+        };
+    }
+    let Some(port) = live.iter().find(|p| same_device(&p.path, &board.serial)) else {
+        return Err(format!("{r}: fixture serial {} not present", board.serial));
+    };
+    if !port.usb {
+        return Err(format!("{r}: {} is not a USB serial port, so not a TOWER board", port.path));
+    }
+    match &port.usb_serial {
+        Some(sn) if sn.contains(role.usb_tag()) => Ok(board.serial.clone()),
+        Some(sn) if sn.contains(role.other().usb_tag()) => Err(format!(
+            "{r}: {} is a {} (USB serial {sn}), not a {}: cables or hil.toml slots swapped?",
+            board.serial,
+            role.other().board_name(),
+            role.board_name()
+        )),
+        Some(sn) => Err(format!(
+            "{r}: {} (USB serial {sn}) is not a {}: refusing to flash an unknown device. If it IS \
+             the board (e.g. on a third-party adapter), pin it: usb_serial = \"{sn}\" under [{r}]",
+            board.serial,
+            role.board_name()
+        )),
+        None => {
+            eprintln!(
+                "HIL: warning: {r} port {} reports no USB serial number; its board type can't be \
+                 verified; trusting the fixture path",
+                board.serial
+            );
+            Ok(board.serial.clone())
+        }
+    }
 }
 
 impl Bench {
@@ -106,73 +258,132 @@ impl Bench {
         Self::load(concat!(env!("CARGO_MANIFEST_DIR"), "/hil.toml"))
     }
 
-    /// Re-resolve both boards against the LIVE port roster (`tower devices`), since FTDI names
-    /// re-enumerate. On a miss this returns a fail-fast message naming the fixture serial and the
-    /// ports actually present, so the operator fixes `hil.toml` (or the cabling) immediately
-    /// instead of watching a test hang on a dead port.
-    pub fn resolve(&self) -> Result<(), String> {
-        let present = list_ports();
-        let mut missing = Vec::new();
-        for (role, board) in [("core", &self.core), ("dongle", &self.dongle)] {
-            if !present.iter().any(|p| p == &board.serial) {
-                missing.push(format!("  {role}: fixture serial {} not present", board.serial));
-            }
+    /// The fixture entry for `role`.
+    pub fn board(&self, role: Role) -> &Board {
+        match role {
+            Role::Core => &self.core,
+            Role::Dongle => &self.dongle,
         }
-        if missing.is_empty() {
+    }
+
+    /// Re-resolve both boards against the LIVE port roster, since FTDI names re-enumerate, and
+    /// verify each slot's identity (`resolve_board`: pinned USB serial, else the board-type tag
+    /// in the port's USB serial number) and that core ≠ dongle. On success the fixture paths are
+    /// rewritten to the live ones. On any problem this returns a fail-fast message naming it plus
+    /// every port present (with its USB serial), so the operator fixes `hil.toml` (or the cabling)
+    /// immediately instead of watching a test hang on a dead port (or erase the wrong board).
+    pub fn resolve(&mut self) -> Result<(), String> {
+        self.resolve_against(&live_ports())
+    }
+
+    fn resolve_against(&mut self, live: &[LivePort]) -> Result<(), String> {
+        let core = resolve_board(Role::Core, &self.core, live);
+        let dongle = resolve_board(Role::Dongle, &self.dongle, live);
+        let mut problems: Vec<String> =
+            [&core, &dongle].into_iter().filter_map(|r| r.as_ref().err().cloned()).collect();
+        if let (Ok(c), Ok(d)) = (&core, &dongle)
+            && same_device(c, d)
+        {
+            problems.push(format!("core and dongle both resolve to {c}; one board can't fill both slots"));
+        }
+        if problems.is_empty() {
+            self.core.serial = core.unwrap_or_default();
+            self.dongle.serial = dongle.unwrap_or_default();
             return Ok(());
         }
         Err(format!(
-            "HIL bench roster mismatch — re-resolve ports (they re-enumerate each session):\n{}\n\
+            "HIL bench roster mismatch: re-resolve ports (they re-enumerate each session):\n{}\n\
              ports present now:\n{}\n\
-             Fix the serials in hil.toml (or `tower devices`), then re-run.",
-            missing.join("\n"),
-            if present.is_empty() {
-                "  (none — is any board plugged in?)".to_string()
-            } else {
-                present.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n")
-            }
+             Fix hil.toml (serial paths, or pin usb_serial) or the cabling, then re-run.",
+            problems.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n"),
+            roster_listing(live)
         ))
+    }
+
+    /// Flash `bin` to the board in `role` over the UART bootloader (`tower flash`), re-verifying the
+    /// slot's identity against the live roster IMMEDIATELY before the erase, since a build can take long
+    /// enough for a cable to be moved. Sequential by design (concurrent FTDI flashing is unreliable
+    /// (Write-Memory timeouts / re-enumeration, see tower-firmware's tools/hwtest/README.md).
+    pub fn flash(&self, role: Role, bin: &Path) -> Result<(), String> {
+        let path = resolve_board(role, self.board(role), &live_ports())
+            .map_err(|e| format!("HIL: refusing to flash: {e}"))?;
+        let out = Command::new("tower")
+            .args(["-d", &path, "flash"])
+            .arg(bin)
+            .output()
+            .map_err(|e| format!("HIL: spawn `tower flash`: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "HIL: `tower -d {path} flash {}` failed:\n{}\n{}",
+                bin.display(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        }
     }
 }
 
-/// Startup roster resolution: load the default fixture and confirm both boards are present. Every
-/// integration test calls this first so a missing board fails with the roster message rather than
-/// a serial timeout ten seconds later.
+/// The roster as the operator needs to see it: each live port with its USB serial number.
+fn roster_listing(live: &[LivePort]) -> String {
+    if live.is_empty() {
+        return "  (none; is any board plugged in?)".to_string();
+    }
+    live.iter()
+        .map(|p| match (&p.usb_serial, p.usb) {
+            (Some(sn), _) => format!("  {}  (USB serial {sn})", p.path),
+            (None, true) => format!("  {}  (USB, no serial number)", p.path),
+            (None, false) => format!("  {}  (not USB)", p.path),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Startup roster resolution: load the default fixture, then resolve + identity-check both boards.
+/// Every integration test calls this first so a missing or mis-cabled board fails with the roster
+/// message rather than a serial timeout ten seconds later (or a flash of the wrong device).
 pub fn bench_or_fail() -> Bench {
-    let bench = Bench::load_default().unwrap_or_else(|e| panic!("{e}"));
+    let mut bench = Bench::load_default().unwrap_or_else(|e| panic!("{e}"));
     if let Err(e) = bench.resolve() {
         panic!("{e}");
     }
     bench
 }
 
-/// Roster load for the **power** group — deliberately does NOT require any FTDI console port to be
-/// present. The power test flashes the Core over SWD (J-Link, found by probe-rs `--chip`) and
-/// measures via the PPK2 (found by USB VID), so it needs no FTDI; `core.serial` is used only by the
-/// USB-present guard, which treats an un-openable port as "unplugged → measure". Requiring the port
-/// (as [`bench_or_fail`] does) is self-contradictory here, because a real STOP measurement needs
-/// the FTDI **unplugged** (VBUS low, else the SDK inhibits STOP). Loads the fixture for that
-/// optional guard without failing when the FTDI is gone.
+/// Roster load for the **power** group: deliberately does NOT resolve or require any FTDI console
+/// port. The power test flashes the Core over SWD (J-Link, found by probe-rs `--chip`) and
+/// measures via the PPK2 (found by USB VID), so it needs no FTDI. The supported power topology is a
+/// PPK2-powered Core whose FTDI adapter is **data-only** (no VBUS) and may stay plugged; a
+/// VBUS-carrying USB back-feeds VDD through the LDO and is caught by the test's plausibility floor
+/// (the PPK2 then reads ~0 µA), not by looking at the port roster.
 pub fn bench_or_fail_power() -> Bench {
     Bench::load_default().unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// The live serial-port roster, via `tower devices` (the CLI knows which ports are TOWER boards).
-/// Falls back to an empty list if `tower` isn't on PATH — [`Bench::resolve`] then reports "none
-/// present", which is the right fail-fast for a bench with no CLI.
-pub fn list_ports() -> Vec<String> {
-    let out = match Command::new("tower").arg("devices").output() {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return Vec::new(),
-    };
-    // `tower devices` lists one device path per line (possibly with trailing description). We take
-    // the first whitespace-delimited token of any line that looks like a device path.
-    String::from_utf8_lossy(&out)
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .filter(|tok| tok.contains("usbserial") || tok.starts_with("/dev/") || tok.starts_with("COM"))
-        .map(|s| s.to_string())
-        .collect()
+/// Build a firmware target into the checkout's `target/firmware.bin` with `just build <kind>
+/// <name>` (`kind` = `example` | `app`) and return the bin path. (Kept as a `just` call rather than
+/// re-implementing objcopy: the firmware justfile owns the build.)
+///
+/// `TOWER_FEATURES` is ALWAYS set explicitly (to `features`, empty meaning "no features"): the
+/// justfile reads it with `env_var_or_default`, so an operator's exported `TOWER_FEATURES` (say
+/// `role-node` left over from a manual flash) would otherwise silently change the gateway build.
+pub fn build_image(kind: &str, name: &str, features: &str) -> Result<PathBuf, String> {
+    let repo = firmware_dir()?;
+    let out = Command::new("just")
+        .current_dir(&repo)
+        .args(["build", kind, name])
+        .env("TOWER_FEATURES", features)
+        .output()
+        .map_err(|e| format!("HIL: spawn `just build {kind} {name}`: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "HIL: `just build {kind} {name}` (features {features:?}) failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    // `just build` writes the merged image to target/firmware.bin (see the justfile `bin`).
+    Ok(repo.join("target/firmware.bin"))
 }
 
 // ---------------------------------------------------------------------------
@@ -196,15 +407,15 @@ pub enum Frame {
     /// A forwarded radio uplink from the gateway firmware (wire v3): the decrypted,
     /// authenticated payload verbatim, plus reception metadata.
     Uplink { src: u32, counter: u32, rssi: i16, lqi: u8, data: Vec<u8> },
-    /// One chunk of a management reply (wire v3) — reassemble by `req_id` (see
+    /// One chunk of a management reply (wire v3); reassemble by `req_id` (see
     /// [`Console::mgmt_roundtrip`]).
     Mgmt { req_id: u16, result: u8, chunk: u16, last: bool, data: Vec<u8> },
-    /// One chunk of a shell-command reply — reassemble by `cmd_id` (see
+    /// One chunk of a shell-command reply; reassemble by `cmd_id` (see
     /// [`Console::shell_roundtrip`]). `text` chunks concatenate; `result` is authoritative on `last`.
     Shell { cmd_id: u16, result: u8, chunk: u16, last: bool, text: String },
     /// A radio-diagnostics sample (wire v3): ambient channel RSSI or a TX report.
     Stat(RadioStat),
-    /// A frame whose `MsgType` we don't model here (e.g. shell traffic) — kept so seq accounting
+    /// A frame whose `MsgType` we don't model here (e.g. shell traffic), kept so seq accounting
     /// stays exact.
     Other(MsgType),
 }
@@ -214,24 +425,35 @@ pub enum Frame {
 /// Read [`next`](Self::next) (blocking up to a timeout) or [`collect_for`](Self::collect_for)
 /// (drain a fixed window). Every decoded frame's 16-bit `seq` is checked for **gaps** (the number
 /// of frames the device skipped, i.e. dropped in transit or by the writer's queue), surfaced via
-/// [`seq_gaps`](Self::seq_gaps) — something `strings | grep` fundamentally cannot see.
+/// [`seq_gaps`](Self::seq_gaps): something `strings | grep` fundamentally cannot see. Frames that
+/// fail to decode are counted ([`decode_errors`](Self::decode_errors)) and named in timeout
+/// diagnostics; a CRC-valid frame of a different protocol version fails [`next`](Self::next) fast.
 pub struct Console {
-    // Option: reset_into_app() temporarily loans the handle to jolt (Port::from_handle) for the
-    // NRST pulse — serialport 4.9 flocks the tty on every open, so a second open while the
-    // console is attached fails with EWOULDBLOCK; sharing the one handle is the only way.
+    // Option only so the host unit tests can build a port-less Console (`for_test`). The reset
+    // pulse drives the modem lines on THIS handle (Console::reset_into_app); serialport 4.9 flocks
+    // the tty on every open, so a second open while the console is attached fails with EWOULDBLOCK.
     port: Option<Box<dyn serialport::SerialPort>>,
     decoder: FrameDecoder,
     last_seq: Option<u16>,
     seq_gaps: u32,
-    /// Host→device frame counter for the writer helpers (wire v3 gateway tests) —
+    /// `session_id` of the most recent `Hello` (a per-boot counter; the same id re-sent means a
+    /// USB re-plug within one boot, a new id a reboot).
+    session: Option<u32>,
+    /// Complete frames that failed to decode (bad CRC / COBS / type …): counted, never silent.
+    decode_errors: u32,
+    last_decode_error: Option<String>,
+    /// Host→device frame counter for the writer helpers (wire v3 gateway tests),
     /// per-link, restarting at 0 like every sender's.
     tx_seq: u16,
 }
 
 impl Console {
     /// Open `path` at the console baud with a short read timeout (so reads poll rather than block
-    /// forever). The FTDI bridge does not reset the MCU on open (NRST/BOOT0 are on the aux lines),
-    /// so attaching here does not perturb a running app.
+    /// forever), then drive the modem lines to the RUN baseline (RTS + DTR asserted). The bridge's
+    /// RTS/DTR drive NRST/BOOT0 through the board's transistor pair (the jolt / tower-cli wiring:
+    /// only RTS-asserted + DTR-released holds RESET); the OS asserts both on open anyway, and
+    /// re-driving them explicitly (like tower-cli's `open_console`) guarantees merely attaching
+    /// can't leave the MCU held in reset, and does not perturb a running app.
     pub fn open(path: &str) -> Result<Self, String> {
         #[allow(unused_mut)]
         let mut port = serialport::new(path, CONSOLE_BAUD)
@@ -245,16 +467,24 @@ impl Console {
         #[cfg(unix)]
         port.set_exclusive(false)
             .map_err(|e| format!("HIL: clear TIOCEXCL on {path}: {e}"))?;
+        // Run baseline (RTS=T, DTR=T), with jolt's tuned settle.
+        serialport::SerialPort::write_request_to_send(&mut port, true)
+            .and_then(|()| serialport::SerialPort::write_data_terminal_ready(&mut port, true))
+            .map_err(|e| format!("HIL: drive run-state lines on {path}: {e}"))?;
+        std::thread::sleep(jolt::port::RUN_SETTLE);
         Ok(Self {
             port: Some(Box::new(port)),
             decoder: FrameDecoder::new(),
             last_seq: None,
             seq_gaps: 0,
+            session: None,
+            decode_errors: 0,
+            last_decode_error: None,
             tx_seq: 0,
         })
     }
 
-    /// Write one host→device frame (the harness's first TX path — until wire v3 it only
+    /// Write one host→device frame (the harness's first TX path; until wire v3 it only
     /// ever read). Used to drive the management channel and the shell from tests.
     pub fn send_frame<T: serde::Serialize>(&mut self, msg_type: MsgType, payload: &T) -> Result<(), String> {
         let mut buf = [0u8; tower_protocol::MAX_WIRE];
@@ -297,7 +527,7 @@ impl Console {
                 None => break,
             }
         }
-        Err(format!("HIL: shell cmd {cmd_id} got no complete reply"))
+        Err(format!("HIL: shell cmd {cmd_id} got no complete reply{}", self.decode_note()))
     }
 
     /// One management round-trip: send `op`, reassemble the chunked reply for `req_id`.
@@ -327,26 +557,54 @@ impl Console {
                 None => break,
             }
         }
-        Err(format!("HIL: mgmt req {req_id} got no complete reply"))
+        Err(format!("HIL: mgmt req {req_id} got no complete reply{}", self.decode_note()))
     }
 
-    /// Pulse NRST so the board reboots into its application, WITHOUT re-opening the tty: the
-    /// console's own handle is loaned to jolt (`Port::from_handle`) for the tuned reset sequence
-    /// and taken back afterwards. (A second open — the old free-function approach — fails on
-    /// serialport 4.9, which flocks the tty on every open.) The reset only toggles modem lines,
-    /// so the console's 115200 8N1 frame format is untouched.
+    /// Pulse NRST so the board reboots into its application, WITHOUT re-opening the tty (a second
+    /// open fails on serialport 4.9, which flocks the tty on every open). The reset only toggles
+    /// modem lines, so the console's 115200 8N1 frame format is untouched.
+    ///
+    /// Line sequence + timings are jolt's `Port::reset_into_app` exactly (RTS=T/DTR=F asserts
+    /// RESET with BOOT0 low for `RESET_PULSE`, RTS=F releases, `APP_BOOT` settle; the 1 µF NRST
+    /// cap makes the ordering load-bearing), plus the one thing jolt v1.4.0 has no hook for: the
+    /// input buffer is cleared WHILE the chip is held in reset (as tower-cli's
+    /// `pulse_reset_into_app` does). Clearing after release would race the boot bytes we want;
+    /// not clearing lets pre-reset frames (the gateway's 1 Hz RadioStat, a post-flash boot's
+    /// banner) satisfy the next `wait_for` and make the new boot's `seq` 0 look like ~65k gaps.
+    /// Decode + seq state is re-baselined too: everything after this belongs to the new boot.
     pub fn reset_into_app(&mut self) -> Result<(), String> {
-        let handle = self.port.take().ok_or("HIL: console handle already loaned")?;
-        let mut port = jolt::port::Port::from_handle(handle);
-        let res = port.reset_into_app().map_err(|e| format!("HIL: reset-into-app: {e}"));
-        self.port = Some(port.into_inner());
+        let port = self.port.as_mut().ok_or("HIL: console has no port")?;
+        let res = pulse_reset_clearing_input(port.as_mut());
+        self.resync();
         res
     }
 
     /// Total sequence gaps seen so far (frames the device advanced its `seq` past but we never
-    /// received — dropped in transit or by the console writer under backpressure/unplug).
+    /// received: dropped in transit or by the console writer under backpressure/unplug).
     pub fn seq_gaps(&self) -> u32 {
         self.seq_gaps
+    }
+
+    /// Complete frames that failed to decode so far (bad CRC / COBS / unknown type …).
+    pub fn decode_errors(&self) -> u32 {
+        self.decode_errors
+    }
+
+    /// `session_id` of the most recent `Hello` seen, if any.
+    pub fn session_id(&self) -> Option<u32> {
+        self.session
+    }
+
+    /// `""`, or a parenthetical naming the undecodable frames, appended to timeout / failure
+    /// messages so a wall of corrupt frames reads as a diagnosable cause, not "did it boot?".
+    fn decode_note(&self) -> String {
+        match &self.last_decode_error {
+            Some(last) if self.decode_errors > 0 => format!(
+                " ({} undecodable console frame(s) dropped meanwhile, last: {last})",
+                self.decode_errors
+            ),
+            _ => String::new(),
+        }
     }
 
     /// Discard any partial frame + reset seq accounting (e.g. right after a device reset, where
@@ -357,27 +615,42 @@ impl Console {
     }
 
     /// Read the next complete frame, waiting up to `timeout`. `Ok(None)` means the window elapsed
-    /// with no full frame (idle line). A decode error (bad CRC/version) is skipped, not returned —
-    /// the next `0x00` resynchronizes, exactly like the CLI.
+    /// with no full frame (idle line). A corrupt frame (bad CRC/COBS/type) is skipped and counted
+    /// ([`decode_errors`](Self::decode_errors)); the next `0x00` resynchronizes, exactly like the
+    /// CLI. A **CRC-valid** frame carrying a different protocol version is the golden-rule lockstep
+    /// break, so it is an `Err` at once (otherwise every test would just report "no Hello").
     pub fn next(&mut self, timeout: Duration) -> Result<Option<Frame>, String> {
         let deadline = Instant::now() + timeout;
         let mut byte = [0u8; 1];
-        let port = self.port.as_mut().ok_or("HIL: console handle loaned out")?;
+        let port = self.port.as_mut().ok_or("HIL: console has no port")?;
         while Instant::now() < deadline {
             match port.read(&mut byte) {
                 Ok(0) => continue,
                 Ok(_) => {
                     // Feed one byte; on a frame boundary decode + account for seq. Build the OWNED
                     // Frame + copy out `seq` inside the decoder borrow, so the borrow ends before
-                    // `account_seq` takes its own `&mut self`.
-                    let decoded = self.decoder.push(byte[0]).and_then(|inner| {
+                    // `on_frame` takes its own `&mut self`.
+                    let Some(decoded) = self.decoder.push(byte[0]).map(|inner| {
                         decode_frame(inner)
-                            .ok()
                             .map(|(msg_type, seq, payload)| (seq, to_frame(msg_type, payload)))
-                    });
-                    if let Some((seq, frame)) = decoded {
-                        self.account_seq(seq);
-                        return Ok(Some(frame));
+                            .map_err(|e| (e, crc_valid(inner)))
+                    }) else {
+                        continue;
+                    };
+                    match decoded {
+                        Ok((seq, frame)) => {
+                            self.on_frame(seq, &frame);
+                            return Ok(Some(frame));
+                        }
+                        // tower-protocol ≤ 1.5.0 checks the version BEFORE the CRC, so a torn or
+                        // noisy frame can masquerade as BadVersion; only a CRC-valid one is real.
+                        Err((tower_protocol::Error::BadVersion { got }, true)) => {
+                            return Err(lockstep_break(got));
+                        }
+                        Err((e, _)) => {
+                            self.decode_errors = self.decode_errors.saturating_add(1);
+                            self.last_decode_error = Some(format!("{e:?}"));
+                        }
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
@@ -403,12 +676,16 @@ impl Console {
 
     /// Wait until a frame satisfies `pred` (returning it), or `timeout` elapses (`Ok(None)`).
     /// The canonical smoke assertion: "await the `ALL PASS` verdict line."
+    ///
+    /// On a timeout with corrupt frames dropped during the wait, says so on stderr (shown with the
+    /// failing test's output); the caller's "no verdict" message alone would hide the cause.
     pub fn wait_for(
         &mut self,
         timeout: Duration,
         mut pred: impl FnMut(&Frame) -> bool,
     ) -> Result<Option<Frame>, String> {
         let deadline = Instant::now() + timeout;
+        let errors_before = self.decode_errors;
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if let Some(f) = self.next(remaining.min(Duration::from_millis(500)))?
@@ -417,6 +694,12 @@ impl Console {
                 return Ok(Some(f));
             }
         }
+        if self.decode_errors > errors_before {
+            eprintln!(
+                "HIL: wait_for timed out after {timeout:?}{}",
+                self.decode_note()
+            );
+        }
         Ok(None)
     }
 
@@ -424,6 +707,17 @@ impl Console {
     /// of the old `strings | grep`, but on decoded ASCII with version + CRC already validated).
     pub fn wait_for_text(&mut self, timeout: Duration, needle: &str) -> Result<bool, String> {
         Ok(self.wait_for(timeout, |f| frame_text(f).is_some_and(|t| t.contains(needle)))?.is_some())
+    }
+
+    /// Per-frame bookkeeping: a `Hello` opens a new device session (the firmware restarts its
+    /// `seq` on boot and re-emits `Hello` on a USB re-plug), so re-baseline the gap tracking on
+    /// it, exactly like tower-cli (`render.rs`), instead of counting the jump as ~65k lost frames.
+    fn on_frame(&mut self, seq: u16, frame: &Frame) {
+        if let Frame::Hello { session_id, .. } = frame {
+            self.last_seq = None;
+            self.session = Some(*session_id);
+        }
+        self.account_seq(seq);
     }
 
     fn account_seq(&mut self, seq: u16) {
@@ -437,12 +731,64 @@ impl Console {
     }
 
     /// Test-only: a `Console` with no serial port, so the pure seq-accounting path
-    /// (`account_seq` / [`seq_gaps`](Self::seq_gaps)) can be exercised on the SHIPPED code — not
-    /// an inline copy — without opening a tty. Never compiled into a non-test build.
+    /// (`account_seq` / [`seq_gaps`](Self::seq_gaps)) can be exercised on the SHIPPED code (not
+    /// an inline copy) without opening a tty. Never compiled into a non-test build.
     #[cfg(test)]
     fn for_test() -> Self {
-        Self { port: None, decoder: FrameDecoder::new(), last_seq: None, seq_gaps: 0, tx_seq: 0 }
+        Self {
+            port: None,
+            decoder: FrameDecoder::new(),
+            last_seq: None,
+            seq_gaps: 0,
+            session: None,
+            decode_errors: 0,
+            last_decode_error: None,
+            tx_seq: 0,
+        }
     }
+}
+
+/// The NRST pulse of [`Console::reset_into_app`] on a borrowed handle: jolt's line order and
+/// timings, with the input buffer cleared while RESET is held. On a line-write failure the run
+/// state (RTS=T, DTR=T) is restored best-effort, as jolt does, so the board isn't left in reset.
+fn pulse_reset_clearing_input(sp: &mut dyn serialport::SerialPort) -> Result<(), String> {
+    let mut pulse = || -> serialport::Result<()> {
+        sp.write_request_to_send(true)?;
+        sp.write_data_terminal_ready(false)?; // RESET asserted, BOOT0 low
+        std::thread::sleep(jolt::port::RESET_PULSE);
+        sp.clear(serialport::ClearBuffer::Input)?; // drop pre-reset bytes while held in reset
+        sp.write_request_to_send(false) // RESET released -> boot main flash
+    };
+    if let Err(e) = pulse() {
+        let _ = sp.write_request_to_send(true);
+        let _ = sp.write_data_terminal_ready(true);
+        return Err(format!("HIL: reset-into-app: {e}"));
+    }
+    std::thread::sleep(jolt::port::APP_BOOT);
+    Ok(())
+}
+
+/// Whether an inner (COBS-decoded) frame's trailing CRC-32 matches its body, i.e. the bytes are
+/// what the device sent, so a `BadVersion` on them is a genuine version mismatch, not line noise.
+fn crc_valid(inner: &[u8]) -> bool {
+    // ver_type(1) + seq(2) + crc(4) is the shortest frame.
+    if inner.len() < 7 {
+        return false;
+    }
+    let body = inner.len() - 4;
+    let stored = u32::from_le_bytes([inner[body], inner[body + 1], inner[body + 2], inner[body + 3]]);
+    tower_protocol::crc::crc32_ieee(&inner[..body]) == stored
+}
+
+/// The fail-fast message for a CRC-valid frame of another protocol version.
+fn lockstep_break(got: u8) -> String {
+    format!(
+        "HIL: the device speaks tower-protocol wire version {got}, but this harness decodes version \
+         {}: a lockstep break (postcard would silently mis-decode). Rebuild the firmware and \
+         re-pin tower-firmware / tower-cli / tower-hil to the SAME tower-protocol tag (control \
+         plane `/lockstep`).",
+        tower_protocol::PROTOCOL_VERSION
+    )
 }
 
 /// Decode a `(MsgType, payload)` into an owned [`Frame`]. Unknown/unmodelled types become
@@ -530,12 +876,13 @@ pub fn frame_text(f: &Frame) -> Option<&str> {
 }
 
 // ---------------------------------------------------------------------------
-// Reset over the FTDI aux lines (jolt)
+// Reset over the FTDI modem lines (jolt): RTS drives NRST, DTR drives BOOT0
 // ---------------------------------------------------------------------------
 
 /// Pulse NRST so the board reboots into its application, using jolt's tuned reset sequence (the
-/// 1 µF NRST cap makes the line ordering load-bearing — we reuse jolt's, not a hand-rolled one).
-/// Used to re-run a one-shot KAT from a clean boot and re-observe its verdict.
+/// 1 µF NRST cap makes the line ordering load-bearing; we reuse jolt's, not a hand-rolled one).
+/// For a port with NO console attached (it opens the tty itself); with a [`Console`] open on the
+/// port use [`Console::reset_into_app`] instead.
 pub fn reset_into_app(path: &str) -> Result<(), String> {
     let mut port = jolt::port::Port::open(path).map_err(|e| format!("HIL: jolt open {path}: {e}"))?;
     port.reset_into_app().map_err(|e| format!("HIL: reset-into-app {path}: {e}"))
@@ -545,31 +892,58 @@ pub fn reset_into_app(path: &str) -> Result<(), String> {
 // PPK2 sidecar client (line-JSON over stdio, ppk2d.py)
 // ---------------------------------------------------------------------------
 
-/// A client for the `ppk2d.py` current sidecar. Protocol is **line-JSON over stdio**: we write one
-/// command per line and read one JSON reply per line. Commands:
+/// A client for the `ppk2d.py` current sidecar. Protocol is **line-JSON over stdio**: the sidecar
+/// first writes one startup line naming its backend, then we write one command per line and read
+/// one JSON reply per line. Every reply carries `"ok"`; anything but `"ok": true` is an error
+/// (its `"error"` text is surfaced). Commands:
 ///
-/// - `{"cmd":"on","mv":<mV>}`   — enable source-measure at `<mV>`
-/// - `{"cmd":"off"}`            — disable the supply
-/// - `{"cmd":"cycle","mv":<mV>}`— power-cycle (off→settle→on) at `<mV>` (clears the probe's
-///   debug-domain residual current — confounder #1)
-/// - `{"cmd":"avg","ms":<ms>}`  — average current over `<ms>` → `{"ua": <µA>}`
+/// - startup                    → `{"ok":true,"backend":"real"|"stub","port":…}` (or an error +
+///   exit when no PPK2 initialises; the stub is opt-in only, `TOWER_PPK2_STUB=1`)
+/// - `{"cmd":"on","mv":<mV>}`:    enable source-measure at `<mV>`
+/// - `{"cmd":"off"}`:             disable the supply
+/// - `{"cmd":"cycle","mv":<mV>}`: power-cycle (off→settle→on) at `<mV>` (clears the probe's
+///   debug-domain residual current: confounder #1)
+/// - `{"cmd":"avg","ms":<ms>}`:   sample for `<ms>` → `{"median_ua","mean_ua","samples"}`
 ///
-/// The sidecar encodes the three known confounders (see `ppk2d.py`); this client just speaks the
-/// protocol. It is only spawned by the `power`-gated tests.
+/// The sidecar encodes the three known confounders (see `ppk2d.py`); this client speaks the
+/// protocol with a deadline on every reply (a wedged sidecar must fail the test, not hang it). It
+/// is only spawned by the `power`-gated tests.
 pub struct Ppk2 {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
-    stdout: BufReader<std::process::ChildStdout>,
+    /// Reply lines, read by a helper thread so every wait can time out.
+    replies: std::sync::mpsc::Receiver<String>,
+    backend: String,
 }
 
-/// Reject any current reading above this — mid-SWD-flash the PPK2's CDC can desync and report
-/// garbage tens of mA (confounder #3). A real deep-sleep floor is tens of µA, so >50 mA is never
-/// a valid STOP reading; treat it as a desync and fail loudly rather than pass/fail on noise.
+/// Reject any current reading above this: mid-SWD-flash the PPK2's CDC can desync and report
+/// garbage tens of mA (confounder #3). A real deep-sleep floor is single-digit µA, so >50 mA is
+/// never a valid STOP reading; treat it as a desync and fail loudly rather than pass/fail on noise.
 pub const PPK2_SANE_MAX_UA: f64 = 50_000.0;
 
+/// Sidecar startup budget: a venv re-exec, the `ppk2-api` import, and up to two CDC candidates'
+/// stale-stream drain + calibration-read retries (~3 s each): generous, but finite.
+const PPK2_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Reply budget for a non-sampling command (`on` / `off` / `cycle`, ~0.3 s settle inside).
+const PPK2_CMD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One `avg` window from the PPK2: both statistics, because they answer different questions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ppk2Reading {
+    /// Median of the samples: the quiescent STOP **floor** (robust to the brief periodic wake
+    /// spikes).
+    pub median_ua: f64,
+    /// Arithmetic mean: the true average draw (what a battery sees), wake spikes included.
+    pub mean_ua: f64,
+    /// Plausible samples the statistics were computed over.
+    pub samples: u64,
+}
+
 impl Ppk2 {
-    /// Spawn the sidecar (`python3 ppk2d.py`). `python` is the launcher; the path is
-    /// resolved relative to this crate so it works from any CWD.
+    /// Spawn the sidecar (`python3 ppk2d.py`) and read its startup line. `python3` is the
+    /// launcher; the path is resolved relative to this crate so it works from any CWD. Fails
+    /// unless the sidecar drives a REAL PPK2; the modelled stub (a plausible fake ~12 µA) is
+    /// accepted only when `TOWER_PPK2_STUB=1` explicitly opts in to a plumbing run.
     pub fn spawn() -> Result<Self, String> {
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/ppk2d.py");
         let mut child = Command::new("python3")
@@ -579,98 +953,211 @@ impl Ppk2 {
             .spawn()
             .map_err(|e| format!("HIL: spawn ppk2d.py: {e}"))?;
         let stdin = child.stdin.take().ok_or("HIL: ppk2d stdin unavailable")?;
-        let stdout = BufReader::new(child.stdout.take().ok_or("HIL: ppk2d stdout unavailable")?);
-        Ok(Self { child, stdin, stdout })
+        let stdout = child.stdout.take().ok_or("HIL: ppk2d stdout unavailable")?;
+        let (tx, replies) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut ppk2 = Self { child, stdin, replies, backend: String::new() };
+        let hello = ppk2.recv(PPK2_STARTUP_TIMEOUT, "startup")?;
+        ppk2.backend = json_str(&hello, "backend").unwrap_or_default();
+        let stub_ok = std::env::var("TOWER_PPK2_STUB").is_ok_and(|v| v == "1");
+        match ppk2.backend.as_str() {
+            "real" => {}
+            "stub" if stub_ok => eprintln!(
+                "HIL: ppk2d is the MODELLED STUB (TOWER_PPK2_STUB=1), a plumbing run; its \
+                 readings are fake and prove nothing about the board"
+            ),
+            other => {
+                return Err(format!(
+                    "HIL: ppk2d backend {other:?} is not a real PPK2 (startup: {hello}); refusing \
+                     to measure; set TOWER_PPK2_STUB=1 only for a deliberate plumbing run"
+                ));
+            }
+        }
+        Ok(ppk2)
     }
 
-    fn send(&mut self, line: &str) -> Result<String, String> {
+    /// The sidecar's backend: `"real"` (a calibrated PPK2) or `"stub"` (opt-in plumbing run).
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    /// Wait up to `timeout` for the next reply line and require `"ok": true`. On a timeout or a
+    /// closed pipe the sidecar is killed, since a late reply would desync the line protocol anyway.
+    fn recv(&mut self, timeout: Duration, what: &str) -> Result<String, String> {
+        let line = match self.replies.recv_timeout(timeout) {
+            Ok(line) => line,
+            Err(e) => {
+                let _ = self.child.kill();
+                let why = match e {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => format!("no reply within {timeout:?}"),
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => "closed the pipe".to_string(),
+                };
+                return Err(format!("HIL: ppk2d {why} ({what}); killed it (its stderr is above)"));
+            }
+        };
+        if json_raw(&line, "ok") == Some("true") {
+            Ok(line)
+        } else {
+            let err = json_str(&line, "error").unwrap_or_else(|| line.clone());
+            Err(format!("HIL: ppk2d {what} failed: {err}"))
+        }
+    }
+
+    fn send(&mut self, line: &str, timeout: Duration) -> Result<String, String> {
         writeln!(self.stdin, "{line}").map_err(|e| format!("HIL: ppk2d write: {e}"))?;
         self.stdin.flush().map_err(|e| format!("HIL: ppk2d flush: {e}"))?;
-        let mut reply = String::new();
-        self.stdout
-            .read_line(&mut reply)
-            .map_err(|e| format!("HIL: ppk2d read: {e}"))?;
-        if reply.is_empty() {
-            return Err("HIL: ppk2d closed the pipe".to_string());
-        }
-        Ok(reply.trim().to_string())
+        self.recv(timeout, line)
     }
 
-    /// Power-cycle the supply at `mv` — the standard preamble to any measurement, because a
+    /// Power-cycle the supply at `mv`: the standard preamble to any measurement, because a
     /// debug probe leaves the STM32 debug domain powered (~+200 µA) until a clean power cycle
     /// (confounder #1). Always cycle before measuring.
     pub fn cycle(&mut self, mv: u32) -> Result<(), String> {
-        let _ = self.send(&format!("{{\"cmd\":\"cycle\",\"mv\":{mv}}}"))?;
-        Ok(())
+        self.send(&format!("{{\"cmd\":\"cycle\",\"mv\":{mv}}}"), PPK2_CMD_TIMEOUT).map(drop)
     }
 
     /// Enable the supply at `mv`.
     pub fn on(&mut self, mv: u32) -> Result<(), String> {
-        let _ = self.send(&format!("{{\"cmd\":\"on\",\"mv\":{mv}}}"))?;
-        Ok(())
+        self.send(&format!("{{\"cmd\":\"on\",\"mv\":{mv}}}"), PPK2_CMD_TIMEOUT).map(drop)
     }
 
     /// Disable the supply.
     pub fn off(&mut self) -> Result<(), String> {
-        let _ = self.send("{\"cmd\":\"off\"}")?;
-        Ok(())
+        self.send("{\"cmd\":\"off\"}", PPK2_CMD_TIMEOUT).map(drop)
     }
 
-    /// Average current over `ms` milliseconds, in microamps. Rejects an insane reading
-    /// (> [`PPK2_SANE_MAX_UA`]) as a CDC desync rather than returning noise.
-    pub fn avg_ua(&mut self, ms: u32) -> Result<f64, String> {
-        let reply = self.send(&format!("{{\"cmd\":\"avg\",\"ms\":{ms}}}"))?;
-        // Minimal parse: find "ua": <number>. Avoids a JSON dep for one field.
-        let ua = parse_ua(&reply).ok_or_else(|| format!("HIL: ppk2d bad avg reply: {reply}"))?;
-        if ua > PPK2_SANE_MAX_UA {
+    /// Sample the current for `ms` milliseconds: median (the STOP floor) and mean (the average
+    /// draw), in microamps. Rejects an insane reading (> [`PPK2_SANE_MAX_UA`]) as a CDC desync
+    /// rather than returning noise.
+    pub fn measure(&mut self, ms: u32) -> Result<Ppk2Reading, String> {
+        let timeout = PPK2_CMD_TIMEOUT + Duration::from_millis(u64::from(ms));
+        let reply = self.send(&format!("{{\"cmd\":\"avg\",\"ms\":{ms}}}"), timeout)?;
+        let num =
+            |key| json_num(&reply, key).ok_or_else(|| format!("HIL: ppk2d avg reply lacks {key}: {reply}"));
+        let reading = Ppk2Reading {
+            median_ua: num("median_ua")?,
+            mean_ua: num("mean_ua")?,
+            samples: num("samples")? as u64,
+        };
+        let worst = reading.median_ua.max(reading.mean_ua);
+        if worst > PPK2_SANE_MAX_UA {
             return Err(format!(
-                "HIL: PPK2 reading {ua:.0} µA > {PPK2_SANE_MAX_UA:.0} µA — CDC desync (do not \
+                "HIL: PPK2 reading {worst:.0} µA > {PPK2_SANE_MAX_UA:.0} µA: CDC desync (do not \
                  sample mid-flash); retry after the flash settles"
             ));
         }
-        Ok(ua)
+        Ok(reading)
     }
 }
 
 impl Drop for Ppk2 {
     fn drop(&mut self) {
         // Best-effort: cut the supply and reap the sidecar so a panicking test doesn't leave the
-        // board powered or the process lingering.
+        // board powered or the process lingering. Bounded (a wedged sidecar gets the command
+        // timeout, then the kill), so Drop can never hang the test binary.
         let _ = self.off();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
-/// Extract the `"ua": <number>` field from a sidecar reply without a JSON dependency.
-fn parse_ua(reply: &str) -> Option<f64> {
-    let idx = reply.find("\"ua\"")?;
-    let after = &reply[idx + 4..];
-    let colon = after.find(':')?;
-    let rest = after[colon + 1..].trim_start();
-    let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E'))
-        .unwrap_or(rest.len());
-    rest[..end].parse::<f64>().ok()
+/// The raw value token of `"key": <value>` in a flat JSON object line (a number / `true` /
+/// `false` / `null`, or a string INCLUDING its quotes), without a JSON dependency. The sidecar
+/// writes only flat objects with the `ok` key first, so the first occurrence is the real key.
+fn json_raw<'a>(reply: &'a str, key: &str) -> Option<&'a str> {
+    let idx = reply.find(&format!("\"{key}\""))?;
+    let after = &reply[idx + key.len() + 2..];
+    let rest = after.trim_start().strip_prefix(':')?.trim_start();
+    if rest.starts_with('"') {
+        // Scan to the closing quote, skipping escaped characters.
+        let mut escaped = false;
+        for (i, c) in rest.char_indices().skip(1) {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => return Some(&rest[..=i]),
+                _ => {}
+            }
+        }
+        return None;
+    }
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
+    Some(rest[..end].trim_end())
+}
+
+/// A numeric field (`"median_ua": 5.1`).
+fn json_num(reply: &str, key: &str) -> Option<f64> {
+    json_raw(reply, key)?.parse::<f64>().ok()
+}
+
+/// A string field, unescaped (`json.dumps` escapes non-ASCII as `\uXXXX`, e.g. `µ`).
+fn json_str(reply: &str, key: &str) -> Option<String> {
+    let raw = json_raw(reply, key)?;
+    let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next()? {
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            'u' => {
+                let hex: String = chars.by_ref().take(4).collect();
+                out.push(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32).unwrap_or('\u{FFFD}'));
+            }
+            other => out.push(other), // \" \\ \/
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Pure host unit tests for the harness plumbing (no hardware) — these RUN in `cargo test`.
+    // Pure host unit tests for the harness plumbing (no hardware); these RUN in `cargo test`.
 
     #[test]
-    fn parse_ua_handles_various_shapes() {
-        assert_eq!(parse_ua("{\"ua\": 42.5}"), Some(42.5));
-        assert_eq!(parse_ua("{\"ua\":12}"), Some(12.0));
-        assert_eq!(parse_ua("{\"other\":1,\"ua\": -3.0e1 }"), Some(-30.0));
-        assert_eq!(parse_ua("{\"nope\": 1}"), None);
+    fn json_fields_handle_various_shapes() {
+        assert_eq!(json_num("{\"ua\": 42.5}", "ua"), Some(42.5));
+        assert_eq!(json_num("{\"ua\":12}", "ua"), Some(12.0));
+        assert_eq!(json_num("{\"other\":1,\"ua\": -3.0e1 }", "ua"), Some(-30.0));
+        assert_eq!(json_num("{\"nope\": 1}", "ua"), None);
+
+        // A real sidecar avg reply (json.dumps spacing).
+        let avg = "{\"ok\": true, \"median_ua\": 5.1, \"mean_ua\": 9.75, \"samples\": 98000}";
+        assert_eq!(json_raw(avg, "ok"), Some("true"));
+        assert_eq!(json_num(avg, "median_ua"), Some(5.1));
+        assert_eq!(json_num(avg, "mean_ua"), Some(9.75));
+        assert_eq!(json_num(avg, "samples"), Some(98000.0));
+
+        // Errors: ok is false, the message is unescaped (µ arrives as \u00b5), quotes survive.
+        let err = "{\"ok\": false, \"error\": \"averaged 6e4 \\u00b5A > max \\\"x\\\", ok\"}";
+        assert_eq!(json_raw(err, "ok"), Some("false"));
+        assert_eq!(json_str(err, "error").as_deref(), Some("averaged 6e4 µA > max \"x\", ok"));
+
+        // The startup line.
+        let hello = "{\"ok\": true, \"backend\": \"real\", \"port\": \"/dev/cu.usbmodem1\"}";
+        assert_eq!(json_str(hello, "backend").as_deref(), Some("real"));
+        assert_eq!(json_str(hello, "port").as_deref(), Some("/dev/cu.usbmodem1"));
+        assert_eq!(json_str(hello, "missing"), None);
     }
 
     #[test]
     fn seq_gap_accounting_uses_real_console() {
         // Exercises the SHIPPED Console::account_seq + seq_gaps() (not an inline copy). The first
-        // frame only establishes the baseline — no gap.
+        // frame only establishes the baseline: no gap.
         let mut c = Console::for_test();
         for s in [10u16, 11, 12] {
             c.account_seq(s);
@@ -690,7 +1177,7 @@ mod tests {
     // --- Native decode: to_frame + the receive seam --------------------------------------
 
     /// Encode `payload` as a REAL wire frame (`encode_frame`) and run it back through the exact
-    /// receive path `Console::next` uses — `FrameDecoder` → `decode_frame` → `to_frame` — returning
+    /// receive path `Console::next` uses (`FrameDecoder` → `decode_frame` → `to_frame`), returning
     /// the `(seq, Frame)` it produces. Exercises the shipped decode, not a re-implementation.
     fn decode_via_wire<T: serde::Serialize>(msg_type: MsgType, seq: u16, payload: &T) -> (u16, Frame) {
         let mut wire = [0u8; tower_protocol::MAX_WIRE];
@@ -804,7 +1291,7 @@ mod tests {
 
     #[test]
     fn to_frame_maps_radio_stat() {
-        // wire-v3 gateway frame — both RadioStat variants map verbatim into Frame::Stat.
+        // wire-v3 gateway frame: both RadioStat variants map verbatim into Frame::Stat.
         let (_, ch) = decode_via_wire(MsgType::RadioStat, 8, &RadioStat::Channel { channel: 4, rssi: -95 });
         assert_eq!(ch, Frame::Stat(RadioStat::Channel { channel: 4, rssi: -95 }));
 
@@ -816,7 +1303,7 @@ mod tests {
     #[test]
     fn to_frame_unknown_type_and_truncated_fall_to_other() {
         // An unmodelled MsgType (shell traffic) is kept as Frame::Other so seq accounting stays
-        // exact — `to_frame`'s catch-all arm. Empty payload is fine: the Other arm never decodes.
+        // exact (`to_frame`'s catch-all arm). Empty payload is fine: the Other arm never decodes.
         let (seq_unknown, unknown) = decode_via_wire(MsgType::ShellResponse, 7, &());
         assert_eq!(unknown, Frame::Other(MsgType::ShellResponse));
         assert_eq!(seq_unknown, 7);
@@ -827,8 +1314,8 @@ mod tests {
         assert_eq!(truncated, Frame::Other(MsgType::Hello));
         assert_eq!(seq_trunc, 8);
 
-        // `Console::next` accounts seq for EVERY decoded frame, Other included, before returning it
-        // — so an unknown/truncated frame still advances the counter. Verify on the real accountant.
+        // `Console::next` accounts seq for EVERY decoded frame, Other included, before returning it,
+        // so an unknown/truncated frame still advances the counter. Verify on the real accountant.
         let mut console = Console::for_test();
         console.account_seq(seq_unknown);
         console.account_seq(seq_trunc);
@@ -890,9 +1377,9 @@ mod tests {
     fn fixture_schema_parses() {
         // Parse a FIXED inline fixture: this smoke-tests the TOML schema without coupling to
         // whichever ports the current bench's committed hil.toml happens to name (they
-        // re-enumerate per session and the operator edits them — a CP210x adapter, a Linux
+        // re-enumerate per session and the operator edits them: a CP210x adapter, a Linux
         // /dev/ttyUSB0, or a Windows COM7 must not fail a plain `cargo test`). The live serials
-        // are validated at resolve time against the `tower devices` roster, not here.
+        // are validated at resolve time against the live port roster, not here.
         let text = concat!(
             "[core]\nserial = \"/dev/ttyUSB0\"\n",
             "[dongle]\nserial = \"COM7\"\n",
@@ -902,6 +1389,180 @@ mod tests {
         assert_eq!(bench.core.serial, "/dev/ttyUSB0");
         assert_eq!(bench.dongle.serial, "COM7");
         assert_eq!(bench.ppk2.supply_mv, 1800);
+    }
+
+    #[test]
+    fn fixture_usb_serial_is_optional() {
+        let text = concat!(
+            "[core]\nserial = \"/dev/cu.usbserial-140\"\nusb_serial = \"hio-core-module-1\"\n",
+            "[dongle]\nserial = \"/dev/cu.usbserial-120\"\n",
+            "[ppk2]\nsupply_mv = 1800\n",
+        );
+        let bench: Bench = toml::from_str(text).expect("fixture with usb_serial parses");
+        assert_eq!(bench.core.usb_serial.as_deref(), Some("hio-core-module-1"));
+        assert_eq!(bench.dongle.usb_serial, None, "path-only stays backward compatible");
+    }
+
+    // --- Roster identity (H5): pure, over a synthetic live roster ------------------------
+
+    const CORE_SN: &str = "hio-core-module-2416969388";
+    const DONGLE_SN: &str = "bc-usb-dongle-r1.0-6435252593b5";
+
+    fn port(path: &str, sn: Option<&str>) -> LivePort {
+        LivePort { path: path.to_string(), usb: true, usb_serial: sn.map(str::to_string) }
+    }
+
+    /// The macOS shape: every USB-UART twice (cu./tty.), plus non-USB ports.
+    fn mac_roster() -> Vec<LivePort> {
+        vec![
+            LivePort { path: "/dev/cu.Bluetooth-Incoming-Port".into(), usb: false, usb_serial: None },
+            port("/dev/cu.usbserial-2110", Some(CORE_SN)),
+            port("/dev/tty.usbserial-2110", Some(CORE_SN)),
+            port("/dev/cu.usbserial-120", Some(DONGLE_SN)),
+            port("/dev/tty.usbserial-120", Some(DONGLE_SN)),
+            port("/dev/cu.usbserial-999", Some("FT8X1234")), // some other FTDI
+        ]
+    }
+
+    fn board(path: &str, sn: Option<&str>) -> Board {
+        Board { serial: path.to_string(), usb_serial: sn.map(str::to_string) }
+    }
+
+    #[test]
+    fn resolve_board_by_tagged_path() {
+        let live = mac_roster();
+        assert_eq!(
+            resolve_board(Role::Core, &board("/dev/cu.usbserial-2110", None), &live).unwrap(),
+            "/dev/cu.usbserial-2110"
+        );
+        // The tty. twin names the same device.
+        assert!(resolve_board(Role::Core, &board("/dev/tty.usbserial-2110", None), &live).is_ok());
+        assert!(resolve_board(Role::Dongle, &board("/dev/cu.usbserial-120", None), &live).is_ok());
+    }
+
+    #[test]
+    fn resolve_board_rejects_swapped_unknown_missing_and_non_usb() {
+        let live = mac_roster();
+        let swapped = resolve_board(Role::Core, &board("/dev/cu.usbserial-120", None), &live).unwrap_err();
+        assert!(swapped.contains("swapped"), "{swapped}");
+        let unknown = resolve_board(Role::Dongle, &board("/dev/cu.usbserial-999", None), &live).unwrap_err();
+        assert!(unknown.contains("usb_serial = \"FT8X1234\""), "tells how to vouch: {unknown}");
+        let missing = resolve_board(Role::Core, &board("/dev/cu.usbserial-140", None), &live).unwrap_err();
+        assert!(missing.contains("not present"), "{missing}");
+        let bt = resolve_board(Role::Core, &board("/dev/cu.Bluetooth-Incoming-Port", None), &live).unwrap_err();
+        assert!(bt.contains("not a USB"), "{bt}");
+    }
+
+    #[test]
+    fn resolve_board_by_pinned_usb_serial() {
+        let live = mac_roster();
+        // A stale path hint is overridden by the pinned serial; cu. preferred over tty.
+        assert_eq!(
+            resolve_board(Role::Core, &board("/dev/cu.usbserial-140", Some(CORE_SN)), &live).unwrap(),
+            "/dev/cu.usbserial-2110"
+        );
+        // Pinning vouches for an untagged third-party adapter.
+        assert_eq!(
+            resolve_board(Role::Dongle, &board("", Some("FT8X1234")), &live).unwrap(),
+            "/dev/cu.usbserial-999"
+        );
+        // A pinned serial of the OTHER board type is a misconfiguration.
+        assert!(resolve_board(Role::Core, &board("", Some(DONGLE_SN)), &live).is_err());
+        // Absent → error; two distinct devices with one serial → ambiguous.
+        assert!(resolve_board(Role::Core, &board("", Some("hio-core-module-0")), &live).is_err());
+        let mut dup = live.clone();
+        dup.push(port("/dev/cu.usbserial-3000", Some(CORE_SN)));
+        let amb = resolve_board(Role::Core, &board("", Some(CORE_SN)), &dup).unwrap_err();
+        assert!(amb.contains("ambiguous"), "{amb}");
+    }
+
+    #[test]
+    fn bench_resolve_rewrites_paths_and_rejects_one_board_in_both_slots() {
+        let live = mac_roster();
+        let mut bench = Bench {
+            core: board("/dev/cu.usbserial-140", Some(CORE_SN)),
+            dongle: board("/dev/tty.usbserial-120", None),
+            ppk2: Ppk2Config { supply_mv: 1800 },
+        };
+        bench.resolve_against(&live).expect("resolves");
+        assert_eq!(bench.core.serial, "/dev/cu.usbserial-2110", "re-enumerated path picked up");
+
+        let mut same = Bench {
+            core: board("", Some("FT8X1234")),
+            dongle: board("", Some("FT8X1234")),
+            ppk2: Ppk2Config { supply_mv: 1800 },
+        };
+        let err = same.resolve_against(&live).unwrap_err();
+        assert!(err.contains("both resolve"), "{err}");
+        assert!(err.contains(CORE_SN), "roster lists USB serials: {err}");
+    }
+
+    // --- Console bookkeeping (H7/H8) ------------------------------------------------------
+
+    #[test]
+    fn hello_rebaselines_seq_tracking() {
+        let mut c = Console::for_test();
+        let hello = Frame::Hello {
+            protocol_version: tower_protocol::PROTOCOL_VERSION,
+            firmware_name: "x".into(),
+            firmware_version: "v".into(),
+            session_id: 7,
+        };
+        let stat = Frame::Other(MsgType::RadioStat);
+        for s in [900u16, 901, 902] {
+            c.on_frame(s, &stat);
+        }
+        // Reboot: the new boot's Hello is seq 0, not ~65k gaps.
+        c.on_frame(0, &hello);
+        c.on_frame(1, &stat);
+        assert_eq!(c.seq_gaps(), 0);
+        assert_eq!(c.session_id(), Some(7));
+        // A real gap inside the new session still counts.
+        c.on_frame(3, &stat);
+        assert_eq!(c.seq_gaps(), 1);
+    }
+
+    /// A CRC-valid frame of another wire version is told apart from a corrupted one, so only a
+    /// genuine lockstep break fails fast.
+    #[test]
+    fn crc_valid_separates_version_mismatch_from_noise() {
+        let mut wire = [0u8; tower_protocol::MAX_WIRE];
+        let n = encode_frame(MsgType::Print, 3, &Print { text: "hi" }, &mut wire).expect("encode");
+        let mut decoder = FrameDecoder::new();
+        let mut inner = Vec::new();
+        for &b in &wire[..n] {
+            if let Some(f) = decoder.push(b) {
+                inner = f.to_vec();
+            }
+        }
+        assert!(crc_valid(&inner), "an intact frame's CRC checks out");
+
+        // Re-stamp the version field (top 3 bits of byte 0) and fix the CRC: a different-version
+        // peer, byte-perfect on the wire → BadVersion with a valid CRC.
+        let other = (tower_protocol::PROTOCOL_VERSION + 1) & 0x07;
+        let mut foreign = inner.clone();
+        foreign[0] = (other << 5) | (foreign[0] & 0x1F);
+        let body = foreign.len() - 4;
+        let crc = tower_protocol::crc::crc32_ieee(&foreign[..body]).to_le_bytes();
+        foreign[body..].copy_from_slice(&crc);
+        assert!(matches!(decode_frame(&foreign), Err(tower_protocol::Error::BadVersion { .. })));
+        assert!(crc_valid(&foreign), "genuine mismatch → fail fast");
+        assert!(lockstep_break(other).contains("lockstep"));
+
+        // The same version flip WITHOUT fixing the CRC is line noise, not a mismatch.
+        let mut noisy = inner.clone();
+        noisy[0] = (other << 5) | (noisy[0] & 0x1F);
+        assert!(!crc_valid(&noisy));
+        assert!(!crc_valid(&[0u8; 3]), "too short to carry a CRC");
+    }
+
+    #[test]
+    fn decode_note_names_dropped_frames() {
+        let mut c = Console::for_test();
+        assert_eq!(c.decode_note(), "");
+        c.decode_errors = 2;
+        c.last_decode_error = Some("BadCrc".into());
+        assert!(c.decode_note().contains("2 undecodable") && c.decode_note().contains("BadCrc"));
     }
 
     #[test]
