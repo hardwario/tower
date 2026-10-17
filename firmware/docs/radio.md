@@ -345,7 +345,10 @@ if let Some((gw_addr, key)) = net.join(addr, PAIRING_WINDOW).await { /* store bo
 
 **Keyed join (E4).** A node whose per-node key the host already holds joins under that key
 instead, with no window and no key on air. The host registered it with `add_peer` (the
-gateway's `NodeAdd`), and the key was provisioned out of band (cable, factory, NFC):
+gateway's `NodeAdd`). The two cases it is for: a node whose key was provisioned by cable or in
+the factory, which finds its gateway on air without a pairing window; and a replacement
+gateway that imported the node keys (`NodeAdd` of each registry entry), which the nodes re-join
+without re-pairing:
 
 ```
 node  JOIN_REQ  flags KEYED, src = node, dest = 0,    payload node(4 LE)          under the node key

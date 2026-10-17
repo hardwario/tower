@@ -4,10 +4,11 @@
 //!   TOWER_FEATURES=role-gateway just flash example net_keyed_join   # host: knows the node
 //!   TOWER_FEATURES=role-node    just flash example net_keyed_join   # joiner: has the key
 //!
-//! Both ends were provisioned with the same per-node key out of band (the gateway's
-//! NodeAdd, a factory step, NFC…), so no key travels on air and no pairing window is
-//! needed: the host answers a KEYED JOIN_REQ from a registered peer at any time, inside
-//! its normal `recv()`. The joiner learns the host's address; both log it.
+//! Both ends hold the same per-node key already: provisioned by cable (`Provision` on the node,
+//! `NodeAdd` on the gateway) or in the factory, or imported by a replacement gateway from the
+//! old one's registry. So no key travels on air and no pairing window is needed: the host
+//! answers a KEYED JOIN_REQ from a registered peer at any time, inside its normal `recv()`.
+//! The joiner learns the host's address; both log it.
 //!
 //! The joiner repeats the join every 5 s, each time on a fresh TX counter (the echo the host
 //! returns is that counter, so it proves the response is fresh), then sends one confirmed

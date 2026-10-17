@@ -935,8 +935,8 @@ impl Net {
         // below −128 dBm, where a bare `as i8` wraps (−130 → +126) and reports a strong link for
         // the weakest one. Clamp so the reported margin is monotonic at the edges.
         payload[4] = rssi.clamp(i8::MIN as i16, i8::MAX as i16) as i8 as u8;
-        // Flags byte: advertise a queued downlink so a sleeping sender holds an RX window open
-        // after this uplink (`ack_flags`; bit 1 is reserved for the STICKER profile).
+        // Flags byte (`ack_flags`): advertise a queued downlink so a sleeping sender holds an RX
+        // window open after this uplink.
         payload[5] = match self.peer_slot(dest) {
             Some(i) if self.peers[i].as_ref().unwrap().pending => ack_flags::PENDING,
             _ => 0,

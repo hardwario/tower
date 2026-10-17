@@ -39,7 +39,8 @@
 //! action). The joiner, in turn, only accepts a JOIN_RESP addressed to itself.
 //!
 //! **Keyed join (E4).** A node whose per-node key the host already holds (`add_peer`, e.g.
-//! the gateway's NodeAdd) joins under that key instead: KEYED JOIN_REQ(addr), sealed under
+//! the gateway's NodeAdd: a node provisioned by cable or in the factory, or a replacement
+//! gateway that imported the node keys) joins under that key instead: KEYED JOIN_REQ(addr), sealed under
 //! the per-node key → KEYED JOIN_RESP(echo of the request's counter), sealed under the same
 //! key. No key travels on air; the node proves the key and its freshness through the host's
 //! replay lane, the host proves the key and its freshness through the echo; the node learns

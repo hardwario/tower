@@ -9,8 +9,7 @@
 //! (duplicate) ACKs are ignored too: a delivery resolves at most once.
 
 /// ACK payload length: `acked(4 LE) ‖ rssi(1, i8) ‖ flags(1)`. Every ACK carries all three
-/// fields; a shorter payload is not an ACK. Bytes beyond this are ignored (the STICKER control
-/// tail, [`ack_flags::CTRL`]).
+/// fields; a shorter payload is not an ACK. Bytes beyond this are ignored.
 pub const ACK_LEN: usize = 6;
 
 /// ACK payload flags byte (byte 5).
@@ -200,7 +199,7 @@ mod tests {
     }
 
     /// The rule is `len >= ACK_LEN`: exactly 6 bytes resolves, and trailing bytes beyond them
-    /// are tolerated (the STICKER control tail); pin the current contract.
+    /// are tolerated; pin the current contract.
     #[test]
     fn payload_length_rule_is_at_least_ack_len() {
         let mut w = AckWait::new(ME, PEER, 42);
@@ -231,7 +230,7 @@ mod tests {
                 pending: true
             })
         );
-        p[5] = 0xFE; // every other bit, incl. the reserved CTRL
+        p[5] = 0xFE; // every other bit
         assert_eq!(ack_meta(&p).map(|m| m.pending), Some(false));
         for len in 0..ACK_LEN {
             assert_eq!(ack_meta(&p[..len]), None, "len {len}");
