@@ -97,8 +97,8 @@ async fn run(b: Board) {
             match net.join(MY_ADDR, PAIRING_WINDOW).await {
                 Some((gw_addr, key)) => info!(
                     target: "pair",
-                    "JOINED *** addr={:08X} (mine) gw={:08X} key[..4]={:02x}{:02x}{:02x}{:02x} (expect the host's)",
-                    MY_ADDR, gw_addr, key[0], key[1], key[2], key[3]
+                    "JOINED *** addr={:08X} (mine) gw={:08X} key[..4]={:02x}{:02x}{:02x}{:02x} (expect the host's) uid {}",
+                    MY_ADDR, gw_addr, key[0], key[1], key[2], key[3], tower::board::UniqueId::read()
                 ),
                 None => warn!(target: "pair", "join failed (no host in range)"),
             }

@@ -743,10 +743,12 @@ fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     // schema hash a host checks for lockstep). Multi-line summary (spans more than one wire frame,
     // which exercises chunking).
     // Lines kept terse so the whole summary fits the shell response buffer (`RESP_CAP` = 256 B)
-    // even at worst case: a 32-char firmware name + 10-digit session + a 9-digit uptime in
-    // seconds (31 years) + the longest `rng:` label (~252 B). `rng:` names the source behind
-    // `addr=random`: the hardware TRNG, or the non-cryptographic fallback if the TRNG failed to
-    // come up (`board::rand_source`; probes once if nothing has drawn yet, then stays cached).
+    // even at worst case: a 32-char firmware name + 10-digit session + a 3-digit wire version + a
+    // 9-digit uptime in seconds (31 years) + the longest `rng:` label (~252 B; the constant
+    // console line made room for `uid:`, the MCU's 96-bit factory ID, `board::UniqueId`). `rng:`
+    // names the source behind `addr=random` and the pairing ephemerals: the hardware TRNG, or the
+    // non-cryptographic fallback if the TRNG failed to come up (`board::rand_source`; probes once
+    // if nothing has drawn yet, then stays cached).
     let _ = write!(
         ctx,
         "firmware: {} {}\r\n\
@@ -755,7 +757,7 @@ fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
          uptime: {}.{:03} s\r\n\
          cpu: STM32L083CZ @ 16 MHz, LSE RTC\r\n\
          memory: 192K flash / 20K RAM / 6K EEPROM\r\n\
-         console: USART1 115200 8N1 framed\r\n\
+         uid: {}\r\n\
          rng: {}\r\n",
         console::firmware_name(),
         console::firmware_version(),
@@ -764,6 +766,7 @@ fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
         WIRE_FINGERPRINT,
         us / 1_000_000,
         (us % 1_000_000) / 1000,
+        crate::board::UniqueId::read(),
         crate::board::rand_source().as_str(),
     );
     Outcome::ok()

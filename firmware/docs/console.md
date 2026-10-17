@@ -309,7 +309,7 @@ tower complete "/system settings set "   # ask the target what completes here
 | Command | Does |
 |---|---|
 | `/system reboot` | flush the reply, then `SCB::sys_reset()` |
-| `/system/resource print` | firmware name + version, session id, `wire: v<PROTOCOL_VERSION> fp 0x<WIRE_FINGERPRINT>` (the lockstep schema fingerprint the boot `Hello` carries), uptime, CPU, clock, memory, `rng:` source (`TRNG` / `SW fallback`) |
+| `/system/resource print` | firmware name + version, session id, `wire: v<PROTOCOL_VERSION> fp 0x<WIRE_FINGERPRINT>` (the lockstep schema fingerprint the boot `Hello` carries), uptime, CPU, clock, memory, `uid: XXXXXXXX-XXXXXXXX-XXXXXXXX` (the MCU's 96-bit factory unique ID, `tower::board::unique_id`), `rng:` source (`TRNG` / `SW fallback`) |
 | `/system/stack print` | measured stack high-water (boot-painted): used/free/total vs the budget, plus the previous boot's peak after a software/IWDG reset |
 | `/system/eeprom print` | wear gauge: compaction flips vs budget, live/free bytes, resets |
 | `/system/eeprom wipe confirm` | factory reset: an atomic flip to an empty store (power-loss-safe; the store is frozen until the reboot that follows, also on failure). **Console-only** |

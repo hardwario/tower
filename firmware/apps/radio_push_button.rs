@@ -52,7 +52,7 @@ use embassy_futures::select::{Either4, select4};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_time::{Duration, Instant, Timer};
 use log::{info, warn};
-use tower::board::GuardedI2c;
+use tower::board::{GuardedI2c, UniqueId};
 use tower::lis2dh12::{self, Lis2dh12, Sensitivity, TiltConfig};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
@@ -576,7 +576,9 @@ async fn ota_join(
             if kv.scope(NS_APP).set(KEY_PROVISION, &p).is_err() {
                 warn!(target: "button", "JOINED {:08X} but persist failed; will not survive reboot", gw_addr);
             } else {
-                info!(target: "button", "JOINED gateway {:08X}", gw_addr);
+                // The success line names this unit by its MCU factory ID, so a host log or the
+                // operator can tie the pairing (and the SAS logged just before) to a device.
+                info!(target: "button", "JOINED gateway {:08X} (uid {})", gw_addr, UniqueId::read());
             }
             net.add_peer(gw_addr, &key);
             Some(p)
@@ -947,7 +949,7 @@ async fn handle_mgmt(
                     }
                     net.add_peer(gw_addr, &key);
                     *provision = Some(rec);
-                    info!(target: "button", "JOINED gateway {:08X}", gw_addr);
+                    info!(target: "button", "JOINED gateway {:08X} (uid {})", gw_addr, UniqueId::read());
                     respond_record(req_id, &Joined { gw_addr }).await;
                 }
                 None => {

@@ -291,14 +291,67 @@ pub fn preinit_csr() -> u32 {
 /// See [`preinit_csr`].
 static PREINIT_CSR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-/// This unit's stable 32-bit radio address, derived from the STM32's 96-bit unique
-/// device ID: CRC-32/IEEE over the UID, clamped to never be 0 (`0` is the "gateway not yet
+/// Base of the STM32L0's factory-programmed 96-bit unique device ID (RM0367 §28.2 "Unique
+/// device ID registers (96 bits)"; `UID_BASE` = `0x1FF8_0050` in ST's CMSIS header for the
+/// STM32L083xx, also embassy-stm32's metapac `UID` address for this chip).
+const UID_BASE: usize = 0x1FF8_0050;
+/// Offsets of the three ID words `U_ID[31:0]`, `U_ID[63:32]`, `U_ID[95:64]` from [`UID_BASE`]. **Not
+/// contiguous on the L0**: the third word sits at `+0x14` (ST's `HAL_GetUIDw2`), with other
+/// factory data in between. embassy-stm32's generic `uid::uid()` copies 12 contiguous bytes, so
+/// on this family it returns the word at `+0x08` instead of `U_ID[95:64]`: don't use it here.
+const UID_OFFSETS: [usize; 3] = [0x00, 0x04, 0x14];
+
+/// The MCU's 96-bit factory unique device ID as its three 32-bit words, `U_ID[31:0]` first (read
+/// from [`UID_OFFSETS`]). This is the device identity: stable for the life of the chip and
+/// unique per STM32 (lot, wafer and position on the wafer). It is the STM32's ID, **not** the
+/// on-board ATSHA204A's serial number, which the SDK deliberately does not use as an identity.
+#[must_use]
+pub fn unique_id_words() -> [u32; 3] {
+    // SAFETY: word-aligned addresses in the always-readable factory system-memory area (the same
+    // ones ST's HAL reads); read-only, no side effects.
+    UID_OFFSETS.map(|off| unsafe { core::ptr::read_volatile((UID_BASE + off) as *const u32) })
+}
+
+/// The MCU's 96-bit factory unique device ID as 12 bytes: the three words of
+/// [`unique_id_words`] in that order, each little-endian (the ID's byte order in memory).
+#[must_use]
+pub fn unique_id() -> [u8; 12] {
+    let mut out = [0u8; 12];
+    for (dst, w) in out.as_chunks_mut::<4>().0.iter_mut().zip(unique_id_words()) {
+        *dst = w.to_le_bytes();
+    }
+    out
+}
+
+/// Displays the unique ID as `XXXXXXXX-XXXXXXXX-XXXXXXXX`: the three words of
+/// [`unique_id_words`] in hex, `U_ID[31:0]` first (the `uid:` line of `/system resource print` and
+/// the push button's pairing log line).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct UniqueId(pub [u32; 3]);
+
+impl UniqueId {
+    /// This chip's ID.
+    #[must_use]
+    pub fn read() -> Self {
+        Self(unique_id_words())
+    }
+}
+
+impl core::fmt::Display for UniqueId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let [a, b, c] = self.0;
+        write!(f, "{a:08X}-{b:08X}-{c:08X}")
+    }
+}
+
+/// This unit's stable 32-bit radio address, derived from the STM32's 96-bit unique device ID
+/// ([`unique_id`]): CRC-32/IEEE over the ID, clamped to never be 0 (`0` is the "gateway not yet
 /// known" dest in the pairing JOIN_REQ, and the "unset / auto" sentinel of the
 /// [`shell` `addr` setting](crate::shell::radio_addr)). Collisions across a fleet
 /// are birthday-bounded (~2⁻³² per pair), acceptable for network addressing; an
 /// operator can pin an explicit or random address instead (`system settings set addr`).
 pub fn unique_id32() -> u32 {
-    let addr = tower_protocol::crc::crc32_ieee(&embassy_stm32::uid::uid());
+    let addr = tower_protocol::crc::crc32_ieee(&unique_id());
     if addr == 0 { 1 } else { addr }
 }
 
