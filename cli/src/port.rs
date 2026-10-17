@@ -10,24 +10,99 @@ use anyhow::{Context, Result, bail};
 
 // ---- port selection -------------------------------------------------------
 
-/// USB serial ports, filtered to the kinds a TOWER Core Module presents across platforms.
+/// A TOWER board, recognised by its USB bridge's serial number (the FTDI iSerial the factory
+/// programs: `hio-core-module-<id>` on a Core Module, `bc-usb-dongle-<rev>-<id>` on a Radio
+/// Dongle; older boards carry a `bc-` prefix instead of `hio-`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Board {
+    CoreModule,
+    RadioDongle,
+}
+
+impl Board {
+    fn from_usb_serial(serial: &str) -> Option<Self> {
+        if serial.contains("core-module") {
+            Some(Self::CoreModule)
+        } else if serial.contains("usb-dongle") {
+            Some(Self::RadioDongle)
+        } else {
+            None
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::CoreModule => "Core Module",
+            Self::RadioDongle => "Radio Dongle",
+        }
+    }
+}
+
+/// One serial port as the OS enumerates it (cached USB descriptors; nothing is opened).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Port {
+    name: String,
+    usb: bool,
+    usb_serial: Option<String>,
+}
+
+impl Port {
+    fn board(&self) -> Option<Board> {
+        self.usb_serial.as_deref().and_then(Board::from_usb_serial)
+    }
+
+    /// The kinds of port a TOWER board presents across platforms.
+    fn usb_like(&self) -> bool {
+        self.usb
+            || ["usbserial", "ttyUSB", "ttyACM"]
+                .iter()
+                .any(|k| self.name.contains(k))
+    }
+
+    /// `/dev/cu.usbserial-2110 (Core Module)`, for a choice the user has to make.
+    fn label(&self) -> String {
+        match self.board() {
+            Some(b) => format!("{} ({})", self.name, b.name()),
+            None => self.name.clone(),
+        }
+    }
+}
+
+/// Every serial port, macOS's dial-in twins folded away (see [`prefer_callout`]).
+fn enumerate(what: &str) -> Result<Vec<Port>> {
+    let ports: Vec<Port> = serialport::available_ports()
+        .context(what.to_string())?
+        .into_iter()
+        .map(|p| match p.port_type {
+            serialport::SerialPortType::UsbPort(info) => Port {
+                name: p.port_name,
+                usb: true,
+                usb_serial: info.serial_number,
+            },
+            _ => Port {
+                name: p.port_name,
+                usb: false,
+                usb_serial: None,
+            },
+        })
+        .collect();
+    let keep = prefer_callout(ports.iter().map(|p| p.name.clone()).collect());
+    Ok(ports.into_iter().filter(|p| keep.contains(&p.name)).collect())
+}
+
+/// USB serial ports, filtered to the kinds a TOWER board presents across platforms.
 /// Propagates the enumeration error (mirroring [`devices`]) rather than swallowing it into an
 /// empty list, so `pick_port` can tell "no ports attached" apart from "couldn't enumerate"
 /// (e.g. no udev in a container) and report the real cause.
 pub(crate) fn usb_ports() -> Result<Vec<String>> {
-    let ports = serialport::available_ports().context("enumerating serial ports")?;
-    Ok(prefer_callout(
-        ports
-            .into_iter()
-            .filter(|p| {
-                matches!(p.port_type, serialport::SerialPortType::UsbPort(_))
-                    || p.port_name.contains("usbserial")
-                    || p.port_name.contains("ttyUSB")
-                    || p.port_name.contains("ttyACM")
-            })
-            .map(|p| p.port_name)
-            .collect(),
-    ))
+    Ok(usb_port_list()?.into_iter().map(|p| p.name).collect())
+}
+
+fn usb_port_list() -> Result<Vec<Port>> {
+    Ok(enumerate("enumerating serial ports")?
+        .into_iter()
+        .filter(Port::usb_like)
+        .collect())
 }
 
 /// Collapse macOS's two device nodes per serial port to the one we want. macOS publishes every
@@ -49,33 +124,74 @@ fn prefer_callout(names: Vec<String>) -> Vec<String> {
 /// device. Ambiguity (zero or several) is an error telling the user to pass `--device`; a
 /// failed enumeration surfaces its own cause (not a misleading "no device found").
 pub(crate) fn pick_port(explicit: Option<String>) -> Result<String> {
+    pick_port_for(explicit, None)
+}
+
+/// [`pick_port`], except that among several USB serial devices the one `board` is chosen when
+/// it is the only one of its kind (`tower gateway` takes the Radio Dongle next to a Core Module
+/// that is being flashed or watched).
+pub(crate) fn pick_port_for(explicit: Option<String>, board: Option<Board>) -> Result<String> {
     if let Some(p) = explicit {
         return Ok(p);
     }
-    let ports = usb_ports()?;
-    match ports.len() {
-        1 => Ok(ports.into_iter().next().unwrap()),
-        0 => bail!(
-            "no USB serial device found: plug in the board (with a data cable) or pass -d/--device \
-             (`tower devices` lists every port)"
-        ),
-        _ => bail!(
-            "multiple USB serial devices; pass --device (one of: {})",
-            ports.join(", ")
-        ),
+    let (name, preferred) = choose(usb_port_list()?, board)?;
+    if preferred && let Some(b) = board {
+        eprintln!(
+            "[tower] using the {} on {name} (pass -d/--device to pick another)",
+            b.name()
+        );
     }
+    Ok(name)
 }
 
-/// `tower devices`: one bare port name per line (script-friendly). It deliberately lists *all*
-/// ports, not just the TOWER-shaped USB ones auto-detect picks from, but macOS's dial-in twins
-/// are folded away (see [`prefer_callout`]) so the list shows the names
-/// `--device` should actually be given, one per physical port.
+/// The decision of [`pick_port_for`] (pure): the port, and whether `board` broke a tie.
+fn choose(ports: Vec<Port>, board: Option<Board>) -> Result<(String, bool)> {
+    if ports.len() == 1 {
+        return Ok((ports.into_iter().next().unwrap().name, false));
+    }
+    if ports.is_empty() {
+        bail!(
+            "no USB serial device found: plug in the board (with a data cable) or pass -d/--device \
+             (`tower devices` lists every port)"
+        );
+    }
+    if let Some(b) = board {
+        let mut of_kind = ports.iter().filter(|p| p.board() == Some(b));
+        if let (Some(only), None) = (of_kind.next(), of_kind.next()) {
+            return Ok((only.name.clone(), true));
+        }
+    }
+    let labels: Vec<String> = ports.iter().map(Port::label).collect();
+    bail!(
+        "multiple USB serial devices; pass -d/--device (one of: {})",
+        labels.join(", ")
+    )
+}
+
+/// `tower devices`: one port per line, macOS's dial-in twins folded away (see
+/// [`prefer_callout`]) so the list shows the names `--device` should be given. The path comes
+/// first (`awk '{print $1}'` keeps working); a USB port adds what it is (a TOWER board, by its
+/// USB serial number) and that serial number. It deliberately lists *all* ports, not just the
+/// USB ones auto-detect picks from.
 pub(crate) fn devices() -> Result<()> {
-    let ports = serialport::available_ports().context("listing serial ports")?;
-    for name in prefer_callout(ports.into_iter().map(|p| p.port_name).collect()) {
-        println!("{name}");
+    let ports = enumerate("listing serial ports")?;
+    let width = ports.iter().map(|p| p.name.len()).max().unwrap_or(0);
+    for p in &ports {
+        println!("{}", device_line(p, width));
     }
     Ok(())
+}
+
+fn device_line(p: &Port, width: usize) -> String {
+    if !p.usb {
+        return p.name.clone();
+    }
+    let what = p.board().map_or("USB serial", Board::name);
+    let line = format!("{:width$}  {what:<12}", p.name);
+    match &p.usb_serial {
+        Some(sn) => format!("{line}  {sn}"),
+        None => line.trim_end().to_string(),
+    }
 }
 
 /// Open the console port at 115200 baud with a short read timeout (so read loops can poll).
@@ -173,7 +289,65 @@ pub(crate) fn open_console_responsive(port: &str, reset: bool) -> Result<Box<dyn
 
 #[cfg(test)]
 mod tests {
-    use super::prefer_callout;
+    use super::{Board, Port, choose, device_line, prefer_callout};
+
+    fn port(name: &str, usb_serial: Option<&str>) -> Port {
+        Port {
+            name: name.into(),
+            usb: true,
+            usb_serial: usb_serial.map(String::from),
+        }
+    }
+
+    /// One port is taken as is; among several, a wanted board kind breaks the tie only when it
+    /// is the one port of that kind; otherwise the error names every port with its kind.
+    #[test]
+    fn choosing_a_port() {
+        let core = port("/dev/ttyUSB0", Some("hio-core-module-2416969388"));
+        let dongle = port("/dev/ttyUSB1", Some("bc-usb-dongle-r1.0-6435252593b5"));
+        let other = port("/dev/ttyUSB2", Some("A50285BI"));
+        assert_eq!(
+            choose(vec![core.clone()], Some(Board::RadioDongle)).unwrap(),
+            ("/dev/ttyUSB0".into(), false)
+        );
+        let pair = vec![core.clone(), dongle.clone()];
+        assert_eq!(
+            choose(pair.clone(), Some(Board::RadioDongle)).unwrap(),
+            ("/dev/ttyUSB1".into(), true)
+        );
+        assert_eq!(
+            choose(pair.clone(), Some(Board::CoreModule)).unwrap(),
+            ("/dev/ttyUSB0".into(), true)
+        );
+        let e = format!("{:#}", choose(pair, None).unwrap_err());
+        assert!(
+            e.contains("/dev/ttyUSB0 (Core Module), /dev/ttyUSB1 (Radio Dongle)"),
+            "{e}"
+        );
+        let two_dongles = vec![
+            dongle.clone(),
+            port("/dev/ttyUSB3", Some("bc-usb-dongle-r1.0-1")),
+            other,
+        ];
+        assert!(choose(two_dongles, Some(Board::RadioDongle)).is_err());
+        assert!(choose(Vec::new(), None).is_err());
+    }
+
+    #[test]
+    fn device_lines_start_with_the_path() {
+        let core = port("/dev/cu.usbserial-2110", Some("hio-core-module-1"));
+        assert_eq!(
+            device_line(&core, 22),
+            "/dev/cu.usbserial-2110  Core Module   hio-core-module-1"
+        );
+        assert_eq!(device_line(&port("COM3", None), 4), "COM3  USB serial");
+        let builtin = Port {
+            name: "/dev/cu.Bluetooth-Incoming-Port".into(),
+            usb: false,
+            usb_serial: None,
+        };
+        assert_eq!(device_line(&builtin, 40), "/dev/cu.Bluetooth-Incoming-Port");
+    }
 
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()

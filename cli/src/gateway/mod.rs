@@ -38,7 +38,7 @@ use tower_protocol::FrameDecoder;
 use tower_protocol::mgmt::DeviceRole;
 
 use crate::mgmt::{DescribeOutcome, DeviceInfoOwned, describe};
-use crate::port::{open_console_responsive, pick_port};
+use crate::port::{Board, open_console_responsive, pick_port_for};
 use crate::render::warn_mismatch;
 use crate::term::sanitize_line;
 use crate::{EXIT_DEVICE_TIMEOUT, EXIT_ERROR, EXIT_PROTOCOL_MISMATCH, EXIT_WRONG_FIRMWARE};
@@ -237,7 +237,7 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
     if external.is_none() {
         anyhow::bail!("built without the embedded broker; pass --mqtt [mqtts://]HOST[:PORT]");
     }
-    let port = pick_port(port)?;
+    let port = pick_port_for(port, Some(Board::RadioDongle))?;
 
     // ---- fail-fast verification (before threads, before any TUI) ----
     let (sp, info) = match verify_gateway(&port, opts.reset)? {

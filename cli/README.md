@@ -112,8 +112,17 @@ back under a new name is followed), and `--no-reconnect` disables it entirely: t
 command then exits `1` when the link drops.
 
 The device is selected with `-d`/`--device` (auto-detected when exactly one USB serial
-device is present). List what's connected with `tower devices`. On macOS each port appears
-once, as its `/dev/cu.*` call-out node (the `/dev/tty.*` dial-in twin is hidden).
+device is present; `tower gateway` also picks the one Radio Dongle among several boards).
+List what's connected with `tower devices`: the path first, then for a USB port what it is (a
+TOWER board is recognised by its USB serial number) and that serial number:
+
+```
+/dev/cu.usbserial-2110   Core Module    hio-core-module-2416969388
+/dev/cu.usbserial-2120   Radio Dongle   bc-usb-dongle-r1.0-6435252593b5
+```
+
+On macOS each port appears once, as its `/dev/cu.*` call-out node (the `/dev/tty.*` dial-in
+twin is hidden).
 
 ### Gateway & MQTT bridge
 
