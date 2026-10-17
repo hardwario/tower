@@ -263,7 +263,21 @@ mod tests {
         p[..4].copy_from_slice(&42u32.to_le_bytes());
         p[4] = -67i8 as u8;
         p[5] = ack_flags::PENDING | ack_flags::CTRL;
-        p[6..].copy_from_slice(&[0x10, 0x04, 0xbd, 0x0c, 0x14, 0x01, 0x15]);
+        // Two well-formed TLVs: id 0x10 (2 B value) and id 0x14 (1 B value).
+        p[6..].copy_from_slice(&[0x10, 0x02, 0xbd, 0x0c, 0x14, 0x01, 0x15]);
+        // The fixture itself must be a complete `id ‖ len ‖ value` sequence ending exactly at
+        // the payload end, so the test exercises the STICKER layout, not a truncated one.
+        let mut tail = &p[6..];
+        let mut ids = [0u8; 2];
+        let mut n = 0;
+        while let [id, len, rest @ ..] = tail {
+            assert!(rest.len() >= *len as usize, "TLV {id:#04x} overruns the payload");
+            ids[n] = *id;
+            n += 1;
+            tail = &rest[*len as usize..];
+        }
+        assert!(tail.is_empty(), "trailing byte(s) after the last TLV");
+        assert_eq!(&ids[..n], &[0x10, 0x14]);
         assert_eq!(
             ack_meta(&p),
             AckMeta {
