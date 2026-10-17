@@ -4,6 +4,36 @@ Cross-cutting work that is decided but not scheduled yet. Component-specific ite
 the code (e.g. [firmware/TODO.md](firmware/TODO.md): FHSS in the product apps, a provisioned
 ATSHA204A).
 
+## Two-board verification of the 2026-10-17 batch
+
+**Why.** The night of 2026-10-17 changed pairing (the node commits its key only on an ACKed
+uplink, the 12 s re-pair hold, the SAS in `Paired`/`Joined`, the window rule), replay and nonce
+safety (counter floors on moved keys, per-accept node lanes, host uplink dedup), the push
+button's backoff and the gateway's request pacing. Everything that needs only one board was
+checked on hardware (KATs, watchdog, gateway end to end, key floors, a join with no gateway in
+range); nothing that needs a node and a gateway on air was.
+
+**What to run** (a Core Module with `radio_push_button`, a Radio Dongle with
+`radio_dongle_gateway`, `tower` from the same commit, EEPROM wiped first):
+- OTA pairing: `tower nodes add --ota`, hold 1 s; the node's `net: pairing: SAS`, the CLI's
+  `paired ... (SAS n)` and the gateway log show the same six digits; `JOINED` follows on the
+  node and its NodeInfo names it.
+- Lost confirm (a temporary patch that skips the JOIN_CONFIRM transmit): the node discards the
+  key after its commit round and pairs again on the next hold.
+- Re-pair: a 12 s hold on a paired node is refused while it is registered; after `tower nodes
+  remove` it pairs again with a new SAS.
+- Window end: `--window 5` with a late hold is refused, never committed behind the host's back.
+- Backoff: with the gateway off, the node's periodic uplinks space out up to the heartbeat and
+  come back on a press.
+- Replay: reboot the dongle under a running `tower gateway`; no event is published twice.
+- Key move: `tower nodes show --keys`, wipe the gateway, `node_add` with the floors; the node's
+  uplinks and remote-shell downlinks keep working.
+- The HIL gateway group (`just hil hil`), and a PPK2 look at the node's idle floor with the new
+  watchdog pet interval (~7.4 s).
+
+**Done when.** Each item passes on the bench and the results are noted in
+`firmware/docs/test-plan.md`.
+
 ## Compatibility gate (before the first users)
 
 **Why.** Until TOWER has users, AGENTS.md says "no backward compatibility anywhere": formats and
