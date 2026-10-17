@@ -173,8 +173,31 @@ pub enum JoinError {
     BadAddr,
 }
 
-/// Why the host did not answer a keyed JOIN_REQ ([`Net::answer_keyed_join`]); logged by
-/// [`Net::recv`], rate-limited.
+/// On-air length of a keyed JOIN_REQ / JOIN_RESP: header + the 4 B payload (the joiner's address
+/// / the counter echo) + the CCM tag.
+const KEYED_FRAME_LEN: usize = frame::HDR_LEN + 4 + TAG_LEN;
+
+/// [`Net::recv`]'s keyed-join responder: checks a keyed JOIN_REQ and, when it may be answered,
+/// returns the sealed JOIN_RESP ([`Net::prepare_keyed_answer`], installed by
+/// [`Net::set_keyed_join`]).
+pub(super) type KeyedResponder = fn(&mut Net, &mut [u8]) -> Option<KeyedAnswer>;
+
+/// A sealed keyed JOIN_RESP, ready to transmit after the turnaround.
+pub(super) struct KeyedAnswer {
+    buf: [u8; KEYED_FRAME_LEN],
+    /// The joiner it answers.
+    pub(super) peer: u32,
+}
+
+impl KeyedAnswer {
+    /// The on-air bytes.
+    pub(super) fn frame(&self) -> &[u8] {
+        &self.buf
+    }
+}
+
+/// Why the host did not answer a keyed JOIN_REQ ([`Net::prepare_keyed_answer`]); logged there,
+/// rate-limited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum KeyedRefusal {
     /// Switched off ([`Net::set_keyed_join`], the gateway's `keyed-join` setting).
@@ -194,8 +217,6 @@ pub(super) enum KeyedRefusal {
     NonceLocked,
     /// The EU duty budget refused the response.
     DutyLimited,
-    /// The radio failed to transmit the response.
-    TxFailed,
 }
 
 impl core::fmt::Display for KeyedRefusal {
@@ -213,7 +234,6 @@ impl core::fmt::Display for KeyedRefusal {
             ),
             KeyedRefusal::NonceLocked => f.write_str("TX locked (nonce safety)"),
             KeyedRefusal::DutyLimited => f.write_str("duty-cycle limited"),
-            KeyedRefusal::TxFailed => f.write_str("response TX failed"),
         }
     }
 }
@@ -485,7 +505,7 @@ impl Net {
         while Instant::now() < deadline {
             // The request's length is fixed (header + 4 B addr + tag), so the duty gate can run
             // before anything is allocated or sealed.
-            if !self.duty.try_tx(duty::frame_toa_ms(frame::HDR_LEN + 4 + TAG_LEN)) {
+            if !self.duty.try_tx(duty::frame_toa_ms(KEYED_FRAME_LEN)) {
                 // Duty-limited: back off one response window, don't spin.
                 Timer::after(JOIN_RESP_WINDOW).await;
                 continue;
@@ -536,23 +556,44 @@ impl Net {
         Err(JoinError::Timeout)
     }
 
-    /// Host, keyed (E4): answer a KEYED JOIN_REQ (`rx` = the whole received frame, dest 0)
-    /// from a peer registered with `add_peer`. Opens it under that peer's key, admits it only
-    /// when the counter is fresh on the peer's replay lane (and advances the lane), then sends
-    /// the KEYED JOIN_RESP echoing the request's counter after `ACK_TURNAROUND`. Returns the
-    /// joiner's address when a response went out, else why not ([`Net::recv`] logs it,
-    /// rate-limited). Called from [`Net::recv`]; nothing else
-    /// changes: the peer, its key and its lane were already installed.
+    /// Host, keyed (E4): prepare the answer to a KEYED JOIN_REQ (`rx` = the whole received
+    /// frame, dest 0) from a peer registered with `add_peer`. Opens it under that peer's key,
+    /// admits it only when the counter is fresh on the peer's replay lane (and advances the lane),
+    /// then seals the KEYED JOIN_RESP echoing the request's counter; [`Net::recv`] sends it after
+    /// `ACK_TURNAROUND`. Returns `None` when it must not answer, after logging why (rate-limited).
+    /// Nothing else changes: the peer, its key and its lane were already installed.
     ///
-    /// The response follows `send_ack`'s discipline: duty gate, then the counter from
+    /// Installed as [`Net::recv`]'s responder by [`Net::set_keyed_join`] (a [`KeyedResponder`]),
+    /// so only images that host keyed joins link it.
+    ///
+    /// The answer follows `send_ack`'s discipline: duty gate, then the counter from
     /// [`alloc_counter`](Net::alloc_counter) (which re-checks the TX lock), then the seal, all
-    /// before the turnaround await, so dropping `recv` mid-response cannot leave the counter
-    /// unconsumed.
+    /// synchronous, so dropping `recv` mid-response cannot leave the counter unconsumed.
     ///
     /// Duty mode only (see [`JoinError::WrongMode`]): in LBT+AFA or FHSS mode the request is
     /// dropped unanswered (`fhss_master_tick` and `afa_serve` receive through `recv`). Refused
-    /// up front, before any CCM work, when switched off ([`Net::set_keyed_join`]).
-    pub(super) async fn answer_keyed_join(&mut self, rx: &mut [u8]) -> Result<u32, KeyedRefusal> {
+    /// up front, before any CCM work, when switched off ([`Net::set_keyed_join`]`(false)`).
+    pub(super) fn prepare_keyed_answer(&mut self, rx: &mut [u8]) -> Option<KeyedAnswer> {
+        let src = frame::Header::parse(rx).map(|(h, _)| h.src).unwrap_or(0);
+        match self.keyed_answer(rx) {
+            Ok(answer) => Some(answer),
+            Err(why) => {
+                if let Some(n) = self.keyed_log.hit() {
+                    log::warn!(
+                        target: "net",
+                        "keyed join from {:08X} refused: {} ({} refusal(s) since last report)",
+                        src,
+                        why,
+                        n
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    /// The decision and the seal behind [`prepare_keyed_answer`](Self::prepare_keyed_answer).
+    fn keyed_answer(&mut self, rx: &mut [u8]) -> Result<KeyedAnswer, KeyedRefusal> {
         if !self.keyed_join_enabled {
             return Err(KeyedRefusal::Off); // the operator's switch: no CCM work at all
         }
@@ -584,7 +625,7 @@ impl Net {
 
         // Fixed length (header + 4 B echo + tag): gate on the duty budget before the counter,
         // so a refused response burns no counter (the joiner simply retries).
-        if !self.duty.try_tx(duty::frame_toa_ms(frame::HDR_LEN + 4 + TAG_LEN)) {
+        if !self.duty.try_tx(duty::frame_toa_ms(KEYED_FRAME_LEN)) {
             return Err(KeyedRefusal::DutyLimited);
         }
         let counter = self.alloc_counter().ok_or(KeyedRefusal::NonceLocked)?; // fail closed
@@ -596,20 +637,19 @@ impl Net {
             counter,
             bulk_index: None,
         };
-        let mut resp = [0u8; MAX_FRAME];
-        let n = frame::seal_frame(
+        let mut answer = KeyedAnswer {
+            buf: [0u8; KEYED_FRAME_LEN],
+            peer: hdr.src,
+        };
+        frame::seal_frame(
             &mut self.ccm,
             &key,
             &resp_hdr,
             &hdr.counter.to_le_bytes(),
-            &mut resp,
+            &mut answer.buf,
         )
-        .map_err(|_| KeyedRefusal::Malformed)?; // unreachable: a 4 B payload always fits
-        Timer::after(ACK_TURNAROUND).await;
-        match self.radio.tx(&resp[..n], false, TX_TIMEOUT).await {
-            Ok(()) => Ok(hdr.src),
-            Err(_) => Err(KeyedRefusal::TxFailed),
-        }
+        .map_err(|_| KeyedRefusal::Malformed)?; // unreachable: the buffer fits exactly
+        Ok(answer)
     }
 
     /// Seal `hdr`+`payload` under `key` (the pairing key, or a per-node key for the keyed

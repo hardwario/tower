@@ -374,20 +374,25 @@ host  JOIN_RESP flags KEYED, src = host, dest = node, payload req counter(4 LE) 
   `NodeAdd`) gets a fresh replay lane on the host (the lane record's key-check value no
   longer matches), so it can keyed-join even with a restarted counter. A node whose counter
   restarted under the **same** key is refused (`stale counter`): re-add it under a new key.
-- **Operator switch.** `net.set_keyed_join(false)` makes the host refuse every keyed join
-  before any CCM work (the gateway's `keyed-join` setting; on by default, since the exchange
-  is mutually authenticated). Every refusal is logged on the `net` target, rate-limited to
-  one line per 10 s with a count: `keyed join from XXXXXXXX refused: <reason> (N refusal(s)
-  since last report)`, the reason being one of switched off, not Duty mode, not a registered
-  node, does not open under its registered key, malformed, stale counter, TX locked,
-  duty-cycle limited, response TX failed.
+- **Hosting is opt-in; operator switch.** A device answers keyed joins only after
+  `net.set_keyed_join(true)`; until then `recv` ignores keyed JOIN_REQs silently, and an image
+  that never calls it does not link the responder at all (it is a function pointer installed
+  by that call; ~1.2 KB of flash a node image doesn't need). `set_keyed_join(false)` keeps the
+  responder but refuses every keyed join before any CCM work: the gateway calls it from its
+  `keyed-join` setting (on by default, since the exchange is mutually authenticated). Every
+  refusal is logged on the `net` target, rate-limited to one line per 10 s with a count:
+  `keyed join from XXXXXXXX refused: <reason> (N refusal(s) since last report)`, the reason
+  being one of switched off, not Duty mode, not a registered node, does not open under its
+  registered key, malformed, stale counter, TX locked, duty-cycle limited (a failed response
+  TX is logged as `keyed join from XXXXXXXX: response TX failed`).
 - The request goes to `dest = 0`, so a device that is not a key holder drops it: an
   unregistered `src` is refused before CCM, and a frame under another key fails CCM.
 - In a P2P mesh any peer holding the joiner's key answers; the joiner then talks to that
   peer. In a star the joiner's only key holder is its gateway.
 
 ```rust
-// host: the key was installed up front (NodeAdd); recv() answers the join inline
+// host: answer keyed joins; the key was installed up front (NodeAdd); recv() answers inline
+net.set_keyed_join(true);
 let _ = net.add_peer(node_addr, &node_key);
 if let Some(node) = net.take_keyed_join() { /* log */ }
 // joiner: same key, own address; returns the host's address

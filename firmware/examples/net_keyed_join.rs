@@ -76,7 +76,9 @@ async fn run(b: Board) {
 
     #[cfg(not(feature = "role-node"))]
     {
-        // The NodeAdd equivalent: the node's address and key are known up front.
+        // Host keyed joins (recv answers them from now on), then the NodeAdd equivalent: the
+        // node's address and key are known up front.
+        net.set_keyed_join(true);
         if !net.add_peer(NODE_ADDR, &NODE_KEY) {
             error!(target: "kjoin", "peer table full");
             return;

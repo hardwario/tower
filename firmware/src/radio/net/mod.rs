@@ -278,7 +278,11 @@ pub struct Net {
     replay_log: LogLimit,
     /// The peer whose keyed join (E4) [`recv`](Self::recv) answered last, until taken.
     keyed_join: Option<u32>,
-    /// Whether [`recv`](Self::recv) answers keyed joins ([`set_keyed_join`](Self::set_keyed_join)).
+    /// The keyed-join responder [`recv`](Self::recv) calls for a keyed JOIN_REQ: `None` until
+    /// [`set_keyed_join`](Self::set_keyed_join) installs it. A function pointer, not code inlined
+    /// into `recv`, so an image that never calls `set_keyed_join` (every node) does not link it.
+    keyed_responder: Option<pairing::KeyedResponder>,
+    /// The operator's switch for an installed responder ([`set_keyed_join`](Self::set_keyed_join)).
     keyed_join_enabled: bool,
     /// Keyed-join refusal warning rate limit.
     keyed_log: LogLimit,
@@ -354,7 +358,8 @@ impl Net {
             last_ack: None,
             replay_log: LogLimit::new(),
             keyed_join: None,
-            keyed_join_enabled: true,
+            keyed_responder: None,
+            keyed_join_enabled: false,
             keyed_log: LogLimit::new(),
         })
     }
@@ -539,12 +544,17 @@ impl Net {
         self.keyed_join.take()
     }
 
-    /// Answer keyed joins (E4, docs/radio.md) inside [`recv`](Self::recv) (`true`, the default)
-    /// or refuse them (`false`: the request is dropped before any CCM work and the refusal is
-    /// logged, rate-limited). The keyed join is mutually authenticated under the node's own
-    /// key, so it is on by default; the gateway exposes this as its `keyed-join` setting, the
-    /// operator's switch for a deployment that only admits nodes through its own procedure.
+    /// Act as a keyed-join host (E4, docs/radio.md): answer keyed joins of registered peers
+    /// inside [`recv`](Self::recv) (`true`) or refuse them (`false`: the request is dropped
+    /// before any CCM work and the refusal is logged, rate-limited). The gateway calls it at boot
+    /// and whenever its `keyed-join` setting (default on: the exchange is mutually authenticated
+    /// under the node's own key) is re-read; that setting is the operator's switch for a
+    /// deployment that only admits nodes through its own procedure.
+    ///
+    /// Until the first call, `recv` ignores keyed JOIN_REQs silently, and an image that never
+    /// calls this links none of the responder (~1.2 KB of flash a node image doesn't need).
     pub fn set_keyed_join(&mut self, enabled: bool) {
+        self.keyed_responder = Some(Self::prepare_keyed_answer);
         self.keyed_join_enabled = enabled;
     }
 
@@ -734,20 +744,18 @@ impl Net {
         // peer's key: a registered peer uses its own key, others the default.
         let (peek, _) = frame::Header::parse(&buf[..len]).ok()?;
         if peek.frame_type == FrameType::JoinReq && peek.flags & flags::KEYED != 0 && peek.dest == 0 {
-            // A keyed join (E4) from a registered peer: answered inline, like an ACK, and
-            // never surfaced as an uplink (pairing.rs).
-            match self.answer_keyed_join(&mut buf[..len]).await {
-                Ok(peer) => self.keyed_join = Some(peer),
-                Err(why) => {
-                    if let Some(n) = self.keyed_log.hit() {
-                        log::warn!(
-                            target: "net",
-                            "keyed join from {:08X} refused: {} ({} refusal(s) since last report)",
-                            peek.src,
-                            why,
-                            n
-                        );
-                    }
+            // A keyed join (E4) from a registered peer: answered inline, like an ACK, and never
+            // surfaced as an uplink (pairing.rs). The responder checks, advances the lane,
+            // allocates the counter and seals the answer synchronously (logging any refusal);
+            // only the sealed bytes cross the turnaround and TX awaits.
+            if let Some(prepare) = self.keyed_responder
+                && let Some(answer) = prepare(self, &mut buf[..len])
+            {
+                Timer::after(ACK_TURNAROUND).await;
+                if self.radio.tx(answer.frame(), false, TX_TIMEOUT).await.is_ok() {
+                    self.keyed_join = Some(answer.peer);
+                } else if let Some(n) = self.keyed_log.hit() {
+                    log::warn!(target: "net", "keyed join from {:08X}: response TX failed ({} event(s))", answer.peer, n);
                 }
             }
             return None;
