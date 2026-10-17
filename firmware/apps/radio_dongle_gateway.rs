@@ -87,6 +87,7 @@ impl BucketIo for EepromBuckets {
 const SET_STATS_PERIOD: u8 = 0x10;
 const SET_BAND: u8 = 0x11;
 const SET_CHANNEL: u8 = 0x12;
+const SET_KEYED_JOIN: u8 = 0x13;
 
 static GW_SETTINGS: &[shell::Setting] = &[
     shell::Setting {
@@ -106,6 +107,16 @@ static GW_SETTINGS: &[shell::Setting] = &[
         name: "channel",
         kind: shell::Kind::Uint { min: 0, max: 2 },
         default: "0",
+    },
+    // Answer keyed joins (E4) from registered nodes. On by default: the exchange is mutually
+    // authenticated under the node's own key and puts nothing secret on air. Off = the
+    // operator's switch for a deployment that admits nodes only through its own procedure;
+    // refusals are logged (`net` target, rate-limited). Re-read every `POLICY_REFRESH`.
+    shell::Setting {
+        key: SET_KEYED_JOIN,
+        name: "keyed-join",
+        kind: shell::Kind::Bool,
+        default: "on",
     },
 ];
 
@@ -150,6 +161,10 @@ const DOWNLINK_TURNAROUND: Duration = Duration::from_millis(20);
 const DOWNLINK_REPS: u8 = 2;
 /// Default downlink TTL when the host passes `ttl == 0`.
 const DEFAULT_TTL_S: u16 = 3600;
+/// How often the main loop re-reads the `keyed-join` setting, so `/system settings set
+/// keyed-join=off` takes effect without a reboot. Not every iteration: a KV lookup scans (and
+/// CRC-checks) the active EEPROM half, a few ms of CPU on this part.
+const POLICY_REFRESH: Duration = Duration::from_secs(2);
 
 static CH: LedChannel = LedChannel::new();
 /// Slow "gateway alive" heartbeat on the on-board LED.
@@ -320,6 +335,14 @@ fn read_u32_setting(kv: Nv, local: u8, default: u32) -> u32 {
     }
 }
 
+fn read_bool_setting(kv: Nv, local: u8, default: bool) -> bool {
+    let mut b = [0u8; 1];
+    match kv.scope(NS_SHELL).get_bytes(local, &mut b) {
+        Ok(Some(1)) => b[0] != 0,
+        _ => default,
+    }
+}
+
 fn read_band_setting(kv: Nv) -> Band {
     let mut b = [0u8; 8];
     match kv.scope(NS_SHELL).get_bytes(SET_BAND, &mut b) {
@@ -407,6 +430,7 @@ async fn run(b: Board) {
     // removed) is dropped on its clear header: no CCM, no ACK, no uplink to the host, no
     // default-lane EEPROM writes. See `default_lane_key` for why this is not optional.
     net.set_default_lane(false);
+    net.set_keyed_join(read_bool_setting(kv, SET_KEYED_JOIN, true));
 
     // Install every registered node into the peer table, bucket-at-a-time. CAPACITY ==
     // MAX_PEERS is pinned above, so a refusal here is a real invariant break: a node
@@ -438,11 +462,16 @@ async fn run(b: Board) {
     let mut stats = Stats::new();
     let mut pairing: Option<PairingSession> = None;
     let mut last_stat = Instant::now();
+    let mut last_policy = Instant::now();
 
     loop {
         // 0. Liveness check-in (see the watchdog arming above): every await in this loop
         //    is bounded, so a stale check-in means parked-forever, and the IWDG resets us.
         watchdog::checkin();
+        if last_policy.elapsed() >= POLICY_REFRESH {
+            last_policy = Instant::now();
+            net.set_keyed_join(read_bool_setting(kv, SET_KEYED_JOIN, true));
+        }
 
         // 1. Serve management requests (host → gateway), but at most two per loop
         //    iteration, so a host polling faster than the response-transmit time can't

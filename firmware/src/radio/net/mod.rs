@@ -68,8 +68,42 @@ pub(crate) const TX_TIMEOUT: Duration = Duration::from_millis(120);
 pub const DEFAULT_REPS: u8 = 3;
 /// Max inter-rep backoff (ms), randomised to de-sync collided senders.
 const MAX_BACKOFF_MS: u32 = 100;
-/// Minimum spacing (s) between replay-drop warnings (a replay storm must not flood the console).
-const REPLAY_LOG_INTERVAL_S: u32 = 10;
+/// Minimum spacing (s) between two rate-limited net-layer warnings of one class (replay drops,
+/// keyed-join refusals): a replay or request storm must not flood the console.
+const NET_LOG_INTERVAL_S: u32 = 10;
+
+/// Rate limit for one class of net-layer warning: at most one line per [`NET_LOG_INTERVAL_S`],
+/// counting the events in between so the line that does go out says how many it stands for.
+#[derive(Clone, Copy)]
+struct LogLimit {
+    /// Uptime (s) of the last line; `u32::MAX` = never.
+    last_s: u32,
+    /// Events since the last line.
+    count: u16,
+}
+
+impl LogLimit {
+    const fn new() -> Self {
+        Self {
+            last_s: u32::MAX,
+            count: 0,
+        }
+    }
+
+    /// Count one event. `Some(n)` = log it now, `n` = events since the previous line (this one
+    /// included); `None` = suppressed.
+    fn hit(&mut self) -> Option<u16> {
+        self.count = self.count.saturating_add(1);
+        let now = Instant::now().as_secs() as u32;
+        if self.last_s != u32::MAX && now.wrapping_sub(self.last_s) < NET_LOG_INTERVAL_S {
+            return None;
+        }
+        let n = self.count;
+        self.last_s = now;
+        self.count = 0;
+        Some(n)
+    }
+}
 
 // The TX-counter reserve block (`RESERVE` = 1024) and the receiver lazy-persist period
 // (`P` = 32) live with their kernels in `tower_net` (`txctr::RESERVE`, `replay::P`).
@@ -239,12 +273,14 @@ pub struct Net {
     /// (receiver-side RSSI + the pending-downlink flag). Cleared at the start of each
     /// send; `None` after an unconfirmed or failed one.
     last_ack: Option<AckMeta>,
-    /// Replay-drop warning rate limit: uptime (s) of the last warning (`u32::MAX` = never) and
-    /// the drops counted since.
-    replay_log_s: u32,
-    replay_drops: u16,
+    /// Replay-drop warning rate limit.
+    replay_log: LogLimit,
     /// The peer whose keyed join (E4) [`recv`](Self::recv) answered last, until taken.
     keyed_join: Option<u32>,
+    /// Whether [`recv`](Self::recv) answers keyed joins ([`set_keyed_join`](Self::set_keyed_join)).
+    keyed_join_enabled: bool,
+    /// Keyed-join refusal warning rate limit.
+    keyed_log: LogLimit,
 }
 
 impl Net {
@@ -315,9 +351,10 @@ impl Net {
             afa: afa::Afa::disabled(),
             fhss: fhss::Fhss::disabled(),
             last_ack: None,
-            replay_log_s: u32::MAX,
-            replay_drops: 0,
+            replay_log: LogLimit::new(),
             keyed_join: None,
+            keyed_join_enabled: true,
+            keyed_log: LogLimit::new(),
         })
     }
 
@@ -500,6 +537,15 @@ impl Net {
     /// inline and never returns them as an uplink.
     pub fn take_keyed_join(&mut self) -> Option<u32> {
         self.keyed_join.take()
+    }
+
+    /// Answer keyed joins (E4, docs/radio.md) inside [`recv`](Self::recv) (`true`, the default)
+    /// or refuse them (`false`: the request is dropped before any CCM work and the refusal is
+    /// logged, rate-limited). The keyed join is mutually authenticated under the node's own
+    /// key, so it is on by default; the gateway exposes this as its `keyed-join` setting, the
+    /// operator's switch for a deployment that only admits nodes through its own procedure.
+    pub fn set_keyed_join(&mut self, enabled: bool) {
+        self.keyed_join_enabled = enabled;
     }
 
     /// Last-seen counter for a registered peer (`None` if not registered).
@@ -690,8 +736,19 @@ impl Net {
         if peek.frame_type == FrameType::JoinReq && peek.flags & flags::KEYED != 0 && peek.dest == 0 {
             // A keyed join (E4) from a registered peer: answered inline, like an ACK, and
             // never surfaced as an uplink (pairing.rs).
-            if let Some(peer) = self.answer_keyed_join(&mut buf[..len]).await {
-                self.keyed_join = Some(peer);
+            match self.answer_keyed_join(&mut buf[..len]).await {
+                Ok(peer) => self.keyed_join = Some(peer),
+                Err(why) => {
+                    if let Some(n) = self.keyed_log.hit() {
+                        log::warn!(
+                            target: "net",
+                            "keyed join from {:08X} refused: {} ({} refusal(s) since last report)",
+                            peek.src,
+                            why,
+                            n
+                        );
+                    }
+                }
             }
             return None;
         }
@@ -785,21 +842,17 @@ impl Net {
 
     /// Rate-limited warning for a replay dropped from a registered peer.
     fn note_replay(&mut self, src: u32, counter: u32) {
-        self.replay_drops = self.replay_drops.saturating_add(1);
-        let now = Instant::now().as_secs() as u32;
-        if self.replay_log_s != u32::MAX && now.wrapping_sub(self.replay_log_s) < REPLAY_LOG_INTERVAL_S {
+        let Some(n) = self.replay_log.hit() else {
             return;
-        }
+        };
         log::warn!(
             target: "net",
             "replay dropped: {:08X} counter {} <= last-seen {} ({} drop(s) since last report)",
             src,
             counter,
             self.lane(src).last_seen(),
-            self.replay_drops
+            n
         );
-        self.replay_log_s = now;
-        self.replay_drops = 0;
     }
 
     /// Retune to a different `band`/`channel` at runtime (both ends must agree).

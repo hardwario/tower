@@ -76,6 +76,51 @@ pub enum JoinError {
     BadAddr,
 }
 
+/// Why the host did not answer a keyed JOIN_REQ ([`Net::answer_keyed_join`]); logged by
+/// [`Net::recv`], rate-limited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KeyedRefusal {
+    /// Switched off ([`Net::set_keyed_join`], the gateway's `keyed-join` setting).
+    Off,
+    /// LBT+AFA or FHSS mode (see [`JoinError::WrongMode`]).
+    WrongMode,
+    /// The src is not a registered peer (no per-node key to authenticate it with).
+    Unregistered,
+    /// The frame does not open under the src's registered key (a key mismatch, or a forgery).
+    AuthFail,
+    /// Opened, but the payload is not the src's own address.
+    Malformed,
+    /// The request counter is not fresh on the src's replay lane: a replayed request, or a node
+    /// that restarted its counter under an unchanged key (re-add it under a new key).
+    Stale { counter: u32, last_seen: u32 },
+    /// TX is locked (fail closed, nonce safety).
+    NonceLocked,
+    /// The EU duty budget refused the response.
+    DutyLimited,
+    /// The radio failed to transmit the response.
+    TxFailed,
+}
+
+impl core::fmt::Display for KeyedRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            KeyedRefusal::Off => f.write_str("keyed joins are switched off"),
+            KeyedRefusal::WrongMode => f.write_str("radio not in Duty mode"),
+            KeyedRefusal::Unregistered => f.write_str("not a registered node"),
+            KeyedRefusal::AuthFail => f.write_str("does not open under its registered key"),
+            KeyedRefusal::Malformed => f.write_str("malformed request"),
+            KeyedRefusal::Stale { counter, last_seen } => write!(
+                f,
+                "stale counter {counter} <= last-seen {last_seen} (replayed, or a counter restart \
+                 under an unchanged key)"
+            ),
+            KeyedRefusal::NonceLocked => f.write_str("TX locked (nonce safety)"),
+            KeyedRefusal::DutyLimited => f.write_str("duty-cycle limited"),
+            KeyedRefusal::TxFailed => f.write_str("response TX failed"),
+        }
+    }
+}
+
 impl core::fmt::Display for JoinError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
@@ -318,11 +363,12 @@ impl Net {
         Err(JoinError::Timeout)
     }
 
-    /// Host, keyed (E4): answer a KEYED JOIN_REQ (`frame` = the whole received frame, dest 0)
+    /// Host, keyed (E4): answer a KEYED JOIN_REQ (`rx` = the whole received frame, dest 0)
     /// from a peer registered with `add_peer`. Opens it under that peer's key, admits it only
     /// when the counter is fresh on the peer's replay lane (and advances the lane), then sends
     /// the KEYED JOIN_RESP echoing the request's counter after `ACK_TURNAROUND`. Returns the
-    /// joiner's address when a response went out. Called from [`Net::recv`]; nothing else
+    /// joiner's address when a response went out, else why not ([`Net::recv`] logs it,
+    /// rate-limited). Called from [`Net::recv`]; nothing else
     /// changes: the peer, its key and its lane were already installed.
     ///
     /// The response follows `send_ack`'s discipline: duty gate, then the counter from
@@ -331,34 +377,44 @@ impl Net {
     /// unconsumed.
     ///
     /// Duty mode only (see [`JoinError::WrongMode`]): in LBT+AFA or FHSS mode the request is
-    /// dropped unanswered (`fhss_master_tick` and `afa_serve` receive through `recv`).
-    pub(super) async fn answer_keyed_join(&mut self, frame: &mut [u8]) -> Option<u32> {
+    /// dropped unanswered (`fhss_master_tick` and `afa_serve` receive through `recv`). Refused
+    /// up front, before any CCM work, when switched off ([`Net::set_keyed_join`]).
+    pub(super) async fn answer_keyed_join(&mut self, rx: &mut [u8]) -> Result<u32, KeyedRefusal> {
+        if !self.keyed_join_enabled {
+            return Err(KeyedRefusal::Off); // the operator's switch: no CCM work at all
+        }
         if self.access != Access::Duty {
-            return None;
+            return Err(KeyedRefusal::WrongMode);
         }
         if self.txc.locked() {
-            return None; // fail closed (nonce safety): the JOIN_RESP consumes a TX counter
+            return Err(KeyedRefusal::NonceLocked); // the JOIN_RESP would consume a TX counter
         }
-        let (peek, _) = frame::Header::parse(frame).ok()?;
+        let (peek, _) = frame::Header::parse(rx).map_err(|_| KeyedRefusal::Malformed)?;
         let registered = self.peer_slot(peek.src).is_some();
         if !registered {
-            return None; // never the default key: the per-node key is the authorization
+            // Never the default key: the per-node key is the authorization.
+            return Err(KeyedRefusal::Unregistered);
         }
         let key = self.key_for(peek.src);
-        let (hdr, range) = frame::open_frame(&mut self.ccm, &key, frame).ok()?;
-        if !keyed_req_valid(&frame[range], hdr.src)
-            || !keyed_req_admit(registered, self.lane(hdr.src).classify(hdr.counter))
-        {
-            return None;
+        let (hdr, range) = frame::open_frame(&mut self.ccm, &key, rx).map_err(|_| KeyedRefusal::AuthFail)?;
+        if !keyed_req_valid(&rx[range], hdr.src) {
+            return Err(KeyedRefusal::Malformed);
+        }
+        let lane = self.lane(hdr.src);
+        if !keyed_req_admit(registered, lane.classify(hdr.counter)) {
+            return Err(KeyedRefusal::Stale {
+                counter: hdr.counter,
+                last_seen: lane.last_seen(),
+            });
         }
         self.lane_accept(hdr.src, hdr.counter);
 
         // Fixed length (header + 4 B echo + tag): gate on the duty budget before the counter,
         // so a refused response burns no counter (the joiner simply retries).
         if !self.duty.try_tx(duty::frame_toa_ms(frame::HDR_LEN + 4 + TAG_LEN)) {
-            return None;
+            return Err(KeyedRefusal::DutyLimited);
         }
-        let counter = self.alloc_counter()?; // None = TX locked: fail closed
+        let counter = self.alloc_counter().ok_or(KeyedRefusal::NonceLocked)?; // fail closed
         let resp_hdr = Header {
             frame_type: FrameType::JoinResp,
             flags: flags::KEYED,
@@ -375,10 +431,12 @@ impl Net {
             &hdr.counter.to_le_bytes(),
             &mut resp,
         )
-        .ok()?;
+        .map_err(|_| KeyedRefusal::Malformed)?; // unreachable: a 4 B payload always fits
         Timer::after(ACK_TURNAROUND).await;
-        let sent = self.radio.tx(&resp[..n], false, TX_TIMEOUT).await.is_ok();
-        sent.then_some(hdr.src)
+        match self.radio.tx(&resp[..n], false, TX_TIMEOUT).await {
+            Ok(()) => Ok(hdr.src),
+            Err(_) => Err(KeyedRefusal::TxFailed),
+        }
     }
 
     /// Seal `hdr`+`payload` under `key` (the pairing key, or a per-node key for the keyed
