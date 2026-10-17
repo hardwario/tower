@@ -1,9 +1,9 @@
-# tower-boot: working notes for coding agents
+# tower-flasher: working notes for coding agents
 
 Library that drives the STM32 ROM UART bootloader (AN3155) of STM32L0 parts (the TOWER Core
 Module / Radio Dongle's STM32L083CZ): flash / erase / verify, read-only chip info, the opt-in
 readout protection (RDP level 1) of production units, and the NRST/BOOT0 reset pulses.
-`crates/boot` in the hardwario/tower monorepo (read the root `AGENTS.md` first). Modules
+`crates/flasher` in the hardwario/tower monorepo (read the root `AGENTS.md` first). Modules
 (`src/lib.rs`): `bootloader` (the AN3155 protocol engine), `chip` (`chip::info`, read-only
 `ChipInfo` incl. `readout_protected`), `error`, `firmware` (raw image load + validation), `flash`
 (connect / flash / erase orchestration), `port` (the serial port + reset pulses), `rdp`
@@ -12,13 +12,12 @@ AN3155 / AN2606 facts with citations), `target` (STM32L0 constants). User-facing
 `README.md`.
 
 Its front end is the `tower` CLI (`tower flash` / `erase` / `reset` / `chip` / `protect` /
-`unprotect` / `devices`). It was the standalone `jolt` flasher before the monorepo; the `jolt-v*`
-tags are its history.
+`unprotect` / `devices`).
 
 ## Consumers
 
 `tower-cli` (`cli/`) and `tower-hil` (`hil/`) depend on it **by path** through the root workspace
-(`tower-boot.workspace = true`). It is an internal crate: no releases, no tags of its own, and an
+(`tower-flasher.workspace = true`). It is an internal crate: no releases, no tags of its own, and an
 API change is made together with its callers in the same commit (the build fails until they
 are updated).
 
@@ -67,8 +66,8 @@ From the repo root (`just check` runs every gate):
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy -p tower-boot --all-targets -- -D warnings
-cargo test -p tower-boot
+cargo clippy -p tower-flasher --all-targets -- -D warnings
+cargo test -p tower-flasher
 ```
 
 The tests need no hardware (a scripted fake port drives `flash`, `erase`, `chip::info`,

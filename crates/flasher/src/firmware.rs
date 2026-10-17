@@ -178,7 +178,7 @@ mod tests {
     fn temp_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let mut dir = std::env::temp_dir();
         // Make the name unique per-process/per-test to avoid collisions.
-        let unique = format!("tower-boot-test-{}-{}", std::process::id(), name);
+        let unique = format!("tower-flasher-test-{}-{}", std::process::id(), name);
         dir.push(unique);
         let mut f = std::fs::File::create(&dir).unwrap();
         f.write_all(bytes).unwrap();
@@ -261,7 +261,7 @@ mod tests {
     fn missing_path_error_mentions_the_path() {
         let mut dir = std::env::temp_dir();
         dir.push(format!(
-            "tower-boot-test-{}-does-not-exist.bin",
+            "tower-flasher-test-{}-does-not-exist.bin",
             std::process::id()
         ));
         let err = load(&dir).unwrap_err();

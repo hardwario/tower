@@ -20,7 +20,7 @@ loaded over the wire (`tower flash`, or SWD); there is no over-the-air update pa
 | [`crates/radio`](crates/radio) | `tower-radio` | Radio timing / CCM / compliance logic the SDK builds on (duty cycle, time-on-air, FHSS hops); not the SPIRIT1 driver. |
 | [`crates/gateway`](crates/gateway) | `tower-gateway` | Decision core of the Radio Dongle gateway firmware (node registry, downlink queue); not the `tower gateway` command. |
 | [`crates/shell`](crates/shell) | `tower-shell` | Pure kernels behind the device shell (address parsing, pagination, TAB completion). |
-| [`crates/boot`](crates/boot) | `tower-boot` | STM32 ROM UART-bootloader control: flash / erase / verify, chip info, NRST/BOOT0 reset pulses. Formerly the `jolt` flasher. |
+| [`crates/flasher`](crates/flasher) | `tower-flasher` | The flasher, around the STM32 ROM UART bootloader: flash / erase / verify, chip info, readout protection, NRST/BOOT0 reset pulses. |
 | [`firmware/`](firmware) | `tower-sdk` (lib `tower`) | Embassy firmware SDK, `examples/` and the TOWER IoT Kit product `apps/`. Its own Cargo workspace for `thumbv6m-none-eabi`. |
 | [`cli/`](cli) | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip, `tower gateway` (radio to MQTT), `tower nodes`, `tower net`. |
 | [`hil/`](hil) | `tower-hil` | HIL bench harness: builds images from `firmware/`, flashes real boards, decodes the console natively, measures power (PPK2). |

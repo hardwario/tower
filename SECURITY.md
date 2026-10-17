@@ -41,7 +41,7 @@ Of particular interest, by component:
   archives carry signed build-provenance attestations
   (`gh attestation verify <archive> --repo hardwario/tower`); a missing or failing attestation on
   an official archive is itself worth reporting.
-- **`crates/boot`**: handling of malformed bootloader responses or firmware images, and anything
+- **`crates/flasher`**: handling of malformed bootloader responses or firmware images, and anything
   that could write outside the intended flash range (main flash only). Readout protection is
   opt-in: level 1 is set or cleared only through the explicit `tower protect` / `tower unprotect`
   commands; the tooling never writes option bytes directly and has no path to the permanent

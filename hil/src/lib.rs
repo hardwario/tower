@@ -508,7 +508,7 @@ pub struct Console {
 impl Console {
     /// Open `path` at the console baud with a short read timeout (so reads poll rather than block
     /// forever), then drive the modem lines to the RUN baseline (RTS + DTR asserted). The bridge's
-    /// RTS/DTR drive NRST/BOOT0 through the board's transistor pair (the tower-boot / tower-cli wiring:
+    /// RTS/DTR drive NRST/BOOT0 through the board's transistor pair (the tower-flasher / tower-cli wiring:
     /// only RTS-asserted + DTR-released holds RESET); the OS asserts both on open anyway, and
     /// re-driving them explicitly (like tower-cli's `open_console`) guarantees merely attaching
     /// can't leave the MCU held in reset, and does not perturb a running app.
@@ -518,18 +518,18 @@ impl Console {
             .timeout(Duration::from_millis(50))
             .open_native()
             .map_err(|e| format!("HIL: open console {path}: {e}"))?;
-        // serialport-rs opens TTYs with TIOCEXCL by default, which makes tower-boot's re-open of
+        // serialport-rs opens TTYs with TIOCEXCL by default, which makes tower-flasher's re-open of
         // the same tty (reset_into_app's NRST pulse, while the console stays attached to catch the
-        // boot burst) fail with EBUSY. Clear it: tower-boot only toggles modem lines, it never reads,
+        // boot burst) fail with EBUSY. Clear it: tower-flasher only toggles modem lines, it never reads,
         // so sharing the tty with the console reader is safe.
         #[cfg(unix)]
         port.set_exclusive(false)
             .map_err(|e| format!("HIL: clear TIOCEXCL on {path}: {e}"))?;
-        // Run baseline (RTS=T, DTR=T), with tower-boot's tuned settle.
+        // Run baseline (RTS=T, DTR=T), with tower-flasher's tuned settle.
         serialport::SerialPort::write_request_to_send(&mut port, true)
             .and_then(|()| serialport::SerialPort::write_data_terminal_ready(&mut port, true))
             .map_err(|e| format!("HIL: drive run-state lines on {path}: {e}"))?;
-        std::thread::sleep(tower_boot::port::RUN_SETTLE);
+        std::thread::sleep(tower_flasher::port::RUN_SETTLE);
         Ok(Self {
             port: Some(Box::new(port)),
             decoder: FrameDecoder::new(),
@@ -650,9 +650,9 @@ impl Console {
     /// open fails on serialport 4.9, which flocks the tty on every open). The reset only toggles
     /// modem lines, so the console's 115200 8N1 frame format is untouched.
     ///
-    /// Line sequence + timings are tower-boot's `Port::reset_into_app` exactly (RTS=T/DTR=F asserts
+    /// Line sequence + timings are tower-flasher's `Port::reset_into_app` exactly (RTS=T/DTR=F asserts
     /// RESET with BOOT0 low for `RESET_PULSE`, RTS=F releases, `APP_BOOT` settle; the 1 µF NRST
-    /// cap makes the ordering load-bearing), plus the one thing tower-boot has no hook for: the
+    /// cap makes the ordering load-bearing), plus the one thing tower-flasher has no hook for: the
     /// input buffer is cleared WHILE the chip is held in reset (as tower-cli's
     /// `pulse_reset_into_app` does). Clearing after release would race the boot bytes
     /// we want; not clearing lets pre-reset frames (the gateway's 1 Hz RadioStat, a post-flash
@@ -838,15 +838,15 @@ impl Console {
     }
 }
 
-/// The NRST pulse of [`Console::reset_into_app`] on a borrowed handle: tower-boot's line order and
+/// The NRST pulse of [`Console::reset_into_app`] on a borrowed handle: tower-flasher's line order and
 /// timings, with the input buffer cleared while RESET is held. On a line-write failure the run
-/// state (RTS=T, DTR=T) is restored best-effort, as tower-boot does, so the board isn't left in
+/// state (RTS=T, DTR=T) is restored best-effort, as tower-flasher does, so the board isn't left in
 /// reset.
 fn pulse_reset_clearing_input(sp: &mut dyn serialport::SerialPort) -> Result<(), String> {
     let mut pulse = || -> serialport::Result<()> {
         sp.write_request_to_send(true)?;
         sp.write_data_terminal_ready(false)?; // RESET asserted, BOOT0 low
-        std::thread::sleep(tower_boot::port::RESET_PULSE);
+        std::thread::sleep(tower_flasher::port::RESET_PULSE);
         sp.clear(serialport::ClearBuffer::Input)?; // drop pre-reset bytes while held in reset
         sp.write_request_to_send(false) // RESET released -> boot main flash
     };
@@ -855,7 +855,7 @@ fn pulse_reset_clearing_input(sp: &mut dyn serialport::SerialPort) -> Result<(),
         let _ = sp.write_data_terminal_ready(true);
         return Err(format!("HIL: reset-into-app: {e}"));
     }
-    std::thread::sleep(tower_boot::port::APP_BOOT);
+    std::thread::sleep(tower_flasher::port::APP_BOOT);
     Ok(())
 }
 
@@ -965,17 +965,17 @@ pub fn frame_text(f: &Frame) -> Option<&str> {
 }
 
 // ---------------------------------------------------------------------------
-// Reset over the FTDI modem lines (tower-boot): RTS drives NRST, DTR drives BOOT0
+// Reset over the FTDI modem lines (tower-flasher): RTS drives NRST, DTR drives BOOT0
 // ---------------------------------------------------------------------------
 
-/// Pulse NRST so the board reboots into its application, using tower-boot's tuned reset sequence
-/// (the 1 µF NRST cap makes the line ordering load-bearing; we reuse tower-boot's, not a
+/// Pulse NRST so the board reboots into its application, using tower-flasher's tuned reset sequence
+/// (the 1 µF NRST cap makes the line ordering load-bearing; we reuse tower-flasher's, not a
 /// hand-rolled one).
 /// For a port with NO console attached (it opens the tty itself); with a [`Console`] open on the
 /// port use [`Console::reset_into_app`] instead.
 pub fn reset_into_app(path: &str) -> Result<(), String> {
     let mut port =
-        tower_boot::port::Port::open(path).map_err(|e| format!("HIL: tower-boot open {path}: {e}"))?;
+        tower_flasher::port::Port::open(path).map_err(|e| format!("HIL: tower-flasher open {path}: {e}"))?;
     port.reset_into_app()
         .map_err(|e| format!("HIL: reset-into-app {path}: {e}"))
 }

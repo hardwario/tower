@@ -3,7 +3,7 @@
 The `tower` host CLI (`cli/` in the hardwario/tower monorepo; read the root `AGENTS.md` first):
 decodes the framed serial link from the TOWER firmware (logs / events / shell / TUI) and
 flashes/erases/resets/identifies the chip over the UART bootloader (`tower flash` / `erase` /
-`reset` / `chip`, via the `tower-boot` library in `crates/boot`, formerly `jolt`), and sets or
+`reset` / `chip`, via the `tower-flasher` library in `crates/flasher`), and sets or
 clears the opt-in production readout protection (`tower protect` / `unprotect`: RDP level 1
 only, both confirmed interactively or by `--yes`; `unprotect` mass-erases flash + data EEPROM).
 It is also the gateway/MQTT host: `tower gateway` bridges a Radio Dongle's network to MQTT
@@ -17,9 +17,9 @@ unless `--broker-allow-plaintext`); change it together with its test matrix, `RE
 
 ## Shared crates (path dependencies)
 
-`tower-protocol` (`crates/protocol`, the wire format) and `tower-boot` (`crates/boot`, the
+`tower-protocol` (`crates/protocol`, the wire format) and `tower-flasher` (`crates/flasher`, the
 bootloader engine) come from the root workspace (`tower-protocol.workspace = true`,
-`tower-boot.workspace = true`). The firmware and the HIL harness build the same
+`tower-flasher.workspace = true`). The firmware and the HIL harness build the same
 `crates/protocol` source, so the wire format cannot drift at build time; there is no tag to
 bump and nothing to keep in step by hand. A protocol change is made together with its callers
 here in the same commit (see `crates/protocol/AGENTS.md`, "Changing the wire").

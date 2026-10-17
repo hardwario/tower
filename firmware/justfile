@@ -13,7 +13,7 @@
 # Pass cargo features:        TOWER_FEATURES=role-gateway just flash example net_confirmed
 #
 # Flashing + console use the `tower` CLI (../cli): it programs the STM32L0 over the UART
-# bootloader (the tower-boot engine, ../crates/boot) AND decodes the firmware's framed console
+# bootloader (the tower-flasher engine, ../crates/flasher) AND decodes the firmware's framed console
 # (`tower logs`, not a raw serial terminal). Install it on your PATH (`cargo install --locked
 # --path cli` from the repo root, or grab a `cli-v*` release binary).
 # Device control on its own (logs, console, reset, erase, devices) is `tower`'s job. Call the

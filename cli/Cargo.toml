@@ -24,7 +24,7 @@ serialport.workspace = true
 rustyline = "19"
 ratatui = "0.30"
 anyhow = "1"
-# Flash/erase progress bars (tower-boot is UI-free and reports `Progress` events).
+# Flash/erase progress bars (tower-flasher is UI-free and reports `Progress` events).
 indicatif = "0.18"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # `use-std`: the gateway engine builds owned frames/records with `to_stdvec` (this is
@@ -53,8 +53,8 @@ getrandom = { version = "0.4", features = ["std"] }
 # Single source of truth for the wire format, shared with the firmware and the HIL harness:
 # all three build this one source tree by path (crates/protocol), so they cannot drift.
 tower-protocol.workspace = true
-# STM32 ROM UART-bootloader control (flash / erase / chip info / reset pulses), crates/boot.
-tower-boot.workspace = true
+# STM32 ROM UART-bootloader control (flash / erase / chip info / reset pulses), crates/flasher.
+tower-flasher.workspace = true
 
 [dev-dependencies]
 # Tests build wire frames with the protocol's own message types; `ShellCompletions`/`Event`

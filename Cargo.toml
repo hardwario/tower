@@ -24,7 +24,7 @@ repository = "https://github.com/hardwario/tower"
 [workspace.dependencies]
 # Internal crates, by path (never by tag or registry).
 tower-protocol = { path = "crates/protocol" }
-tower-boot = { path = "crates/boot" }
+tower-flasher = { path = "crates/flasher" }
 
 # Third-party crates shared by several members. Declared no_std-safe (default features off)
 # because the firmware workspace builds the `crates/*` that inherit these for thumbv6m; a host

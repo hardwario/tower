@@ -163,7 +163,7 @@ gateway's own.
   freezes the store until reboot and keeps the wear counter.
 - Fuzzed with power cuts at every write against an independent model (`fuzz/kv_store`).
 
-### 4.6 Physical access (`crates/boot`, `tower protect`)
+### 4.6 Physical access (`crates/flasher`, `tower protect`)
 
 - Without readout protection, the ROM bootloader and SWD can read flash and the data EEPROM,
   i.e. every key on the board.
@@ -248,6 +248,6 @@ gateway's own.
 | Gateway registry and queue | `crates/gateway`, `firmware/apps/radio_dongle_gateway.rs` | `firmware/docs/gateway.md` |
 | Console framing and schema tags | `crates/protocol` | `crates/protocol/README.md` |
 | Storage | `crates/kv`, `firmware/src/storage.rs` | `firmware/docs/storage.md` |
-| Readout protection | `crates/boot/src/rdp.rs`, `cli/` | `crates/boot/README.md`, `cli/README.md` |
+| Readout protection | `crates/flasher/src/rdp.rs`, `cli/` | `crates/flasher/README.md`, `cli/README.md` |
 | MQTT gateway | `cli/src/gateway`, `cli/src/client` | `cli/README.md` |
 | Fuzzing | `fuzz/` | `fuzz/README.md` |

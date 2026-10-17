@@ -44,11 +44,11 @@ USB: the supported setup is a **data-only** FTDI adapter (no VBUS line), which m
 - USART1 on PA9 (TX) / PA10 (RX), 115200 8N1. The link is COBS+CRC framed, so a raw serial
   monitor shows binary; that is expected.
 - NRST and BOOT0 hang off the FTDI's **RTS / DTR** modem lines through the board's transistor
-  pair (tower-boot / tower-cli wiring: RTS→NRST, DTR→BOOT0, a 1 µF cap on NRST makes the line
+  pair (tower-flasher / tower-cli wiring: RTS→NRST, DTR→BOOT0, a 1 µF cap on NRST makes the line
   *order* matter). Only RTS-asserted + DTR-released holds RESET; both asserted (what the OS drives on
   open, and what the harness re-drives explicitly) is the run state, so merely opening the port
   does **not** reset the board. `tower flash` / `tower reset` / `Console::reset_into_app` pulse
-  them with tower-boot's tuned sequence.
+  them with tower-flasher's tuned sequence.
 
 **J-Link ↔ Core (SWD, power group)**
 - Standard 10-pin Cortex debug header: SWDIO, SWCLK, GND, VTref. **nRESET is not wired** on

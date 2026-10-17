@@ -35,7 +35,7 @@ prefixed packages; the Rust crate name is `tower_X`).
 | `crates/radio` | `tower-radio` | Radio timing / CCM / compliance logic (duty token buckets, time-on-air, FHSS hop permutation). Not the SPIRIT1 driver (`tower::radio`). |
 | `crates/gateway` | `tower-gateway` | Decision core of the Radio Dongle gateway firmware (node-registry codec, downlink queue). Not the host `tower gateway` MQTT bridge (that is in `cli`). |
 | `crates/shell` | `tower-shell` | Pure kernels behind the device shell (`addr` parser + PRNG, pagination window, TAB completion). Not the shell itself (`tower::shell`). |
-| `crates/boot` | `tower-boot` | Boot control around the STM32 ROM UART bootloader (AN3155): flash / erase / verify, chip info, NRST/BOOT0 reset pulses. Library only; **formerly the `jolt` flasher** (its binary is gone, its commands live in `tower`). |
+| `crates/flasher` | `tower-flasher` | The flasher, around the STM32 ROM UART bootloader (AN3155): flash / erase / verify, chip info, readout protection, NRST/BOOT0 reset pulses. Library only; its front end is `tower`. |
 | `firmware/` | `tower-sdk` (lib `tower`) | Embassy firmware SDK for the Core Module, `examples/` (demos) and `apps/` (TOWER IoT Kit products). Its **own Cargo workspace** (thumbv6m + flip-link). |
 | `cli/` | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip, the `tower gateway` radio-to-MQTT bridge, `tower nodes` / `tower net`. Version 2.0.0. |
 | `hil/` | `tower-hil` | Hardware-in-the-loop bench harness: builds images from `../firmware`, flashes real boards, decodes the console natively, measures power (PPK2). |
@@ -66,7 +66,7 @@ more), one `LICENSE`, one `SECURITY.md`, one `.github/`.
    │ firmware/ (device)          │   │ cli/  `tower` (host)       │   │ hil/ (bench harness)   │
    │ STM32L083CZ, Embassy        │──▶│ decodes logs/events/shell  │   │ builds ../firmware,    │
    │ framed console over USB UART│◀──│ flash/erase/reset/chip     │   │ flashes, decodes,      │
-   │ uses crates/kv net radio    │   │ (crates/boot), MQTT bridge │   │ measures (PPK2)        │
+   │ uses crates/kv net radio    │   │ (crates/flasher), MQTT bridge │   │ measures (PPK2)        │
    │ gateway shell               │   └────────────────────────────┘   └────────────────────────┘
    └─────────────────────────────┘
 ```
@@ -144,9 +144,9 @@ it. Details: `crates/protocol/AGENTS.md`, "Changing the wire".
   tag matches `cli/Cargo.toml`, the commit is on `main` and CI is green for it, then builds
   cross-platform archives (`tower-cli-vX.Y.Z-<target>`) with checksums and signed
   build-provenance attestations.
-- `tower-protocol`, `tower-boot` and the other `crates/*` are internal path dependencies
+- `tower-protocol`, `tower-flasher` and the other `crates/*` are internal path dependencies
   (`0.0.0`, `publish = false`): no releases, no tags. The `protocol-v*` tags already pushed
-  (the hand-versioned wire releases), the imported `jolt-v*` tags (tower-boot's history) and
+  (the hand-versioned wire releases), the imported `jolt-v*` tags (tower-flasher's history) and
   `cli-v1.0.0` are history; no new `protocol-v*` tags are made.
 
 ---

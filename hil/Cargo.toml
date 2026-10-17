@@ -25,9 +25,9 @@ tower-protocol.workspace = true
 postcard = { workspace = true, features = ["use-std"] }
 # Serial I/O to both boards' FTDI ports.
 serialport.workspace = true
-# tower-boot (crates/boot): its `port::Port` drives the tuned NRST/BOOT0 pulses (reset-into-app /
+# tower-flasher (crates/flasher): its `port::Port` drives the tuned NRST/BOOT0 pulses (reset-into-app /
 # reset-into-bootloader) we use to reset the Core.
-tower-boot.workspace = true
+tower-flasher.workspace = true
 # Parse the hil.toml bench fixture (core/dongle serials, ppk2 supply). Tiny, std-only.
 toml = "1"
 serde = { workspace = true, features = ["std"] }

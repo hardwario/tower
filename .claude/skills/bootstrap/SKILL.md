@@ -58,7 +58,7 @@ for both workspaces, and CI installs exactly that channel. Then:
   entry must be present (`rustfmt`, `clippy`, `llvm-tools`, `thumbv6m-none-eabi`);
   `rustup target add --toolchain <channel> <triple>` /
   `rustup component add --toolchain <channel> <name>` for any that are missing.
-- Linux only: `serialport` (tower-boot, cli, hil) needs the `libudev` dev headers; if a build
+- Linux only: `serialport` (tower-flasher, cli, hil) needs the `libudev` dev headers; if a build
   fails there, the hint is `libudev-dev` + `pkg-config`. The CLI also builds OpenSSL from source
   (`openssl/vendored`, its MQTT TLS stack on Linux): that needs `perl`, `make` and a C compiler.
 

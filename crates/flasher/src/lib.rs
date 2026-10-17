@@ -1,17 +1,16 @@
-//! tower-boot: boot control for HARDWARIO TOWER boards around the STM32 ROM UART
-//! bootloader (AN3155): flash / erase / verify, chip info, and the NRST/BOOT0
-//! reset pulses.
+//! tower-flasher: the flasher of HARDWARIO TOWER boards, around the STM32 ROM UART
+//! bootloader (AN3155): flash / erase / verify, chip info, the opt-in readout
+//! protection, and the NRST/BOOT0 reset pulses.
 //!
-//! A UI-free library (it was the standalone `jolt` flasher before the monorepo).
-//! The `tower` CLI (`tower flash` / `erase` / `reset` / `chip`) and the HIL
+//! A UI-free library. The `tower` CLI (`tower flash` / `erase` / `reset` / `chip`) and the HIL
 //! harness drive it directly:
 //!
 //! ```no_run
-//! use tower_boot::flash::{self, FlashOptions, Progress};
-//! use tower_boot::port::Port;
+//! use tower_flasher::flash::{self, FlashOptions, Progress};
+//! use tower_flasher::port::Port;
 //!
 //! let mut port = Port::open("/dev/ttyUSB0")?;
-//! let firmware = tower_boot::firmware::load("app.bin".as_ref())?;
+//! let firmware = tower_flasher::firmware::load("app.bin".as_ref())?;
 //! let opts = FlashOptions::default(); // erase + verify + run, no `go`
 //! // The engine is UI-free: it emits `Progress` events through this callback
 //! // instead of printing, so callers render progress however they like.
@@ -21,7 +20,7 @@
 //!     }
 //! })?;
 //! // Or discard progress entirely: `flash::flash(&mut port, &firmware, &opts, &mut flash::no_progress)`.
-//! # Ok::<(), tower_boot::error::Error>(())
+//! # Ok::<(), tower_flasher::error::Error>(())
 //! ```
 //!
 //! The high-level entry points are [`flash::flash`], [`flash::erase`],

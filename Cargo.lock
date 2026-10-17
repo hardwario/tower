@@ -3798,14 +3798,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tower-boot"
-version = "0.0.0"
-dependencies = [
- "serialport",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "tower-cli"
 version = "2.0.0"
 dependencies = [
@@ -3830,9 +3822,17 @@ dependencies = [
  "serde",
  "serde_json",
  "serialport",
- "tower-boot",
+ "tower-flasher",
  "tower-protocol",
  "uuid",
+]
+
+[[package]]
+name = "tower-flasher"
+version = "0.0.0"
+dependencies = [
+ "serialport",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3852,7 +3852,7 @@ dependencies = [
  "serde",
  "serialport",
  "toml 1.1.8+spec-1.1.0",
- "tower-boot",
+ "tower-flasher",
  "tower-protocol",
 ]
 

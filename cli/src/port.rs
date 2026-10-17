@@ -2,7 +2,7 @@
 //!
 //! This is the host side of attaching to a TOWER device's framed console: pick the USB
 //! serial port, open it at the console baud, and drive the modem lines to a known state so
-//! merely opening the port can't leave the MCU held in reset. The reset pulse mirrors tower-boot.
+//! merely opening the port can't leave the MCU held in reset. The reset pulse mirrors tower-flasher.
 
 use std::time::Duration;
 
@@ -85,44 +85,44 @@ pub(crate) fn open(port: &str) -> Result<Box<dyn serialport::SerialPort>> {
 
 // ---- console line control (NRST/BOOT0 over RTS/DTR) -----------------------
 //
-// The AUTHORITATIVE copy of this sequence lives in tower-boot (crates/boot/src/port.rs:
+// The AUTHORITATIVE copy of this sequence lives in tower-flasher (crates/flasher/src/port.rs:
 // `open_with` / `reset_into_app`). We keep a minimal local pulse so a console
 // command can reset on the *same* handle it streams from and thus capture boot
 // output from the very first byte; reopening the port would drop the `Hello` +
 // early logs and re-undefine the line state. RTS->NRST, DTR->BOOT0; (true,true)
 // is the safe "run" baseline.
 //
-// The tuned *delays* are no longer copied: they're taken directly from tower-boot's
+// The tuned *delays* are no longer copied: they're taken directly from tower-flasher's
 // public constants below, so they can't silently drift out of lockstep (a rename
 // upstream becomes a compile error here). The line polarity/ordering is basic,
 // stable bridge wiring.
 //
-// Convergence opportunity (since jolt v1.3.0, now tower-boot):
-// `tower_boot::port::Port::from_handle(sp)` + `reset_into_app_no_settle()` implement the same run-baseline + pulse over a
+// Convergence opportunity:
+// `tower_flasher::port::Port::from_handle(sp)` + `reset_into_app_no_settle()` implement the same run-baseline + pulse over a
 // borrowed handle. We don't call it here for one reason: our console pulse clears
 // the input buffer *while the chip is held in reset* (dropping pre-reset garbage so
 // the boot `Hello` isn't preceded by junk), and `reset_into_app_no_settle` has no
 // mid-reset clear hook; clearing after release would race the boot bytes we want.
-// If tower-boot grows a mid-reset-clear variant, drop this fork for `from_handle`.
+// If tower-flasher grows a mid-reset-clear variant, drop this fork for `from_handle`.
 
 /// Drive RTS/DTR to the run baseline so merely opening the port can't leave the
 /// MCU held in reset by whatever level the USB bridge asserts on open. Mirrors
-/// tower-boot's `open_with` (and reuses its tuned `RUN_SETTLE`).
+/// tower-flasher's `open_with` (and reuses its tuned `RUN_SETTLE`).
 pub(crate) fn set_run_baseline(sp: &mut dyn serialport::SerialPort) -> Result<()> {
     sp.write_request_to_send(true)?;
     sp.write_data_terminal_ready(true)?;
-    std::thread::sleep(tower_boot::port::RUN_SETTLE);
+    std::thread::sleep(tower_flasher::port::RUN_SETTLE);
     Ok(())
 }
 
 /// Pulse NRST to reboot into the application (BOOT0 low) so the caller can capture
-/// boot output from byte 0. Mirrors tower-boot's `reset_into_app` (reusing its tuned
+/// boot output from byte 0. Mirrors tower-flasher's `reset_into_app` (reusing its tuned
 /// `RESET_PULSE`) minus the post-boot settle (we want the boot logs), plus a
-/// mid-reset input-buffer clear tower-boot's no-settle variant doesn't offer.
+/// mid-reset input-buffer clear tower-flasher's no-settle variant doesn't offer.
 pub(crate) fn pulse_reset_into_app(sp: &mut dyn serialport::SerialPort) -> Result<()> {
     sp.write_request_to_send(true)?; // RTS asserted
     sp.write_data_terminal_ready(false)?; // BOOT0 low -> RESET asserted
-    std::thread::sleep(tower_boot::port::RESET_PULSE);
+    std::thread::sleep(tower_flasher::port::RESET_PULSE);
     let _ = sp.clear(serialport::ClearBuffer::Input); // drop pre-reset bytes while held in reset
     sp.write_request_to_send(false)?; // RESET released -> boot the app
     Ok(())

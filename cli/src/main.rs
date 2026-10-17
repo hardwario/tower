@@ -1,5 +1,5 @@
 //! `tower`, the HARDWARIO TOWER host CLI: devices, logs/events, shell/exec, the console TUI,
-//! and flash/erase/reset/chip/protect/unprotect (via the tower-boot engine, crates/boot).
+//! and flash/erase/reset/chip/protect/unprotect (via the tower-flasher engine, crates/flasher).
 //!
 //! The firmware's UART is always framed (`tower-protocol`: COBS + CRC + postcard),
 //! so a plain terminal shows binary; this tool decodes it. The same `FrameDecoder`
@@ -912,11 +912,11 @@ fn monitor(port: Option<String>, hex: bool, reset: bool) -> Result<()> {
     }
 }
 
-// ---- firmware: flash / erase / reset / chip (STM32 UART bootloader, via tower-boot) ----
+// ---- firmware: flash / erase / reset / chip (STM32 UART bootloader, via tower-flasher) ----
 //
 // The console protocol above runs over the firmware's framed UART link; these
 // commands instead drive the STM32 system bootloader (toggling NRST/BOOT0 over
-// the bridge's RTS/DTR). The whole bootloader engine is the `tower-boot` crate; we
+// the bridge's RTS/DTR). The whole bootloader engine is the `tower-flasher` crate; we
 // only pick the port (reusing the same auto-detect as the other commands) and
 // hand off to it.
 
@@ -930,12 +930,12 @@ fn flash_cmd(
     verbose: bool,
 ) -> Result<()> {
     let port = pick_port(port)?;
-    let fw = tower_boot::firmware::load(&file)?;
-    if fw.len() as u32 > tower_boot::target::MAX_FLASH_SIZE {
+    let fw = tower_flasher::firmware::load(&file)?;
+    if fw.len() as u32 > tower_flasher::target::MAX_FLASH_SIZE {
         bail!(
             "firmware is {} bytes, exceeding the {} KiB maximum for any STM32L0 device",
             fw.len(),
-            tower_boot::target::MAX_FLASH_SIZE / 1024
+            tower_flasher::target::MAX_FLASH_SIZE / 1024
         );
     }
     eprintln!(
@@ -943,17 +943,17 @@ fn flash_cmd(
         file.display(),
         fw.len()
     );
-    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
-    // tower-boot's FlashOptions is #[non_exhaustive] (a new option won't break us): start from
+    let mut sp = tower_flasher::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    // tower-flasher's FlashOptions is #[non_exhaustive] (a new option won't break us): start from
     // Default and override. `verbose` moved out of the options into the progress sink below.
-    let mut opts = tower_boot::flash::FlashOptions::default();
+    let mut opts = tower_flasher::flash::FlashOptions::default();
     opts.erase = erase;
     opts.verify = verify;
     opts.run = run;
     opts.go = go;
     let mut report = flash_progress(verbose);
     let start = Instant::now();
-    tower_boot::flash::flash(&mut sp, &fw, &opts, &mut report)
+    tower_flasher::flash::flash(&mut sp, &fw, &opts, &mut report)
         .map_err(|e| boot_err(e, "flashing firmware"))?;
     // A ~45 s flash prints only live progress above; without a terminal line the caller
     // can't tell success from a hang, so always confirm completion.
@@ -968,9 +968,10 @@ fn flash_cmd(
 fn erase_cmd(port: Option<String>, verbose: bool) -> Result<()> {
     let port = pick_port(port)?;
     eprintln!("[tower] erasing {port}");
-    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    let mut sp = tower_flasher::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
     let mut report = flash_progress(verbose);
-    let pages = tower_boot::flash::erase(&mut sp, &mut report).map_err(|e| boot_err(e, "erasing flash"))?;
+    let pages =
+        tower_flasher::flash::erase(&mut sp, &mut report).map_err(|e| boot_err(e, "erasing flash"))?;
     eprintln!("[tower] erased {pages} page(s), reset into application");
     Ok(())
 }
@@ -980,33 +981,33 @@ fn erase_cmd(port: Option<String>, verbose: bool) -> Result<()> {
 const READOUT_PROTECTED_HINT: &str = "this board is readout-protected; `tower unprotect` erases it \
      (flash + EEPROM) so it can be re-flashed; it must then be re-paired";
 
-/// Map a tower-boot error of `flash` / `erase` to the CLI's: a readout-protected board gets the
+/// Map a tower-flasher error of `flash` / `erase` to the CLI's: a readout-protected board gets the
 /// actionable [`READOUT_PROTECTED_HINT`] (still exit 1, the tool-error code), anything else keeps
 /// the library message under `context`.
-fn boot_err(e: tower_boot::error::Error, context: &'static str) -> anyhow::Error {
+fn boot_err(e: tower_flasher::error::Error, context: &'static str) -> anyhow::Error {
     match e {
-        tower_boot::error::Error::ReadoutProtected { .. } => anyhow!(READOUT_PROTECTED_HINT),
+        tower_flasher::error::Error::ReadoutProtected { .. } => anyhow!(READOUT_PROTECTED_HINT),
         e => anyhow::Error::new(e).context(context),
     }
 }
 
-/// `tower chip`: what the STM32 ROM bootloader reports about the attached part (the content of
-/// the former `jolt info`, plus the readout-protection state). Read-only:
-/// [`tower_boot::chip::info`] enters the bootloader, reads `Get ID` + `Get`, probes the
+/// `tower chip`: what the STM32 ROM bootloader reports about the attached part, including the
+/// readout-protection state. Read-only:
+/// [`tower_flasher::chip::info`] enters the bootloader, reads `Get ID` + `Get`, probes the
 /// protection with one Read Memory, and resets back into the application on every path. The
 /// data goes to stdout (one `Label   : value` line each, script-friendly); status lines go to
 /// stderr.
 fn chip_cmd(port: Option<String>, verbose: bool) -> Result<()> {
     let port = pick_port(port)?;
     eprintln!("[tower] reading chip info on {port} (enters the bootloader, then restores the app)");
-    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    let mut sp = tower_flasher::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
     // Connect diagnostics only with --verbose; the id is printed from the result below.
-    let mut report = |p: tower_boot::flash::Progress| {
+    let mut report = |p: tower_flasher::flash::Progress| {
         if verbose {
             eprintln!("[tower] {p:?}");
         }
     };
-    let info = tower_boot::chip::info(&mut sp, &mut report).context("reading chip info")?;
+    let info = tower_flasher::chip::info(&mut sp, &mut report).context("reading chip info")?;
     print!("{}", chip_report(&port, &info));
     if !info.is_known() {
         eprintln!(
@@ -1040,7 +1041,7 @@ fn readout_line(readout_protected: bool) -> &'static str {
 
 // ---- readout protection: protect / unprotect --------------------------------
 //
-// Opt-in production lock (tower-boot's `rdp` module has the protocol and the ST citations).
+// Opt-in production lock (tower-flasher's `rdp` module has the protocol and the ST citations).
 // Dev boards stay open; `protect` is a deliberate provisioning step after flash, verify and
 // pairing, and `unprotect` is the only way back, at the cost of a mass erase of the flash AND
 // the data EEPROM. Both ask first: `protect` for "yes", `unprotect` for the word "erase", so a
@@ -1118,8 +1119,8 @@ fn confirm(notice: &str, word: &str) -> Result<()> {
 
 /// A progress sink for `protect` / `unprotect`: one line per step (the chip id, each probe, the
 /// accepted command); `--verbose` dumps the raw events instead.
-fn rdp_progress(verbose: bool) -> impl FnMut(tower_boot::flash::Progress) {
-    use tower_boot::flash::Progress;
+fn rdp_progress(verbose: bool) -> impl FnMut(tower_flasher::flash::Progress) {
+    use tower_flasher::flash::Progress;
     move |p| {
         if verbose {
             eprintln!("[tower] {p:?}");
@@ -1146,7 +1147,7 @@ fn rdp_progress(verbose: bool) -> impl FnMut(tower_boot::flash::Progress) {
     }
 }
 
-/// `tower protect`: RDP level 1 through [`tower_boot::rdp::protect`], then the state read back in
+/// `tower protect`: RDP level 1 through [`tower_flasher::rdp::protect`], then the state read back in
 /// a new bootloader session is printed (`Readout : ...` on stdout).
 fn protect_cmd(port: Option<String>, yes: bool, verbose: bool) -> Result<()> {
     use std::io::IsTerminal;
@@ -1156,8 +1157,8 @@ fn protect_cmd(port: Option<String>, yes: bool, verbose: bool) -> Result<()> {
         confirm(&protect_notice(&port), "yes")?;
     }
     eprintln!("[tower] enabling readout protection (RDP level 1) on {port}");
-    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
-    let change = tower_boot::rdp::protect(&mut sp, &mut rdp_progress(verbose)).context(
+    let mut sp = tower_flasher::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    let change = tower_flasher::rdp::protect(&mut sp, &mut rdp_progress(verbose)).context(
         "enabling readout protection (`tower chip` reads the current state; power-cycle the board first \
          if the bootloader does not answer)",
     )?;
@@ -1174,7 +1175,7 @@ fn protect_cmd(port: Option<String>, yes: bool, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-/// `tower unprotect`: RDP level 1 back to 0 through [`tower_boot::rdp::unprotect`] (a mass erase
+/// `tower unprotect`: RDP level 1 back to 0 through [`tower_flasher::rdp::unprotect`] (a mass erase
 /// of flash + data EEPROM), then the state read back is printed. A board that is not protected
 /// is left alone (nothing is erased).
 fn unprotect_cmd(port: Option<String>, yes: bool, verbose: bool) -> Result<()> {
@@ -1189,8 +1190,8 @@ fn unprotect_cmd(port: Option<String>, yes: bool, verbose: bool) -> Result<()> {
         confirm(&unprotect_notice(&port), "erase")?;
     }
     eprintln!("[tower] removing readout protection on {port} (erases flash + data EEPROM)");
-    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
-    let change = tower_boot::rdp::unprotect(&mut sp, &mut rdp_progress(verbose)).context(
+    let mut sp = tower_flasher::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    let change = tower_flasher::rdp::unprotect(&mut sp, &mut rdp_progress(verbose)).context(
         "removing readout protection (`tower chip` reads the current state; power-cycle the board first \
          if the bootloader does not answer)",
     )?;
@@ -1207,11 +1208,11 @@ fn unprotect_cmd(port: Option<String>, yes: bool, verbose: bool) -> Result<()> {
 }
 
 /// The `tower chip` stdout block. The bootloader lines are omitted when `Get` did not answer
-/// (the id is the essential part, as in the former `jolt info`).
-fn chip_report(port: &str, info: &tower_boot::chip::ChipInfo) -> String {
+/// (the id is the essential part).
+fn chip_report(port: &str, info: &tower_flasher::chip::ChipInfo) -> String {
     let mut out = format!(
         "Device  : {port} @ {} baud, 8E1\nChip id : 0x{:03X} ({})\n{}",
-        tower_boot::target::BAUD,
+        tower_flasher::target::BAUD,
         info.id,
         info.family,
         readout_line(info.readout_protected)
@@ -1226,13 +1227,13 @@ fn chip_report(port: &str, info: &tower_boot::chip::ChipInfo) -> String {
     out
 }
 
-/// A tower-boot flash/erase progress sink. tower-boot is UI-free (it emits `Progress` events);
+/// A tower-flasher flash/erase progress sink. tower-flasher is UI-free (it emits `Progress` events);
 /// we render them with `indicatif` progress bars, so a ~45 s flash shows live
 /// erase/write/verify progress instead of looking hung. `indicatif` auto-detects the terminal,
 /// so a redirected stderr (a log, a pipe) stays clean. `--verbose` dumps the raw events instead.
-fn flash_progress(verbose: bool) -> impl FnMut(tower_boot::flash::Progress) {
+fn flash_progress(verbose: bool) -> impl FnMut(tower_flasher::flash::Progress) {
     use indicatif::{ProgressBar, ProgressStyle};
-    use tower_boot::flash::Progress;
+    use tower_flasher::flash::Progress;
 
     fn pages_bar(total: usize, msg: &'static str) -> ProgressBar {
         let bar = ProgressBar::new(total as u64);
@@ -1317,7 +1318,7 @@ fn flash_progress(verbose: bool) -> impl FnMut(tower_boot::flash::Progress) {
 
 fn reset_cmd(port: Option<String>, bootloader: bool) -> Result<()> {
     let port = pick_port(port)?;
-    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    let mut sp = tower_flasher::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
     if bootloader {
         sp.reset_into_bootloader().context("resetting into bootloader")?;
         eprintln!("[tower] {port} reset into bootloader");
@@ -2148,14 +2149,13 @@ mod tests {
         assert!(request_completions(&mut sp, &mut dec, "", 0, 2, SHORT).is_none());
     }
 
-    /// `tower chip` prints the same content the former `jolt info` did, plus the protection
-    /// state: the device line, the chip id with its family, `Readout`, and (when `Get` answered)
+    /// `tower chip` prints the device line, the chip id with its family, `Readout`, and (when `Get` answered)
     /// the bootloader version and commands.
     #[test]
     fn chip_report_lines() {
-        let info = tower_boot::chip::ChipInfo {
+        let info = tower_flasher::chip::ChipInfo {
             id: 0x447,
-            family: tower_boot::target::chip_name(0x447),
+            family: tower_flasher::target::chip_name(0x447),
             bootloader_version: Some(0x31),
             commands: vec![0x00, 0x02, 0x31],
             readout_protected: false,
@@ -2169,7 +2169,7 @@ mod tests {
              Commands: 0x00 0x02 0x31\n"
         );
         // `Get` unanswered: the bootloader lines are omitted, the id and protection still shown.
-        let bare = tower_boot::chip::ChipInfo {
+        let bare = tower_flasher::chip::ChipInfo {
             bootloader_version: None,
             commands: Vec::new(),
             readout_protected: true,
@@ -2189,7 +2189,7 @@ mod tests {
     /// with no extra context; any other error keeps its context.
     #[test]
     fn boot_err_names_the_way_out_of_readout_protection() {
-        use tower_boot::error::Error;
+        use tower_flasher::error::Error;
         let msg = format!(
             "{:#}",
             boot_err(

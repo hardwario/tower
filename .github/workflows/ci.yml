@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # serialport (tower-boot, cli, hil) links against libudev on Linux. The CLI's vendored
+      # serialport (tower-flasher, cli, hil) links against libudev on Linux. The CLI's vendored
       # OpenSSL (its MQTT TLS stack) builds with the runner's perl, make and gcc.
       - name: Install libudev
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
@@ -112,7 +112,7 @@ jobs:
       - name: Build (release)
         run: cargo build --locked --release -p tower-cli
       - name: Test
-        run: cargo test --locked -p tower-cli -p tower-boot -p tower-protocol
+        run: cargo test --locked -p tower-cli -p tower-flasher -p tower-protocol
 
   # 2. The firmware workspace (thumbv6m). Runs inside firmware/ so its .cargo/config.toml (target
   #    + flip-link) applies; `just fw ci` is the same set locally.

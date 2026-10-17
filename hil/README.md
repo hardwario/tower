@@ -68,7 +68,7 @@ that cannot happen at build time. It can still happen at run time against a boar
 another checkout (or built from one via `TOWER_FIRMWARE_DIR`): every console frame carries the
 firmware's schema tag, and the harness fails fast on a foreign one ("the device's console frames
 carry schema tag ..."); rebuild and reflash from the same checkout. The reset pulses come from
-`tower-boot` (`crates/boot`), also by path.
+`tower-flasher` (`crates/flasher`), also by path.
 
 ## License
 

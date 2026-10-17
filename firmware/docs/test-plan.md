@@ -36,7 +36,7 @@ root: the whole host workspace).
 |---|---|
 | MCU | STM32L083CZ (Cortex-M0+), chip id `0x447` |
 | Target | `thumbv6m-none-eabi` |
-| Flash transport | Dongle: STM32 UART bootloader via `tower flash` (tower-boot engine, ~30 s/image). Core: **SWD via probe-rs** (J-Link), which doesn't need the FTDI, so the Core can be measured with USB unplugged. |
+| Flash transport | Dongle: STM32 UART bootloader via `tower flash` (tower-flasher engine, ~30 s/image). Core: **SWD via probe-rs** (J-Link), which doesn't need the FTDI, so the Core can be measured with USB unplugged. |
 | Console | USART1 PA9/PA10, 115200 8N1, COBS+CRC32+postcard framed (`tower-protocol`) |
 | Radio | SPIRIT1 / SPSGRF, SPI1 PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 |
 | Reset/boot | NRST/BOOT0 on FTDI **aux** lines (not DTR/RTS) → opening a port does **not** reset |

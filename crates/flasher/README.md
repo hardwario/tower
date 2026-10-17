@@ -1,14 +1,13 @@
-# tower-boot: boot control for TOWER boards
+# tower-flasher: the TOWER flasher
 
-Boot control for **STM32L0** microcontrollers (STM32L0x1 / L0x2 / L0x3; on TOWER, the
+The flasher of **STM32L0** microcontrollers (STM32L0x1 / L0x2 / L0x3; on TOWER, the
 STM32L083CZ of the Core Module and the Radio Dongle) around the STM32 embedded **UART
 bootloader** (ST AN3155): flash / erase / verify, read-only chip info, the opt-in **readout
 protection** (RDP level 1) of production units, and the NRST/BOOT0 reset pulses that enter the
 bootloader or restart the application.
 
-It is a **library only** (`crates/boot` in the [hardwario/tower](https://github.com/hardwario/tower)
-monorepo); its front end is the `tower` CLI. It was the standalone `jolt` flasher before the
-monorepo (the `jolt-v*` tags in this repository are that history).
+It is a **library only** (`crates/flasher` in the [hardwario/tower](https://github.com/hardwario/tower)
+monorepo); its front end is the `tower` CLI.
 
 The engine can enter the bootloader **automatically** (no buttons) on boards whose USB-UART
 bridge drives the MCU's NRST and BOOT0 pins, which is how it is used on the **TOWER Radio
@@ -33,14 +32,14 @@ device is present (see `cli/`). Install the CLI from the repo root with
 ## Library
 
 Consumers in this repository (`cli/`, `hil/`) depend on it by path through the root workspace
-(`tower-boot.workspace = true`):
+(`tower-flasher.workspace = true`):
 
 ```rust
-use tower_boot::flash::{self, FlashOptions, Progress};
-use tower_boot::port::Port;
+use tower_flasher::flash::{self, FlashOptions, Progress};
+use tower_flasher::port::Port;
 
 let mut port = Port::open("/dev/ttyUSB0")?;
-let firmware = tower_boot::firmware::load("app.bin".as_ref())?;
+let firmware = tower_flasher::firmware::load("app.bin".as_ref())?;
 let opts = FlashOptions::default();   // erase + verify + run, no `go`
 
 // The engine is UI-free: it reports progress through a callback instead of
@@ -52,8 +51,8 @@ flash::flash(&mut port, &firmware, &opts, &mut |p: Progress| {
 })?;
 // ...or discard progress: flash::flash(&mut port, &firmware, &opts, &mut flash::no_progress)
 // ...or a full-chip wipe:  flash::erase(&mut port, &mut flash::no_progress)
-// ...or a read-only query: tower_boot::chip::info(&mut port, &mut flash::no_progress)
-// ...or the production lock:  tower_boot::rdp::protect(&mut port, &mut flash::no_progress)
+// ...or a read-only query: tower_flasher::chip::info(&mut port, &mut flash::no_progress)
+// ...or the production lock:  tower_flasher::rdp::protect(&mut port, &mut flash::no_progress)
 ```
 
 The high-level entry points:
@@ -69,7 +68,7 @@ The high-level entry points:
   `readout_protected`, `changed()`). `unprotect` mass-erases the flash and the data EEPROM;
 - `Port::reset_into_app` / `Port::reset_into_bootloader`: the reset pulses.
 
-Every library entry point returns `tower_boot::error::Error` (no `anyhow` in the public API), and
+Every library entry point returns `tower_flasher::error::Error` (no `anyhow` in the public API), and
 nothing in the library prints. For callers that already hold an open serial handle,
 `Port::from_handle` / `Port::into_inner` and the `pub` reset-timing constants let you drive the
 tuned NRST/BOOT0 sequence without re-implementing it (the `tower` CLI and the HIL harness reuse
@@ -157,7 +156,7 @@ and the tests pin that.
 
 ## Tests
 
-From the repo root, `cargo test -p tower-boot` covers the protocol logic with no hardware:
+From the repo root, `cargo test -p tower-flasher` covers the protocol logic with no hardware:
 command/address/data checksums and framing, the Get-ID reply parse, the Extended-Erase page
 list, write padding, chunk/address bookkeeping, the main-flash bound of Write Memory, the
 readout-protection handshakes and probe, and a scripted fake serial port that drives `flash`,

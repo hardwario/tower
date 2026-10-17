@@ -87,7 +87,7 @@ jobs:
           done
 
   # Gate 2: fmt + clippy + tests of the host workspace on the exact tagged tree (the CLI and the
-  # crates it links: tower-protocol, tower-boot).
+  # crates it links: tower-protocol, tower-flasher).
   checks:
     name: fmt + clippy + test
     runs-on: ubuntu-latest

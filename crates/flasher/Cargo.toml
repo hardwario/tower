@@ -1,12 +1,12 @@
 [package]
-name = "tower-boot"
+name = "tower-flasher"
 version = "0.0.0"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Boot control for HARDWARIO TOWER boards around the STM32 ROM UART bootloader (AN3155): flash / erase / verify, chip info, opt-in readout protection (RDP level 1, never level 2), NRST/BOOT0 reset pulses. A UI-free library; the `tower` CLI and the HIL harness drive it."
+description = "The flasher of HARDWARIO TOWER boards, around the STM32 ROM UART bootloader (AN3155): flash / erase / verify, chip info, opt-in readout protection (RDP level 1, never level 2), NRST/BOOT0 reset pulses. A UI-free library; the `tower` CLI and the HIL harness drive it."
 
 # Library only: no binary, no UI dependencies. Progress is reported through a callback
 # (`flash::Progress`); the `tower` CLI renders it.

@@ -290,8 +290,7 @@ checkout); rebuild both`.
 
 `tower` can program the device's STM32L0 over its UART bootloader (toggling
 NRST/BOOT0 through the USB-UART bridge), so a separate flashing tool isn't
-needed. The bootloader engine is the [`tower-boot`](../crates/boot) library
-(formerly the `jolt` flasher, whose commands live here now):
+needed. The bootloader engine is the [`tower-flasher`](../crates/flasher) library:
 
 ```sh
 tower flash firmware.bin     # erase, write, verify, then reset into the app
@@ -304,7 +303,7 @@ tower protect                # production lock: readout protection (RDP level 1)
 tower unprotect              # remove it: ERASES flash + data EEPROM, asks for "erase" first
 ```
 
-`tower chip` is read-only (the former `jolt info`, plus the protection state): it enters the
+`tower chip` is read-only: it enters the
 bootloader, reads `Get ID` and `Get`, probes the readout protection with one Read Memory, then
 resets back into the application on every path. The data goes to stdout, status lines to
 stderr; `-v` prints the bootloader connect diagnostics (as for `flash` / `erase`):
@@ -317,9 +316,8 @@ BL ver  : 3.1
 Commands: 0x00 0x01 0x02 0x11 0x21 0x31 0x44 0x63 0x73 0x82 0x92
 ```
 
-The `Commands` line is what the bootloader implements, the same at every protection level. The
-former `jolt monitor` raw serial monitor has no counterpart: `tower monitor --hex` dumps every
-received byte.
+The `Commands` line is what the bootloader implements, the same at every protection level.
+`tower monitor --hex` dumps every received byte.
 
 Firmware must be a raw `.bin` (convert `.elf`/`.hex` with
 `arm-none-eabi-objcopy -O binary in.elf out.bin`). The device is auto-detected when
