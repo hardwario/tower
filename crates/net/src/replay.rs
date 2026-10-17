@@ -24,6 +24,13 @@ pub const P: u32 = 32;
 // across the wrap only while P divides 256.
 const _: () = assert!(P <= 128 && 256 % P == 0);
 
+/// A lazy-persist period as the cadence counter can honour it: a power of two in `1..=P`
+/// (rounded up), so it divides 256 and the `u8` wrap keeps the cadence exact.
+#[must_use]
+pub fn persist_period(period: u8) -> u8 {
+    period.clamp(1, P as u8).next_power_of_two()
+}
+
 /// Maximum transmissions of ONE counter by a legitimate sender: the confirmed-send repetition
 /// ceiling (`Net::send` / `afa_send` clamp `reps` to `1..=MAX_REPS`; `fhss_send` sends once).
 pub const MAX_REPS: u8 = 10;
@@ -110,10 +117,33 @@ impl ReplayLane {
     /// every [`P`] accepts (replay window ≤ P across a reboot, firmware/docs/radio.md).
     #[must_use = "a true return means the lane must be persisted now"]
     pub fn accept(&mut self, counter: u32) -> bool {
+        self.accept_every(counter, P as u8)
+    }
+
+    /// [`accept`](Self::accept) with a caller-chosen persist period: true once every `period`
+    /// accepts. `period` is rounded to a power of two in `1..=P` (the cadence counter is a
+    /// wrapping `u8`, exact only for a divisor of 256); `1` persists on **every** accept, which
+    /// leaves no replay window across a reboot at the cost of one record per accepted frame:
+    /// right for a receiver that hears few frames (a sleeping node's downlinks), wrong for a
+    /// busy one (a gateway's uplinks, firmware/docs/storage.md).
+    #[must_use = "a true return means the lane must be persisted now"]
+    pub fn accept_every(&mut self, counter: u32, period: u8) -> bool {
         self.last_seen = counter;
         self.reacks = 0; // a new last-seen: its retransmits get a fresh re-ACK allowance
         self.accepts = self.accepts.wrapping_add(1);
-        self.accepts.is_multiple_of(P as u8)
+        self.accepts.is_multiple_of(persist_period(period))
+    }
+
+    /// Raise the lane to `seen` (an imported last-seen, carried with a key moved from another
+    /// device): nothing at or below it is fresh any more. Never lowers the lane. Returns whether
+    /// it moved (the caller persists the lane then).
+    #[must_use = "a true return means the lane must be persisted now"]
+    pub fn raise(&mut self, seen: u32) -> bool {
+        if seen <= self.last_seen {
+            return false;
+        }
+        *self = Self::new(seen);
+        true
     }
 
     /// A [`Retransmit`](ReplayVerdict::Retransmit) of a *confirmed* frame arrived: may it be
@@ -415,6 +445,51 @@ mod tests {
         while lane.reack() {}
         let _ = lane.accept(2);
         assert!(lane.reack(), "a new counter gets a fresh re-ACK allowance");
+    }
+
+    /// Period 1 persists on every accept: a lane restored after a reboot then has no window at
+    /// all, so a recorded frame (a sleeping node's downlink) can never be replayed into it.
+    #[test]
+    fn persist_every_accept_leaves_no_reboot_window() {
+        let mut lane = ReplayLane::new(0);
+        let mut persisted = 0;
+        for c in [3u32, 9, 10, 400] {
+            assert!(lane.accept_every(c, 1), "counter {c} must be persisted");
+            persisted = c;
+        }
+        let rebooted = ReplayLane::new(persisted);
+        for c in [3u32, 9, 10] {
+            assert_eq!(rebooted.classify(c), ReplayVerdict::Replay);
+        }
+        assert_eq!(rebooted.classify(400), ReplayVerdict::Retransmit);
+    }
+
+    /// Periods round up to a power of two in 1..=P, so the u8 cadence stays exact.
+    #[test]
+    fn persist_period_rounds_to_a_divisor_of_256() {
+        assert_eq!(persist_period(0), 1);
+        assert_eq!(persist_period(1), 1);
+        assert_eq!(persist_period(3), 4);
+        assert_eq!(persist_period(32), P as u8);
+        assert_eq!(persist_period(200), P as u8);
+        let mut lane = ReplayLane::new(0);
+        for n in 1..=600u32 {
+            assert_eq!(lane.accept_every(n, 3), n % 4 == 0, "accept #{n}");
+        }
+    }
+
+    /// An imported last-seen raises the lane (everything at or below it is dead) and never
+    /// lowers it.
+    #[test]
+    fn raise_moves_the_lane_up_only() {
+        let mut lane = ReplayLane::new(0);
+        assert!(lane.raise(700));
+        assert_eq!(lane.classify(700), ReplayVerdict::Retransmit);
+        assert_eq!(lane.classify(5), ReplayVerdict::Replay);
+        assert_eq!(lane.classify(701), ReplayVerdict::Fresh);
+        assert!(!lane.raise(700));
+        assert!(!lane.raise(3));
+        assert_eq!(lane.last_seen(), 700);
     }
 
     /// The u8 accept counter keeps the lazy-persist cadence exact across its wrap.

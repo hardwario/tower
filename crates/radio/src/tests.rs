@@ -233,3 +233,26 @@ fn frame_toa_total_for_any_length() {
         assert_eq!(frame_toa_ms(17_582_054_044_766_043_904), u32::MAX);
     }
 }
+
+// --- uplink backoff (a sleeping node whose gateway is gone) ------------------------------
+
+/// No miss: the configured period. Each miss doubles it, up to the heartbeat cap, and it never
+/// overflows however many misses pile up.
+#[test]
+fn uplink_backoff_doubles_to_the_cap() {
+    assert_eq!(uplink_backoff_s(60, 900, 0), 60);
+    assert_eq!(uplink_backoff_s(60, 900, 1), 120);
+    assert_eq!(uplink_backoff_s(60, 900, 3), 480);
+    assert_eq!(uplink_backoff_s(60, 900, 4), 900);
+    assert_eq!(uplink_backoff_s(60, 900, 255), 900);
+    assert_eq!(uplink_backoff_s(u64::MAX / 2, u64::MAX, 255), u64::MAX);
+}
+
+/// A cap below the period (heartbeat shorter than the measuring period) never shortens the
+/// period itself, and a zero period still waits a second.
+#[test]
+fn uplink_backoff_never_below_the_period() {
+    assert_eq!(uplink_backoff_s(300, 60, 0), 300);
+    assert_eq!(uplink_backoff_s(300, 60, 5), 300);
+    assert_eq!(uplink_backoff_s(0, 0, 0), 1);
+}

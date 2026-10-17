@@ -21,6 +21,14 @@
 //! bulk transfer) must not leave its counter unconsumed, or the next transfer re-reads it and
 //! seals a *different* plaintext under the same `(key, nonce)`: a full CCM break. Consuming
 //! "after the TX/ACK await" (the old shape of `fhss_send`/`afa_send`/bulk) was exactly that bug.
+//!
+//! **The counter is per device, keys move between devices.** The nonce is `src ‖ counter ‖ …`
+//! and the counter belongs to the device, not to a key, so a key that was used on one counter
+//! line and is then installed where the counter restarted (a gateway whose store was wiped
+//! importing its old registry under the same address) would repeat that key's nonces from the
+//! start. A key therefore travels with a counter **floor**: [`floor`](TxCounter::floor) on the
+//! exporting side (above every counter it ever sent), [`raise_to`](TxCounter::raise_to) on the
+//! importing side (nothing below it is ever sent again, durably) before the key is installed.
 
 /// TX-counter reserve block: persist the watermark only once per `RESERVE`
 /// transfers, and on boot resume *at* the watermark (> any value actually sent,
@@ -35,6 +43,8 @@ pub struct TxCounter {
     /// Highest reserved (persisted) counter value; `counter < reserve_limit`
     /// holds as an invariant only while [`locked`](Self::locked) is false:
     /// the counter is never used at or past the last *durably* persisted watermark.
+    /// `u32::MAX` after a lost watermark: the history is unknown, so every counter may have
+    /// been sent (what [`floor`](Self::floor) must report).
     reserve_limit: u32,
     /// Set once a reserve-watermark persist fails: TX is refused (fail closed) so a
     /// counter past the last durable watermark can never go on air (which after a
@@ -69,6 +79,11 @@ impl TxCounter {
     /// boot (which persists a watermark first), so its presence proves a watermark existed.
     /// Counting only the default-lane last-seen (the original rule) left the guard dead in the
     /// product apps, which run on peer lanes alone (the gateway disables the default lane).
+    /// It also counts the app's own word that it holds **stored keys** (a provisioning record,
+    /// a non-empty registry): those are written once and early, while the watermark and the
+    /// lanes are rewritten often and sit late in the log, so one corrupt record can orphan
+    /// every network record at once and leave only the keys. Without that evidence the boot
+    /// looked virgin and resumed at 1 under the old keys.
     ///
     /// **Residual (not detectable here): a *stale older* watermark.** If the corruption orphans
     /// the newest watermark record but an *older* watermark record of the same key precedes the
@@ -95,7 +110,11 @@ impl TxCounter {
         // exists to prevent). Saturated, the counter just runs into `advance`'s u32::MAX
         // ceiling lock within one block: the link ends its life failing closed, never
         // repeating a nonce.
-        let reserve_limit = resume.saturating_add(RESERVE);
+        let reserve_limit = if stored_watermark.is_none() && prior_use {
+            u32::MAX // history lost: report the worst case (see `floor`), nothing is persisted
+        } else {
+            resume.saturating_add(RESERVE)
+        };
         let txc = Self {
             counter: resume,
             reserve_limit,
@@ -120,6 +139,56 @@ impl TxCounter {
     #[must_use]
     pub fn locked(&self) -> bool {
         self.locked
+    }
+
+    /// This device's **counter floor**: every counter it has ever sent, under any key, is below
+    /// it (the durable watermark; `u32::MAX` when the history is unknown after a lost watermark,
+    /// or the counter is exhausted). A key exported from here carries it, so the device that
+    /// imports the key can [`raise_to`](Self::raise_to) it before sending anything under that
+    /// key: the counter is per device, the key is not, and a device whose counter restarted
+    /// would otherwise repeat the key's nonces. A snapshot: it covers what was sent until now.
+    #[must_use]
+    pub fn floor(&self) -> u32 {
+        self.reserve_limit.max(self.counter)
+    }
+
+    /// Raise the counter to at least `floor` (an imported key's [`floor`](Self::floor)), durably:
+    /// returns `true` once no counter below `floor` can ever be sent again, in this boot or after
+    /// any reboot, which is what the caller must have before it persists or installs the key.
+    ///
+    /// When the durable watermark already covers `floor` nothing is written. Otherwise the
+    /// watermark `floor + RESERVE` (saturating) is handed to `persist`, which must write **and
+    /// read back** it; the raise is committed only on `true`. A failed persist locks TX and
+    /// returns `false`: the key must not be installed, since a reboot would resume at the old
+    /// watermark, below `floor`. A raise
+    /// to `u32::MAX` persists the ceiling and locks: no counter is left for that key, here or
+    /// after a reboot (a key with an unknown history should be refused before it gets here).
+    ///
+    /// While locked nothing is sent this boot, and the next boot resumes at the durable
+    /// watermark (`reserve_limit`), so the floor is covered exactly when it is at or below it.
+    #[must_use = "false: the floor is not durable, the key must not be installed"]
+    pub fn raise_to(&mut self, floor: u32, persist: impl FnOnce(u32) -> bool) -> bool {
+        if self.locked {
+            return floor <= self.reserve_limit;
+        }
+        if floor <= self.counter {
+            return true; // already past it (and the counter is below the durable watermark)
+        }
+        if floor < self.reserve_limit {
+            self.counter = floor; // the durable watermark already covers it
+            return true;
+        }
+        let watermark = floor.saturating_add(RESERVE);
+        if !persist(watermark) {
+            self.locked = true;
+            return false;
+        }
+        self.reserve_limit = watermark;
+        self.counter = floor;
+        if floor == u32::MAX {
+            self.locked = true; // the ceiling: MAX itself is never sent (see `advance`)
+        }
+        true
     }
 
     /// Advance the TX counter by one transfer. Returns the next watermark to persist when the
@@ -277,7 +346,9 @@ mod tests {
     }
 
     /// Watermark-lost boot (prior use but no readable watermark): locked, and NO watermark is
-    /// written (a fresh low watermark would poison a later boot into resuming low).
+    /// written (a fresh low watermark would poison a later boot into resuming low). `prior_use`
+    /// includes the app's stored keys: a store that lost every network record at once but kept
+    /// a provisioning record fails closed the same way.
     #[test]
     fn watermark_lost_fails_closed_without_writing() {
         let (txc, persist) = TxCounter::resume(None, true);
@@ -500,6 +571,112 @@ mod tests {
         // Two consecutive boots at the ceiling: still nothing issued.
         let (mut again, _) = TxCounter::resume(Some(u32::MAX), true);
         assert_eq!(again.alloc(), None);
+    }
+
+    // --- floor / raise_to (a key's counter history travels with it) ----------------------------
+
+    /// The floor is above every counter ever handed out, and a lost history reports the worst
+    /// case (an importer must not trust a floor nobody knows).
+    #[test]
+    fn floor_covers_everything_sent() {
+        let (mut txc, persist) = TxCounter::resume(None, false);
+        let mut store = persist;
+        let mut max = 0;
+        for _ in 0..(RESERVE + 10) {
+            max = alloc_ok(&mut txc, &mut store).unwrap();
+        }
+        assert!(txc.floor() > max);
+        assert_eq!(Some(txc.floor()), store, "the floor is the durable watermark");
+        let (lost, _) = TxCounter::resume(None, true);
+        assert_eq!(lost.floor(), u32::MAX, "a lost watermark: history unknown");
+    }
+
+    /// THE nonce-reuse scenario: a gateway sends under key K, exports it with its floor, loses
+    /// its store (counter back to 1), and imports K again. Raised to the floor first, it never
+    /// re-sends one of the old counters, and neither does any later life of the new store.
+    #[test]
+    fn raise_to_floor_never_reuses_an_exported_counter() {
+        // Life A: fresh store, ~2.5 blocks of traffic, then export.
+        let (mut a, p) = TxCounter::resume(None, false);
+        let mut store_a = p;
+        let mut sent_a = 0;
+        for _ in 0..(2 * RESERVE + 500) {
+            sent_a = alloc_ok(&mut a, &mut store_a).unwrap();
+        }
+        let floor = a.floor();
+        // Life B: the wiped store (virgin), then the import raises the floor.
+        let (mut b, p) = TxCounter::resume(None, false);
+        let mut store_b = p;
+        assert!(b.raise_to(floor, |w| {
+            store_b = Some(w);
+            true
+        }));
+        let first = alloc_ok(&mut b, &mut store_b).unwrap();
+        assert!(first > sent_a, "the first counter after the import must be new");
+        // A reboot of B resumes at its own durable watermark, still above the floor.
+        let (b2, _) = TxCounter::resume(store_b, true);
+        assert!(b2.counter() > sent_a);
+    }
+
+    /// A floor the counter already passed, or one the durable watermark covers, writes nothing.
+    #[test]
+    fn raise_to_without_a_write_when_covered() {
+        let (mut txc, _) = TxCounter::resume(Some(5000), true);
+        let no_write = |_| panic!("no persist expected");
+        assert!(txc.raise_to(0, no_write));
+        assert!(txc.raise_to(4000, no_write));
+        assert_eq!(txc.counter(), 5000, "never lowered");
+        assert!(txc.raise_to(5000 + RESERVE - 1, no_write));
+        assert_eq!(txc.counter(), 5000 + RESERVE - 1);
+        assert!(!txc.locked());
+    }
+
+    /// A failed persist of the raised watermark locks TX and reports the floor as NOT durable
+    /// (the caller must not install the key: a reboot would resume below it).
+    #[test]
+    fn raise_to_persist_failure_locks_and_refuses() {
+        let (mut txc, _) = TxCounter::resume(None, false);
+        assert!(!txc.raise_to(1_000_000, |_| false));
+        assert!(txc.locked());
+        assert_eq!(txc.alloc(), None);
+        assert_eq!(
+            txc.reserve_limit(),
+            1 + RESERVE,
+            "the durable watermark did not move"
+        );
+    }
+
+    /// While locked, the floor counts as covered only when the durable watermark (where the next
+    /// boot resumes) is at or above it.
+    #[test]
+    fn raise_to_while_locked_reports_the_durable_watermark() {
+        let (mut txc, _) = TxCounter::resume(Some(3000), true);
+        txc.lock();
+        let no_write = |_| panic!("locked: nothing is written");
+        assert!(txc.raise_to(3000 + RESERVE, no_write));
+        assert!(!txc.raise_to(3001 + RESERVE, no_write));
+        let (mut lost, _) = TxCounter::resume(None, true);
+        assert!(
+            lost.raise_to(u32::MAX - 1, no_write),
+            "lost: locked for good anyway"
+        );
+    }
+
+    /// A raise to the ceiling persists the ceiling and locks: nothing is ever sent under that
+    /// history again, and the next boot (resuming at the stored MAX) stays locked too.
+    #[test]
+    fn raise_to_ceiling_locks_durably() {
+        let (mut txc, _) = TxCounter::resume(None, false);
+        let mut stored = None;
+        assert!(txc.raise_to(u32::MAX, |w| {
+            stored = Some(w);
+            true
+        }));
+        assert_eq!(stored, Some(u32::MAX));
+        assert!(txc.locked());
+        assert_eq!(txc.alloc(), None);
+        let (mut next, _) = TxCounter::resume(stored, true);
+        assert_eq!(next.alloc(), None);
     }
 
     /// A near-MAX stored watermark must SATURATE the reserve limit at u32::MAX (fixed

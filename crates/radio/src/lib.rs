@@ -173,5 +173,19 @@ pub fn hop_channel<const N: usize>(seed: u32, cycle: u32, i: u8) -> u8 {
     perm[i as usize]
 }
 
+/// Interval (s) until a sleeping node's next periodic uplink after `misses` consecutive
+/// undelivered ones: `period_s` doubled per miss, capped at `cap_s` (the heartbeat), never
+/// below `period_s` (and at least 1 s). A node whose gateway is gone (switched off, out of
+/// range, the node removed) would otherwise send a confirmed uplink with every retransmission
+/// and ACK window on every period forever: on the default 60 s period that averages many times
+/// the STOP floor's current, and airtime spent for nobody. The caller resets `misses` on a delivery and
+/// on a button press (someone is there; try promptly again).
+#[must_use]
+pub fn uplink_backoff_s(period_s: u64, cap_s: u64, misses: u8) -> u64 {
+    let period = period_s.max(1);
+    let backed_off = period.saturating_mul(1u64 << misses.min(32));
+    backed_off.min(cap_s.max(period))
+}
+
 #[cfg(test)]
 mod tests;
