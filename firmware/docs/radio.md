@@ -320,8 +320,9 @@ node  JOIN_CONFIRM  2 ‖ tag_node          src = node, dest = host  under the N
   sides refuse (a fixed-channel exchange). The `PAIRING_KEY` key transport of v1 (the host sent
   the per-node key under a public key) is gone; nothing answers or sends it.
 - **Cost.** ~22 KB of flash per image (X25519 + SHA-256 + HKDF + HMAC). Stack: the shared-secret
-  computation needs ~2.2 KB below its caller (static estimate), and it runs in non-inlined
-  functions so that frame exists only while it computes.
+  computation needs ~2.5 KB below its caller (static estimate; `crypto_x25519_kat` reports the
+  measured high-water), and it runs in non-inlined functions so that frame exists only while
+  it computes.
 
 **OTA pairing only adds new peers.** The host sends no JOIN_RESP for a JOIN_REQ whose address
 is already a registered peer, reserved, or the host's own (logged once per window call as
@@ -457,6 +458,7 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `crypto_aes_kat` | 1 | AES-128 ECB FIPS-197 known-answer test |
 | `crypto_ccm_kat` | 1 | AES-128-CCM RFC 3610 vector + tamper test |
 | `crypto_frame_loopback` | 1 | frame codec + nonce + CCM round-trip |
+| `crypto_x25519_kat` | 1 | pairing-v2 X25519 vs RFC 7748, scalar-multiplication timing, stack high-water |
 | `net_secure_ping` | node / gateway | one CCM-sealed DATA frame end-to-end |
 | `net_confirmed` | node / gateway | confirmed delivery + ACK + retransmit |
 | `net_persist` | 1 | TX-counter reserve-ahead survives reboot |

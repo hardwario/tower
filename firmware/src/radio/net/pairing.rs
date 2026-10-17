@@ -87,7 +87,7 @@ const JOIN_CONFIRM_WINDOW: Duration = Duration::from_millis(300);
 /// HMACs. 1.5 s leaves ~25 % over the slow end. Err long: too short fails every pairing (the
 /// answer lands after the wait closed), too long only slows a retry. Re-tune from the
 /// `crypto_x25519_kat` measurement on the board.
-const PEER_KEX_TIME: Duration = Duration::from_millis(1500);
+pub const PEER_KEX_TIME: Duration = Duration::from_millis(1500);
 /// One listen slice of the host's pairing window between JOIN_REQ polls.
 const PAIR_RX_SLICE: Duration = Duration::from_millis(500);
 

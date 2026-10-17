@@ -219,6 +219,7 @@ B=tower logs --reset, H=host, X=interactive, S=shell-exec).
 | D2 | crypto_ccm_kat | `AES-128-CCM RFC 3610 #1 + tamper: ALL PASS ***`; tag `…17e8d12cfdf926e0` | seal CT+tag match; open recovers PT; tampered byte ⇒ REJECTED |
 | D3 | crypto_frame_loopback | `frame codec + nonce + CCM loopback: ALL PASS ***` | DATA hdr round-trip + tamper + wrong-key reject; BULK 3-byte index in nonce |
 | D4 | edge_frame_limits | `edge_frame_limits: ALL PASS ***` (12 checks) | MTU 74/64 accept, 75/65 reject `PayloadTooLong`; `BadVersion`/`BadType`/`TooShort`/`AuthFail` |
+| D5 | crypto_x25519_kat | `x25519_kat: ALL PASS ***` (re-emitted every 5 s, so mode A works too) after 8 `MATCH` lines (RFC 7748 §5.2 vectors 1+2, iterated ×1, §6.1 both public keys + shared secret from both sides, handshake agreement); record the `timing:` line (scalar multiplication ms, key schedule ms, handshake critical path vs the 1500 ms `PEER_KEX_TIME` budget: must say `OK`) and the verdict's stack high-water | ~10 s of blocking compute before the verdict (each scalar multiplication ~1 s); a handshake over budget means pairing waits too short: raise `PEER_KEX_TIME` |
 
 ### E. Storage / counter persistence
 | ID | Example | Mode | Pass | Edge |

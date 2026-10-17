@@ -86,6 +86,7 @@ examples:
     @echo crypto_aes_kat
     @echo crypto_ccm_kat
     @echo crypto_frame_loopback
+    @echo crypto_x25519_kat
     @echo edge_frame_limits
     @echo edge_rapid
     @echo edge_recovery
