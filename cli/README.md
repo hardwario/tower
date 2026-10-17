@@ -349,8 +349,8 @@ Commands: 0x00 0x01 0x02 0x11 0x21 0x31 0x44 0x63 0x73 0x82 0x92
 The `Commands` line is what the bootloader implements, the same at every protection level.
 `tower monitor --hex` dumps every received byte.
 
-Firmware must be a raw `.bin` (convert `.elf`/`.hex` with
-`arm-none-eabi-objcopy -O binary in.elf out.bin`). The device is auto-detected when
+Firmware must be a raw `.bin` (convert an `.elf` with `rust-objcopy -O binary in.elf out.bin`
+from cargo-binutils, or `arm-none-eabi-objcopy`; `just fw build` does it for you). The device is auto-detected when
 exactly one USB serial device is present; otherwise pass `--device`.
 
 ### Readout protection (production units)

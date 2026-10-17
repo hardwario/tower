@@ -25,8 +25,8 @@ protection, bootloader version, supported commands; read-only, the app is restor
 and `tower protect` / `tower unprotect` (RDP level 1 on and off, see
 [Readout protection](#readout-protection)); `tower monitor --hex` dumps the raw serial bytes.
 
-Every `tower` command takes `-d/--device`, or auto-detects the port when exactly one USB serial
-device is present (see `cli/`). Install the CLI from the repo root with
+Every serial-port `tower` command takes `-d/--device`, or auto-detects the port when exactly one
+USB serial device is present (see `cli/`). Install the CLI from the repo root with
 `cargo install --locked --path cli` (or `just install-cli`).
 
 ## Library

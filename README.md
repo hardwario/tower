@@ -22,7 +22,7 @@ loaded over the wire (`tower flash`, or SWD); there is no over-the-air update pa
 | [`crates/shell`](crates/shell) | `tower-shell` | Pure kernels behind the device shell (address parsing, pagination, TAB completion). |
 | [`crates/flasher`](crates/flasher) | `tower-flasher` | The flasher, around the STM32 ROM UART bootloader: flash / erase / verify, chip info, readout protection, NRST/BOOT0 reset pulses. |
 | [`firmware/`](firmware) | `tower-sdk` (lib `tower`) | Embassy firmware SDK, `examples/` and the TOWER IoT Kit product `apps/`. Its own Cargo workspace for `thumbv6m-none-eabi`. |
-| [`cli/`](cli) | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip, `tower gateway` (radio to MQTT), `tower nodes`, `tower net`. |
+| [`cli/`](cli) | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip / protect, `tower gateway` (radio to MQTT), `tower nodes`, `tower net`. |
 | [`hil/`](hil) | `tower-hil` | HIL bench harness: builds images from `firmware/`, flashes real boards, decodes the console natively, measures power (PPK2). |
 
 **Naming rule:** the directory `crates/X` holds the package `tower-X`. Short directories,
