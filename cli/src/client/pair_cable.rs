@@ -146,7 +146,7 @@ pub(crate) fn run(s: &mut Session, node_port: &str, name: Option<&str>) -> Resul
 /// The gateway's network parameters from its `describe` RPC answer: address, band and
 /// channel, all REQUIRED. A node provisioned onto a guessed band/channel can never reach
 /// its gateway (and a guessed EU868 band would transmit out-of-band in the US), so an
-/// answer without them (a pre-fix gateway) fails the pairing instead of defaulting to 0.
+/// answer without them fails the pairing instead of defaulting to 0.
 fn gw_params(gw: &serde_json::Value) -> Result<(u32, u8, u8)> {
     let addr = gw
         .get("gateway")

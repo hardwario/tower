@@ -1394,7 +1394,7 @@ mod tests {
         assert!(text.contains("HARDWARIO TOWER Console"));
         assert!(text.contains("reconnecting"));
         assert!(text.contains("/dev/mock"));
-        // Footer hint mentions the new quit binding.
+        // The footer lists the key bindings.
         assert!(text.contains("<F8> Clear"));
     }
 

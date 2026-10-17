@@ -34,9 +34,7 @@ mod term;
 mod tui;
 
 use port::{devices, open_console, pick_port};
-use render::{
-    ColorMode, OutputMode, Renderer, View, device_text, hexline, read_loop, resolve_color, warn_mismatch,
-};
+use render::{ColorMode, OutputMode, Renderer, View, device_text, hexline, read_loop, warn_mismatch};
 #[cfg(test)]
 use session::await_ready;
 use session::{
@@ -172,9 +170,6 @@ enum Cmd {
         /// When to colorize output.
         #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
         color: ColorMode,
-        /// Disable ANSI colors (deprecated alias for `--color never`).
-        #[arg(long, hide = true)]
-        no_colors: bool,
         /// Emit one JSON object per line (NDJSON) instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -193,9 +188,6 @@ enum Cmd {
         /// When to colorize output.
         #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
         color: ColorMode,
-        /// Disable ANSI colors (deprecated alias for `--color never`).
-        #[arg(long, hide = true)]
-        no_colors: bool,
         /// Emit one JSON object per line (NDJSON) instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -353,14 +345,13 @@ fn run(cli: Cli) -> Result<u8> {
         Cmd::Devices => devices().map(|()| EXIT_OK),
         Cmd::Logs {
             color,
-            no_colors,
             json,
             send,
             reset,
             delay,
         } => stream(
             cli.port,
-            output_mode(color, no_colors, json),
+            output_mode(color, json),
             View::Logs,
             send,
             reset,
@@ -368,14 +359,9 @@ fn run(cli: Cli) -> Result<u8> {
             reconnect,
         )
         .map(|()| EXIT_OK),
-        Cmd::Events {
-            color,
-            no_colors,
-            json,
-            reset,
-        } => stream(
+        Cmd::Events { color, json, reset } => stream(
             cli.port,
-            output_mode(color, no_colors, json),
+            output_mode(color, json),
             View::Events,
             None,
             reset,
@@ -417,13 +403,13 @@ fn run(cli: Cli) -> Result<u8> {
 }
 
 /// Build the streaming output mode: `--json` wins (structured NDJSON); otherwise text with
-/// color resolved from `--color`/`--no-colors`.
-fn output_mode(color: ColorMode, no_colors: bool, json: bool) -> OutputMode {
+/// color resolved from `--color`.
+fn output_mode(color: ColorMode, json: bool) -> OutputMode {
     if json {
         OutputMode::Json
     } else {
         OutputMode::Text {
-            colors: resolve_color(color, no_colors),
+            colors: color.enabled(),
         }
     }
 }

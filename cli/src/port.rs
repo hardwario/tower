@@ -92,9 +92,9 @@ pub(crate) fn open(port: &str) -> Result<Box<dyn serialport::SerialPort>> {
 // early logs and re-undefine the line state. RTS->NRST, DTR->BOOT0; (true,true)
 // is the safe "run" baseline.
 //
-// The tuned *delays* are no longer copied: they're taken directly from tower-flasher's
-// public constants below, so they can't silently drift out of lockstep (a rename
-// upstream becomes a compile error here). The line polarity/ordering is basic,
+// The tuned *delays* are not copied: they come straight from tower-flasher's public
+// constants below, so the two cannot drift apart (a rename there becomes a compile
+// error here). The line polarity/ordering is basic,
 // stable bridge wiring.
 //
 // Convergence opportunity:

@@ -401,7 +401,7 @@ mod tests {
                 assert_eq!(d.role, DeviceRole::Gateway);
                 assert_eq!(d.addr, 0xAB12);
                 assert_eq!(d.firmware_name, "radio_dongle_gateway");
-                // The version too: the bridge's status no longer needs the boot Hello.
+                // The version too: the bridge's status does not need the boot Hello.
                 assert_eq!(d.firmware_version, "v0.1.0");
             }
             _ => panic!("expected device info"),

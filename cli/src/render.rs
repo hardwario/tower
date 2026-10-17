@@ -42,7 +42,7 @@ pub(crate) enum ColorMode {
 impl ColorMode {
     /// Resolve to a concrete on/off, honoring the `NO_COLOR` convention (<https://no-color.org>)
     /// and TTY detection for `Auto`.
-    fn enabled(self) -> bool {
+    pub(crate) fn enabled(self) -> bool {
         use std::io::IsTerminal;
         match self {
             ColorMode::Always => true,
@@ -50,12 +50,6 @@ impl ColorMode {
             ColorMode::Auto => std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal(),
         }
     }
-}
-
-/// Resolve the effective color choice: the deprecated `--no-colors` flag, if present, forces
-/// off; otherwise `--color`'s auto/always/never decides (auto = TTY && `NO_COLOR` unset).
-pub(crate) fn resolve_color(color: ColorMode, no_colors: bool) -> bool {
-    if no_colors { false } else { color.enabled() }
 }
 
 /// How the streaming commands render frames: human-readable text (with or without color)
@@ -619,13 +613,6 @@ mod tests {
     fn color_mode_never_and_always() {
         assert!(!ColorMode::Never.enabled());
         assert!(ColorMode::Always.enabled());
-    }
-
-    #[test]
-    fn resolve_color_no_colors_forces_off() {
-        // The deprecated --no-colors flag always wins, even over --color always.
-        assert!(!resolve_color(ColorMode::Always, true));
-        assert!(resolve_color(ColorMode::Always, false));
     }
 
     #[test]

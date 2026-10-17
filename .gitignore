@@ -17,3 +17,6 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# Claude Code agent worktrees (temporary checkouts)
+.claude/worktrees/

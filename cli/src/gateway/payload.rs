@@ -7,15 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Version of this topic/payload tree, carried in the retained `gateway/status`.
-/// Bumped 1→2 when the terminology was unified: node-address keys/params
-/// `id`/`node`→`addr`, and every unit suffix dropped from key names
-/// (`last_seen_s`→`last_seen`, `uptime_s`→`uptime`, `remaining_s`→`remaining`,
-/// `ttl_s`→`ttl`, `age_s`→`age`, `window_s`→`window`, `rssi_dbm`→`rssi`,
-/// `ack_rssi_dbm`→`ack_rssi`); units live in the field docs, not the names.
-/// One bump: schema 2 never shipped in a tagged release between the renames.
-/// Bumped 2→3 when `Status.protocol` (the console's hand-bumped version number) became
-/// `Status.wire` (the schema tags, `console 0x…  radio 0x…`).
+/// Version of this topic/payload tree, carried in the retained `gateway/status`; clients
+/// refuse a mismatch. Bump it with any change an external subscriber would notice (a topic or
+/// key renamed, removed or retyped). Units live in the field docs, not in the key names.
 pub(crate) const SCHEMA: u32 = 3;
 
 /// `gateway/status` (retained). The LWT publishes only `{state:"offline", schema}`
@@ -163,7 +157,6 @@ pub(crate) struct ShellRsp {
     /// Authoritative only when `done` (mirrors the shell-response discipline).
     pub result: u8,
     /// A chunk gap was detected: the text is incomplete.
-    #[serde(default)]
     pub truncated: bool,
     /// Set on gateway-side failures (queue expiry, undeliverable) instead of a node reply.
     #[serde(skip_serializing_if = "Option::is_none")]
