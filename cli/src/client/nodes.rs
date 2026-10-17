@@ -73,7 +73,8 @@ pub(crate) enum NodesCmd {
         #[arg(long)]
         no_wait: bool,
     },
-    /// List a node's queued (not yet delivered) remote commands.
+    /// List a node's pending remote commands (queued on the gateway, or delivered and awaiting the
+    /// node's reply).
     Pending {
         node: String,
         #[arg(long)]

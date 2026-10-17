@@ -247,8 +247,8 @@ Keep `ca.key` and `broker.key` private (`broker.p12` contains the key too); clie
 The MQTT topic tree (under `--prefix`) is the gateway's public API; every topic, payload and
 RPC op is documented in the [MQTT API reference](../docs/mqtt-api.md). Rules for clients
 writing to it:
-commands (`gateway/cmd`, `nodes/{addr}/shell/req`) must not be retained (a retained one is
-ignored and cleared); request ids must be 1-64 characters of `[A-Za-z0-9_.-]` (a uuid), and a
+commands (`gateway/cmd`, `nodes/{addr}/shell/req`) must not be retained (one published retained
+runs once, on its live delivery; the copy the broker replays later is ignored and cleared); request ids must be 1-64 characters of `[A-Za-z0-9_.-]` (a uuid), and a
 QoS-1 redelivery of a recent id is dropped; RPC responses arrive on `gateway/rsp/{id}`, so
 subscribe once to `gateway/rsp/+` and match the id. Only nodes in the gateway's registry
 are ever published; at startup the gateway drops downlinks a previous `tower gateway` left
@@ -265,7 +265,7 @@ tower nodes add --port <SERIAL> [--name N]         # pair a node over its USB ca
 tower nodes rename <node> <name>
 tower nodes remove <node>
 tower nodes shell <node> "<line>" [--timeout MS] [--no-wait]   # remote shell, queued until wake
-tower nodes pending <node>                         # queued, not-yet-delivered commands
+tower nodes pending <node>                         # commands queued or awaiting the reply
 tower nodes dequeue <node> <ref>                   # drop a queued command by ref
 tower net status                                   # gateway online/offline + stats summary
 ```

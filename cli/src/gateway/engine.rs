@@ -1563,7 +1563,14 @@ impl Engine {
                 self.issue(out, OpKind::PairingCancel, MgmtOp::PairingCancel, rpc);
             }
             "queue_list" => {
-                let node = node_param().unwrap_or(0);
+                // No `addr`: every node's queue. One that names no node is an error, not "all".
+                let node = match params.get("addr") {
+                    None | Some(serde_json::Value::Null) => 0,
+                    Some(_) => match node_param() {
+                        Some(node) => node,
+                        None => return self.rpc_err_direct(out, &me, "unknown node"),
+                    },
+                };
                 self.issue(out, OpKind::QueueList, MgmtOp::QueueList { node_addr: node }, rpc);
             }
             "queue_drop" => {
@@ -1613,10 +1620,11 @@ impl Engine {
                 );
             }
             "stats_config" => {
+                // Absent: the firmware's own `stats-period` default (500 ms).
                 let period = params
                     .get("period_ms")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(1000)
+                    .unwrap_or(500)
                     .min(60_000) as u32;
                 self.issue(
                     out,
@@ -3534,6 +3542,26 @@ mod tests {
             .find(|o| o.contains("NodeUpdate"))
             .expect("auto-name NodeUpdate");
         assert!(op.contains("push-button:0"), "{op}");
+    }
+
+    /// `queue_list` lists every node's queue without an `addr`, and refuses one that names no
+    /// node instead of falling back to "all".
+    #[test]
+    fn queue_list_refuses_an_unknown_node() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"q-1","op":"queue_list","params":{"addr":"cellar"}}"#,
+        ));
+        let rsp = rpc_rsp(&out, "q-1");
+        assert!(!rsp.ok && rsp.error.as_deref() == Some("unknown node"), "{rsp:?}");
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"q-2","op":"queue_list","params":{"addr":"kitchen"}}"#,
+        ));
+        let (_, op) = out.iter().find_map(sent_op).expect("a named node is listed");
+        assert!(op.contains("43794"), "{op}"); // 0xAB12
     }
 
     /// The dongle takes management requests through a one-deep inbox, so the engine sends one

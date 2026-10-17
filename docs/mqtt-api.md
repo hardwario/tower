@@ -621,11 +621,11 @@ Errors: `unknown node`, `not found`.
 
 #### `queue_list`
 
-The dongle's downlink queue (items not yet delivered).
+The dongle's downlink queue (the items it still holds for delivery).
 
 | Param | Type | Default | Meaning |
 |-------|------|---------|---------|
-| `addr` | string | all nodes | One node (address or current name); a name that matches no node also lists all nodes |
+| `addr` | string | all nodes | One node (address or current name); one that names no node is refused (`unknown node`) |
 
 Each element: `addr` (the node), `ref` (the item id), `age` (seconds since it was queued),
 `ttl` (its lifetime, seconds).
@@ -666,7 +666,7 @@ dongle's `stats-period` setting (500 ms by default) in RAM only, until the dongl
 
 | Param | Type | Default | Meaning |
 |-------|------|---------|---------|
-| `period_ms` | number | `1000` | Milliseconds, capped at `60000`; `0` stops sampling |
+| `period_ms` | number | `500` (the dongle's default) | Milliseconds, capped at `60000`; `0` stops sampling |
 
 ```json
 {"id":"u-s","op":"stats_config","params":{"period_ms":5000}}

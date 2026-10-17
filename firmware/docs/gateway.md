@@ -283,7 +283,8 @@ Opaque host-built `NodeCmd` envelopes awaiting a sleeping node's next uplink. Gl
 `QUEUE_CAP = 4`, per-node FIFO `PER_NODE_CAP = 2`, `MAX_ITEM = 74` B. Stable monotonic `u16` ids
 (from 1; `0` reserved = "not a queue item" in `RadioStat::Tx`). TTL expiry drops stale items and
 reports `TX_EXPIRED`. **The queue is RAM-only:** a gateway reboot drops it, made visible by the
-`Hello` `session_id` bump; the host re-queues. Delivery: each confirmed uplink's ACK carries a
+`Hello` `session_id` bump; the host fails every pending command ("gateway rebooted; command
+lost") and the client sends it again. Delivery: each confirmed uplink's ACK carries a
 *pending* flag; when set, the node opens a short RX window and the gateway delivers one item per
 uplink cycle.
 

@@ -98,7 +98,9 @@ pub(crate) struct Node {
     pub sleeping: bool,
     /// No operator/auto name assigned yet.
     pub unnamed: bool,
-    /// Seconds since the last uplink at publish time; `null` = never (since gateway boot).
+    /// Seconds since the last uplink as the dongle reported it at the last registry refresh, or
+    /// 0 when published for an uplink the bridge just saw; not aged in between (for liveness use
+    /// the events' `ts` or a fresh `node_list`). `null` = never (since gateway boot).
     pub last_seen: Option<u32>,
     pub rssi: Option<i8>,
     pub uplinks: u32,

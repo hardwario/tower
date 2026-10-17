@@ -10,7 +10,7 @@
 //! | `gateway/stats`                 | gw→ | yes    | `Stats`                       |
 //! | `gateway/pairing`               | gw→ | yes    | `Pairing`                     |
 //! | `gateway/cmd`                   | →gw | no     | `RpcRequest`                  |
-//! | `gateway/rsp/{uuid}`            | gw→ | no     | `RpcResponse` (clients share the `gateway/rsp/+` filter) |
+//! | `gateway/rsp/{id}`              | gw→ | no     | `RpcResponse` (clients share the `gateway/rsp/+` filter) |
 //! | `nodes/{addr}`                    | gw→ | yes    | `Node` (empty = removed)      |
 //! | `nodes/{addr}/event/button`       | gw→ | no     | `ButtonEvent`                 |
 //! | `nodes/{addr}/event/accel`        | gw→ | no     | `AccelEvent`                  |

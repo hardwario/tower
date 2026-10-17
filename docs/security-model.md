@@ -200,7 +200,8 @@ registered address by design (an authenticated host action: the re-provision pat
   127.0.0.1 (a free port, the same login table), not through the TLS port: an in-process TLS hop
   authenticates nothing, and this keeps the bridge's (re)connects clear of whatever the network
   sends the TLS port (residual risk 5).
-- Retained command messages are ignored and cleared; payload sizes and request ids are bounded;
+- A retained command runs at most once (its live delivery); the stored copy a broker replays is
+  ignored and cleared. Payload sizes and request ids are bounded;
   duplicate requests (QoS 1 redelivery) are dropped; node names are printable and unique; keys
   are redacted in the TUI's MQTT mirror.
 
