@@ -6,14 +6,14 @@
 //!
 //! The whole cleartext header is the CCM **AAD**; the payload is encrypted; the
 //! 8-byte CCM tag authenticates both. The 13-byte nonce is *derived* from the
-//! header (`src ‖ counter ‖ bulk_index ‖ 0x0000`) — never transmitted — which is
+//! header (`src ‖ counter ‖ bulk_index ‖ 0x0000`), never transmitted, which is
 //! why it's reconstructable on receive and unique per (key, frame). This module
 //! is pure (no I/O) and ties the layout to [`ccm`](super::ccm) via
 //! [`seal_frame`]/[`open_frame`].
 
 use super::ccm::{Ccm, NONCE_LEN, TAG_LEN};
 
-/// Protocol version (`bits[7:5]` of `ver_type`). Caps at 7 — and value 7 is reserved
+/// Protocol version (`bits[7:5]` of `ver_type`). Caps at 7, and value 7 is reserved
 /// as the extension escape ("real version elsewhere"), never a normal bump, so fielded
 /// firmwares that hard-reject unknown versions can still be reasoned about at v8+.
 pub const VERSION: u8 = 1;
@@ -29,7 +29,7 @@ pub const HDR_LEN_BULK: usize = 17;
 pub const MAX_PAYLOAD: usize = 74;
 // The shared radio-application schema (`tower_protocol::radio`) sizes its NodeMsg/NodeCmd
 // envelopes against this exact MTU (its encoders reject anything larger). If either side
-// drifts, node apps could build envelopes the net layer refuses — make it a compile error.
+// drifts, node apps could build envelopes the net layer refuses; make it a compile error.
 const _: () = assert!(
     tower_protocol::radio::MAX_RADIO_PAYLOAD == MAX_PAYLOAD,
     "tower_protocol::radio::MAX_RADIO_PAYLOAD must equal the radio MTU"
@@ -110,7 +110,7 @@ pub enum FrameError {
     BadType,
     /// Payload exceeds the per-frame limit.
     PayloadTooLong,
-    /// CCM authentication failed (forged/tampered/wrong key) — drop.
+    /// CCM authentication failed (forged/tampered/wrong key): drop.
     AuthFail,
 }
 
@@ -203,7 +203,7 @@ impl Header {
 // The nonce construction lives in the host-testable `tower_net_core` leaf crate, where the
 // exact byte layout is pinned by a golden test and uniqueness across (src, counter, bulk_index)
 // is proven by round-trip/property tests. Re-exported so call sites keep saying
-// `frame::nonce_for` — it remains the single audited nonce source for the whole stack, and no
+// `frame::nonce_for`; it remains the single audited nonce source for the whole stack, and no
 // behavioural change (the construction is byte-identical).
 pub use tower_net_core::nonce::nonce_for;
 

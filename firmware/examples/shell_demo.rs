@@ -1,4 +1,4 @@
-//! shell_demo — the RouterOS-style shell: SDK built-ins + settings, plus app commands
+//! shell_demo: the RouterOS-style shell, SDK built-ins + settings, plus app commands
 //! merged into the tree at every level and app settings of every kind.
 //!
 //! Drive with `tower shell` (TAB completes, incl. enum/bool values after `=`) or
@@ -32,7 +32,7 @@ fn cmd_uptime(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
 
 /// App command merged **into the SDK's `/system` menu** → `/system hello`.
 fn cmd_hello(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
-    let _ = write!(ctx, "hello — an app command living under the SDK's /system menu");
+    let _ = write!(ctx, "hello: an app command living under the SDK's /system menu");
     Outcome::ok()
 }
 
@@ -62,7 +62,7 @@ static APP_COMMANDS: &[Entry] = &[
     ),
 ];
 
-/// App settings — one of each kind. Keys are `u8` locals in the shell namespace (`NS_SHELL`);
+/// App settings: one of each kind. Keys are `u8` locals in the shell namespace (`NS_SHELL`);
 /// pick any free local (the SDK `identity` setting uses `0x00`).
 static APP_SETTINGS: &[Setting] = &[
     Setting {
@@ -93,7 +93,7 @@ static APP_SETTINGS: &[Setting] = &[
 
 async fn run(_b: Board) {
     // The shell (with this app's APP_COMMANDS + APP_SETTINGS) is served by `app!` below.
-    info!("shell ready — try `/system settings print` via `tower shell`");
+    info!("shell ready: try `/system settings print` via `tower shell`");
 
     // Logs keep flowing alongside the shell on the same framed link.
     let mut n: u32 = 0;

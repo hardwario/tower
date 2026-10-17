@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh <example> <outbin> [features]  — cargo objcopy an example to a raw .bin.
+# build.sh <example> <outbin> [features]: cargo objcopy an example to a raw .bin.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ex="$1"; out="$2"; feats="${3:-}"

@@ -1,4 +1,4 @@
-//! net_bulk_stream — streaming bulk transfer, no RAM ceiling (docs/radio.md).
+//! net_bulk_stream: streaming bulk transfer, no RAM ceiling (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash example net_bulk_stream   # sender: streams a blob from a source
 //!   TOWER_FEATURES=role-node    just flash example net_bulk_stream   # requester: streams to a verifying sink
@@ -10,13 +10,13 @@
 //! chunk on the fly through a [`BulkSink`], then discards it. RAM is constant
 //! regardless of size.
 //!
-//! The sender cycles **firmware-sized** blobs — 4 / 16 / 32 / 64 KB — and the
+//! The sender cycles **firmware-sized** blobs (4 / 16 / 32 / 64 KB) and the
 //! requester is purely announce-driven (it verifies whatever length the announce
 //! declares against the reference pattern + a streamed CRC-32, so it self-syncs to
 //! the sender's size each round). Per round it logs bytes / chunks / ms / bps / PASS.
 //!
 //! Uses **Us915** (unrestricted bench duty) so the 64 KB blob completes in ~1.5 min
-//! rather than the ~12 min an EU 868 1 % duty cycle would impose — this is a
+//! rather than the ~12 min an EU 868 1 % duty cycle would impose. This is a
 //! protocol/RAM stress, not an RF-compliance demo (single-channel Us915 is bench-only).
 
 #![no_std]
@@ -64,7 +64,7 @@ fn crc32_pattern(n: usize) -> u32 {
     !crc
 }
 
-/// Sender side: generate pattern bytes on demand — no blob is ever held in RAM.
+/// Sender side: generate pattern bytes on demand; no blob is ever held in RAM.
 #[cfg(not(feature = "role-node"))]
 struct PatternSource {
     len: usize,
@@ -83,7 +83,7 @@ impl tower::radio::net::BulkSource for PatternSource {
     }
 }
 
-/// Requester side: verify + CRC each chunk as it streams in, then discard it — no
+/// Requester side: verify + CRC each chunk as it streams in, then discard it: no
 /// reassembly buffer, so transfer size is bounded by neither RAM nor the protocol.
 #[cfg(feature = "role-node")]
 struct CrcCheckSink {

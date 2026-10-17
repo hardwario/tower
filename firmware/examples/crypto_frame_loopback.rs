@@ -1,4 +1,4 @@
-//! crypto_frame_loopback — verify the frame codec + nonce + CCM end to end on a
+//! crypto_frame_loopback: verify the frame codec + nonce + CCM end to end on a
 //! single board (no radio link): build a secured DATA frame, then parse + open
 //! it, checking the header round-trips and the payload is recovered; then tamper
 //! and confirm rejection; then a bulk frame (with the 3-byte index → nonce).
@@ -108,7 +108,7 @@ async fn run(_b: Board) {
 
     // Re-emit the verdict every 5 s: the boot burst above (~10 frames in ~10 ms) can overflow
     // the console TX queue (drop-newest, see src/console.rs TX_DEPTH), and the verdict is the
-    // one line that must survive — this way `tower logs` attached at ANY time still sees it.
+    // one line that must survive. This way `tower logs` attached at ANY time still sees it.
     loop {
         if pass {
             info!(target: "frame", "frame codec + nonce + CCM loopback: ALL PASS ***");

@@ -1,4 +1,4 @@
-//! radio_id — bring the SPIRIT1 out of shutdown and verify its device ID.
+//! radio_id: bring the SPIRIT1 out of shutdown and verify its device ID.
 //!
 //! The make-or-break radio bring-up checkpoint: it proves the SPI bus, the
 //! software chip-select timing (PA15), and the SDN line (PB7) are all correct.

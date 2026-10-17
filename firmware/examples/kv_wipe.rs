@@ -1,21 +1,27 @@
-//! kv_wipe — factory-reset the data EEPROM: zero the whole 6 KiB, returning the KV store to
-//! its virgin state (next boot re-initializes fresh at generation 1).
+//! kv_wipe: factory-reset the data-EEPROM key-value store: drop every key, leaving an empty
+//! store the next firmware boots on.
 //!
-//! Exists because the store has **no key deletion**: a live set only ever grows (peer tables,
-//! replay lanes, settings), and once it approaches a half's capacity every few appends force a
-//! compaction flip — wear plus a multi-second CPU stall each time (docs/storage.md). The
-//! normal reset is the shell command `/system/eeprom wipe confirm`; this example is the
-//! fallback for a device whose shell is unreachable:
+//! The normal reset is the shell command `/system/eeprom wipe confirm` (console-only); per-key
+//! removal is `Nv::delete` (tombstones, so the live set can shrink). This example is the fallback
+//! for a device whose shell is unreachable (e.g. a crash-looping app, or a `no_shell` build):
 //!
-//!   just flash example kv_wipe     # LED: slow blink = wiping, solid = done — then
-//!   just flash example <your app>  # boots on a fresh store
+//!   just flash example kv_wipe     # LED: on = wiping (~3-5 s), slow blink = done, then
+//!   just flash example <your app>  # boots on an empty store
+//!
+//! It runs the same codec operation as the shell ([`storage::factory_wipe`]): a **flip to an
+//! empty store**: blank the dead half, commit its superblock, then scrub the old half. A power
+//! loss at any point leaves either the complete old store or an empty one (never a half-zeroed
+//! log whose tail could resurface), both record halves end up physically zero, and the wear
+//! gauge (the superblock generation, `/system/eeprom print` `flips:`) keeps counting rather
+//! than resetting (the wipe costs one flip).
 //!
 //! ⚠️ Erases EVERYTHING the store holds: pairing keys, peer tables, replay lanes, the TX
-//! watermark, settings, session counter. A re-keyed/re-paired network is required after —
+//! watermark, settings, session counter. A re-keyed/re-paired network is required after,
 //! which is exactly the fail-closed behaviour the security model wants on a wiped store.
 //!
-//! Deliberately NOT an `app!`: it must run before any `Nv`/`Kv` is constructed over the
-//! region it is zeroing, so it uses a bare entry with `board::init` + the raw `Storage`.
+//! Deliberately NOT an `app!`: it must run before any `Nv`/`Kv` (and any subsystem holding RAM
+//! state derived from the store) exists, so it uses a bare entry with `board::init` + the raw
+//! `Storage`.
 
 #![no_std]
 #![no_main]
@@ -24,7 +30,7 @@ use embassy_executor::Spawner;
 use embassy_stm32::flash::Flash;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_time::Timer;
-use tower::storage::Storage;
+use tower::storage::{self, Storage};
 
 #[embassy_executor::main(executor = "embassy_stm32::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
@@ -32,23 +38,17 @@ async fn main(_spawner: Spawner) {
     let mut led = Output::new(p.PH1, Level::Low, Speed::Low);
     let mut storage = Storage::new(Flash::new_blocking(p.FLASH));
 
-    // Zero the full EEPROM in 64 B chunks, blinking so the ~5 s of CPU-stalling writes read
-    // as activity, not a hang. (Word writes stall the chip; the blink advances between chunks.)
-    let zeros = [0u8; 64];
-    let len = storage.len() as u32;
-    let mut off = 0u32;
-    while off < len {
-        let n = 64u32.min(len - off);
-        let _ = storage.write(off, &zeros[..n as usize]);
-        off += n;
-        if off.is_multiple_of(512) {
-            led.toggle();
-        }
-    }
-
-    // Done: LED solid. Flash the real firmware next; it boots on a virgin store.
+    // LED on for the duration: the wipe is one synchronous run of CPU-stalling EEPROM programs
+    // (~2.6 s, ~5.2 s if the dead half wasn't pre-blanked), so nothing can blink meanwhile.
     led.set_high();
+    let ok = storage::factory_wipe(&mut storage).is_ok();
+    led.set_low();
+
+    // Done: slow blink (fast blink = the wipe reported an EEPROM error: re-flash and retry;
+    // the store is still consistent, either untouched or empty). Flash the real firmware next.
+    let half_period = if ok { 500 } else { 100 };
     loop {
-        Timer::after_secs(60).await;
+        led.toggle();
+        Timer::after_millis(half_period).await;
     }
 }

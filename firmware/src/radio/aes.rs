@@ -6,7 +6,7 @@
 //! engine's `datatype = BYTE` swap, so callers pass plain big-endian byte
 //! blocks (matching the FIPS-197 / RFC 3610 test-vector convention).
 //!
-//! Only single-block **ECB encryption** is exposed — [`ccm`](super::ccm) builds
+//! Only single-block **ECB encryption** is exposed; [`ccm`](super::ccm) builds
 //! CBC-MAC and CTR (and thus AES-CCM) on top of it in firmware, which keeps this
 //! driver tiny and avoids the engine's chaining-mode state machine.
 

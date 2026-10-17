@@ -1,6 +1,6 @@
-# HARDWARIO TOWER Firmware SDK — task runner (https://just.systems)
+# HARDWARIO TOWER Firmware SDK: task runner (https://just.systems)
 #
-# The crate is a library; flashable programs come in two kinds — `example` (educational,
+# The crate is a library; flashable programs come in two kinds: `example` (educational,
 # examples/) and `app` (a ready-made TOWER IoT Kit product, apps/). build/flash/run/size take
 # the kind then the name. Run `just` (or `just default`) for the full recipe list. Common flow:
 #
@@ -14,9 +14,12 @@
 # Flashing + console use the `tower` CLI (https://github.com/hardwario/tower-cli): it programs
 # the STM32L0 over the UART bootloader (the jolt engine, as a library) AND decodes the firmware's
 # framed console (`tower logs`, not a raw serial terminal). Install it on your PATH (e.g.
-# `cargo install --path ../github/tower-cli`, or grab a release binary). Device control on its
-# own (logs, console, reset, erase, devices) is `tower`'s job — call the CLI directly; the
-# justfile only wraps the steps that need the kind/name/features build context.
+# `cargo install --locked --path ../cli` from the TOWER control plane, or grab a release binary).
+# Device control on its own (logs, console, reset, erase, devices) is `tower`'s job. Call the
+# CLI directly; the justfile only wraps the steps that need the kind/name/features build context.
+#
+# `build`/`size` run `cargo objcopy`/`cargo size` (cargo-binutils: `cargo install --locked
+# cargo-binutils`); the llvm-tools component they drive comes with rust-toolchain.toml.
 #
 # The HIL bench harness lives in its own repo (github.com/hardwario/tower-hil) and builds its
 # images from this checkout; the tower-protocol pin check lives in CI here
@@ -26,7 +29,7 @@
 # so the same `just` recipes run on Linux, macOS, and Windows. Windows uses cmd.exe (below) so
 # exit codes propagate to CI.
 
-# On Windows, run recipe lines with cmd.exe (always present; propagates child exit codes — unlike
+# On Windows, run recipe lines with cmd.exe (always present; propagates child exit codes, unlike
 # `-Command` PowerShell). Unix keeps the default `sh`. See the cross-platform note above.
 set windows-shell := ["cmd.exe", "/c"]
 
@@ -44,7 +47,7 @@ features := env_var_or_default("TOWER_FEATURES", "")
 _feat_flag := if features == "" { "" } else { "--features " + features }
 
 # Host triple, needed by `test` ONLY: the committed .cargo/config.toml pins the repo's DEFAULT
-# cargo target to thumbv6m (so bare `cargo build`/`cargo run` cross-compile for the L0) — which
+# cargo target to thumbv6m (so bare `cargo build`/`cargo run` cross-compile for the L0), which
 # also applies to `cargo test`, and thumbv6m has no libtest / panic handler. The explicit host
 # --target undoes that one default; it cannot be dropped without dropping the config default.
 # `--print host-tuple` avoids parsing `rustc -vV` and works on every OS.
@@ -61,15 +64,16 @@ default:
 # === Targets ======================================================================================
 #
 # A buildable target has a KIND and a NAME, and `build`/`flash`/`run`/`size` take both:
-#   example  — educational, demonstrates one block      (examples/*.rs, cargo --example)
-#   app      — a ready-made TOWER IoT Kit product        (apps/*.rs,     cargo --bin)
+#   example: educational, demonstrates one block        (examples/*.rs, cargo --example)
+#   app:     a ready-made TOWER IoT Kit product          (apps/*.rs,     cargo --bin)
 #     just build example blinky
 #     just flash app radio_push_button
 # `just examples` / `just apps` list the names of each kind.
 
-# Hand-maintained (keeps the recipe OS-independent — no ls/sed vs PowerShell split): add an
-# `@echo <name>` line, kept sorted, when you add examples/<name>.rs.
-# List the example apps (examples/*.rs) — build/flash/run them as kind `example`.
+# Hand-maintained (keeps the recipe OS-independent: no ls/sed vs PowerShell split): add an
+# `@echo <name>` line, kept sorted, when you add examples/<name>.rs. CI (host-test job) fails
+# when this list and examples/*.rs disagree.
+# List the example apps (examples/*.rs); build/flash/run them as kind `example`.
 examples:
     @echo accelerometer
     @echo blinky
@@ -88,7 +92,10 @@ examples:
     @echo fhss_kat
     @echo fhss_sweep
     @echo i2cscan
+    @echo kv_wipe
+    @echo led_on
     @echo lowpower
+    @echo lse_probe
     @echo net_bulk
     @echo net_bulk_stream
     @echo net_bulk_stress
@@ -121,7 +128,7 @@ examples:
     @echo watchdog
 
 # Hand-maintained, same deal as `examples`: add an `@echo <name>` line for a new apps/<name>.rs.
-# List the TOWER IoT Kit product firmwares (apps/*.rs) — build/flash/run them as kind `app`.
+# List the TOWER IoT Kit product firmwares (apps/*.rs); build/flash/run them as kind `app`.
 apps:
     @echo radio_climate_monitor
     @echo radio_dongle_gateway
@@ -145,7 +152,7 @@ size kind name:
 # TOWER_FEATURES for cargo features:
 #   just flash example blinky --no-verify
 #   TOWER_FEATURES=role-gateway just flash example net_confirmed
-# Build + flash a target — erase/write/verify/reset.
+# Build + flash a target: erase/write/verify/reset.
 flash kind name *args: (build kind name)
     tower {{_device_flag}} flash {{bin}} {{args}}
 
@@ -158,11 +165,18 @@ run kind name: (flash kind name)
 
 # === Tests & checks ===============================================================================
 
+# Runs cargo from THIS directory, so .cargo/config.toml applies (thumbv6m target + the flip-link
+# linker); a `cargo build --manifest-path firmware/Cargo.toml` from elsewhere would silently skip
+# both. Same command as CI's embedded build (needs flip-link on PATH; no hardware).
+# Compile the library + every product app + every example for the MCU (no flashing).
+check *args:
+    cargo build --locked --release --lib --bins --examples {{args}}
+
 # Builds for the host triple (the firmware itself is no_std): `tower-kv` (the EEPROM key-value
-# codec), `tower-net-core` (the network-layer security decision kernels — replay rule, TX-counter
+# codec), `tower-net-core` (the network-layer security decision kernels: replay rule, TX-counter
 # watermark/fail-closed nonce safety, ACK resolution, FHSS beacon-epoch acceptance, pairing
 # confirm freshness, CCM nonce construction), `tower-radio-core` (the EU/US/FHSS duty token-bucket
-# math + the fixed FHSS hop permutation — the regulatory arithmetic), `tower-gw-core` (the gateway
+# math + the fixed FHSS hop permutation, i.e. the regulatory arithmetic), `tower-gw-core` (the gateway
 # node-registry bucket codec + downlink-queue policy) and `tower-shell-core` (the `addr` setting
 # value parser + its xorshift). The shared wire-protocol tests live in the tower-protocol repo.
 # Run the firmware's host-side unit tests.
@@ -175,7 +189,7 @@ test *args:
 
 
 # flip-link puts the stack BELOW the statics on the 20 KB part, so each product bin must
-# leave enough stack (floor 8 KB; measured peaks ~6.8 KB node / est ~7.5 KB gateway — see
+# leave enough stack (floor 8 KB; measured peaks ~6.8 KB node / est ~7.5 KB gateway; see
 # docs/gateway.md "RAM budget"). Builds the bins, then checks the ELF layout. Run in CI.
 # Guard the RAM budget: fail if any product bin's statics leave too little stack.
 ram-budget:

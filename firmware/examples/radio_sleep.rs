@@ -1,16 +1,16 @@
-//! radio_sleep — low-power SLEEP / SHUTDOWN between transfers (docs/radio.md).
+//! radio_sleep: low-power SLEEP / SHUTDOWN between transfers (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-node    just flash example radio_sleep   # duty-cycled sender
 //!   TOWER_FEATURES=role-gateway just flash example radio_sleep   # always-on receiver
 //!
 //! The node wakes, transmits a frame, then drops the radio to a low-power state
-//! between transfers — alternating SLEEP (config retained, fast wake) and SHUTDOWN
+//! between transfers, alternating SLEEP (config retained, fast wake) and SHUTDOWN
 //! (powered down, needs a re-init on wake). It logs the wake latency for each so
 //! the SLEEP→READY vs SHUTDOWN→READY+reconfig cost is visible. The gateway just
-//! keeps receiving and prints each frame — proving the node re-links correctly
+//! keeps receiving and prints each frame, proving the node re-links correctly
 //! after BOTH sleep modes.
 //!
-//! Note: with USB connected the MCU stays out of STOP (USB inhibits it — see the
+//! Note: with USB connected the MCU stays out of STOP (USB inhibits it; see the
 //! boot log). Unplug USB to let the MCU itself drop to STOP during the wait; the
 //! radio's SLEEP/SHUTDOWN behaviour shown here is independent of that.
 
@@ -61,7 +61,7 @@ async fn node(radio: &mut Spirit1, cfg: &RfConfig) -> ! {
     info!(target: "sleep", "NODE: TX then sleep, alternating SLEEP / SHUTDOWN on ch{}", CHANNEL);
     let mut seq: u32 = 0;
     loop {
-        // Transmit (radio is READY here — freshly woken on later iterations).
+        // Transmit (radio is READY here, freshly woken on later iterations).
         let mut frame = [0x5Au8; 12];
         frame[..4].copy_from_slice(&seq.to_le_bytes());
         match radio.tx(&frame, false, Duration::from_millis(200)).await {

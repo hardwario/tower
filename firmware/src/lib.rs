@@ -1,25 +1,25 @@
-//! HARDWARIO TOWER Firmware SDK — reusable building blocks for the Core Module
+//! HARDWARIO TOWER Firmware SDK: reusable building blocks for the Core Module
 //! (STM32L083CZ), built on [Embassy](https://embassy.dev).
 //!
 //! Each module is an independent block; [`board`] provides the common one-line
-//! board init. See `examples/` for per-block samples and ready-made apps —
+//! board init. See `examples/` for per-block samples and ready-made apps;
 //! build and flash one with `just flash <name>`.
 //!
 //! Blocks:
-//! - [`board`] — [`Board::take`](board::Board::take) + the [`app!`] macro: the common
+//! - [`board`]: [`Board::take`](board::Board::take) + the [`app!`] macro: the common
 //!   one-line entry (clock, console, EXTI, radio pins, USB-aware low power).
-//! - [`console`] — serial console + `log` backend (level + uptime timestamp).
-//! - [`shell`] — RouterOS-style interactive shell + declarative EEPROM-backed settings
+//! - [`console`]: serial console + `log` backend (level + uptime timestamp).
+//! - [`shell`]: RouterOS-style interactive shell + declarative EEPROM-backed settings
 //!   framework; pairs with [`console`] and the `tower` host CLI.
-//! - [`led`] — non-blocking single-LED blink dispatcher (background + instant).
-//! - [`button`] — debounced button (click/hold), EXTI-gated or polled.
-//! - [`power`] — the SDK's USB-presence-gated STOP policy (implemented in `console`).
-//! - [`radio`] — SPIRIT1 sub-GHz radio stack (driver + AES-CCM + network layer).
-//! - [`tmp112`] — TMP112 temperature sensor driver (HAL-independent).
-//! - [`lis2dh12`] — LIS2DH12 accelerometer: orientation/dice + tilt interrupt.
-//! - [`storage`] — EEPROM non-volatile storage: raw byte area + a key-value store (raw or postcard values).
-//! - [`ws2812`] — WS2812B/SK6812 strip driver (timer PWM + DMA).
-//! - [`strip`] — addressable-LED effects (rainbow, chase, …) with brightness+gamma.
+//! - [`led`]: non-blocking single-LED blink dispatcher (background + instant).
+//! - [`button`]: debounced button (click/hold), EXTI-gated or polled.
+//! - [`power`]: the SDK's USB-presence-gated STOP policy (implemented in `console`).
+//! - [`radio`]: SPIRIT1 sub-GHz radio stack (driver + AES-CCM + network layer).
+//! - [`tmp112`]: TMP112 temperature sensor driver (HAL-independent).
+//! - [`lis2dh12`]: LIS2DH12 accelerometer: orientation/dice + tilt interrupt.
+//! - [`storage`]: EEPROM non-volatile storage: raw byte area + a key-value store (raw or postcard values).
+//! - [`ws2812`]: WS2812B/SK6812 strip driver (timer PWM + DMA).
+//! - [`strip`]: addressable-LED effects (rainbow, chase, …) with brightness+gamma.
 
 #![no_std]
 
@@ -45,7 +45,7 @@ pub use embassy_executor::Spawner;
 /// Define an application entry point with the common boilerplate handled.
 ///
 /// Wraps your `async fn run(b: Board)` with the STOP-mode executor + reset entry and the
-/// always-on board setup ([`board::Board::take`] — clock, console, TMP112 one-shot). It also
+/// always-on board setup ([`board::Board::take`]: clock, console, TMP112 one-shot). It also
 /// **serves the interactive [`shell`] by default**, over the shared EEPROM
 /// [`Nv`](crate::storage::Nv) handle, so the app can drive `Net` on the same `b.kv`
 /// alongside it. The whole app is then just:
@@ -85,7 +85,7 @@ macro_rules! app {
             $crate::shell::serve_ext(b.spawner, b.kv, $cmds, &[]);
         });
     };
-    // Run with NO shell — the app owns the console RX, or stays minimal.
+    // Run with NO shell: the app owns the console RX, or stays minimal.
     ($run:path, no_shell) => {
         $crate::app!(@entry $run, |_b: &$crate::board::Board| {});
     };
@@ -102,6 +102,10 @@ macro_rules! app {
             // Paint the free stack from the shallow boot frame (before any deep call), so
             // `/system stack print` can later report a measured high-water mark. Cheap (one
             // sentinel fill of unused RAM) and the first thing that runs so it covers everything.
+            // It first reads the PREVIOUS boot's paint (RAM survives a warm reset): an IWDG reset
+            // with the paint consumed to the bottom files a `stack-overflow` crash record, the
+            // only trace a flip-link overflow (core lockup, no handler) can leave. Must run before
+            // `Board::take`, whose `board::init` clears the reset-cause flags it reads.
             $crate::stack::paint();
             let mut board = $crate::board::Board::take(spawner);
             // Background EEPROM maintenance (incremental compaction + dead-half pre-blanking),
@@ -115,13 +119,13 @@ macro_rules! app {
             // Uniform startup banner, naming this example/app (the `just flash <name>` target).
             $crate::console::boot_banner(option_env!("CARGO_BIN_NAME").unwrap_or("app"));
             // If the previous boot ended in a panic/HardFault, the reset-surviving breadcrumb
-            // holds it — report it now (one ERROR frame) and cache it for /system/crash print.
+            // holds it; report it now (one ERROR frame) and cache it for /system/crash print.
             $crate::console::emit_crash_report();
             let __setup = $setup;
             __setup(&board);
             // Common TOWER power-on LED signature (500 ms off → 2 s on → 500 ms off).
             // Runs after the SDK is up (console/shell serving, so the host link is
-            // live throughout) and before the application's `run` — every board, every
+            // live throughout) and before the application's `run`: every board, every
             // app, the same 3 s boot indication.
             $crate::board::Board::boot_indicator(&mut board).await;
             $run(board).await

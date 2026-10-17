@@ -3,24 +3,24 @@
 //! Runs as its own task that owns the button's GPIO and produces high-level
 //! [`Event`]s, consumed through a cheap, copyable [`Button`] handle:
 //! `button.next_event().await`. Two constructors share the *same* debounce/
-//! click/hold state machine, config, and events — they differ only in how they
+//! click/hold state machine, config, and events; they differ only in how they
 //! idle:
 //!
-//!   * [`init_exti`] — **low power.** Owns an [`ExtiInput`]; while the button is
+//!   * [`init_exti`]: **low power.** Owns an [`ExtiInput`]; while the button is
 //!     released it sleeps on the pin's EXTI interrupt, so the MCU can enter STOP
 //!     and only wakes on a press edge. It polls at `scan_interval` *only* while a
 //!     press is being processed. Prefer this.
-//!   * [`init_polled`] — owns a plain [`Input`] and polls at `scan_interval`
-//!     continuously (no EXTI). Use it when the EXTI line is unavailable — STM32
+//!   * [`init_polled`]: owns a plain [`Input`] and polls at `scan_interval`
+//!     continuously (no EXTI). Use it when the EXTI line is unavailable: STM32
 //!     shares EXTI line *N* across all ports' pin *N*, so e.g. PA8 and PB8 both
 //!     map to line 8 and cannot both be EXTI-driven; put one on `init_exti` and
 //!     the other on `init_polled`. Costs periodic wake-ups (no STOP while idle).
 //!
 //! Events (mirrors the HARDWARIO SDK button semantics):
-//!   * [`Event::Press`]   — debounced press edge.
-//!   * [`Event::Release`] — debounced release edge.
-//!   * [`Event::Click`]   — a press+release shorter than `click_timeout` (and not a hold).
-//!   * [`Event::Hold`]    — fired once when held continuously for `hold_time`.
+//!   * [`Event::Press`]:   debounced press edge.
+//!   * [`Event::Release`]: debounced release edge.
+//!   * [`Event::Click`]:   a press+release shorter than `click_timeout` (and not a hold).
+//!   * [`Event::Hold`]:    fired once when held continuously for `hold_time`.
 //!
 //! Pin-agnostic: both constructors take embassy's type-erased input, and the
 //! pressed level is declared with [`Polarity`].
@@ -115,7 +115,7 @@ impl Default for ButtonChannel {
 
 /// Pending simulated-press duration (ms), delivered to the scan task. See [`simulate`].
 /// Module-global (one virtual button); with two real buttons the signal reaches
-/// whichever scan task is idle first — fine for the single-button products that use it.
+/// whichever scan task is idle first (fine for the single-button products that use it).
 static SIM: Signal<CriticalSectionRawMutex, u32> = Signal::new();
 
 /// Inject a **simulated press held for `ms` milliseconds** into the button scan
@@ -143,7 +143,7 @@ impl Button {
         self.ch.inner.receive().await
     }
 
-    /// Handle form of [`simulate`] — inject a simulated press of `ms` milliseconds.
+    /// Handle form of [`simulate`]: inject a simulated press of `ms` milliseconds.
     pub fn simulate(&self, ms: u32) {
         simulate(ms);
     }
@@ -153,7 +153,7 @@ impl Button {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Polarity {
     /// Pressed drives the line high (e.g. the Core Module's PA8: externally
-    /// pulled down, a press drives it high — idle reads low, a press reads high).
+    /// pulled down, a press drives it high; idle reads low, a press reads high).
     ActiveHigh,
     /// Pressed drives the line low (a button to GND with a pull-up).
     ActiveLow,
@@ -182,7 +182,7 @@ pub fn init_exti(
 
 /// Spawn a **polled** button task; returns its event handle.
 ///
-/// Samples the input every `scan_interval` with no EXTI — use when the pin's
+/// Samples the input every `scan_interval` with no EXTI; use when the pin's
 /// EXTI line is already taken (see the module docs). Keeps the MCU waking while
 /// idle, so prefer [`init_exti`] when the EXTI line is free.
 pub fn init_polled(
@@ -248,7 +248,7 @@ async fn scan_task(mut input: Source, active_high: bool, config: Config, ch: &'s
     loop {
         let now = Instant::now();
         // A simulated press reads as "pressed" until its window ends; then it clears and
-        // the physical pin takes over again (which, off the bench, reads released) — so
+        // the physical pin takes over again (which, off the bench, reads released), so
         // the machine debounces the synthetic release and fires Release/Click naturally.
         if matches!(sim_until, Some(until) if now >= until) {
             sim_until = None;
@@ -259,7 +259,7 @@ async fn scan_task(mut input: Source, active_high: bool, config: Config, ch: &'s
         };
 
         if raw != pressed {
-            // Candidate transition — require the new level to hold long enough.
+            // Candidate transition: require the new level to hold long enough.
             let threshold = if raw {
                 config.debounce_press
             } else {
@@ -297,7 +297,7 @@ async fn scan_task(mut input: Source, active_high: bool, config: Config, ch: &'s
                 sim_until = Some(Instant::now() + Duration::from_millis(ms as u64));
             }
         } else {
-            // A press (real or simulated) is in progress — keep polling.
+            // A press (real or simulated) is in progress; keep polling.
             Timer::after(config.scan_interval).await;
         }
     }

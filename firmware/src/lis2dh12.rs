@@ -3,15 +3,15 @@
 //! HAL-independent: the register-level methods are generic over [`embedded_hal::i2c::I2c`],
 //! like [`tmp112`](crate::tmp112). (The tilt-report `min_interval` throttle uses `embassy-time`.)
 //! Configured for the firmware's defaults: **normal mode (10-bit), 10 Hz ODR,
-//! ±2 g** full scale — plenty for orientation/tilt and low power.
+//! ±2 g** full scale, plenty for orientation/tilt and low power.
 //!
 //! Two features over the raw readings:
-//!   * **Orientation / "dice"** — [`Accel::dice`] maps a reading to which face is
-//!     up (1–6, opposite faces summing to 7), or `None` while the device is moving
+//!   * **Orientation / "dice"**: [`Accel::dice`] maps a reading to which face is
+//!     up (1-6, opposite faces summing to 7), or `None` while the device is moving
 //!     or held at an angle. Uses the gravity-vector method from the HARDWARIO
 //!     reference firmware (a face is accepted when every axis is within 0.6 g of
 //!     the corresponding axis-aligned unit vector).
-//!   * **Tilt / manipulation alert** — [`enable_tilt`](Lis2dh12::enable_tilt)
+//!   * **Tilt / manipulation alert**: [`enable_tilt`](Lis2dh12::enable_tilt)
 //!     programs the chip's hardware interrupt generator (high-pass filtered, so
 //!     static gravity is removed and only *movement* triggers) and routes it to
 //!     the **INT1** pin. On the Core Module INT1 is wired to PB6, so the MCU can
@@ -32,7 +32,7 @@
 use embassy_time::{Duration, Instant};
 use embedded_hal::i2c::I2c;
 
-/// 7-bit I²C address with SA0/SDO tied high — the HARDWARIO Core Module strap.
+/// 7-bit I²C address with SA0/SDO tied high (the HARDWARIO Core Module strap).
 pub const ADDR_DEFAULT: u8 = 0x19;
 /// Address with SA0/SDO tied low.
 pub const ADDR_SA0_LOW: u8 = 0x18;
@@ -73,13 +73,13 @@ const INT1_SRC_IA: u8 = 0b0100_0000; // interrupt-active flag in INT1_SRC
 /// motion threshold, where 1 LSB = 16 mg at ±2 g. Lower threshold = more sensitive.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Sensitivity {
-    /// ~768 mg — only a firm shake or knock.
+    /// ~768 mg: only a firm shake or knock.
     Low,
-    /// ~384 mg — a deliberate pick-up.
+    /// ~384 mg: a deliberate pick-up.
     Medium,
-    /// ~192 mg — a gentle nudge.
+    /// ~192 mg: a gentle nudge.
     High,
-    /// ~96 mg — a light touch.
+    /// ~96 mg: a light touch.
     Ultra,
 }
 
@@ -98,7 +98,7 @@ impl Sensitivity {
 /// Configuration for the [tilt](Lis2dh12::enable_tilt) (movement) interrupt.
 #[derive(Clone, Copy)]
 pub struct TiltConfig {
-    /// Motion threshold — see [`Sensitivity`].
+    /// Motion threshold; see [`Sensitivity`].
     pub sensitivity: Sensitivity,
     /// Minimum time between *reported* tilts. During continuous motion the
     /// interrupt re-fires every sample; triggers within this window are still
@@ -253,7 +253,7 @@ impl<I2C: I2c> Lis2dh12<I2C> {
         if let Some(prev) = self.last_tilt
             && now.saturating_duration_since(prev) < self.min_interval
         {
-            return Ok(false); // within the min interval — cleared but not reported
+            return Ok(false); // within the min interval: cleared but not reported
         }
         self.last_tilt = Some(now);
         Ok(true)

@@ -1,13 +1,13 @@
-//! accelerometer — LIS2DH12 dice orientation + tilt alert
+//! accelerometer: LIS2DH12 dice orientation + tilt alert
 //! ([`lis2dh12`](tower::lis2dh12) block).
 //!
-//! Reports which die face is up (1–6) as you turn the board, like a digital die.
+//! Reports which die face is up (1-6) as you turn the board, like a digital die.
 //! Opposite faces sum to 7. Watch with `just run example accelerometer`.
 //!
 //! Tilt detection is **opt-in** via the `TILT` constant below: set it to a
 //! [`Sensitivity`](tower::lis2dh12::Sensitivity) to have the accelerometer's
-//! hardware interrupt (INT1 → PB6) flag any manipulation — logged as `tilt!` and
-//! flashed on the LED — or `None` to disable it.
+//! hardware interrupt (INT1 → PB6) flag any manipulation (logged as `tilt!` and
+//! flashed on the LED), or `None` to disable it.
 //!
 //! The accelerometer shares the I²C2 bus with the TMP112, so the app reclaims the
 //! bus from the (shut-down) sensor via `release()`.
@@ -54,7 +54,7 @@ async fn run(b: Board) {
 
     let mut int1 = b.accel_int;
     // Reclaim the shared I²C2 bus from the TMP112 driver for the accelerometer. The bus is
-    // ATSHA-guarded, so every accel read here automatically re-sleeps the ATSHA204A — no
+    // ATSHA-guarded, so every accel read here automatically re-sleeps the ATSHA204A; no
     // explicit hygiene needed even though this polls the shared bus continuously.
     let mut accel = Lis2dh12::new(b.tmp112.release(), lis2dh12::ADDR_DEFAULT);
 

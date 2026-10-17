@@ -1,4 +1,4 @@
-//! net_star — star topology with per-node keys (docs/radio.md).
+//! net_star: star topology with per-node keys (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway              just flash example net_star  # hub (holds both nodes)
 //!   TOWER_FEATURES=role-node                 just flash example net_star  # node A
@@ -8,7 +8,7 @@
 //! flashed as A (default) or B (node-2) with that node's key and sends confirmed
 //! uplinks. The gateway decrypts each node with the registered per-node key,
 //! tracks a separate replay lane per node, and auto-ACKs. With two boards: flash
-//! the gateway once, then the node as A — re-flash it as B to show the second
+//! the gateway once, then the node as A; re-flash it as B to show the second
 //! peer decoded under a different key by the same gateway. (B only decodes
 //! because KEY_B is registered; the gateway's default key is KEY_A.)
 

@@ -1,4 +1,4 @@
-//! net_bulk_stress — large bulk transfer stress (docs/radio.md).
+//! net_bulk_stress: large bulk transfer stress (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash example net_bulk_stress   # sender: serves a big blob
 //!   TOWER_FEATURES=role-node    just flash example net_bulk_stress   # requester: pulls + verifies
@@ -10,13 +10,13 @@
 //! elapsed / throughput / PASS-FAIL each round.
 //!
 //! Hardware-measured on two boards (4 MHz SPI):
-//! - 2 KB / 32 chunks completes reliably, CRC OK every round, ~2–4 kbps effective
+//! - 2 KB / 32 chunks completes reliably, CRC OK every round, ~2-4 kbps effective
 //!   (dominated by the per-chunk req/resp round-trip, not airtime).
 //! - **Limits.** This example's receive buffer is monolithic and lives in the task's
 //!   future (.bss), so on the 20 KB L0 it trades 1:1 against stack headroom. Stack
 //!   painting measured peak stack ≈ 9.0 KB, so free-stack-at-peak = 4044 − BLOB_LEN B:
 //!   the *hard* ceiling is ≈ 4 KB, and even 4096 silently overruns .bss by ~50 B
-//!   (it corrupts a static — observed as a garbage console drop-count) though the
+//!   (it corrupts a static, observed as a garbage console drop-count) though the
 //!   transfer's CRC still passes. BLOB_LEN is 2048 here for a ~2 KB margin. For larger
 //!   transfers use the **streaming** `bulk_serve_from`/`bulk_fetch_into` API
 //!   (`net_bulk_stream` demos it to 64 KB at constant RAM). On EU 868 the 1 % duty governor caps
@@ -46,7 +46,7 @@ const KEY: [u8; 16] = [
 /// Blob size to stress (64-byte chunks → BLOB_LEN/64 chunks). The receive buffer lives in
 /// this task's future (.bss), so on the 20 KB L0 it trades 1:1 against stack headroom.
 /// Stack-painting measured peak stack ≈ 9.0 KB during a fetch, and free-stack-at-peak
-/// = 4044 − BLOB_LEN bytes — so the *hard* ceiling is ≈ 4 KB (4096 already overruns .bss
+/// = 4044 − BLOB_LEN bytes, so the *hard* ceiling is ≈ 4 KB (4096 already overruns .bss
 /// by ~50 B and silently corrupts a static). 2048 leaves a ~2 KB margin; do not raise it
 /// without re-measuring. For larger transfers use the streaming API (see `net_bulk_stream`).
 const BLOB_LEN: usize = 2048;

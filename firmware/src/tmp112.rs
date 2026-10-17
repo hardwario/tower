@@ -19,7 +19,7 @@ use embedded_hal::i2c::I2c;
 
 /// TMP112 7-bit I²C addresses, selected by the ADD0 pin strap.
 pub const ADDR_GND: u8 = 0x48;
-/// ADD0 → V+ — the HARDWARIO Core Module strap.
+/// ADD0 → V+ (the HARDWARIO Core Module strap).
 pub const ADDR_VPLUS: u8 = 0x49;
 /// ADD0 → SDA.
 pub const ADDR_SDA: u8 = 0x4A;
@@ -50,7 +50,7 @@ impl<I2C: I2c> Tmp112<I2C> {
         Self { i2c, addr }
     }
 
-    /// Put the device in shutdown so it only converts on demand. Optional —
+    /// Put the device in shutdown so it only converts on demand. Optional:
     /// [`trigger_oneshot`](Self::trigger_oneshot) already leaves it shut down
     /// between conversions.
     pub fn shutdown(&mut self) -> Result<(), I2C::Error> {

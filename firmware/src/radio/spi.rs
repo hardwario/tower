@@ -3,13 +3,13 @@
 //! Owns the blocking [`Spi`] on SPI1 plus the **software** chip-select on PA15.
 //! The SPIRIT1 needs `t_su(CS) ≥ 2 µs` between CS falling and the first SCLK
 //! edge (datasheet Table 35), which the peripheral's hardware NSS can't
-//! guarantee — so CS is a plain GPIO output driven low for the whole
+//! guarantee, so CS is a plain GPIO output driven low for the whole
 //! transaction, with a short busy-wait after asserting it.
 //!
 //! Every method returns the two MC_STATE status bytes the SPIRIT1 shifts out on
 //! MISO during the header + address bytes of *every* transaction (§10.2). Use
 //! [`regs::state_from_status`] on `status[0]` to
-//! get the current MC state for free — no extra read.
+//! get the current MC state for free: no extra read.
 
 use embassy_stm32::Peri;
 use embassy_stm32::gpio::{Level, Output, Speed};

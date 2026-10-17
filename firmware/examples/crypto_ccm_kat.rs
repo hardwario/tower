@@ -1,4 +1,4 @@
-//! crypto_ccm_kat — validate AES-128-CCM against RFC 3610 Packet Vector #1,
+//! crypto_ccm_kat: validate AES-128-CCM against RFC 3610 Packet Vector #1,
 //! plus a tamper test. Single board, no radio.
 //!
 //! Encrypts the RFC 3610 #1 vector (N=13, M=8) and checks the ciphertext + tag,

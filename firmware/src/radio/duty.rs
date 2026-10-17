@@ -4,7 +4,7 @@
 //! of airtime and refills at `permil`‰ of wall-clock (10‰ = 1 %). A TX is allowed
 //! only if its time-on-air fits the bucket; otherwise it's deferred/refused
 //! (`DutyLimited`). This approximates a rolling-hour 1 % limit (cap = 1 % of an
-//! hour = 36 000 ms) and counts **all** TX — data, ACK, bulk, retransmits, JOIN.
+//! hour = 36 000 ms) and counts **all** TX: data, ACK, bulk, retransmits, JOIN.
 //! The gateway is governed too (regulatory, independent of mains power).
 //!
 //! The **pure integer** math (refill/consume with the sub-ms residue carry, the frame
@@ -12,12 +12,12 @@
 //! [`tower_radio_core`] leaf crate; this module keeps only the thin `embassy_time::Instant`
 //! real-time wrapper ([`DutyGovernor::try_tx`]) on top of it. Splitting the arithmetic out
 //! lets `just test` unit-test the regulatory budget on the host (the firmware itself is
-//! no_std and can't `cargo test`) — with **zero** behavioural change on the target.
+//! no_std and can't `cargo test`), with **zero** behavioural change on the target.
 
 use embassy_time::Instant;
 
 // Re-export the pure core so the rest of the firmware keeps saying `duty::frame_toa_ms`,
-// `duty::BITRATE`, etc. — no external API change from the extraction.
+// `duty::BITRATE`, etc.; no external API change from the extraction.
 pub use tower_radio_core::{
     BITRATE, EU_CAP_MS, EU_PERMIL, FHSS_DWELL_BURST_MS, FHSS_PERMIL, FHSS_WINDOW_MS, frame_toa_ms,
 };
@@ -47,7 +47,7 @@ impl DutyGovernor {
     /// US 915 governor: no EU-style duty limit (100 % refill). FCC 15.247 governs
     /// US operation by channel-dwell/PSD rather than a fixed duty cycle, so the
     /// bucket simply refills as fast as it drains. (A compliant product still owes
-    /// FHSS/wideband — this is for bench testing; see [`Band`](super::config::Band).)
+    /// FHSS/wideband: this is for bench testing; see [`Band`](super::config::Band).)
     pub fn us915() -> Self {
         Self::new(EU_CAP_MS, 1000)
     }
@@ -77,7 +77,7 @@ impl DutyGovernor {
         self.core.budget_ms()
     }
 
-    /// Add the airtime earned over `elapsed_ms` of wall-clock (capped) — the pure-core refill,
+    /// Add the airtime earned over `elapsed_ms` of wall-clock (capped): the pure-core refill,
     /// exposed for callers that meter their own elapsed time. See the field docs on the core's
     /// residue carry (many short intervals sum exactly to one long interval).
     pub fn refill_ms(&mut self, elapsed_ms: u32) {

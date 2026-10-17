@@ -1,12 +1,12 @@
-//! edge_frame_limits — MTU + malformed/forged-frame rejection KAT (docs/radio.md).
+//! edge_frame_limits: MTU + malformed/forged-frame rejection KAT (docs/radio.md).
 //! Single board, no radio link: drives the frame codec + AES-CCM at its
 //! boundaries and asserts each accept/reject, printing one PASS/FAIL verdict.
 //!
 //!   just flash example edge_frame_limits
 //!
 //! Covers: payload MTU (1 B / 74 B accept, 75 B reject; bulk 64 B accept, 65 B
-//! reject), and the receive-side drops — bad version, unknown type, truncated,
-//! tampered ciphertext, tampered tag, wrong key — each must yield the right error.
+//! reject), and the receive-side drops (bad version, unknown type, truncated,
+//! tampered ciphertext, tampered tag, wrong key): each must yield the right error.
 
 #![no_std]
 #![no_main]
@@ -49,7 +49,7 @@ async fn run(_b: Board) {
     // them, so the writer task never runs to drain the console queue mid-burst. Logging
     // every ✓ would overflow the depth-4 TX queue (drop-newest) and silently drop the
     // final verdict line. We only log *failures* (rare) plus the single verdict at the
-    // end — the verdict is the answer; per-check detail appears only when something breaks.
+    // end. The verdict is the answer; per-check detail appears only when something breaks.
     let mut check = |name: &str, ok: bool| {
         if !ok {
             error!(target: "edge", "  {} ✗ FAIL", name);
@@ -106,7 +106,7 @@ async fn run(_b: Board) {
         );
     }
     // Unknown type: set type field (bits[4:0]) to 8. Beacon=7 is the max valid type,
-    // so 8 is the first unused discriminant — `FrameType::from_u8` returns None → BadType.
+    // so 8 is the first unused discriminant: `FrameType::from_u8` returns None → BadType.
     {
         let mut b = buf;
         b[0] = (b[0] & 0xE0) | 0x08;

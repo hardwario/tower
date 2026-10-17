@@ -1,12 +1,12 @@
-//! edge_rapid — back-to-back transfers: one-at-a-time, monotonic counters (docs/radio.md).
+//! edge_rapid: back-to-back transfers, one-at-a-time, monotonic counters (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-node    just flash example edge_rapid   # hammers confirmed sends
 //!   TOWER_FEATURES=role-gateway just flash example edge_rapid   # checks ordering
 //!
 //! The node fires confirmed sends with NO inter-send delay (the Net serializes
-//! them — one transfer at a time, docs/radio.md). The gateway asserts every accepted frame's
+//! them: one transfer at a time, docs/radio.md). The gateway asserts every accepted frame's
 //! counter is strictly greater than the last (monotonic, no reorder, no double-
-//! accept) — a violation latches a FAIL. Gaps (lost frames) are fine; what must
+//! accept); a violation latches a FAIL. Gaps (lost frames) are fine; what must
 //! never happen is an out-of-order or repeated counter being accepted.
 
 #![no_std]

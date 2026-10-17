@@ -1,5 +1,5 @@
-//! fhss_sweep — F1: sweep all FHSS hop channels, verify the synth locks across the
-//! whole 903–926.7 MHz set (especially the band edges), and **measure** the
+//! fhss_sweep (F1): sweep all FHSS hop channels, verify the synth locks across the
+//! whole 903-926.7 MHz set (especially the band edges), and **measure** the
 //! retune+VCO-lock time so the FHSS slot GUARD is set from data, not assumed.
 //!
 //!   just flash example fhss_sweep        # one board
@@ -46,7 +46,7 @@ async fn run(b: Board) {
         error!(target: "sweep", "config: {e}");
     }
 
-    info!(target: "sweep", "sweeping {} FHSS channels {}–{} MHz",
+    info!(target: "sweep", "sweeping {} FHSS channels {}-{} MHz",
         FHSS_N, fhss_freq_hz(0) / 1_000_000, fhss_freq_hz(FHSS_N - 1) / 1_000_000);
 
     let mut lock_errors = 0u32;

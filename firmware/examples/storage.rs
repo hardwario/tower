@@ -1,10 +1,10 @@
-//! storage — key-value persistence in the L0 EEPROM
+//! storage: key-value persistence in the L0 EEPROM
 //! ([`storage`](tower::storage) block).
 //!
 //! Shows both value styles of the shared key-value store, surviving reset/power-cycle:
-//!   * a **raw scalar** — a boot counter stored as `u32` little-endian bytes
+//!   * a **raw scalar**: a boot counter stored as `u32` little-endian bytes
 //!     (no serializer), and
-//!   * a **postcard record** — a `Settings` struct (any serde type).
+//!   * a **postcard record**: a `Settings` struct (any serde type).
 //!
 //! Adding a new key never disturbs existing ones, so this is also how you evolve
 //! stored data: add a key instead of growing a struct. Reset the board a few
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tower::storage::NS_APP;
 use tower::{app, board::Board};
 
-// Locals within NS_APP (any u8 — the namespace prefix keeps the full key nonzero, so even
+// Locals within NS_APP (any u8: the namespace prefix keeps the full key nonzero, so even
 // local 0 is fine). Add a fresh local to add a new value.
 const KEY_BOOTS: u8 = 0x00; // raw u32 (local within NS_APP)
 const KEY_SETTINGS: u8 = 0x01; // postcard struct (local within NS_APP)

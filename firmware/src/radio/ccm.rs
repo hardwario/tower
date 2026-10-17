@@ -2,7 +2,7 @@
 //! hardware AES ECB primitive ([`aes`](super::aes)).
 //!
 //! Fixed parameters for the TOWER radio: **13-byte nonce (N=13, L=2)** and an
-//! **8-byte tag (M=8)** — confidentiality + integrity in one AEAD. CCM = CBC-MAC
+//! **8-byte tag (M=8)**, confidentiality + integrity in one AEAD. CCM = CBC-MAC
 //! over the AAD + plaintext for the tag, plus CTR for confidentiality, both from
 //! single-block AES encryption. The nonce is derived from the clear header (see
 //! [`frame`](super::frame)); the AAD is the whole cleartext header.
@@ -12,7 +12,7 @@
 //! [`AesBlock`] single-block cipher; it is verified there
 //! against RFC 3610 Packet Vector #1. This module is the thin device binding: it plugs the L0
 //! hardware AES ([`HwAes`]) in as that block cipher and re-exposes the same `Ccm` API the radio
-//! stack already uses. **Zero** behavioural change on target — the hardware binding caches the
+//! stack already uses. **Zero** behavioural change on target: the hardware binding caches the
 //! key and reloads it only when it changes, so a whole seal/open (one key, many blocks) issues
 //! the exact same register sequence as the original set-key-once code.
 
@@ -25,7 +25,7 @@ pub use tower_radio_core::ccm::{MAX_AAD, NONCE_LEN, TAG_LEN};
 /// The L0 hardware AES engine as an [`AesBlock`], with a **key cache**: the hardware `set_key`
 /// runs only when the key actually changes. Across a single seal/open the key is constant, so
 /// this reproduces the original "set the key once, then encrypt N blocks" register sequence
-/// exactly — no extra key loads, no behavioural change on device.
+/// exactly: no extra key loads, no behavioural change on device.
 struct HwAes {
     aes: Aes,
     loaded_key: Option<[u8; 16]>,
@@ -88,6 +88,14 @@ impl Ccm {
         tag: &[u8; TAG_LEN],
     ) -> bool {
         self.core.open(key, nonce, aad, data, tag)
+    }
+
+    /// Key-check value of `key` (first 4 bytes of `AES_K(0¹²⁸)`, little-endian); see
+    /// [`tower_radio_core::ccm::Ccm::key_check`]. Goes through the same cached hardware engine,
+    /// so it never desynchronises the key cache.
+    #[must_use]
+    pub fn key_check(&mut self, key: &[u8; 16]) -> u32 {
+        self.core.key_check(key)
     }
 }
 

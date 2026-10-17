@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fc.sh PORT BIN SECS OUT  — flash bin to port, then mode-B capture (jolt --reset) for SECS.
+# fc.sh PORT BIN SECS OUT: flash bin to port, then mode-B capture (jolt --reset) for SECS.
 # Mode B = reset-then-read, for one-shot examples that print their verdict at boot and idle.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"

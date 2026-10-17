@@ -25,7 +25,7 @@ impl AesBlock for SoftAes {
     }
 }
 
-/// RFC 3610 §8 Packet Vector #1 (M=8, L=2, N=13 — exactly the TOWER parameters).
+/// RFC 3610 §8 Packet Vector #1 (M=8, L=2, N=13: exactly the TOWER parameters).
 ///
 /// AAD = the 8-byte header; the remaining 23 bytes are the plaintext. The expected ciphertext +
 /// 8-byte MIC are copied verbatim from the RFC, so this pins the CCM construction (CBC-MAC over
@@ -160,4 +160,14 @@ fn single_byte_tamper_rejected() {
             "untampered must authenticate"
         );
     }
+}
+
+/// Key-check value: AES-128 of the zero block under the zero key is the well-known
+/// `66e94bd4 ef8a2c3b 884cfa59 ca342b2e` (FIPS-197-style KAT), so the KCV (its first four
+/// bytes read little-endian) is `0xd44be966`. Different keys give different KCVs.
+#[test]
+fn key_check_value_kat() {
+    let mut ccm = Ccm::new(SoftAes);
+    assert_eq!(ccm.key_check(&[0u8; 16]), 0xd44b_e966);
+    assert_ne!(ccm.key_check(&[0u8; 16]), ccm.key_check(&[1u8; 16]));
 }

@@ -2,10 +2,10 @@
 name = "tower-gw-core"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.99.1"
 license = "MIT"
 repository = "https://github.com/hardwario/tower-firmware"
-description = "no_std pure decision core of the HARDWARIO TOWER gateway app: the EEPROM node-registry bucket codec (paired ids + AES keys + names, packed into tower-kv-sized buckets because MAX_KEYS is a global budget) and the RAM downlink-queue policy (per-node FIFO, global pool, TTL expiry, dequeue ids). Split out so the registry/queue arithmetic can be unit-tested on the host — the firmware itself is no_std and can't cargo test."
+description = "no_std pure decision core of the HARDWARIO TOWER gateway app: the EEPROM node-registry bucket codec (paired ids + AES keys + names, packed into tower-kv-sized buckets because MAX_KEYS is a global budget) and the RAM downlink-queue policy (per-node FIFO, global pool, TTL expiry, dequeue ids). Split out so the registry/queue arithmetic can be unit-tested on the host; the firmware itself is no_std and can't cargo test."
 
 # Same shape as crates/tower-kv: serde/postcard/heapless only, no_std, host-testable
 # with plain `cargo test`. The firmware keeps all EEPROM I/O and radio flow and

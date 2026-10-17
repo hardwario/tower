@@ -1,4 +1,4 @@
-//! radio_csma — CSMA/CCA: defer TX while the channel is busy (docs/radio.md).
+//! radio_csma: CSMA/CCA, defer TX while the channel is busy (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash example radio_csma   # jammer: CW 3 s on / 3 s off
 //!   TOWER_FEATURES=role-node    just flash example radio_csma   # sender: TX with CSMA enabled
@@ -6,7 +6,7 @@
 //! The jammer holds an unmodulated carrier for 3 s, then releases it for 3 s,
 //! repeating. The sender transmits a small frame every 600 ms with CSMA/CCA
 //! enabled: while the carrier is up its RSSI exceeds the −90 dBm threshold, so the
-//! radio backs off and (after MAX_NB attempts) reports `Busy` — it never blocks.
+//! radio backs off and (after MAX_NB attempts) reports `Busy`; it never blocks.
 //! When the carrier drops, the very next CSMA TX goes out `ok`. Watch the sender:
 //! it should print runs of `Busy` during the jam and `ok` when the channel clears.
 
@@ -74,7 +74,7 @@ async fn sender(radio: &mut Spirit1) -> ! {
             }
             Err(RadioError::Busy) => {
                 busy += 1;
-                warn!(target: "csma", "seq={} Busy — CCA backed off (channel held) [ok={} busy={}]", seq, ok, busy);
+                warn!(target: "csma", "seq={} Busy: CCA backed off (channel held) [ok={} busy={}]", seq, ok, busy);
             }
             Err(e) => warn!(target: "csma", "seq={} {e}", seq),
         }

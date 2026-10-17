@@ -1,4 +1,4 @@
-//! fhss_compliance — F10: §15.247 compliance evidence from a board log (1 board).
+//! fhss_compliance (F10): §15.247 compliance evidence from a board log (1 board).
 //!
 //!   just flash example fhss_compliance
 //!
@@ -8,7 +8,7 @@
 //! airtime approaches the 0.4 s/20 s limit, and (3) channel use is even (each
 //! channel is visited exactly once per cycle by the Fisher-Yates permutation). This
 //! is master-only (beacons just here, no node), so the airtime per channel is one
-//! beacon ToA — the structural bound (cycle 24 s > 20 s ⇒ ≤ one 300 ms slot/channel/
+//! beacon ToA; the structural bound (cycle 24 s > 20 s ⇒ ≤ one 300 ms slot/channel/
 //! 20 s) is what keeps a *loaded* channel compliant too. Capture with `--reset`.
 
 #![no_std]
@@ -66,7 +66,7 @@ async fn run(b: Board) {
     let mut visited = [false; FHSS_N as usize];
     for _ in 0..SLOTS {
         let Some(s) = net.fhss_master_tick().await else {
-            continue; // master mode not active (shouldn't happen here — we enabled it above)
+            continue; // master mode not active (shouldn't happen here: we enabled it above)
         };
         if (s.channel as usize) < FHSS_N as usize {
             visited[s.channel as usize] = true;

@@ -1,4 +1,4 @@
-//! net_p2p — peer-to-peer confirmed exchange under a shared link key (docs/radio.md).
+//! net_p2p: peer-to-peer confirmed exchange under a shared link key (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-peer-a just flash example net_p2p   # initiator (PING)
 //!   TOWER_FEATURES=role-peer-b just flash example net_p2p   # responder (PONG)
@@ -7,7 +7,7 @@
 //! the shared per-link key and exchanges confirmed messages BOTH directions.
 //! A pings B (confirmed, gets B's ACK), then listens; B receives (auto-ACKs) and
 //! pongs back confirmed (gets A's ACK). Both should report Delivered each round
-//! and print the peer's payload — demonstrating bidirectional confirmed P2P over
+//! and print the peer's payload, demonstrating bidirectional confirmed P2P over
 //! the half-duplex radio plus the peer table (each side holds one peer).
 
 #![no_std]

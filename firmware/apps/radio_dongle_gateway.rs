@@ -1,29 +1,29 @@
-//! radio_dongle_gateway — TOWER IoT Kit product firmware: the network coordinator.
+//! radio_dongle_gateway (TOWER IoT Kit product firmware): the network coordinator.
 //!
 //! The USB Radio Dongle bridges its secured radio network to the host over the framed
-//! console — as a **transparent bridge**: every authenticated uplink is forwarded
+//! console, as a **transparent bridge**: every authenticated uplink is forwarded
 //! verbatim (`Uplink` frames; the host decodes the radio-application payload), so new
 //! node app types never require a gateway firmware change. What the gateway *does* own
 //! is coordination:
 //!
-//! * the **node registry** — paired ids + AES keys + names, persisted in `NS_APP`
+//! * the **node registry**: paired ids + AES keys + names, persisted in `NS_APP`
 //!   EEPROM buckets (`tower-gw-core::registry`), accessed bucket-at-a-time (never
-//!   RAM-resident — see the RAM budget note below) and mirrored into the net layer's
+//!   RAM-resident; see the RAM budget note below) and mirrored into the net layer's
 //!   peer table at boot;
-//! * **pairing** — an OTA window opened on host request (`MgmtOp::PairingOpen`; the
+//! * **pairing**: an OTA window opened on host request (`MgmtOp::PairingOpen`; the
 //!   host mints the key) and cable-paired installs (`MgmtOp::NodeAdd`);
-//! * the **downlink queue** — opaque host-built payloads (`tower-gw-core::queue`,
+//! * the **downlink queue**: opaque host-built payloads (`tower-gw-core::queue`,
 //!   RAM-only; a reboot drops it and the host re-queues on the `Hello` session bump)
 //!   delivered on a sleeping node's next uplink, advertised via the ACK pending flag;
-//! * **radio diagnostics** — ambient channel RSSI at a settable cadence plus per-TX
+//! * **radio diagnostics**: ambient channel RSSI at a settable cadence plus per-TX
 //!   outcome reports (`RadioStat` frames) feeding the host's running channel graph.
 //!
 //! Single-owner design: one main loop owns `Net` + queue (no `&mut Net` sharing across
 //! tasks) and multiplexes recv slices, management requests, the pairing window, and
 //! the stats tick.
 //!
-//! **RAM budget** (20 KB part, HW-measured ~9 KB stack peak for any `Net` app — see
-//! the stack-overflow history): everything this app keeps resident beyond the SDK
+//! **RAM budget** (20 KB part, ~9 KB stack region; bench-measured gateway high-water 7360 B
+//! (2026-07-12, `/system stack print`); see the stack-overflow history): everything this app keeps resident beyond the SDK
 //! baseline must fit in ~2 KB, or the stack loses the difference. Hence: registry on
 //! EEPROM (transient ~270 B bucket locals on the stack), a 4-item downlink queue,
 //! and 12-byte packed link stats. Check `just size app radio_dongle_gateway` after
@@ -44,7 +44,7 @@ use log::{info, warn};
 use tower::led::{self, LedChannel, Pattern, Polarity, Step};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
-use tower::radio::net::{Net, NetConfig, SendResult};
+use tower::radio::net::{Net, NetConfig, SendResult, peer_addr_valid};
 use tower::storage::{NS_APP, NS_SHELL, Nv, Scoped};
 use tower::{app, board::Board, console, shell, watchdog};
 use tower_gw_core::queue::{PushError, Queue};
@@ -135,7 +135,7 @@ fn cmd_status(ctx: &mut shell::Ctx<'_>, _args: &[&str]) -> shell::Outcome {
 
 // --- timing ------------------------------------------------------------------------
 
-/// One receive slice of the main loop — short enough that management requests and the
+/// One receive slice of the main loop: short enough that management requests and the
 /// stats tick stay responsive, long enough that the loop isn't spinning.
 const RECV_SLICE: Duration = Duration::from_millis(250);
 /// One pairing-window slice (management latency ceiling while pairing).
@@ -157,10 +157,15 @@ static HEARTBEAT: Pattern = &[Step::on(30), Step::off(1970)];
 /// Fast blink while the OTA pairing window is open.
 static PAIRING: Pattern = &[Step::on(100), Step::off(150)];
 
-/// The default-lane key. Not a secret and not used by any legitimate node (every
-/// registered node has its own key; the pairing exchange uses `PAIRING_KEY`): traffic
-/// from unregistered peers must simply fail CCM auth, which any value achieves.
-/// Derived from the UID so two gateways side by side don't share a lane key.
+/// The net layer's `NetConfig::key` for the gateway. **Not a secret, and it must never
+/// authenticate anything:** it is derived from the gateway's own address, which rides in
+/// clear in every frame, with a public constant, so anyone can compute it. (An earlier note
+/// here claimed unregistered traffic "must simply fail CCM auth, which any value achieves". That was
+/// wrong: an attacker sealed DATA frames from unregistered addresses under this key and the
+/// gateway ACKed them and forwarded them to the host as genuine uplinks.) The gateway therefore
+/// runs **registered peers only** (`set_default_lane(false)` right after `Net::new`): no
+/// default lane, so this key is never used to open a frame. It only exists because `NetConfig`
+/// requires one; no legitimate node uses it (each has its own key; pairing uses `PAIRING_KEY`).
 fn default_lane_key(addr: u32) -> [u8; 16] {
     let mut k = [0u8; 16];
     for (i, chunk) in k.chunks_mut(4).enumerate() {
@@ -170,12 +175,12 @@ fn default_lane_key(addr: u32) -> [u8; 16] {
 }
 
 /// RAM-only per-node link stats. Packed to 12 B/entry (16 entries = 192 B of the app
-/// future); deliberately NOT persisted — per-uplink EEPROM writes would burn the part
+/// future); deliberately NOT persisted; per-uplink EEPROM writes would burn the part
 /// (docs/storage.md). `NodeEntry.last_seen` is documented as "since gateway boot".
 #[derive(Clone, Copy)]
 struct LinkStat {
     addr: u32,
-    /// `Instant::as_secs()` truncated — wraps after 136 years of uptime.
+    /// `Instant::as_secs()` truncated; wraps after 136 years of uptime.
     seen_s: u32,
     rssi: i8,
     /// Saturating (reported as-is in the u32 wire field).
@@ -185,7 +190,7 @@ struct LinkStat {
 // The registry, the net peer table, and the link-stat array MUST stay the same size:
 // if the registry could hold more nodes than the peer table, the boot mirror would
 // silently drop the excess and those nodes' uplinks would fail CCM auth against the
-// default lane — paired nodes going dead with no host-visible signal. MAX_PEERS has
+// default lane: paired nodes going dead with no host-visible signal. MAX_PEERS has
 // moved twice already (64→32→16); pin the coupling here, the one crate that sees both.
 const _: () = assert!(registry::CAPACITY == tower::radio::net::MAX_PEERS);
 
@@ -227,7 +232,7 @@ impl Stats {
     }
 }
 
-/// An armed OTA pairing window (delayed `MgmtResponse` — resolves on join/expiry/cancel).
+/// An armed OTA pairing window (delayed `MgmtResponse`: resolves on join/expiry/cancel).
 struct PairingSession {
     req_id: u16,
     key: [u8; 16],
@@ -236,7 +241,7 @@ struct PairingSession {
 
 /// Chunked management-response sender: accumulates record bytes into ≤192-byte `data`
 /// chunks, flushing as they fill (the app-driven-chunking contract of
-/// [`console::mgmt_chunk`]). Record boundaries need not align with chunk boundaries —
+/// [`console::mgmt_chunk`]). Record boundaries need not align with chunk boundaries;
 /// the host concatenates all `data` before decoding the record stream.
 struct ChunkStream {
     req_id: u16,
@@ -294,7 +299,7 @@ async fn respond_empty(req_id: u16, result: u8) {
 }
 
 /// Reply `MGMT_OK` with a single postcard record (largest single record is a
-/// max-name `DeviceInfo` at ~60 B — 96 covers every one-record reply).
+/// max-name `DeviceInfo` at ~60 B; 96 covers every one-record reply).
 async fn respond_record<T: serde::Serialize>(req_id: u16, record: &T) {
     let mut buf = [0u8; 96];
     match postcard::to_slice(record, &mut buf) {
@@ -323,7 +328,7 @@ fn read_band_setting(kv: Nv) -> Band {
 }
 
 async fn run(b: Board) {
-    // Hardware safety net: a hung gateway takes the whole network down — reset it within
+    // Hardware safety net: a hung gateway takes the whole network down; reset it within
     // ~26 s (the L0 hardware ceiling) rather than waiting for someone to notice. Liveness-
     // gated on the main loop below: the feeder task alone only proves the executor runs,
     // and the 2026-07-13 wedge (main loop parked on console backpressure after a lost
@@ -350,7 +355,7 @@ async fn run(b: Board) {
     let addr = shell::radio_addr(kv);
     STAT_ID.store(addr, Ordering::Relaxed);
     // Registry format guard: refuse buckets written by a NEWER format (a firmware
-    // downgrade) instead of mis-decoding them as empty and stamping the marker back —
+    // downgrade) instead of mis-decoding them as empty and stamping the marker back,
     // which would silently discard every pairing. v1-or-unset stamps and proceeds.
     let mut fmt = [0u8; 1];
     let newer_format =
@@ -358,7 +363,7 @@ async fn run(b: Board) {
     if newer_format {
         log::error!(
             target: "gateway",
-            "registry format v{} is newer than this firmware understands (v{}) — registry left untouched; update the firmware",
+            "registry format v{} is newer than this firmware understands (v{}), registry left untouched; update the firmware",
             fmt[0],
             registry::FORMAT_VERSION
         );
@@ -393,13 +398,17 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            log::error!(target: "gateway", "net init: {e} — gateway down");
+            log::error!(target: "gateway", "net init: {e}; gateway down");
             return;
         }
     };
+    // Registered peers only: a frame from any address not in the peer table (never paired, or
+    // removed) is dropped on its clear header: no CCM, no ACK, no uplink to the host, no
+    // default-lane EEPROM writes. See `default_lane_key` for why this is not optional.
+    net.set_default_lane(false);
 
     // Install every registered node into the peer table, bucket-at-a-time. CAPACITY ==
-    // MAX_PEERS is pinned above, so a refusal here is a real invariant break — a node
+    // MAX_PEERS is pinned above, so a refusal here is a real invariant break: a node
     // the registry holds but the radio won't decrypt for. Say so instead of going mute.
     // (Skipped under the newer-format guard: those buckets must not be interpreted.)
     let mut node_count = 0u32;
@@ -407,7 +416,7 @@ async fn run(b: Board) {
         for i in 0..registry::BUCKETS {
             for rec in registry::load(&buckets, i).iter() {
                 if !net.add_peer(rec.addr, &rec.key) {
-                    warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", rec.addr);
+                    warn!(target: "gateway", "peer table refused {:08X}, node will not decrypt", rec.addr);
                 }
                 node_count += 1;
             }
@@ -434,7 +443,7 @@ async fn run(b: Board) {
         //    is bounded, so a stale check-in means parked-forever, and the IWDG resets us.
         watchdog::checkin();
 
-        // 1. Serve management requests (host → gateway) — but at most two per loop
+        // 1. Serve management requests (host → gateway), but at most two per loop
         //    iteration, so a host polling faster than the response-transmit time can't
         //    starve the radio recv slice below (depth-1 channel: a dropped burst is
         //    just retried by the host anyway).
@@ -466,13 +475,13 @@ async fn run(b: Board) {
 
         let now_ms = Instant::now().as_millis();
 
-        // 2. Radio: either a pairing-window slice or a receive slice — the two share
+        // 2. Radio: either a pairing-window slice or a receive slice; the two share
         //    the one radio, and pairing mode is explicit + short-lived.
         if let Some(sess) = pairing.as_ref() {
             if registry::count(&buckets) >= registry::CAPACITY {
                 // The registry filled while the window was open (a concurrent cable
                 // NodeAdd): close early instead of letting a node complete the JOIN,
-                // persist its side, and then be refused — half-paired and unreachable.
+                // persist its side, and then be refused, half-paired and unreachable.
                 respond_empty(sess.req_id, mgmt::MGMT_FULL).await;
                 led.set_background(Some(HEARTBEAT));
                 pairing = None;
@@ -482,6 +491,8 @@ async fn run(b: Board) {
                 pairing = None;
             } else {
                 let slice = PAIR_SLICE.min(sess.deadline.saturating_duration_since(Instant::now()));
+                // `open_pairing` never answers a JOIN_REQ for an already-registered (or reserved,
+                // or our own) address; OTA pairing only adds NEW nodes (docs/gateway.md).
                 if let Some(node_addr) = net.open_pairing(slice, &sess.key).await {
                     let key = sess.key;
                     let req_id = sess.req_id;
@@ -547,18 +558,27 @@ async fn run(b: Board) {
             STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
         }
 
-        if stats_period_ms > 0 && last_stat.elapsed() >= Duration::from_millis(stats_period_ms as u64) {
+        // Ambient channel RSSI: the sample is a free by-product of the recv slices: each idle
+        // RX timeout latches the channel level as it SABORTs (`Net::take_idle_rssi`). The old
+        // `rssi_sample()` here opened its own ~20 ms RX window (flushing the FIFO) and then left
+        // the radio READY across the console write: every 500 ms the gateway went deaf long
+        // enough to cost ~8-14 % of first-attempt uplinks. No fresh idle sample yet (the slices
+        // kept catching frames) → nothing to report; retry next iteration.
+        if stats_period_ms > 0
+            && last_stat.elapsed() >= Duration::from_millis(stats_period_ms as u64)
+            && let Some(rssi) = net.take_idle_rssi()
+        {
             last_stat = Instant::now();
-            if let Ok(rssi) = net.rssi_sample().await {
-                console::radio_stat(RadioStat::Channel { channel, rssi }).await;
-            }
+            console::radio_stat(RadioStat::Channel { channel, rssi }).await;
         }
     }
 }
 
-/// Commit a joined node: persist it (UNNAMED — the host auto-names from the first
+/// Commit a joined node: persist it (UNNAMED: the host auto-names from the first
 /// `NodeInfo` uplink via `NodeUpdate`, keeping this firmware payload-agnostic), install
-/// the peer, and resolve the delayed `PairingOpen` response.
+/// the peer, and resolve the delayed `PairingOpen` response. Insert-only
+/// (`registry::add_new`): an OTA join must never overwrite a registered node's key (the net
+/// layer already refuses such a JOIN_REQ; this is the registry-side backstop).
 async fn commit_pairing(
     node_addr: u32,
     key: [u8; 16],
@@ -572,14 +592,18 @@ async fn commit_pairing(
         flags: mgmt::NODE_FLAG_UNNAMED,
         name: heapless::String::new(),
     };
-    match registry::add(buckets, &rec) {
+    match registry::add_new(buckets, &rec) {
         Ok(()) => {
             if !net.add_peer(node_addr, &key) {
-                warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", node_addr);
+                warn!(target: "gateway", "peer table refused {:08X}, node will not decrypt", node_addr);
             }
             STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
             info!(target: "gateway", "paired node {:08X}", node_addr);
             respond_record(req_id, &Paired { addr: node_addr }).await;
+        }
+        Err(RegistryError::Exists) => {
+            warn!(target: "gateway", "pairing: {:08X} is already registered; remove it first to re-pair", node_addr);
+            respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
         }
         Err(RegistryError::Full) => respond_empty(req_id, mgmt::MGMT_FULL).await,
         Err(_) => respond_empty(req_id, mgmt::MGMT_STORAGE).await,
@@ -602,6 +626,7 @@ async fn handle_mgmt(
 ) {
     let req_id = req.req_id;
     let now_ms = Instant::now().as_millis();
+    let gw_addr = addr; // the arms below destructure their own `addr`
     match req.op {
         MgmtOp::Describe => {
             let name = console::firmware_name();
@@ -660,7 +685,11 @@ async fn handle_mgmt(
             name,
             flags,
         } => {
-            if addr == 0 || name.len() > mgmt::MAX_NODE_NAME {
+            // Same address rules as OTA pairing and `Net::add_peer`: not reserved (0 /
+            // broadcast) and not the gateway's own address (a node sharing it would collide CCM
+            // nonces under its key). A cable NodeAdd MAY overwrite an existing node; it is an
+            // authenticated host action (re-provision), unlike an OTA join.
+            if !peer_addr_valid(addr, gw_addr) || name.len() > mgmt::MAX_NODE_NAME {
                 respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                 return;
             }
@@ -677,7 +706,7 @@ async fn handle_mgmt(
             ) {
                 Ok(()) => {
                     if !net.add_peer(addr, &key) {
-                        warn!(target: "gateway", "peer table refused {:08X} — node will not decrypt", addr);
+                        warn!(target: "gateway", "peer table refused {:08X}, node will not decrypt", addr);
                     }
                     STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
                     info!(target: "gateway", "node {:08X} added ({})", addr, name);
@@ -738,7 +767,7 @@ async fn handle_mgmt(
                 key,
                 deadline: Instant::now() + Duration::from_secs(window as u64),
             });
-            // The response is DELAYED — it resolves when the window does.
+            // The response is DELAYED: it resolves when the window does.
         }
         MgmtOp::PairingCancel => {
             if let Some(sess) = pairing.take() {

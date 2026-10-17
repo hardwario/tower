@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tb.sh NODE_BIN NODE_PORT GW_BIN GW_PORT SECS NODE_OUT GW_OUT
 # Two-board test: flash node then gateway SEQUENTIALLY (concurrent flashing of two FTDIs over
-# one USB bus is unreliable — Write-Memory timeouts / port re-enumeration), then capture both
+# one USB bus is unreliable: Write-Memory timeouts / port re-enumeration), then capture both
 # ports CONCURRENTLY with `tower logs` (mode A, for continuous output).
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"

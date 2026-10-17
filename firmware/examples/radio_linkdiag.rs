@@ -1,4 +1,4 @@
-//! radio_linkdiag — deep instrumentation of the TX and RX state machines / FIFOs
+//! radio_linkdiag: deep instrumentation of the TX and RX state machines / FIFOs
 //! / interrupts, to verify the packet-handling *infrastructure* (not just RF
 //! registers).
 //!
@@ -7,9 +7,9 @@
 //!
 //! TX role: loads a known payload, confirms it landed in the TX FIFO, strobes TX,
 //! traces the MC_STATE progression (READY→SYNTH→LOCK→TX→READY), reads the result
-//! IRQ, and confirms the FIFO drained — proving the transmitter really sends a
+//! IRQ, and confirms the FIFO drained, proving the transmitter really sends a
 //! packet. RX role: strobes RX and polls ELEM_RXFIFO directly; if *any* bytes
-//! arrive it dumps them raw — proving (or disproving) reception below the IRQ /
+//! arrive it dumps them raw, proving (or disproving) reception below the IRQ /
 //! length-decode layer.
 
 #![no_std]

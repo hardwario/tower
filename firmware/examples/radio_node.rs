@@ -1,4 +1,4 @@
-//! radio_node — reference sensor node (shipped happy-path app, docs/radio.md).
+//! radio_node: reference sensor node (shipped happy-path app, docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-node just flash example radio_node
 //!

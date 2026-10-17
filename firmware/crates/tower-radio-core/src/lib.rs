@@ -1,14 +1,14 @@
 //! Pure integer core of the TOWER radio timing/compliance math (docs/radio.md).
 //!
 //! Extracted from `src/radio/duty.rs` and `src/radio/net/fhss.rs` so the regulatory
-//! arithmetic — the EU/US/FHSS duty token-bucket, frame time-on-air, and the fixed FHSS
-//! hop permutation — can be **unit-tested on the host** (`cargo test`). The firmware itself
+//! arithmetic (the EU/US/FHSS duty token-bucket, frame time-on-air, and the fixed FHSS
+//! hop permutation) can be **unit-tested on the host** (`cargo test`). The firmware itself
 //! is `no_std` with a thumbv6m default target and has no libtest, exactly the reason
 //! `crates/tower-kv` was split out; this follows that precedent.
 //!
 //! Everything here is `no_std` and free of any real-time dependency: the token bucket takes
 //! `elapsed_ms` as an argument rather than reading a clock. The `embassy_time::Instant`-based
-//! [`DutyGovernor::try_tx`] wrapper stays in `src/radio/duty.rs` and delegates to
+//! `DutyGovernor::try_tx` wrapper stays in `src/radio/duty.rs` and delegates to
 //! [`DutyGovernor::refill_ms`] + [`DutyGovernor::try_consume`] here, so there is **zero**
 //! behavioural change on the target and no external API change (the firmware re-exports these
 //! from `src/radio`).
@@ -32,10 +32,11 @@ pub const FHSS_DWELL_BURST_MS: u32 = 100;
 pub const FHSS_PERMIL: u32 = 10;
 
 /// Time-on-air (ms) of a frame whose FIFO payload is `frame_len` bytes, including
-/// the HW-generated preamble (4) + sync (4) + length (1) + CRC (2) — docs/radio.md. Rounded
-/// up so the regulatory budget is never under-counted.
+/// the HW-generated preamble (4) + sync (4) + length (1) + CRC (2), see docs/radio.md. Rounded
+/// up so the regulatory budget is never under-counted. `const` so radio timing constants can be
+/// derived from it at compile time.
 #[must_use]
-pub fn frame_toa_ms(frame_len: usize) -> u32 {
+pub const fn frame_toa_ms(frame_len: usize) -> u32 {
     let bytes = 4 + 4 + 1 + frame_len as u32 + 2;
     (bytes * 8 * 1000).div_ceil(BITRATE)
 }
@@ -76,7 +77,7 @@ impl DutyGovernor {
     /// US 915 governor: no EU-style duty limit (100 % refill). FCC 15.247 governs
     /// US operation by channel-dwell/PSD rather than a fixed duty cycle, so the
     /// bucket simply refills as fast as it drains. (A compliant product still owes
-    /// FHSS/wideband — this is for bench testing; see `Band`.)
+    /// FHSS/wideband: this is for bench testing; see `Band`.)
     pub fn us915() -> Self {
         Self::new(EU_CAP_MS, 1000)
     }
@@ -97,7 +98,7 @@ impl DutyGovernor {
     }
 
     /// Add the airtime earned over `elapsed_ms` of wall-clock (capped). Accumulates the
-    /// sub-millisecond remainder in [`residue`](Self::residue) so repeated short intervals sum
+    /// sub-millisecond remainder in `residue` so repeated short intervals sum
     /// exactly to the true refill instead of each truncating to zero (see the field docs).
     pub fn refill_ms(&mut self, elapsed_ms: u32) {
         let total = elapsed_ms
@@ -124,14 +125,14 @@ impl DutyGovernor {
 /// construction), deterministic at both ends. `N` is the FHSS channel count (the firmware
 /// instantiates it with `config::FHSS_N` = 80).
 ///
-/// The permutation is **fixed across cycles** — it is seeded from `seed` alone and does
+/// The permutation is **fixed across cycles**: it is seeded from `seed` alone and does
 /// **not** mix in `cycle`. This is a §15.247 compliance requirement, not a stylistic
 /// choice: a fresh per-cycle shuffle gives *no* minimum spacing across a cycle boundary,
 /// so a channel could fall in the last slot of one cycle and the first slot of the next
 /// (~300 ms apart) and thus be occupied twice inside a single 20 s averaging window,
 /// exceeding the 0.4 s/20 s per-channel limit. With one fixed permutation every channel
-/// recurs at the *same* slot offset each cycle — exactly one cycle
-/// (`N · FHSS_SLOT_MS` = 24 s > 20 s) apart — so it is tuned at most once per window
+/// recurs at the *same* slot offset each cycle, exactly one cycle
+/// (`N · FHSS_SLOT_MS` = 24 s > 20 s) apart, so it is tuned at most once per window
 /// by construction. `cycle` is kept in the signature (both ends still pass it) for
 /// call-site symmetry with the slot decomposition and to leave room for a future
 /// schedule that re-keys per cycle *without* reintroducing the adjacency hazard.
@@ -144,7 +145,7 @@ pub fn hop_channel<const N: usize>(seed: u32, cycle: u32, i: u8) -> u8 {
         perm[k] = k as u8;
         k += 1;
     }
-    // xorshift32 seeded from `seed` ONLY (not the cycle) — a single fixed permutation, so a
+    // xorshift32 seeded from `seed` ONLY (not the cycle): a single fixed permutation, so a
     // channel's successive visits are exactly one 24 s cycle apart (> the 20 s window).
     let mut x = seed;
     if x == 0 {

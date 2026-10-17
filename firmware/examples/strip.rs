@@ -1,4 +1,4 @@
-//! strip — scrolling rainbow on the WS2812 strip (PA1).
+//! strip: scrolling rainbow on the WS2812 strip (PA1).
 //!
 //! Demonstrates the effects layer ([`strip`](tower::strip)) over the
 //! PWM/DMA driver. Edit `NUM` for your strip length.

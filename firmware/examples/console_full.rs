@@ -1,6 +1,6 @@
-//! console_full — the showcase for `tower console` (the TUI). Serves the shell and
+//! console_full: the showcase for `tower console` (the TUI). Serves the shell and
 //! emits live logs (every level) plus periodic structured events, so all three panes
-//! — Device Events / Interactive Shell / Device Logs — have content.
+//! (Device Events / Interactive Shell / Device Logs) have content.
 //!
 //! Drive it with:  `tower console`
 //!   try `/system identity print`, `/system/resource print`, TAB completion,
@@ -17,7 +17,7 @@ use tower::{app, board::Board, console, println};
 
 async fn run(_b: Board) {
     // The shell is served automatically by `app!` (Responses/Command panes), over the shared KV.
-    info!("console_full ready — drive the shell, e.g. `/system identity print`");
+    info!("console_full ready: drive the shell, e.g. `/system identity print`");
 
     let mut n: u32 = 0;
     loop {

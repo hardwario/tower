@@ -1,4 +1,4 @@
-//! radio_afa — EU 868 LBT + Adaptive Frequency Agility (EN 300 220).
+//! radio_afa: EU 868 LBT + Adaptive Frequency Agility (EN 300 220).
 //!
 //!   TOWER_FEATURES=role-gateway just flash example radio_afa   # scans the AFA set, auto-ACKs
 //!   TOWER_FEATURES=role-node    just flash example radio_afa   # LBT + agility transmitter
@@ -6,12 +6,12 @@
 //! Listen-Before-Talk + frequency agility is the EU technique that relaxes the 1 %
 //! duty cap. The node listens before every TX (CCA) and hops to another channel
 //! when one is busy or still in its post-TX off-time; the gateway just scans the
-//! 8-channel set (865.2–868.0 MHz) and ACKs on whatever channel caught the frame —
+//! 8-channel set (865.2-868.0 MHz) and ACKs on whatever channel caught the frame,
 //! no time-sync. Each node cycle does: (1) one **confirmed** send (LBT + delivery +
-//! ACK — the node camps a channel, the gateway scans onto it), then (2) a short
+//! ACK: the node camps a channel, the gateway scans onto it), then (2) a short
 //! **unconfirmed burst** whose per-channel off-time forces the channel to sweep,
 //! demonstrating agility. Watch the node log the channel it used and the gateway log
-//! the channel it received on — they move across the set under contention.
+//! the channel it received on; they move across the set under contention.
 
 #![no_std]
 #![no_main]
@@ -84,7 +84,7 @@ async fn run(b: Board) {
             error!(target: "afa", "enable_afa: {e}");
             return;
         }
-        info!(target: "afa", "NODE: LBT+AFA over 8 EU channels (865.2–868.0 MHz)");
+        info!(target: "afa", "NODE: LBT+AFA over 8 EU channels (865.2-868.0 MHz)");
         let mut seq: u32 = 0;
         loop {
             // 1) Confirmed: LBT + delivery + ACK (node camps a channel; GW scans onto it).
@@ -96,7 +96,7 @@ async fn run(b: Board) {
             }
             seq = seq.wrapping_add(1);
 
-            // 2) Unconfirmed burst: the per-channel off-time forces agility — watch ch sweep.
+            // 2) Unconfirmed burst: the per-channel off-time forces agility; watch ch sweep.
             for _ in 0..4 {
                 let _ = net.afa_send(GW_ADDR, &seq.to_le_bytes(), false, 1).await;
                 info!(target: "afa", "  agility burst seq={} ch={}", seq, net.afa_channel());

@@ -1,9 +1,9 @@
-//! net_persist — TX-counter persistence across reboot (docs/radio.md).
+//! net_persist: TX-counter persistence across reboot (docs/radio.md).
 //!
 //! Single board. On boot it logs the resumed TX counter, the persisted reserve
 //! watermark, and last-seen, then sends unconfirmed frames (advancing the
 //! counter). Power-cycle / reset the board: the counter must **resume at the
-//! previous watermark** (jumping ahead, never reusing a value) — e.g. boot 1
+//! previous watermark** (jumping ahead, never reusing a value), e.g. boot 1
 //! starts at 1 (watermark 1025); after a reset it resumes at 1025 (watermark
 //! 2049), skipping the unused tail of the reserved block.
 //!

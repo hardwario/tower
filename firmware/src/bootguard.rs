@@ -1,11 +1,11 @@
 //! Boot-loop guard.
 //!
-//! A unit wedged in a reset loop — a persistent hang caught by the [`watchdog`](crate::watchdog),
-//! or a brown-out cycle — would otherwise rewrite per-boot EEPROM state (the console session
+//! A unit wedged in a reset loop (a persistent hang caught by the [`watchdog`](crate::watchdog),
+//! or a brown-out cycle) would otherwise rewrite per-boot EEPROM state (the console session
 //! counter, the radio TX watermark) on *every* reset, slowly grinding the data EEPROM (see
 //! `docs/storage.md`). This counts consecutive resets that never reached a healthy uptime in a
-//! **reset-surviving `.uninit` RAM word** — retained across a warm reset but never persisted, so
-//! it costs **zero EEPROM wear** — and lets the SDK stop persisting per-boot state once a loop is
+//! **reset-surviving `.uninit` RAM word** (retained across a warm reset but never persisted, so
+//! it costs **zero EEPROM wear**) and lets the SDK stop persisting per-boot state once a loop is
 //! detected ([`console::init_session`](crate::console::init_session) does exactly that).
 //!
 //! A cold boot (random RAM) is told from a warm reset by a magic marker; a brown-out that loses
@@ -19,7 +19,7 @@ use embassy_time::{Duration, Timer};
 
 /// Marks [`STATE`] as a live boot-guard record (vs cold-boot RAM garbage).
 const MAGIC: u32 = 0xB007_10AD;
-/// Consecutive fast resets — each failing to reach [`HEALTHY_UPTIME`] — before a unit is judged to
+/// Consecutive fast resets (each failing to reach [`HEALTHY_UPTIME`]) before a unit is judged to
 /// be boot-looping and the SDK suppresses per-boot EEPROM writes.
 pub const BOOT_LOOP_THRESHOLD: u32 = 8;
 /// Uptime a boot must survive to be declared healthy, which clears the consecutive-reset run.
@@ -55,7 +55,7 @@ pub fn on_boot(spawner: Spawner) -> u32 {
     resets
 }
 
-/// The consecutive-reset run length from the last [`on_boot`] — for apps that want to back off
+/// The consecutive-reset run length from the last [`on_boot`], for apps that want to back off
 /// their own per-boot persistence (or skip arming the watchdog) while a unit is looping.
 pub fn consecutive_resets() -> u32 {
     RESETS.load(Ordering::Relaxed)
@@ -67,7 +67,7 @@ pub fn is_looping() -> bool {
     consecutive_resets() >= BOOT_LOOP_THRESHOLD
 }
 
-/// Clear the reset run once the unit proves a healthy uptime — so the *next* reboot (after a long,
+/// Clear the reset run once the unit proves a healthy uptime, so the *next* reboot (after a long,
 /// successful session) starts a fresh count rather than inheriting this boot's run.
 #[embassy_executor::task]
 async fn healthy_watch() {

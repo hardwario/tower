@@ -8,7 +8,7 @@
 //! Two layers, with a clear priority:
 //!   * a **background** pattern that loops forever (a status/heartbeat
 //!     indication), and
-//!   * **instant** sequences that take priority — each preempts the background,
+//!   * **instant** sequences that take priority: each preempts the background,
 //!     plays once, and then the background resumes.
 //!
 //! When an instant sequence interrupts a *running* background, the LED is first
@@ -72,7 +72,7 @@ enum Command {
     Background(Option<Pattern>),
     /// Play a one-shot sequence at priority over the background.
     Play(Pattern),
-    /// Play a one-shot pulse train `[on `on_ms`, off `off_ms`] × count` — a
+    /// Play a one-shot pulse train `[on `on_ms`, off `off_ms`] × count`, a
     /// [`Pattern`] whose timings are known only at runtime (e.g. a configurable
     /// button-feedback flash), which a `'static` [`Pattern`] can't express.
     Pulse { on_ms: u32, off_ms: u32, count: u16 },
@@ -114,7 +114,7 @@ impl Led {
         let _ = self.ch.inner.try_send(Command::Play(seq));
     }
 
-    /// Play a one-shot pulse train — `[on `on_ms`, off `off_ms`] × count` — at
+    /// Play a one-shot pulse train (`[on `on_ms`, off `off_ms`] × count`) at
     /// priority over the background. Unlike [`play`](Self::play), the timings are
     /// runtime values (for a configurable flash), so no `'static` [`Pattern`] is
     /// needed. `count == 0` is a no-op.

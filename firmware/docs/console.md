@@ -1,4 +1,4 @@
-# TOWER Console — user guide
+# TOWER Console: user guide
 
 A framed, bidirectional **host ↔ target console** for the TOWER Core Module
 (STM32L083CZ). One serial link carries everything: structured **logs**, raw
@@ -15,7 +15,7 @@ framework**. The host side is the **`tower`** CLI/TUI.
 > implemented and tested on real hardware. The codec has 20 host tests including
 > 9000 fuzz iterations (run in the tower-protocol repo).
 
-This is the standalone reference for using and maintaining the console subsystem —
+This is the standalone reference for using and maintaining the console subsystem:
 architecture, wire protocol, the firmware + host APIs, and a worked example per feature.
 
 ---
@@ -39,16 +39,16 @@ The console owns **USART1** on the Core Module:
 |---|---|---|
 | TX | PA9 | target → host |
 | RX | PA10 | host → target (full-duplex; wired through the dongle's USB bridge) |
-| Baud | — | 115200 **8N1** |
+| Baud | n/a | 115200 **8N1** |
 
 It is **DMA-backed**: TX on `DMA1_CH4`, RX on a circular DMA buffer (`RingBufferedUartRx`)
-on `DMA1_CH5` — a different DMA channel group (`DMA1_CHANNEL4_5_6_7`) from the WS2812 LED
+on `DMA1_CH5`, a different DMA channel group (`DMA1_CHANNEL4_5_6_7`) from the WS2812 LED
 strip's `DMA1_CH3` (`DMA1_CHANNEL2_3`), so the strip and the console both use DMA with no
 channel or IRQ overlap. The hardware-filled RX ring means a host → target byte is never lost
 to receiver overrun while a TX burst or critical section delays the reader.
 
 The link is **always framed** (binary COBS frames). A plain serial terminal (`screen`,
-`minicom`, or any raw monitor) shows gibberish — use the `tower` CLI (`tower logs`),
+`minicom`, or any raw monitor) shows gibberish; use the `tower` CLI (`tower logs`),
 which decodes the frames.
 
 ## Quick start
@@ -101,37 +101,37 @@ app!(run);
   per-frame **`seq`** at send time (so a gap on the wire means *real* loss, never a queue
   drop), encodes the frame, and writes it. Before the next real frame it emits a
   `Dropped{count}` marker if anything was dropped.
-- **The codec** (`tower-protocol`) frames every message identically — see *Wire
+- **The codec** (`tower-protocol`) frames every message identically; see *Wire
   protocol*.
-- **RX** is read by the same manager and **routed by frame type** — shell frames to the
+- **RX** is read by the same manager and **routed by frame type**: shell frames to the
   shell's channel. The manager owns the whole UART so it can
-  be torn down/rebuilt on USB unplug/plug — see *Low power & the dynamic console*.
+  be torn down/rebuilt on USB unplug/plug (see *Low power & the dynamic console*).
 
 ### Low power & the dynamic (USB-gated) console
 
 On the STM32L0 an **enabled USART holds embassy's STOP refcount**, so a permanently-on
-console would keep the low-power executor out of STOP *forever* — an unplugged / battery
+console would keep the low-power executor out of STOP *forever*: an unplugged / battery
 node would burn ~3.5 mA (WFI at 16 MHz) instead of idling at µA. The console is therefore
 **dynamic**: `console::manager` (spawned by `Board::take`) owns USART1 + PA9/PA10 + the
 `VBUS_SENSE` (PA12) EXTI, and gates the whole UART on USB presence:
 
 - **USB present** → builds the DMA-backed `Uart` (RX ring on ch5), runs the writer + the RX frame-router, and
   re-emits a `Hello`. While USB is present the enabled USART keeps the MCU in WFI (not
-  STOP) — which is what we want: the console/shell stay responsive and the node is
+  STOP), which is what we want: the console/shell stay responsive and the node is
   powered/plugged anyway.
 - **USB absent** → **drops** the UART, which disables USART1 and releases the STOP
   refcount, so the executor reaches STOP and the node idles at µA (~32 µA @3 V measured,
   vs 3527 µA with a permanently-on console). It then waits for USB on the **PA12 EXTI
   edge plus a ~500 ms RTC poll**: EXTI works in STOP and brings the console up the instant
-  VBUS rises — **no reset** — while the poll is a fallback for a *missed* edge. PA12 is
+  VBUS rises (**no reset**), while the poll is a fallback for a *missed* edge. PA12 is
   driven by the FT231X's **CBUS3** output (a push-pull ~3.3 V logic level, *not* a 5 V
   divider), which asserts only tens of ms after power-up, i.e. after the executor may have
-  already armed the edge wait — so relying on the edge alone can hang; the poll closes that
+  already armed the edge wait, so relying on the edge alone can hang; the poll closes that
   gap. The periodic wake costs sub-µA (STOP floor unchanged).
 
 RX is owned by the manager and **routed by frame type**: `ShellCommand`/`ShellComplete`
 go to the shell (`shell::dispatch_frame`; the shell registers its command tree + settings
-via `shell::serve`/`serve_ext`, which just store them — no task). So the shell keeps
+via `shell::serve`/`serve_ext`, which just store them and spawn no task). So the shell keeps
 working across teardown/rebuild without owning the raw RX half.
 
 **The `WakeGuard`:** even while the console is up, STOP would gate the USART clock and the
@@ -145,25 +145,25 @@ The dynamic behavior (console live on plug, torn down on unplug, no reset) can o
 verified with real USB. Recommended bench procedure:
 
 **Setup.** Power the board from a **separate supply** (battery / power-profiler), *not*
-from USB, so plugging/unplugging USB only toggles `VBUS_SENSE` — it doesn't cut power.
+from USB, so plugging/unplugging USB only toggles `VBUS_SENSE`; it doesn't cut power.
 Have the `tower` CLI on PATH and flash a console-exercising firmware (`console_full` is
-ideal): `just flash example console_full`. (Flashing is unaffected — the STM32 bootloader
+ideal): `just flash example console_full`. (Flashing is unaffected: the STM32 bootloader
 runs before the app's console.)
 
 | Test | Steps | Pass |
 |---|---|---|
-| **A — console up on USB** | USB plugged, `tower logs` | `Hello` then streaming logs; `tower console` shell responds (`/system/resource print`, TAB) |
-| **B — live plug/unplug** | `tower logs` running + current meter on VDD; unplug USB, then re-plug | On unplug: logs stop, **current drops to µA** (~50 ms). On re-plug: reconnects, fresh `Hello`, logs resume |
+| **A: console up on USB** | USB plugged, `tower logs` | `Hello` then streaming logs; `tower console` shell responds (`/system/resource print`, TAB) |
+| **B: live plug/unplug** | `tower logs` running + current meter on VDD; unplug USB, then re-plug | On unplug: logs stop, **current drops to µA** (~50 ms). On re-plug: reconnects, fresh `Hello`, logs resume |
 | **B (no-reset check)** | across the unplug/replug in B, watch the log **uptime timestamps** | Uptime is **continuous / increasing** (device kept running+sleeping). If it resets to 0 → the device rebooted, i.e. *not* the dynamic path |
-| **C — headless boot → plug** | power board with **no USB** (idles at µA), then plug USB | PA12 EXTI (or the ~500 ms poll fallback) wakes the MCU; console appears in `tower logs` within ~½ s |
+| **C: headless boot → plug** | power board with **no USB** (idles at µA), then plug USB | PA12 EXTI (or the ~500 ms poll fallback) wakes the MCU; console appears in `tower logs` within ~½ s |
 
-**If a test fails — where to look:**
+**If a test fails, where to look:**
 
 - **Console never appears on plug** → PA12 isn't reading logic-high when USB is plugged.
   It's driven by the FT231X CBUS3 push-pull output (see the caveat below), which the
-  ~500 ms poll already tolerates being late — so if it *never* appears, scope PA12 on
+  ~500 ms poll already tolerates being late, so if it *never* appears, scope PA12 on
   plug: it must reach the STM32's V_IH, or the manager never sees "USB present." (Hardware
-  issue — e.g. CBUS3 mis-configured in the FTDI EEPROM — not the firmware logic.)
+  issue, e.g. CBUS3 mis-configured in the FTDI EEPROM, not the firmware logic.)
 - **Logs appear but garbled** → framing / the reused static `TX_BUF`/`RX_BUF` across rebuilds.
 - **Shell silent, logs fine** → the RX router (`dispatch_frame`) or `SHELL_PARAMS` not set
   (a `no_shell` app has no shell by design).
@@ -183,18 +183,42 @@ message + location like any other error.
 
 It then **resets** (it does not halt). Before resetting it writes the crash text into a
 reset-surviving `.uninit` RAM breadcrumb (`crashlog`, zero EEPROM wear); the next boot
-re-reports it as a `crash`-module ERROR frame and via `/system/crash print` — so a
+re-reports it as a `crash`-module ERROR frame and via `/system/crash print`, so a
 battery node that faults **with USB unplugged** still surfaces its crash, after it has
-already recovered. HardFaults follow the same path (with the faulting PC/LR). Crash
-loops are bounded by the bootguard's EEPROM-write backoff, and the run length shows in
-`/system/eeprom print`.
+already recovered. The record is `<message> @ <path>:<line>`: message first and clipped
+(never dropped), and a dependency's long absolute `~/.cargo/registry/...` path cut to its
+last ~48 bytes; a plain bounded `write!` of the whole panic info used to lose the message
+whenever the location alone nearly filled the 192-byte record. Crash loops are bounded by
+the bootguard's EEPROM-write backoff, and the run length shows in `/system/eeprom print`.
+
+**HardFaults** follow the same path (record = faulting PC/LR), with one difference: the
+SDK's own `HardFault` entry stub copies PC/LR out of the exception frame and then resets
+MSP to the top of the stack region before running the handler, so the ~1 KB of reporting
+code never runs on whatever was left of a deep stack.
+
+Two failures can't run a handler at all, so the breadcrumb is written elsewhere:
+
+- **Stack overflow.** With flip-link an overflow pushes SP below the RAM origin; the
+  HardFault entry's own exception-frame stacking faults again and the Cortex-M0+ **locks
+  up**: no handler runs, and only an armed IWDG resets it. The evidence survives in RAM:
+  at the next boot, before re-painting, `stack::paint` reads the previous boot's stack
+  paint, and if that boot's deepest reach got within 1 KB of the bottom **and** the reset
+  was the IWDG, it files a `stack-overflow` record (*"probable stack overflow: IWDG reset,
+  stack reached N B from the bottom (M B used)"*). Without a watchdog a locked-up unit stays
+  dead until a power cycle, which loses RAM. Arm the IWDG on field units.
+- **Wedge.** When the watchdog's liveness gate withholds the pet (`watchdog::require_checkin`),
+  the feeder files a `watchdog` record (*"main loop unresponsive ..."*). It is reported only
+  if the reset that followed really was the IWDG, and retracted if the loop recovered first.
+
+`/system/crash print` shows the kind (`panic` / `hardfault` / `stack-overflow` / `watchdog`)
+and the text.
 
 ---
 
 ## Logging
 
 Use the standard [`log`](https://docs.rs/log) macros. The host adds the timestamp,
-color, and columns — the device only sends level + uptime + module + message.
+color, and columns; the device only sends level + uptime + module + message.
 
 ```rust
 use log::{error, warn, info, debug, trace};
@@ -205,13 +229,13 @@ info!("interval set to {} s", interval);
 - **Levels:** Error, Warn, Info, Debug, Trace. Default max level is **Trace**; lower
   it at runtime with `log::set_max_level(...)`.
 - **`module`** is the last `::` segment of the log target (e.g. `power`).
-- **Over-long lines are truncated, never dropped** — a message past `MAX_MSG` (192
+- **Over-long lines are truncated, never dropped**: a message past `MAX_MSG` (192
   bytes) is clipped at a char boundary (a plain `heapless` write would reject it
   wholesale and log nothing).
 
 ### Raw text
 
-`print!` / `println!` (from the `tower` crate) send a `Print` message — verbatim text
+`print!` / `println!` (from the `tower` crate) send a `Print` message: verbatim text
 with no level/timestamp, rendered inline by `tower logs`. `println!` appends `\r\n`.
 
 ```rust
@@ -234,7 +258,7 @@ No sequence gap is reported, because dropped messages never consumed a `seq`.
 
 ## Events
 
-Structured, **self-describing** key=value records — the host renders any app's events
+Structured, **self-describing** key=value records: the host renders any app's events
 with no shared per-app schema. `event()` is `async`: while USB is present it applies
 **backpressure** (awaits a free queue slot, so a burst is never dropped); while USB is
 unplugged there is no writer to drain the queue, so it falls back to **drop-newest with a
@@ -247,7 +271,7 @@ console::event("measurement", &[("temp_c", "2351"), ("rh", "41")]).await;
 ```
 
 Caps (clipped if exceeded): name ≤ 24 bytes, ≤ **6** fields, each key ≤ 12 / value ≤
-20 bytes — sized so a worst-case event always fits one frame. View with `tower events`:
+20 bytes, sized so a worst-case event always fits one frame. View with `tower events`:
 
 ```
 12:01:07.245 EVENT measurement  temp_c=2351 rh=41
@@ -284,11 +308,11 @@ tower complete "/system settings set "   # ask the target what completes here
 | Command | Does |
 |---|---|
 | `/system reboot` | flush the reply, then `SCB::sys_reset()` |
-| `/system/resource print` | firmware/protocol version, uptime, CPU, clock, memory |
-| `/system/stack print` | measured stack high-water (boot-painted) — used/free/total vs the budget |
+| `/system/resource print` | firmware/protocol version, uptime, CPU, clock, memory, `rng:` source (`TRNG` / `SW fallback`) |
+| `/system/stack print` | measured stack high-water (boot-painted): used/free/total vs the budget, plus the previous boot's peak after a software/IWDG reset |
 | `/system/eeprom print` | wear gauge: compaction flips vs budget, live/free bytes, resets |
-| `/system/eeprom wipe confirm` | factory reset — zero the whole store, then reboot |
-| `/system/crash print` | the last panic/HardFault recovered at this boot (from the breadcrumb) |
+| `/system/eeprom wipe confirm` | factory reset: an atomic flip to an empty store (power-loss-safe; the store is frozen until the reboot that follows, also on failure). **Console-only** |
+| `/system/crash print` | the last crash recovered at this boot (from the breadcrumb): panic, HardFault, stack overflow, or watchdog wedge |
 | `/system settings print` | list every setting and its value |
 | `/system settings set <name>=<value>` | validate by kind + persist |
 | `/system settings get <name>` | show value + constraints + default |
@@ -297,8 +321,19 @@ tower complete "/system settings set "   # ask the target what completes here
 Unknown commands return result code 1. Tokens split on `/`, space, and tab, so
 `/system settings set` and `/system/settings/set` are equivalent.
 
+**Console-only commands.** The same command tree also serves the **radio remote shell**
+(`shell::stream_line`, e.g. a gateway-queued `NodeCmd::Shell`: anything that can publish a
+downlink over MQTT). Operations that are destructive or cut the radio link therefore refuse
+remote lines with result **5 (`R_DENIED`)** and run only from the USB console:
+`/system/eeprom wipe` (built with `Entry::cmd_console_only`) and `settings set` of an
+address setting (`Kind::Addr`, i.e. `addr`). Everything else (including `/system reboot`,
+`settings print/get`, `/export`, and setting non-address values) works over the radio.
+App commands opt in with `Entry::cmd_console_only(..)`; a handler that is only partly
+sensitive checks `ctx.is_remote()` itself. `shell::run_line` (no transport context) is
+treated as remote.
+
 Responses longer than one frame are **chunked** (192-byte `chunk`/`last` frames) and
-reassembled by the host into one response — `/system/resource print` is a 7-line
+reassembled by the host into one response; `/system/resource print` is a 7-line
 example.
 
 ---
@@ -306,9 +341,9 @@ example.
 ## Settings framework
 
 Settings are **declarative**: an app provides a `&'static [Setting]` table and the
-shell derives `print` / `set` / `get` / `export` and completion from it — no
+shell derives `print` / `set` / `get` / `export` and completion from it, with no
 per-setting code. Each `Setting.key` is a **`u8` local** within the shell's EEPROM
-namespace (`NS_SHELL`) — the shell prefixes it, so app keys can't collide with other
+namespace (`NS_SHELL`); the shell prefixes it, so app keys can't collide with other
 subsystems. **`0x00..=0x0F` is reserved for the SDK base table** (`identity` = `0x00`,
 `addr` = `0x01`, the rest headroom for base growth); app settings start at `0x10`.
 The partition is load-bearing: a key collision silently aliases two settings' storage.
@@ -350,14 +385,21 @@ static SETTINGS: &[Setting] = &[
   ```
   > /system settings set mode=⇥     →  p2p  star  mesh
   ```
+  A completion reply is always **one frame**: the target stops adding candidates before the
+  encoded reply would exceed the ~249-byte payload (or 16 entries) and sets `more`, so many
+  long app setting / enum names can't make TAB time out. The common prefix is cut at a char
+  boundary (enum values may be non-ASCII).
 - Unset / unreadable / out-of-range stored values fall back to the `default`.
 
-`identity` is just an SDK `Str` setting (key `0x00`, ≤32 chars) — nothing special.
+`identity` is just an SDK `Str` setting (key `0x00`, ≤32 chars), nothing special.
 `addr` (key `0x01`, `Kind::Addr`, default `auto`) is the SDK's other base setting: the
 unit's **32-bit radio address** (the frame-header src/dest, i.e. the net-layer `addr`). `auto`
 resolves to the chip-UID-derived address; `random` mints a fresh non-zero one from the
-STM32L0 hardware TRNG (`board::rand_u32`). `get` shows the *effective* address, so it never
-lies about what the radio uses. It is boot-applied — reboot to re-address a live node.
+STM32L0 hardware TRNG (`board::rand_u32`); the reply names the source (`ok (0x…, TRNG)`;
+`SW fallback` if the TRNG failed to start, also shown as `rng:` in `/system/resource print`).
+`get` shows the *effective* address, so it never lies about what the radio uses. It is
+boot-applied (reboot to re-address a live node) and **console-only** (`R_DENIED` over the
+radio remote shell: re-addressing would cut the link the command arrived on).
 
 ---
 
@@ -397,14 +439,17 @@ async fn run(b: Board) {
 ```
 
 The handler context (`Ctx`) exposes:
-- `write!(ctx, …)` — `Ctx` implements `core::fmt::Write` (the response text);
-- `ctx.kv` — the shell-namespaced (`NS_SHELL`) EEPROM handle; settings are keyed by `u8`
+- `write!(ctx, …)`: `Ctx` implements `core::fmt::Write` (the response text);
+- `ctx.kv`: the shell-namespaced (`NS_SHELL`) EEPROM handle; settings are keyed by `u8`
   within it, so use keys other than the SDK base's `0x00` (`identity`);
-- `ctx.settings` — the merged settings table (`iter()` / `find(name)`).
+- `ctx.settings`: the merged settings table (`iter()` / `find(name)`);
+- `ctx.is_remote()`: whether the line came over the radio remote shell (answer `R_DENIED`
+  for anything that must stay console-only). Whole commands opt in with
+  `Entry::cmd_console_only(name, args, handler)` instead.
 
 Merge rules: a menu shadows a same-named command (menus stay descendable); on a
 command-name collision the SDK command wins; completion dedups names. Apps don't need
-any host changes — `tower` is target-authoritative.
+any host changes; `tower` is target-authoritative.
 
 ---
 
@@ -433,12 +478,12 @@ frame and a `seq` gap each print a one-line warning.
 
 ### The TUI (`tower console`)
 
-A three-pane [ratatui](https://ratatui.rs) terminal app — Device Events, the SSH-style
-Interactive Shell (scrollback + a `> ` prompt with in-pane TAB hints), Device Logs — all
+A three-pane [ratatui](https://ratatui.rs) terminal app with Device Events, the SSH-style
+Interactive Shell (scrollback + a `> ` prompt with in-pane TAB hints) and Device Logs, all
 on one serial drain (35/65 split):
 
 ```
- HARDWARIO TOWER Console v0.1.0 — /dev/cu.usbserial-140 ●
+ HARDWARIO TOWER Console v0.1.0 (/dev/cu.usbserial-140) ●
 ┌Device Events──────────────┐┌Device Logs────────────────────────────────┐
 │12:01 measurement temp=23.5 ││12:01 [  64.030] INFO  app: heartbeat 32    │
 │                            ││12:01 [  66.031] WARN  app: link flaky      │
@@ -453,7 +498,7 @@ on one serial drain (35/65 split):
 ```
 
 Only the `clock [uptime] LEVEL` prefix of a log line is severity-tinted; command syntax is
-highlighted (paths / commands / `key=value`), and `F5` pauses the *view* only — frames keep
+highlighted (paths / commands / `key=value`), and `F5` pauses the *view* only; frames keep
 being captured while the viewport holds still.
 
 | Key | Action |
@@ -478,11 +523,11 @@ inner:  ver_type(1) │ seq(2, LE) │ payload(postcard) │ crc32(4, LE)
         crc32    = CRC-32/IEEE over [ver_type, seq, payload…]
 ```
 
-- **COBS** framing with a `0x00` delimiter (the only zero on the wire) — the host
+- **COBS** framing with a `0x00` delimiter (the only zero on the wire); the host
   resynchronizes on the next delimiter after any garbage.
 - **CRC-32/IEEE** over the header + payload catches corruption (the same primitive
   the EEPROM KV store uses).
-- **postcard** for the payload — compact and `no_std`, but **not self-describing**, so
+- **postcard** for the payload: compact and `no_std`, but **not self-describing**, so
   both ends must share the exact struct/enum definitions. That's why `tower-protocol`
   is one crate, version-pinned.
 - **`seq`** (writer-assigned) lets the host detect real wire loss.
@@ -518,7 +563,7 @@ A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, th
 | `MAX_MSG` | 192 | log / print text |
 | `SHELL_CHUNK` | 192 | shell-response text per frame (chunked) |
 | `MAX_SETTING` | 64 | largest setting value |
-| TX queue depth | 8 | producer → writer channel |
+| TX queue depth | 4 | producer → writer channel (`console::TX_DEPTH`; was 8; each slot is ~280 B of RAM) |
 
 ### Shell result codes
 
@@ -529,22 +574,25 @@ A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, th
 | 2 | `R_BAD_ARG` | bad / out-of-range value |
 | 3 | `R_STORAGE` | EEPROM write failed |
 | 4 | `R_TRUNCATED` | response body overflowed the cap and was truncated |
+| 5 | `R_DENIED` | console-only command / address setting refused over the radio remote shell |
 
 ---
 
 ## Firmware API summary
 
 `tower::console`:
-- `event(name, &[(k, v)]).await` — emit a structured event
-- `print!` / `println!` — raw text (re-exported macros)
-- `install_logger(max_level)`, `manager(usart1, tx_pin, rx_pin, vbus)`, `boot_banner(name)`
-  — wiring for the dynamic (USB-gated) console, handled for you by `Board::take` / `app!`
+- `event(name, &[(k, v)]).await`: emit a structured event
+- `print!` / `println!`: raw text (re-exported macros)
+- `install_logger(max_level)`, `manager(usart1, tx_pin, rx_pin, vbus)`, `boot_banner(name)`:
+  wiring for the dynamic (USB-gated) console, handled for you by `Board::take` / `app!`
 
 `tower::shell`:
 - `serve(spawner, kv)` / `serve_ext(spawner, kv, app_commands, app_settings)`
 - types: `Entry` (`::cmd` / `::menu`), `Command`, `Args` (`None` / `Names` / `Settings`),
   `Setting`, `Kind`, `SettingsTable`, `Ctx`, `Outcome` (`::ok` / `::code`), `Handler`
-- constants: `MAX_SETTING`, `R_OK`/`R_NOT_FOUND`/`R_BAD_ARG`/`R_STORAGE`/`R_TRUNCATED`
+- `Entry::cmd_console_only` / `Ctx::is_remote`: keep a command (or part of one) off the radio
+  remote shell
+- constants: `MAX_SETTING`, `R_OK`/`R_NOT_FOUND`/`R_BAD_ARG`/`R_STORAGE`/`R_TRUNCATED`/`R_DENIED`
 
 `tower_protocol`: `encode_frame`, `decode_frame`, `FrameDecoder`, `MsgType`, the payload
 structs, `PROTOCOL_VERSION`, `MAX_FRAME`, `MAX_WIRE`, `crc::{crc32_update, crc32_ieee}`.
@@ -557,7 +605,7 @@ structs, `PROTOCOL_VERSION`, `MAX_FRAME`, `MAX_WIRE`, `crc::{crc32_update, crc32
 | `console_panic` | the framed panic path (`tower logs` shows the panic record) |
 | `events_demo` | structured events interleaved with logs |
 | `shell_demo` | the shell: built-ins, settings of every kind, an app command + nested subtree, app settings |
-| `console_full` | the showcase for `tower console` — logs + events + shell together |
+| `console_full` | the showcase for `tower console`: logs + events + shell together |
 
 Flash any of them, e.g. `TOWER_DEVICE=/dev/cu.usbserial-140 just flash example shell_demo`,
 then drive with `tower shell` / `tower logs` / `tower console`.
@@ -579,30 +627,30 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
 
 ## Known limitations & caveats
 
-- **DMA (RX overrun fixed):** the console now uses DMA — TX on `DMA1_CH4`, RX on a circular
+- **DMA (RX overrun fixed):** the console now uses DMA: TX on `DMA1_CH4`, RX on a circular
   DMA buffer on `DMA1_CH5` (a different channel group from the WS2812 strip's `DMA1_CH3`, so
   both coexist). The hardware-filled RX ring removed the old ~1% host → target loss that the
   interrupt-per-byte path suffered during a TX flood. The writer still holds a `WakeGuard` per
-  burst — now belt-and-braces (the RX ring already holds the STOP inhibit while the console is up).
+  burst, now belt-and-braces (the RX ring already holds the STOP inhibit while the console is up).
 - **`fw ?` in the header** appears only if you attach `tower console` and never see a
-  `Hello` — the firmware announces it on boot and on each USB plug-in (when the dynamic
+  `Hello`; the firmware announces it on boot and on each USB plug-in (when the dynamic
   console rebuilds), not on host connect. The TUI
   header otherwise shows the **`tower` CLI** version; the firmware version is in
   `/system/resource print`.
 - **`VBUS_SENSE` (PA12):** the dynamic console gates on PA12 reading logic-high when USB
   is plugged. PA12 is driven by the FT231X's **CBUS3** pin (a push-pull ~3.3 V logic
-  output configured in the FTDI EEPROM — e.g. `DRIVE1` on the Core Module, `SLEEP#` on the
-  Radio Dongle) — *not* a resistor divider off USB 5 V. Two consequences: (1) CBUS3 asserts
+  output configured in the FTDI EEPROM, e.g. `DRIVE1` on the Core Module, `SLEEP#` on the
+  Radio Dongle), *not* a resistor divider off USB 5 V. Two consequences: (1) CBUS3 asserts
   only tens of ms after power-up, which is why the manager also **polls VBUS every ~500 ms**
   (a missed rising edge still brings the console up within ½ s); (2) if CBUS3 is
   mis-configured in the EEPROM, PA12 won't reach the STM32's V_IH and the console won't come
-  up — scope PA12 on plug to confirm. The pin uses an internal pull-down so it reads a
+  up; scope PA12 on plug to confirm. The pin uses an internal pull-down so it reads a
   defined low when unplugged (no false "present"). PA12 is also the USB DP pin, used here
   purely as a VBUS-sense GPIO (no USB device peripheral is enabled).
-- **Setting values can't contain `/`, space, or tab** — those are command tokenizers.
+- **Setting values can't contain `/`, space, or tab**: those are command tokenizers.
   Enum values dodge this by being a fixed set.
 - **postcard is not self-describing:** any change to a payload struct/enum is a wire
-  change — bump `PROTOCOL_VERSION` and re-tag `tower-protocol`; both ends (firmware + host)
+  change: bump `PROTOCOL_VERSION` and re-tag `tower-protocol`; both ends (firmware + host)
   pin the new tag in lockstep. Today's tag is `v1.3.0`.
 - **A response is capped at `MAX_SETTING`/`MAX_RESP`-sized text** before chunking; very
   large dumps are clipped. Raise the caps (and `MAX_RESP`) if you need more.

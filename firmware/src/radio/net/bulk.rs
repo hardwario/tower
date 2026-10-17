@@ -6,7 +6,7 @@
 //!
 //! The transfer is **streamed on both ends**: the sender pulls each chunk from a
 //! [`BulkSource`] on demand, and the requester hands each chunk to a [`BulkSink`]
-//! as it arrives — neither side ever buffers the whole transfer, so RAM is constant
+//! as it arrives; neither side ever buffers the whole transfer, so RAM is constant
 //! regardless of length. The slice-backed [`Net::bulk_serve`] / [`Net::bulk_fetch`]
 //! are thin convenience wrappers over the streaming core [`Net::bulk_serve_from`] /
 //! [`Net::bulk_fetch_into`].
@@ -35,8 +35,13 @@ pub trait BulkSource {
     /// Total number of bytes to serve (fixed for the whole transfer; announced once).
     fn total_len(&self) -> usize;
     /// Fill `out` with the bytes at byte `offset` (`offset` is chunk-aligned and
-    /// `out.len()` ≤ [`BULK_CHUNK`] — exactly the bytes remaining for the last
+    /// `out.len()` ≤ [`BULK_CHUNK`]; exactly the bytes remaining for the last
     /// chunk). Returns the number of bytes written (normally `out.len()`).
+    ///
+    /// **Must be deterministic within one transfer:** a re-requested chunk (its BULK_DATA was
+    /// lost) is read again and re-sealed under the *same* `(session, index)` nonce, so it must
+    /// yield the same bytes. A source whose content changes mid-transfer (a live log, a buffer
+    /// refilled in place) would encrypt different plaintext under one nonce; snapshot it first.
     #[allow(async_fn_in_trait)] // single-threaded embedded executor; no Send bound needed
     async fn read(&mut self, offset: usize, out: &mut [u8]) -> usize;
 }
@@ -45,7 +50,7 @@ pub trait BulkSource {
 /// requester never holds the whole transfer in RAM. Implement it to verify, hash,
 /// or stream the bytes into any backing store.
 pub trait BulkSink {
-    /// Called once after the announce with the total length, before any chunk is pulled —
+    /// Called once after the announce with the total length, before any chunk is pulled;
     /// set up the destination here. Return `false` to refuse the transfer (e.g. too large
     /// for the destination), aborting the fetch.
     #[allow(async_fn_in_trait)]
@@ -58,7 +63,7 @@ pub trait BulkSink {
 }
 
 impl Net {
-    /// Serve an in-RAM `data` slice as a bulk transfer to `dest` — a convenience
+    /// Serve an in-RAM `data` slice as a bulk transfer to `dest`: a convenience
     /// wrapper over [`bulk_serve_from`](Self::bulk_serve_from). Returns whether the
     /// last chunk was served.
     pub async fn bulk_serve(&mut self, dest: u32, data: &[u8]) -> bool {
@@ -67,8 +72,8 @@ impl Net {
     }
 
     /// Serve `source` as a bulk transfer to `dest`: announce the length + session,
-    /// then answer BULK_REQ(index) with BULK_DATA(index, ≤64 B) — pulling each chunk
-    /// from `source` on demand — until the last chunk is pulled or the session idles
+    /// then answer BULK_REQ(index) with BULK_DATA(index, ≤64 B), pulling each chunk
+    /// from `source` on demand, until the last chunk is pulled or the session idles
     /// out (30 s). The source is never fully buffered, so the transfer size is
     /// bounded by neither RAM nor (the 24-bit index aside) the protocol. Returns
     /// whether the last chunk was served.
@@ -79,18 +84,20 @@ impl Net {
         let key = self.key_for(dest);
         let total_len = source.total_len();
         let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
-        let announce_counter = self.txc.counter();
-        self.advance_tx_counter();
-        let session = self.txc.counter(); // reserved for all chunks; consumed at the end
-        // Nonce-reuse guard: the announce frame rides `announce_counter` (bulk_index 0) and
-        // chunk 0 rides `session` (also bulk_index 0) — their CCM nonces differ only while the
-        // TX counter still advances. At the u32::MAX ceiling `advance_tx_counter` is a no-op, so
-        // the two would collide into one nonce with different plaintext. Refuse to serve there
-        // (the link is already failing closed at saturation — re-key long before; see
-        // `advance_tx_counter`).
-        if announce_counter == session {
-            return false;
-        }
+        // Both counters are allocated (consumed) up front, before the first await: the
+        // announce rides `announce_counter`, every chunk rides `session` (+ its bulk_index). The
+        // session used to be "reserved" here but consumed only at the very end, so a transfer
+        // dropped mid-serve (the caller's future cancelled) left it unconsumed and the next
+        // transfer reused chunk 0's nonce `(addr, session, 0)`. The allocator also makes the two
+        // distinct by construction (each value is handed out once; at the u32 ceiling it returns
+        // `None` rather than a pinned value), which the old explicit `announce == session`
+        // ceiling guard used to check.
+        let Some(announce_counter) = self.alloc_counter() else {
+            return false; // TX locked: fail closed
+        };
+        let Some(session) = self.alloc_counter() else {
+            return false; // the announce allocation locked TX (ceiling / persist failure)
+        };
 
         let mut ann = [0u8; 8];
         ann[..4].copy_from_slice(&(total_len as u32).to_le_bytes());
@@ -156,11 +163,10 @@ impl Net {
                 served_last = true;
             }
         }
-        self.advance_tx_counter(); // consume the session counter
         served_last
     }
 
-    /// Fetch a bulk transfer from `src` into the `out` slice — a convenience wrapper
+    /// Fetch a bulk transfer from `src` into the `out` slice: a convenience wrapper
     /// over [`bulk_fetch_into`](Self::bulk_fetch_into). Returns the total length
     /// received, or `None` on announce/chunk failure or `out` too small.
     pub async fn bulk_fetch(&mut self, src: u32, out: &mut [u8]) -> Option<usize> {
@@ -202,7 +208,14 @@ impl Net {
 
         let mut received = 0;
         for k in 0..n_chunks {
-            let req_counter = self.txc.counter(); // one counter per chunk; retransmits reuse it
+            // One counter per chunk, consumed before its first TX await; retransmits of the
+            // same BULK_REQ reuse it (byte-identical frame). Consuming it only after the chunk
+            // loop (as before) reused it on any early exit: a sink abort returned before the
+            // advance, so the next frame shared the nonce `(addr, req_counter, 0/k)`. Allocating
+            // per chunk also re-checks the TX lock after every watermark persist.
+            let Some(req_counter) = self.alloc_counter() else {
+                return None; // TX locked: fail closed
+            };
             let req_hdr = Header {
                 frame_type: FrameType::BulkReq,
                 flags: 0,
@@ -229,7 +242,7 @@ impl Net {
                     // Require exactly the expected chunk length (full BULK_CHUNK, or the
                     // remainder for the last chunk): a peer-controlled (authenticated but
                     // possibly buggy) short or over-long `dlen` must never feed the sink a
-                    // partial/over-long chunk — retry instead.
+                    // partial/over-long chunk; retry instead.
                     if dlen != (total_len - off).min(BULK_CHUNK) {
                         continue; // wrong-size chunk; retry within reps
                     }
@@ -241,7 +254,6 @@ impl Net {
                     break;
                 }
             }
-            self.advance_tx_counter();
             if !got {
                 return None;
             }

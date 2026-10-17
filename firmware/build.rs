@@ -1,7 +1,7 @@
 fn main() {
     // Linker args for the firmware binaries. We use the un-suffixed
     // `rustc-link-arg` (rather than `-bins`) so it applies to the crate's
-    // `examples/` too — they are the flashable targets in this SDK (the crate
+    // `examples/` too; they are the flashable targets in this SDK (the crate
     // itself is a library).
 
     // --nmagic avoids excessive section alignment/padding on the small L0 flash.

@@ -1,16 +1,16 @@
-//! Addressable-LED **strip effects** — a high-level layer over the [`ws2812`](crate::ws2812)
+//! Addressable-LED **strip effects**: a high-level layer over the [`ws2812`](crate::ws2812)
 //! driver.
 //!
 //! A [`Strip`] owns an RGB *intent* framebuffer plus the WS2812 driver. You
 //! compose a frame (static colour, compound segments, gradient, or one of the
-//! animated effects), then [`show`](Strip::show) renders it — applying the
-//! global brightness and gamma correction — over the wire.
+//! animated effects), then [`show`](Strip::show) renders it (applying the
+//! global brightness and gamma correction) over the wire.
 //!
-//! **Brightness (0–100 %)** is gamma-corrected so the knob is *approximately
+//! **Brightness (0-100 %)** is gamma-corrected so the knob is *approximately
 //! perceptually* linear: 50 % looks roughly half as bright to the eye. Uses
-//! integer gamma 2.0 (`out = (ch·b/100)² / 255`), no float or lookup tables — the
+//! integer gamma 2.0 (`out = (ch·b/100)² / 255`), no float or lookup tables; the
 //! eye's response (≈ √light) is the inverse of the squaring, so perceived
-//! brightness ∝ the 0–100 value (gamma 2.0 approximates the ~2.2 sRGB curve).
+//! brightness ∝ the 0-100 value (gamma 2.0 approximates the ~2.2 sRGB curve).
 //! The same correction smooths colour gradients.
 //!
 //! Effects are **frame-based**: each effect method fills the framebuffer for a
@@ -43,9 +43,9 @@ use crate::ws2812::{Rgb, Rgbw, Ws2812, rgbw_buf_len};
 /// Which LED type the strip drives (sets the wire format at [`Strip::show`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LedKind {
-    /// WS2812B — 24-bit RGB.
+    /// WS2812B: 24-bit RGB.
     Rgb,
-    /// SK6812 — 32-bit RGBW (white left off by the effects).
+    /// SK6812: 32-bit RGBW (white left off by the effects).
     Rgbw,
 }
 
@@ -73,7 +73,7 @@ pub const MAGENTA: Rgb = Rgb::new(255, 0, 255);
 pub const ORANGE: Rgb = Rgb::new(255, 96, 0);
 pub const WHITE: Rgb = Rgb::new(255, 255, 255);
 
-/// Apply brightness (0–100 %) and gamma 2.0 to one channel.
+/// Apply brightness (0-100 %) and gamma 2.0 to one channel.
 fn correct(channel: u8, brightness: u8) -> u8 {
     let v = channel as u16 * brightness.min(100) as u16 / 100; // 0..=255 intent
     ((v * v + 127) / 255) as u8 // gamma 2.0 (+127 = round to nearest)
@@ -123,7 +123,7 @@ impl Rng {
 
 /// A WS2812/SK6812 strip with an effects framebuffer.
 ///
-/// `NUM` is the pixel count; `BUF` is the underlying driver buffer length —
+/// `NUM` is the pixel count; `BUF` is the underlying driver buffer length;
 /// always pass `{ ws2812::rgbw_buf_len(NUM) }` (it fits both RGB and RGBW).
 pub struct Strip<'d, const NUM: usize, const BUF: usize> {
     ws: Ws2812<'d, BUF>,
@@ -135,11 +135,11 @@ pub struct Strip<'d, const NUM: usize, const BUF: usize> {
 impl<'d, const NUM: usize, const BUF: usize> Strip<'d, NUM, BUF> {
     /// Compile-time guard: `BUF` must hold the full RGBW encoding of `NUM` pixels, so either
     /// wire format fits. A wrong `BUF` (anything but `{ ws2812::rgbw_buf_len(NUM) }`) fails the
-    /// **build** — unlike a `debug_assert!`, which would be compiled out in release and only trap
+    /// **build**, unlike a `debug_assert!`, which would be compiled out in release and only trap
     /// (or silently overflow) on hardware.
     const _BUF_FITS: () = assert!(BUF >= rgbw_buf_len(NUM), "Strip: BUF must be rgbw_buf_len(NUM)");
 
-    /// Create a strip on PA1 (TIM2_CH2 + DMA1_CH3). `brightness` is 0–100 %.
+    /// Create a strip on PA1 (TIM2_CH2 + DMA1_CH3). `brightness` is 0-100 %.
     pub fn new(
         tim: Peri<'d, TIM2>,
         data: Peri<'d, PA1>,
@@ -156,7 +156,7 @@ impl<'d, const NUM: usize, const BUF: usize> Strip<'d, NUM, BUF> {
         }
     }
 
-    /// Set the global brightness (0–100 %, gamma-corrected at [`show`](Self::show)).
+    /// Set the global brightness (0-100 %, gamma-corrected at [`show`](Self::show)).
     pub fn set_brightness(&mut self, percent: u8) {
         self.brightness = percent.min(100);
     }

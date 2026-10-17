@@ -1,7 +1,7 @@
-//! events_demo — structured, self-describing events interleaved with logs.
+//! events_demo: structured, self-describing events interleaved with logs.
 //!
 //! Emits a `measurement` event each second (plus a periodic `heartbeat`) and normal
-//! logs. Render events with `tower events` and logs with `tower logs` — both decode
+//! logs. Render events with `tower events` and logs with `tower logs`; both decode
 //! the same framed stream.
 
 #![no_std]

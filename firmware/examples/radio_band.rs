@@ -1,14 +1,14 @@
-//! radio_band — runtime band switching via `net.set_band()` (868 ↔ 915 MHz).
+//! radio_band: runtime band switching via `net.set_band()` (868 ↔ 915 MHz).
 //!
 //!   TOWER_FEATURES=role-node    just flash example radio_band   # dwells on each band, sends
 //!   TOWER_FEATURES=role-gateway just flash example radio_band   # scans both bands, receives
 //!
-//! One firmware image, both bands, selected at **runtime** — no rebuild, no Cargo
+//! One firmware image, both bands, selected at **runtime**: no rebuild, no Cargo
 //! feature. The node retunes with `set_band`, dwells on each band for ~4 s and
 //! sends confirmed frames tagged with the band; the gateway scans the two bands
 //! (~0.9 s each), also via `set_band`, and logs which band each frame arrived on.
-//! You should see deliveries on BOTH 868 and 915 — proof the live retune works.
-//! (915 is for bench testing only; it is not FCC 15.247-compliant — see `Band`.)
+//! You should see deliveries on BOTH 868 and 915, proof the live retune works.
+//! (915 is for bench testing only; it is not FCC 15.247-compliant; see `Band`.)
 
 #![no_std]
 #![no_main]

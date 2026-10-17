@@ -12,14 +12,14 @@
 //!   * `ShellComplete` → walk the tree **to the cursor** → `ShellCompletions`.
 //!
 //! Because dispatch runs on its own task (not inline on the RX loop), a slow handler no longer
-//! stalls RX draining — but handlers should still be short, and their
+//! stalls RX draining, but handlers should still be short, and their
 //! `ShellResponse`s go through the bounded `TX_CHANNEL`. Not a place for long-running work.
 //!
 //! Both use the same tokenizer + [`resolve`] walk, so completion can never suggest
 //! something execution won't accept.
 //!
 //! ## Extending it (apps)
-//! App commands merge into the SDK tree **at every level** — drop a command into an
+//! App commands merge into the SDK tree **at every level**: drop a command into an
 //! existing menu (`/system/hello`) or grow your own nested subtree (`/radio/test/ping`).
 //! App settings join the same `/system settings` table and complete their values.
 //! ```ignore
@@ -46,7 +46,7 @@ use embassy_time::Instant;
 use heapless::{String, Vec};
 use tower_protocol::msg::{Candidate, CandidateKind, ShellCommand, ShellComplete, ShellCompletions};
 use tower_protocol::{MsgType, PROTOCOL_VERSION, decode_frame};
-use tower_shell_core::Window;
+use tower_shell_core::{CompletionBudget, Window};
 
 use crate::console;
 use crate::storage::{FLIP_BUDGET, NS_SHELL, Nv, Scoped};
@@ -68,13 +68,19 @@ pub const R_OK: u8 = 0;
 pub const R_NOT_FOUND: u8 = 1;
 pub const R_BAD_ARG: u8 = 2;
 pub const R_STORAGE: u8 = 3;
-/// The response exceeded the buffer and was truncated — the body is incomplete. Set by the
+/// The response exceeded the buffer and was truncated; the body is incomplete. Set by the
 /// **console** (single-window) dispatcher when the handler wrote past one [`RESP_CAP`] window
 /// ([`Ctx`]'s [`Window`] reports [`more`](Window::more)), so a caller doesn't mistake a cut-off
 /// `/export` / `settings print` for a complete, successful one. The **streaming** transport
-/// ([`stream_line`]) never truncates — it re-runs the handler to capture every window — so it
+/// ([`stream_line`]) never truncates (it re-runs the handler to capture every window), so it
 /// never returns this.
 pub const R_TRUNCATED: u8 = 4;
+/// Refused because the line arrived over a **remote** transport (the radio remote shell,
+/// [`stream_line`] / [`run_line`]) and the command (or, for `settings set`, an address
+/// setting) is **console-only**: destructive or link-breaking operations (a factory wipe,
+/// re-addressing a node) need physical access to the cable, never just a queued MQTT command.
+/// See [`Entry::cmd_console_only`] and [`Ctx::is_remote`].
+pub const R_DENIED: u8 = 5;
 
 // ---- declarative settings ---------------------------------------------------
 
@@ -101,11 +107,11 @@ pub enum Kind {
 }
 
 /// A persisted, named setting. The shell derives `/system settings print|set|get`
-/// and `/export` from the table — no per-setting code.
+/// and `/export` from the table; no per-setting code.
 pub struct Setting {
     /// Local key within the shell namespace (`NS_SHELL`); the shell prefixes it, so a setting can
     /// never collide with another subsystem's keys. **`0x00..=0x0F` is reserved for the SDK base
-    /// table** (`identity` = `0x00`, `addr` = `0x01`, the rest headroom for base growth) — app
+    /// table** (`identity` = `0x00`, `addr` = `0x01`, the rest headroom for base growth); app
     /// settings start at `0x10`. A collision doesn't error: two settings would silently alias the
     /// same stored bytes, so the partition is load-bearing for persisted config.
     pub key: u8,
@@ -212,7 +218,7 @@ impl Outcome {
 /// Execution context for a command handler. Write the response via `write!(ctx, …)`
 /// (Ctx is [`core::fmt::Write`]); persistent state is `ctx.kv` / `ctx.settings`.
 ///
-/// A handler always writes its **whole** response, obliviously — the `Ctx` keeps only the one
+/// A handler always writes its **whole** response, obliviously: the `Ctx` keeps only the one
 /// [`Window`] `[skip, skip+RESP_CAP)` its driver asked for and discards the rest (while still
 /// counting the total). The console dispatcher uses a single `skip = 0` window (and flags
 /// [`R_TRUNCATED`] if the response spilled past it); the streaming transport re-runs the handler
@@ -227,20 +233,45 @@ pub struct Ctx<'a> {
     /// `out`, and its [`total`](Window::total)/[`more`](Window::more) drive truncation (console)
     /// and re-run paging (streaming).
     window: Window,
+    /// Which transport the line arrived on (see [`is_remote`](Self::is_remote)).
+    origin: Origin,
+}
+
+/// Where a command line came from: the console cable, or a remote transport (the radio remote
+/// shell). Remote lines may not run [console-only](Entry::cmd_console_only) commands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Console,
+    Remote,
 }
 
 impl<'a> Ctx<'a> {
     /// A context that captures the window starting at byte `skip` of the handler's output into the
     /// (cleared) `out` buffer. `out` is `RESP_CAP`-sized and the window cap is `RESP_CAP`, so every
-    /// captured segment fits — the `push_str`s below never lose bytes.
-    fn new(kv: Scoped, settings: SettingsTable, out: &'a mut String<RESP_CAP>, skip: usize) -> Self {
+    /// captured segment fits; the `push_str`s below never lose bytes.
+    fn new(
+        kv: Scoped,
+        settings: SettingsTable,
+        out: &'a mut String<RESP_CAP>,
+        skip: usize,
+        origin: Origin,
+    ) -> Self {
         out.clear();
         Self {
             kv,
             settings,
             out,
             window: Window::new(skip, RESP_CAP),
+            origin,
         }
+    }
+
+    /// Whether this line arrived over a **remote** transport (the radio remote shell) rather than
+    /// the console cable. The dispatcher already refuses [console-only](Entry::cmd_console_only)
+    /// commands for remote lines; a handler that is only *partly* sensitive (like `settings set`,
+    /// which refuses address settings) checks this itself and answers [`R_DENIED`].
+    pub fn is_remote(&self) -> bool {
+        self.origin == Origin::Remote
     }
 }
 
@@ -264,6 +295,9 @@ pub struct Command {
     pub name: &'static str,
     pub args: Args,
     pub run: Handler,
+    /// Refuse the command ([`R_DENIED`]) when the line arrives over a remote transport; set via
+    /// [`Entry::cmd_console_only`]. Default `false` ([`Entry::cmd`]).
+    pub console_only: bool,
 }
 
 impl Entry {
@@ -275,7 +309,24 @@ impl Entry {
     }
     /// Build a command entry (for app trees).
     pub const fn cmd(name: &'static str, args: Args, run: Handler) -> Self {
-        Entry::Cmd(Command { name, args, run })
+        Entry::Cmd(Command {
+            name,
+            args,
+            run,
+            console_only: false,
+        })
+    }
+    /// Build a **console-only** command entry: it runs only for lines from the console cable;
+    /// over the radio remote shell it is refused with [`R_DENIED`] before its handler runs. For
+    /// destructive / link-breaking operations that any client able to queue a downlink (e.g. an
+    /// MQTT publisher on the gateway) must not trigger.
+    pub const fn cmd_console_only(name: &'static str, args: Args, run: Handler) -> Self {
+        Entry::Cmd(Command {
+            name,
+            args,
+            run,
+            console_only: true,
+        })
     }
     /// Build a menu entry (for app trees).
     pub const fn menu(name: &'static str, children: &'static [Entry]) -> Self {
@@ -295,7 +346,8 @@ static BASE_ROOT: &[Entry] = &[
                 "eeprom",
                 &[
                     Entry::cmd("print", Args::None, cmd_eeprom),
-                    Entry::cmd("wipe", Args::None, cmd_eeprom_wipe),
+                    // Console-only: a factory reset must never be queueable over the radio.
+                    Entry::cmd_console_only("wipe", Args::None, cmd_eeprom_wipe),
                 ],
             ),
             Entry::Menu("crash", &[Entry::cmd("print", Args::None, cmd_crash)]),
@@ -380,10 +432,10 @@ fn resolve(toks: &[&str], app: &'static [Entry]) -> Resolved {
 
 /// Shell parameters registered by [`serve_ext`] and consumed by the console's RX router
 /// (the [`manager`](crate::console::manager)) via [`dispatch_frame`]. `None` until a
-/// shell is served — an app using `no_shell` leaves it unset, so incoming shell frames
+/// shell is served; an app using `no_shell` leaves it unset, so incoming shell frames
 /// are simply ignored. `Nv` and the slices are `Copy`, so a `Cell` suffices.
 // The tuple-in-Cell-in-Mutex type reads as "complex" to clippy but is a plain shared-state cell;
-// suppress the lint here (annotation only — no logic change) so the CI clippy `-D warnings` gate
+// suppress the lint here (annotation only, no logic change) so the CI clippy `-D warnings` gate
 // is green over intentional shared state.
 #[allow(clippy::type_complexity)]
 static SHELL_PARAMS: critical_section::Mutex<
@@ -392,14 +444,14 @@ static SHELL_PARAMS: critical_section::Mutex<
 
 /// Set once the shell drain task has been spawned, so repeated [`serve`]/[`serve_ext`] calls
 /// don't try to spawn it twice (which would exhaust the task's pool of 1). A critical-section
-/// cell rather than an atomic swap — Cortex-M0+ has no atomic read-modify-write.
+/// cell rather than an atomic swap; Cortex-M0+ has no atomic read-modify-write.
 static SHELL_SPAWNED: critical_section::Mutex<core::cell::Cell<bool>> =
     critical_section::Mutex::new(core::cell::Cell::new(false));
 
 /// Drain the console-owned [`SHELL_RX`](crate::console::SHELL_RX) channel and dispatch each
 /// shell frame. Running on its own task (rather than inline on the console RX loop) is what lets
-/// the console depend only on `tower-protocol` — it copies frames into the channel and never
-/// calls into the shell — and it keeps a slow handler from stalling RX draining.
+/// the console depend only on `tower-protocol` (it copies frames into the channel and never
+/// calls into the shell), and it keeps a slow handler from stalling RX draining.
 #[embassy_executor::task]
 async fn shell_rx_task() {
     loop {
@@ -435,7 +487,7 @@ pub fn serve_ext(spawner: Spawner, kv: Nv, app_commands: &'static [Entry], app_s
     }
 }
 
-/// Handle one decoded shell RX frame — called by [`shell_rx_task`]. No-op if no shell was
+/// Handle one decoded shell RX frame, called by [`shell_rx_task`]. No-op if no shell was
 /// served (`no_shell` apps leave [`SHELL_PARAMS`] unset).
 async fn dispatch_frame(inner: &[u8]) {
     let Some((kv, app_commands, app_settings)) = critical_section::with(|cs| SHELL_PARAMS.borrow(cs).get())
@@ -474,29 +526,34 @@ async fn handle(kv: Scoped, app: &'static [Entry], settings: SettingsTable, inne
 
 async fn dispatch(kv: Scoped, app: &'static [Entry], settings: SettingsTable, cmd_id: u16, line: &str) {
     let mut out = String::<RESP_CAP>::new();
-    let (result, reboot) = run_line_with(kv, app, settings, line, &mut out);
+    let (result, reboot) = run_line_with(kv, app, settings, line, &mut out, Origin::Console);
     console::shell_response(cmd_id, result, out.as_str()).await;
     if reboot {
         // Wait for the response to actually leave the wire before resetting, instead of a
         // fixed sleep shorter than a full TX queue at 115200 baud (which truncated the
-        // reboot response). This runs on the console RX task, so a USB unplug within the
-        // window cancels it (the manager tears the console down) and the reset is skipped
-        // — acceptable: a reboot issued then immediately unplugged is a no-op, and the
-        // node reboots on demand only while a host is attached.
+        // reboot response). This runs on the shell's own drain task (`shell_rx_task`), not
+        // the console manager's, so a USB unplug in the window no longer cancels it: the
+        // response enqueue falls back to drop-newest once the console is down, `flush` is
+        // bounded (~1 s), and the reset always happens, which matters for a wipe, whose
+        // store stays frozen until this reboot.
         console::flush().await;
         cortex_m::peripheral::SCB::sys_reset();
     }
 }
 
-/// Run one command line against the shell registered by [`serve`]/[`serve_ext`] — the
+/// Run one command line against the shell registered by [`serve`]/[`serve_ext`]: the
 /// transport-independent core powering **both** the console dispatcher and the radio
 /// remote shell (one dispatcher, two transports). The response body is written into
 /// `out`; the return is `(result_code, reboot_requested)`. A reboot request is NOT
-/// acted on here — the caller owns its transport and must flush its response (over
+/// acted on here; the caller owns its transport and must flush its response (over
 /// radio: send the final chunk) before resetting.
 ///
 /// Synchronous: nothing in the resolve/run path awaits (handlers are plain fns).
 /// If no shell was served (`no_shell` apps), answers [`R_NOT_FOUND`].
+///
+/// The line is treated as **remote** (fail-safe: this entry point can't prove it came over the
+/// cable): [console-only](Entry::cmd_console_only) commands and address settings answer
+/// [`R_DENIED`].
 pub fn run_line(line: &str, out: &mut String<RESP_CAP>) -> (u8, bool) {
     let Some((kv, app_commands, app_settings)) = critical_section::with(|cs| SHELL_PARAMS.borrow(cs).get())
     else {
@@ -507,10 +564,17 @@ pub fn run_line(line: &str, out: &mut String<RESP_CAP>) -> (u8, bool) {
         base: BASE_SETTINGS,
         app: app_settings,
     };
-    run_line_with(kv.scope(NS_SHELL), app_commands, settings, line, out)
+    run_line_with(
+        kv.scope(NS_SHELL),
+        app_commands,
+        settings,
+        line,
+        out,
+        Origin::Remote,
+    )
 }
 
-/// An async sink for a **streamed** shell response — the unbounded counterpart to the
+/// An async sink for a **streamed** shell response, the unbounded counterpart to the
 /// [`RESP_CAP`]-buffered [`run_line`], used by the radio remote-shell transport so a
 /// large reply (`/export`, `settings print`) is never truncated at 256 B. The producer
 /// calls [`push`](ShellSink::push) for body text of any length and [`done`](ShellSink::done)
@@ -518,7 +582,7 @@ pub fn run_line(line: &str, out: &mut String<RESP_CAP>) -> (u8, bool) {
 /// returns `false` on a transport error, and streaming stops.
 ///
 /// `async fn` in a trait is fine here: the executor is single-threaded (embassy), so
-/// the returned futures need no `Send` bound — the reason the lint fires.
+/// the returned futures need no `Send` bound (the reason the lint fires).
 #[allow(async_fn_in_trait)]
 pub trait ShellSink {
     /// Append response text; the sink transmits full frames as they fill.
@@ -527,13 +591,13 @@ pub trait ShellSink {
     async fn done(&mut self, result: u8) -> bool;
 }
 
-/// Stream one command line's response through `sink` — like [`run_line`] but with **no
+/// Stream one command line's response through `sink`, like [`run_line`] but with **no
 /// `RESP_CAP` ceiling**, and with **no per-command knowledge**. It streams *every* command
 /// uniformly by **windowed re-run**: run the handler capturing one `RESP_CAP`-wide output
 /// [`Window`], push it, and if the handler wrote more, re-run with `skip` advanced to the next
-/// window — until the whole response has been paged out. A terse response (the common case)
+/// window, until the whole response has been paged out. A terse response (the common case)
 /// fits one window and runs exactly once; a big dump (`/export`, `settings print` with many app
-/// settings) re-executes a handful of times, which is fine — those commands are rare.
+/// settings) re-executes a handful of times, which is fine; those commands are rare.
 ///
 /// **Purity contract:** a handler whose output can exceed one window MUST be deterministic and
 /// side-effect-free, because it is re-run per window (re-running must reproduce the identical
@@ -543,6 +607,10 @@ pub trait ShellSink {
 ///
 /// Returns `(result, reboot)`; the caller acts on a reboot only after the sink has flushed its
 /// final chunk (the response must be on the air before a reset).
+///
+/// This is the **remote** (radio) transport: [console-only](Entry::cmd_console_only) commands
+/// (`/system/eeprom wipe`) and `settings set` of an address setting (`addr`) are refused with
+/// [`R_DENIED`]; everything else (including `/system reboot`) runs as on the console.
 pub async fn stream_line<S: ShellSink>(line: &str, sink: &mut S) -> (u8, bool) {
     // Same guards as `run_line_with`: reject rather than silently truncate.
     if line.len() > MAX_LINE {
@@ -572,13 +640,20 @@ pub async fn stream_line<S: ShellSink>(line: &str, sink: &mut S) -> (u8, bool) {
         sink.done(R_NOT_FOUND).await;
         return (R_NOT_FOUND, false);
     };
+    if cmd.console_only {
+        sink.push(DENIED_MSG).await;
+        sink.done(R_DENIED).await;
+        return (R_DENIED, false);
+    }
     // Page the response out one RESP_CAP window per handler run. `skip` is char-aligned (a
-    // previous window's `skip + captured`), so no re-run ever splits a multi-byte char.
+    // previous window's `skip + consumed`) as long as the handler reproduces its output; if a
+    // concurrent change drifted it between passes (we await the radio between windows), the
+    // Window skips the partial char instead of panicking and paging still terminates.
     let mut out = String::<RESP_CAP>::new();
     let mut skip = 0usize;
     loop {
         let (outcome, window) = {
-            let mut ctx = Ctx::new(kv, settings, &mut out, skip);
+            let mut ctx = Ctx::new(kv, settings, &mut out, skip, Origin::Remote);
             let outcome = (cmd.run)(&mut ctx, &toks[arg_start..]);
             (outcome, ctx.window)
         };
@@ -589,9 +664,12 @@ pub async fn stream_line<S: ShellSink>(line: &str, sink: &mut S) -> (u8, bool) {
             sink.done(outcome.result).await;
             return (outcome.result, outcome.reboot);
         }
-        skip += window.captured();
+        skip += window.consumed();
     }
 }
+
+/// Reply text for a [console-only](Entry::cmd_console_only) command refused over a remote link.
+const DENIED_MSG: &str = "console-only command: refused over the radio (use the USB console)";
 
 /// [`run_line`] against explicit shell state (the console path already holds it).
 fn run_line_with(
@@ -600,6 +678,7 @@ fn run_line_with(
     settings: SettingsTable,
     line: &str,
     out: &mut String<RESP_CAP>,
+    origin: Origin,
 ) -> (u8, bool) {
     // Reject an over-long line instead of silently executing a truncated prefix. The
     // wire allows ~240-byte lines but the shell buffer is MAX_LINE; clipping mid-value
@@ -615,18 +694,22 @@ fn run_line_with(
     }
     let toks = tokenize(line);
     match resolve(&toks, app) {
+        Resolved::Cmd(cmd, _) if cmd.console_only && origin == Origin::Remote => {
+            let _ = out.push_str(DENIED_MSG);
+            (R_DENIED, false)
+        }
         Resolved::Cmd(cmd, arg_start) => {
             // One `skip = 0` window: the console transport caps a response at RESP_CAP.
             let (outcome, window) = {
-                let mut ctx = Ctx::new(kv, settings, out, 0);
+                let mut ctx = Ctx::new(kv, settings, out, 0, origin);
                 let outcome = (cmd.run)(&mut ctx, &toks[arg_start..]);
                 (outcome, ctx.window)
             };
             // A response that spilled past the single window would otherwise report R_OK on a
             // silently truncated body; surface it as R_TRUNCATED so a scripting caller
             // (`tower exec`) can tell the output is incomplete. Don't mask a handler's own
-            // non-zero result. (The streaming transport pages the rest out instead — see
-            // `stream_line` — so it never hits this.)
+            // non-zero result. (The streaming transport pages the rest out instead (see
+            // `stream_line`), so it never hits this.)
             let result = if window.more() && outcome.result == R_OK {
                 R_TRUNCATED
             } else {
@@ -653,12 +736,15 @@ fn cmd_reboot(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
 
 fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let us = Instant::now().as_micros();
-    // "firmware:" reports the app/example NAME + version and the per-boot session id — the exact
+    // "firmware:" reports the app/example NAME + version and the per-boot session id: the exact
     // fields the boot `Hello` carries and `tower` prints on connect (they must agree). The name
     // is per-app; the version is the SDK crate version; the session bumps once per boot. Multi-line
-    // summary (spans more than one wire frame — exercises chunking).
+    // summary (spans more than one wire frame, which exercises chunking).
     // Lines kept terse so the whole summary fits the shell response buffer (`RESP_CAP` = 256 B)
-    // even at worst case: a 32-char firmware name + 10-digit session + large uptime.
+    // even at worst case: a 32-char firmware name + 10-digit session + large uptime + the
+    // longest `rng:` label (~245 B). `rng:` names the source behind `addr=random`: the
+    // hardware TRNG, or the non-cryptographic fallback if the TRNG failed to come up
+    // (`board::rand_source`; probes once if nothing has drawn yet, then stays cached).
     let _ = write!(
         ctx,
         "firmware: {} {}\r\n\
@@ -667,19 +753,21 @@ fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
          uptime: {}.{:03} s\r\n\
          cpu: STM32L083CZ @ 16 MHz, LSE RTC\r\n\
          memory: 192K flash / 20K RAM / 6K EEPROM\r\n\
-         console: USART1 115200 8N1 framed\r\n",
+         console: USART1 115200 8N1 framed\r\n\
+         rng: {}\r\n",
         console::firmware_name(),
         console::firmware_version(),
         console::session_id(),
         PROTOCOL_VERSION,
         us / 1_000_000,
         (us % 1_000_000) / 1000,
+        crate::board::rand_source().as_str(),
     );
     Outcome::ok()
 }
 
 fn cmd_eeprom(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
-    // Wear gauge: the KV compaction-flip count (the persisted superblock generation — a pure read,
+    // Wear gauge: the KV compaction-flip count (the persisted superblock generation; a pure read,
     // no added wear) vs the conservative flip budget (FLIP_BUDGET), plus the store's occupancy
     // (live/free) and the background-maintenance pre-blank state. All pure reads. See
     // docs/storage.md.
@@ -709,7 +797,7 @@ fn cmd_eeprom(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
 
 fn cmd_stack(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     // Measured stack high-water: the boot painter (`stack::paint`) filled the free stack with a
-    // sentinel; this reports how much has since been overwritten — the deepest the call graph +
+    // sentinel; this reports how much has since been overwritten: the deepest the call graph +
     // ISR frames ever reached. Weigh `used` against the 8 KB budget floor (docs/gateway.md); a
     // small `free` is a near-overflow warning on this 20 KB part. All pure reads.
     let total = crate::stack::total();
@@ -721,20 +809,29 @@ fn cmd_stack(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     } else {
         0
     };
+    let layout = if crate::stack::flip_link_layout() {
+        "RAM bottom, flip-link"
+    } else {
+        "above statics, no flip-link"
+    };
     let _ = write!(
         ctx,
-        "stack: {total} B total (RAM bottom, flip-link)\r\n\
+        "stack: {total} B total ({layout})\r\n\
          used: {used} B ({}.{}%) peak high-water\r\n\
          free: {free} B at the deepest reach\r\n",
         permille / 10,
         permille % 10,
     );
+    // The run that ended in the last software/IWDG reset; its paint survived in RAM.
+    if let Some(prev) = crate::stack::previous_used() {
+        let _ = write!(ctx, "previous boot: {prev} B used\r\n");
+    }
     Outcome::ok()
 }
 
 fn cmd_crash(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     // The crash the reset-surviving breadcrumb recovered at THIS boot (cleared by the read, so
-    // it reflects the most recent fault since power-on — a brown-out that lost RAM reads clean).
+    // it reflects the most recent fault since power-on; a brown-out that lost RAM reads clean).
     match crate::crashlog::last() {
         Some(c) => {
             let _ = write!(ctx, "last crash: {}\r\n{}\r\n", c.kind.as_str(), c.message());
@@ -747,9 +844,10 @@ fn cmd_crash(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
 }
 
 fn cmd_eeprom_wipe(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
-    // Factory reset. Destroys EVERYTHING the store holds — pairing keys, peer tables, replay
-    // lanes, the TX watermark, settings, the session counter — so it demands the literal
+    // Factory reset. Destroys EVERYTHING the store holds (pairing keys, peer tables, replay
+    // lanes, the TX watermark, settings, the session counter), so it demands the literal
     // `confirm` argument (which completion never offers) rather than firing on a bare line.
+    // Console-only (`Entry::cmd_console_only`): never reachable over the radio remote shell.
     if args != ["confirm"] {
         let _ = write!(
             ctx,
@@ -758,8 +856,11 @@ erases the WHOLE store (keys, peers, settings) and reboots"
         );
         return Outcome::code(R_BAD_ARG);
     }
-    // ~5 s CPU stall while the EEPROM zeroes (docs/storage.md); the response goes out after,
-    // then the framework flushes it and reboots into a virgin store.
+    // A flip to an empty store (`storage::factory_wipe`): ~2.6-5.2 s CPU stall (docs/storage.md),
+    // atomic and power-loss-safe. The store is then frozen (every other task's write fails), so
+    // nothing re-populates it from pre-wipe RAM state before the reboot. Reboot on failure too:
+    // a failed wipe still leaves a consistent store (old or empty), but this boot's store is
+    // frozen and its subsystems' RAM state can't be trusted against it.
     match ctx.kv.raw().wipe() {
         Ok(()) => {
             let _ = write!(ctx, "eeprom wiped - rebooting");
@@ -768,9 +869,12 @@ erases the WHOLE store (keys, peers, settings) and reboots"
                 reboot: true,
             }
         }
-        Err(_) => {
-            let _ = write!(ctx, "wipe failed");
-            Outcome::code(R_STORAGE)
+        Err(e) => {
+            let _ = write!(ctx, "wipe failed ({e}); store left whole or empty - rebooting");
+            Outcome {
+                result: R_STORAGE,
+                reboot: true,
+            }
         }
     }
 }
@@ -780,7 +884,7 @@ erases the WHOLE store (keys, peers, settings) and reboots"
 /// streaming path ([`stream_line`]) so the two formats can never drift.
 fn write_setting(kv: Scoped, s: &Setting, export: bool, out: &mut impl Write) {
     let mut val = String::<MAX_SETTING>::new();
-    // `get`/`print` show an unset address as the *effective* UID-derived value — but
+    // `get`/`print` show an unset address as the *effective* UID-derived value, but
     // exporting that literal would pin it on whatever device replays the export (two
     // nodes sharing one radio address share a replay lane: the lower-counter one goes
     // silently dead). Export the stored `auto` sentinel instead.
@@ -850,7 +954,7 @@ fn settings_set(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
     };
     // The tokenizer splits on `/`, space, and tab, so a value containing one arrives
     // as EXTRA tokens (`identity=a/b` → ["identity=a", "b"]). Storing just the first
-    // piece and answering `ok` would be silent truncation — reject instead.
+    // piece and answering `ok` would be silent truncation; reject instead.
     let consumed = if args.first().is_some_and(|a| a.contains('=')) {
         1
     } else {
@@ -865,6 +969,15 @@ fn settings_set(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
         let _ = write!(ctx, "no such setting: {name}");
         return Outcome::code(R_NOT_FOUND);
     };
+    // Re-addressing a node over the radio would cut the very link the command arrived on (and
+    // can collide two nodes onto one replay lane), so address settings are console-only.
+    if ctx.is_remote() && matches!(s.kind, Kind::Addr) {
+        let _ = write!(
+            ctx,
+            "{name} is console-only: refused over the radio (use the USB console)"
+        );
+        return Outcome::code(R_DENIED);
+    }
     let mut buf = [0u8; MAX_SETTING];
     // `addr=random` mints a fresh non-zero address here (the pure encoder has no RNG);
     // everything else goes through the normal validated encode.
@@ -891,7 +1004,10 @@ fn settings_set(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
         Ok(()) => {
             match generated {
                 Some(a) => {
-                    let _ = write!(ctx, "ok (0x{a:08x})");
+                    // Name the entropy source, so a TRNG that failed to start (and fell back to
+                    // the non-cryptographic PRNG) is visible right where it matters.
+                    let src = crate::board::rand_source().as_str();
+                    let _ = write!(ctx, "ok (0x{a:08x}, {src})");
                 }
                 None => {
                     let _ = write!(ctx, "ok");
@@ -1076,8 +1192,15 @@ fn complete(
     let prefix_toks = tokenize(&upto[..partial_start]);
 
     let mut candidates: Vec<Candidate<'static>, 16> = Vec::new();
+    // The reply must fit ONE frame (the host matches it by req_id): stop admitting candidates
+    // before the encoded payload would exceed it, and flag `more`: long app setting / enum
+    // names (16 × ~20 B) would otherwise fail to encode and the host's TAB would just time out.
+    let mut budget = CompletionBudget::new(tower_protocol::MAX_PAYLOAD);
+    let mut push = |cands: &mut Vec<Candidate<'static>, 16>, c: Candidate<'static>| -> bool {
+        cands.len() < cands.capacity() && budget.try_add(c.text.len()) && cands.push(c).is_ok()
+    };
     let mut more = false;
-    // The offset the host will replace from — normally the partial's start, but for
+    // The offset the host will replace from: normally the partial's start, but for
     // `set name=<value>` completion it moves to just after the `=`.
     let mut token_start = partial_start;
 
@@ -1091,7 +1214,7 @@ fn complete(
                         Entry::Menu(..) => CandidateKind::Menu,
                         Entry::Cmd(..) => CandidateKind::Command,
                     };
-                    if candidates.push(Candidate { text: name, kind }).is_err() {
+                    if !push(&mut candidates, Candidate { text: name, kind }) {
                         more = true;
                         break;
                     }
@@ -1104,12 +1227,13 @@ fn complete(
             Args::Names(names) => {
                 for a in names {
                     if a.starts_with(partial)
-                        && candidates
-                            .push(Candidate {
+                        && !push(
+                            &mut candidates,
+                            Candidate {
                                 text: a,
                                 kind: CandidateKind::Arg,
-                            })
-                            .is_err()
+                            },
+                        )
                     {
                         more = true;
                         break;
@@ -1130,12 +1254,13 @@ fn complete(
                     };
                     for &v in vals {
                         if v.starts_with(vpart)
-                            && candidates
-                                .push(Candidate {
+                            && !push(
+                                &mut candidates,
+                                Candidate {
                                     text: v,
                                     kind: CandidateKind::Value,
-                                })
-                                .is_err()
+                                },
+                            )
                         {
                             more = true;
                             break;
@@ -1150,8 +1275,7 @@ fn complete(
                     CandidateKind::Value
                 };
                 for s in settings.iter() {
-                    if s.name.starts_with(partial)
-                        && candidates.push(Candidate { text: s.name, kind }).is_err()
+                    if s.name.starts_with(partial) && !push(&mut candidates, Candidate { text: s.name, kind })
                     {
                         more = true;
                         break;
@@ -1165,25 +1289,10 @@ fn complete(
     ShellCompletions {
         req_id,
         token_start: token_start as u16,
-        common_prefix: common_prefix(&candidates),
+        // Char-safe: app enum values may be non-ASCII, and a byte-wise prefix sliced mid-char
+        // would panic on TAB (host-tested in `tower_shell_core::common_prefix`).
+        common_prefix: tower_shell_core::common_prefix(candidates.iter().map(|c| c.text)),
         candidates,
         more,
     }
-}
-
-/// Longest common prefix of the candidate texts (ASCII tree/setting names → byte-safe).
-fn common_prefix(cands: &[Candidate<'static>]) -> &'static str {
-    let Some(first) = cands.first().map(|c| c.text) else {
-        return "";
-    };
-    let mut len = first.len();
-    for c in &cands[1..] {
-        let common = first
-            .bytes()
-            .zip(c.text.bytes())
-            .take_while(|(a, b)| a == b)
-            .count();
-        len = len.min(common);
-    }
-    &first[..len]
 }

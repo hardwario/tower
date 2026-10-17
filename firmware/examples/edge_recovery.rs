@@ -1,10 +1,10 @@
-//! edge_recovery — stuck-state / timeout recovery (docs/radio.md). Single board.
+//! edge_recovery: stuck-state / timeout recovery (docs/radio.md). Single board.
 //!
 //!   just flash example edge_recovery
 //!
 //! Hammers the failure paths that must self-heal: an RX that times out (no sender)
 //! must SABORT back to READY, a FIFO flush must leave the FIFOs empty, and an
-//! RX→READY cycle must always settle — never wedging the state machine. After 10
+//! RX→READY cycle must always settle, never wedging the state machine. After 10
 //! timeout/recovery cycles the device ID is re-read to prove the chip is still
 //! fully responsive. Prints one PASS/FAIL verdict.
 

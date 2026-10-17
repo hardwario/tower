@@ -1,4 +1,4 @@
-# tools/hwtest — hardware test harness
+# tools/hwtest: hardware test harness
 
 Scripts that drive the reusable hardware test suite in [`docs/test-plan.md`](../../docs/test-plan.md)
 on two TOWER Core Modules over their FTDI serial ports. See the test plan for the full matrix,
@@ -6,7 +6,7 @@ pass signals, and edge-case catalogue; this README is just the runner mechanics.
 
 ## Why these exist
 - One-shot KAT examples print their verdict ~ms after boot then idle, and `tower logs` has no
-  reset-on-attach — so `cap.py` runs `jolt monitor --reset` (resets *then* reads) and you `strings`
+  reset-on-attach, so `cap.py` runs `jolt monitor --reset` (resets *then* reads) and you `strings`
   the raw bytes (the postcard message text is plain ASCII and survives COBS).
 - Flashing two FTDIs concurrently is unreliable (Write-Memory timeouts, port re-enumeration), so
   `tb.sh` flashes **sequentially**, then captures both ports **concurrently**.

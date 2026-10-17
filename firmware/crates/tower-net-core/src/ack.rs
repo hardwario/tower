@@ -2,14 +2,14 @@
 //! `src/radio/net/mod.rs::await_ack`; docs/radio.md).
 //!
 //! The sender of a confirmed frame opens an ACK window and offers every frame it hears to this
-//! kernel; the kernel decides which single frame resolves the delivery. Everything else — a
+//! kernel; the kernel decides which single frame resolves the delivery. Everything else (a
 //! foreign/undecodable frame, a non-ACK, an ACK from/to the wrong device, an ACK for a
-//! *different* counter (stale/duplicate) — is **ignored**, i.e. the caller keeps listening for
+//! *different*, stale/duplicate counter) is **ignored**, i.e. the caller keeps listening for
 //! the rest of the window rather than treating it as a failed delivery. Once resolved, further
 //! (duplicate) ACKs are ignored too: a delivery resolves at most once.
 
 /// ACK payload flags byte (byte 5, appended in wire v3). Absent on older peers'
-/// 4/5-byte ACKs — the `len >= 4` acceptance rule (pinned below) is what makes the
+/// 4/5-byte ACKs; the `len >= 4` acceptance rule (pinned below) is what makes the
 /// append interop-safe in a mixed-version network.
 pub mod ack_flags {
     /// The ACKer (a gateway) holds a queued downlink for the ACKed sender, who
@@ -17,7 +17,7 @@ pub mod ack_flags {
     pub const PENDING: u8 = 1 << 0;
 }
 
-/// Metadata parsed out of an ACK payload — the receiver-side RSSI report and the
+/// Metadata parsed out of an ACK payload: the receiver-side RSSI report and the
 /// wire-v3 pending-downlink flag. Layout: `acked(4 LE) ‖ rssi(1, i8) ‖ flags(1)`,
 /// with both trailing bytes optional (older peers send 4- or 5-byte ACKs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -43,9 +43,9 @@ pub fn ack_meta(payload: &[u8]) -> AckMeta {
 /// The verdict for one frame heard inside the ACK window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AckVerdict {
-    /// This is our ACK — the confirmed transfer is delivered (exactly once).
+    /// This is our ACK: the confirmed transfer is delivered (exactly once).
     Resolved,
-    /// Not our ACK (foreign, non-ACK, wrong peer/dest, stale counter, or already resolved) —
+    /// Not our ACK (foreign, non-ACK, wrong peer/dest, stale counter, or already resolved);
     /// keep waiting for the rest of the window.
     Ignore,
 }
@@ -53,9 +53,9 @@ pub enum AckVerdict {
 /// One pending confirmed delivery: who must acknowledge what, and whether it already resolved.
 #[derive(Debug, Clone, Copy)]
 pub struct AckWait {
-    /// Our own address — the ACK must be addressed to us.
+    /// Our own address: the ACK must be addressed to us.
     me: u32,
-    /// The peer we sent to — the ACK must come from it.
+    /// The peer we sent to: the ACK must come from it.
     peer: u32,
     /// The TX counter of the frame awaiting acknowledgement.
     counter: u32,
@@ -79,7 +79,7 @@ impl AckWait {
     /// `src`/`dest`, and decrypted payload.
     ///
     /// ACK payload: acked counter (4 LE) + rssi (1). A valid ACK for a *different* counter
-    /// (a stale/duplicate ACK) also isn't ours — keep waiting for the right one.
+    /// (a stale/duplicate ACK) also isn't ours; keep waiting for the right one.
     pub fn offer(&mut self, is_ack: bool, src: u32, dest: u32, payload: &[u8]) -> AckVerdict {
         if self.resolved {
             return AckVerdict::Ignore; // a delivery resolves at most once
@@ -123,7 +123,7 @@ mod tests {
         );
     }
 
-    /// A duplicate ACK after resolution is ignored — the delivery never double-resolves.
+    /// A duplicate ACK after resolution is ignored; the delivery never double-resolves.
     #[test]
     fn duplicate_ack_does_not_double_resolve() {
         let mut w = AckWait::new(ME, PEER, 42);
@@ -141,7 +141,7 @@ mod tests {
         );
     }
 
-    /// A late/stale ACK for an old counter is ignored — the window keeps waiting for the right
+    /// A late/stale ACK for an old counter is ignored; the window keeps waiting for the right
     /// one instead of failing (the star-contention false-NotDelivered fix, docs/radio.md).
     #[test]
     fn stale_counter_ignored_then_right_one_resolves() {
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(w.offer(true, PEER, ME, &ack_payload(42, 0)), AckVerdict::Resolved);
     }
 
-    /// A short payload (< 4 bytes — no full acked-counter field) never resolves.
+    /// A short payload (< 4 bytes, no full acked-counter field) never resolves.
     #[test]
     fn short_payload_ignored() {
         let mut w = AckWait::new(ME, PEER, 42);
@@ -185,7 +185,7 @@ mod tests {
     }
 
     /// The rule is `len >= 4`: exactly 4 bytes (no rssi byte) still matches, and trailing bytes
-    /// beyond the rssi are tolerated — pin the current contract.
+    /// beyond the rssi are tolerated; pin the current contract.
     #[test]
     fn payload_length_rule_is_at_least_four() {
         let mut w = AckWait::new(ME, PEER, 42);
@@ -201,7 +201,7 @@ mod tests {
 
     /// `ack_meta` over every historical ACK length: 4 bytes (no RSSI, pre-RSSI era),
     /// 5 bytes (RSSI, wire v2), 6 bytes (RSSI + flags, wire v3). Older-peer ACKs must
-    /// parse as "no pending" — never as a spurious RX window on the node.
+    /// parse as "no pending", never as a spurious RX window on the node.
     #[test]
     fn ack_meta_all_lengths() {
         assert_eq!(
@@ -249,7 +249,7 @@ mod tests {
         assert!(!ack_meta(&p6).pending);
     }
 
-    /// A 6-byte (flags-bearing) ACK still resolves the wait — the `len >= 4` rule.
+    /// A 6-byte (flags-bearing) ACK still resolves the wait: the `len >= 4` rule.
     #[test]
     fn six_byte_ack_still_resolves() {
         let mut w = AckWait::new(ME, PEER, 42);

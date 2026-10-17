@@ -1,22 +1,22 @@
 //! Non-volatile storage in the STM32L0 **data EEPROM**.
 //!
 //! The L0 has true byte-addressable EEPROM (6 KB on the Core Module, ~100k+ write
-//! endurance) — no page erase, no wear-leveling needed. Two layers:
+//! endurance): no page erase, no wear-leveling needed. Two layers:
 //!
-//!   * [`Storage`] — the raw area: [`read`](Storage::read) / [`write`](Storage::write)
+//!   * [`Storage`]: the raw area; [`read`](Storage::read) / [`write`](Storage::write)
 //!     at any byte offset, [`len`](Storage::len) the total size. You own the layout.
-//!   * [`Kv`] — a small **key-value store** over that area, **power-loss-safe**: it survives a
-//!     reset mid-write (the codec is double-buffered — see [`tower_kv`]). Each value lives under
+//!   * [`Kv`]: a small **key-value store** over that area, **power-loss-safe**: it survives a
+//!     reset mid-write (the codec is double-buffered; see [`tower_kv`]). Each value lives under
 //!     a `u16` key as a `{tag, len, crc}`-framed record; updates **append** (a torn write only
 //!     ever loses the in-flight record, never committed data) and compaction reclaims superseded
 //!     records via an atomic half-flip. Add a key to *evolve* stored data rather than growing a
 //!     struct. Values can be stored as **raw bytes** ([`set_bytes`](Kv::set_bytes)) for scalars,
 //!     or **postcard** ([`set`](Kv::set)) for any `#[derive(Serialize, Deserialize)]` type.
 //!     Double-buffering halves usable space (~3 KB of the 6 KB region; the rest is the flip
-//!     buffer) — ample for the SDK's counter/peer/settings state.
+//!     buffer), ample for the SDK's counter/peer/settings state.
 //!
 //! ```ignore
-//! let kv = b.kv.scope(NS_APP); // a namespaced view — apps own NS_APP; locals are u8
+//! let kv = b.kv.scope(NS_APP); // a namespaced view: apps own NS_APP; locals are u8
 //! const BOOTS: u8 = 0x01;
 //! const CFG: u8 = 0x02;
 //!
@@ -53,7 +53,7 @@ pub const EEPROM_ENDURANCE_CYCLES: u32 = 100_000;
 /// flip erases + reprograms the store's most-written cells (the re-packed live-set prefix and the
 /// committed superblock); charging one full erase/write cycle of the worst cell per flip caps the
 /// store at `endurance` flips. The store wear-levels across two alternating halves, so a given
-/// cell is really the flip target only every *other* flip — true life is ~2× this — meaning the
+/// cell is really the flip target only every *other* flip (true life is ~2× this), meaning the
 /// gauge errs toward reporting *more* wear, never less. See `docs/storage.md`.
 pub const FLIP_BUDGET: u32 = EEPROM_ENDURANCE_CYCLES;
 
@@ -72,6 +72,10 @@ pub enum Error {
     TooManyKeys,
     /// A stale incremental-flip plan (handled internally by [`Kv`]; never surfaced in practice).
     Stale,
+    /// The store was [wiped](Kv::wipe) and is frozen until the reboot that must follow: every
+    /// write is refused so no subsystem can re-populate it from RAM state derived from the
+    /// pre-wipe contents (reads still work; they see the empty store).
+    Frozen,
 }
 
 impl From<KvError<embassy_stm32::flash::Error>> for Error {
@@ -96,6 +100,7 @@ impl core::fmt::Display for Error {
             Error::InvalidKey => "invalid key (0 is reserved)",
             Error::TooManyKeys => "too many distinct keys",
             Error::Stale => "stale flip state",
+            Error::Frozen => "store frozen after a wipe (reboot pending)",
         })
     }
 }
@@ -135,24 +140,47 @@ impl<'d> Storage<'d> {
 /// The [`Kv`] codec ([`tower_kv`]) drives the EEPROM through this trait. The raw flash error is
 /// surfaced verbatim so [`Kv`] maps it back to [`Error::Flash`]. (Distinct from `Storage`'s
 /// inherent `read`/`write`, which already wrap the error in [`Error`].)
+///
+/// **Watchdog hook.** Every codec write is one bounded EEPROM program, and the only way the SDK
+/// stalls the whole CPU for *seconds* is a long synchronous run of them (a wipe, the in-line
+/// fallback flip: up to ~5.2 s, docs/storage.md) during which the executor, and so the
+/// watchdog feeder, cannot run. Each write therefore reloads an armed IWDG via
+/// [`watchdog::pet_during_stall`](crate::watchdog::pet_during_stall), which refuses once the
+/// app's liveness check-ins are stale or the stall outlasts any legitimate EEPROM operation, so
+/// a genuine hang still resets. One register write per program; a no-op with no watchdog armed.
 impl Eeprom for Storage<'_> {
     type Error = embassy_stm32::flash::Error;
     fn read(&self, off: u32, buf: &mut [u8]) -> Result<(), Self::Error> {
         self.flash.eeprom_read_slice(off, buf)
     }
     fn write(&mut self, off: u32, data: &[u8]) -> Result<(), Self::Error> {
-        self.flash.eeprom_write_slice(off, data)
+        let r = self.flash.eeprom_write_slice(off, data);
+        crate::watchdog::pet_during_stall();
+        r
     }
+}
+
+/// Factory-reset the key-value store held in `storage`: the [`tower_kv::wipe`] flip to an empty
+/// store, **power-loss-safe at every step**: a reset mid-wipe leaves either the complete old store
+/// or an empty one, never a half-zeroed log whose surviving tail could resurface under new
+/// appends. Keeps the generation counting (the wear gauge is not reset; a wipe costs one flip),
+/// and scrubs both record halves so wiped keys aren't left physically readable.
+///
+/// For a bare entry that must not build the shared [`Kv`] (`examples/kv_wipe.rs`); everything
+/// else goes through [`Nv::wipe`], which also freezes the store until the reboot.
+pub fn factory_wipe(storage: &mut Storage<'_>) -> Result<(), Error> {
+    let capacity = storage.len() as u32;
+    tower_kv::wipe(storage, capacity).map_err(Error::from)
 }
 
 /// EEPROM key **namespace**. Each subsystem owns one `Ns`; combined with a per-subsystem 8-bit
 /// `local` key it forms the 16-bit [`Kv`] key as `(ns << 8) | local`. Two subsystems with
-/// different `Ns` can never collide, whatever locals they pick — so the disjoint-key invariant is
+/// different `Ns` can never collide, whatever locals they pick, so the disjoint-key invariant is
 /// **structural** (hold a [`Scoped`] view via [`Nv::scope`]), not a hand-maintained convention.
 ///
-/// The high byte is the namespace, the low byte the local key — a flat `u16` space as before, just
+/// The high byte is the namespace, the low byte the local key: a flat `u16` space as before, just
 /// partitioned by *number*, not by memory (the log-structured [`Kv`] stores by key tag + insertion
-/// order, so the key value costs nothing — see the module docs).
+/// order, so the key value costs nothing; see the module docs).
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Ns(pub u8);
 
@@ -162,7 +190,7 @@ pub const NS_SYS: Ns = Ns(0x53);
 pub const NS_NET: Ns = Ns(0x52);
 /// Console/shell settings (one local per declared [`Setting`](crate::shell)).
 pub const NS_SHELL: Ns = Ns(0x55);
-/// Application-owned state — apps pick any locals here, clear of every SDK namespace.
+/// Application-owned state: apps pick any locals here, clear of every SDK namespace.
 pub const NS_APP: Ns = Ns(0x60);
 
 /// Compose a full [`Kv`] key from a namespace + an 8-bit local key. Use it for `const` keys and at
@@ -182,13 +210,18 @@ pub struct Kv<'d> {
     storage: Storage<'d>,
     capacity: u32,
     /// RAM-only maintenance state (pre-blank cursor + at most one pending incremental flip).
-    /// Lives here — inside the one [`SharedKv`] mutex — so the write path
+    /// Lives here (inside the one [`SharedKv`] mutex) so the write path
     /// ([`set_bytes`](Self::set_bytes)) and the [`maintenance`] task share it: a store that
     /// fills mid-flip *finishes* the pending flip instead of restarting one. Losing it (reboot)
-    /// is always safe (see [`tower_kv::FlipState`]). Costs ~540 B of `.bss` — deliberately off
+    /// is always safe (see [`tower_kv::FlipState`]). Costs ~540 B of `.bss`, deliberately off
     /// the stack: the flip plan otherwise sat in the deepest call paths (docs/radio.md: no
     /// stack guard on this target).
     maint: MaintState,
+    /// Set by [`wipe`](Self::wipe) (success *or* failure): every later write fails with
+    /// [`Error::Frozen`] until the reboot the caller owes. Without it, the ~1 s between the wipe
+    /// and the shell's reset (response flush) let other tasks (the gateway loop, the radio
+    /// watermark / replay-lane persists) write their pre-wipe RAM state straight back.
+    frozen: bool,
 }
 
 impl<'d> Kv<'d> {
@@ -203,7 +236,13 @@ impl<'d> Kv<'d> {
             storage,
             capacity,
             maint: MaintState::new(),
+            frozen: false,
         }
+    }
+
+    /// `Err(Frozen)` once [`wipe`](Self::wipe) ran: the guard every write path takes first.
+    fn writable(&self) -> Result<(), Error> {
+        if self.frozen { Err(Error::Frozen) } else { Ok(()) }
     }
 
     /// Reclaim the underlying [`Storage`] for raw access.
@@ -211,37 +250,36 @@ impl<'d> Kv<'d> {
         self.storage
     }
 
-    /// Factory reset: zero the ENTIRE EEPROM — every record, both superblocks — returning the
-    /// store to its virgin state ([`tower_kv::init`] re-initializes it on the next boot), and
-    /// reset the in-RAM maintenance state. **~5 s of CPU-stalling word writes**
-    /// (docs/storage.md); callers must reboot immediately after (the shell's
-    /// `/system/eeprom wipe confirm` does) so no subsystem keeps RAM state derived from the
-    /// wiped store. Exists because the store has no per-key deletion — the live set only grows.
+    /// Factory reset: drop **every** key (pairing keys, peers, replay lanes, the TX watermark,
+    /// settings, the session counter) via [`factory_wipe`]: a flip to an empty store, atomic and
+    /// power-loss-safe at every step, with the wear-gauge generation preserved. ~2.6 s of
+    /// CPU-stalling word programs (~5.2 s if the dead half wasn't pre-blanked; docs/storage.md).
+    ///
+    /// The store is then **frozen**: every write fails with [`Error::Frozen`], also when the
+    /// wipe itself failed part-way (the store is still consistent: old or empty), so no subsystem
+    /// can re-populate it from RAM state derived from the pre-wipe contents. The caller **must
+    /// reboot** (the shell's `/system/eeprom wipe confirm` does, on success and on failure).
+    /// Per-key removal is [`delete`](Self::delete); this is the whole-device reset.
     pub fn wipe(&mut self) -> Result<(), Error> {
-        let zeros = [0u8; 64];
-        let mut off = 0u32;
-        while off < self.capacity {
-            let n = 64u32.min(self.capacity - off) as usize;
-            self.storage.write(off, &zeros[..n])?;
-            off += n as u32;
-        }
+        self.frozen = true;
         self.maint = MaintState::new();
-        Ok(())
+        factory_wipe(&mut self.storage)
     }
 
     /// Store raw bytes under `key`. Use this for scalars (`&x.to_le_bytes()`) or
-    /// any pre-encoded blob — no serializer involved. (Codec in [`tower_kv`].)
+    /// any pre-encoded blob; no serializer involved. (Codec in [`tower_kv`].)
     ///
     /// Flip-aware: if the half fills while the [`maintenance`] task has an incremental flip in
     /// flight, the write finishes that flip (bounded: its remaining steps) instead of paying for
     /// a from-scratch synchronous compaction.
     pub fn set_bytes(&mut self, key: u16, value: &[u8]) -> Result<(), Error> {
+        self.writable()?;
         tower_kv::set_bytes_with(&mut self.storage, self.capacity, key, value, self.maint.pending())
             .map_err(Error::from)
     }
 
     /// Read the raw bytes stored under `key` into `out`; returns the value's true
-    /// length (which may exceed `out.len()` — only `out.len()` bytes are copied),
+    /// length (which may exceed `out.len()`; only `out.len()` bytes are copied),
     /// or `None` if the key is absent.
     pub fn get_bytes(&self, key: u16, out: &mut [u8]) -> Result<Option<usize>, Error> {
         tower_kv::get_bytes(&self.storage, self.capacity, key, out).map_err(Error::from)
@@ -249,8 +287,9 @@ impl<'d> Kv<'d> {
 
     /// Delete `key` (a tombstone append): it reads back absent, and the next compaction reclaims
     /// its space. A wear-free no-op if already absent. Flip-aware like [`set_bytes`](Self::set_bytes).
-    /// The store can now *shrink*, not only grow — the lever against a full-store compaction storm.
+    /// The store can now *shrink*, not only grow: the lever against a full-store compaction storm.
     pub fn delete(&mut self, key: u16) -> Result<(), Error> {
+        self.writable()?;
         tower_kv::delete_with(&mut self.storage, self.capacity, key, self.maint.pending())
             .map_err(Error::from)
     }
@@ -264,7 +303,7 @@ impl<'d> Kv<'d> {
     }
 
     /// Load a postcard value under `key`, or `None` if absent / it doesn't
-    /// deserialize into `T` (e.g. the type's shape changed — add a new key instead).
+    /// deserialize into `T` (e.g. the type's shape changed; add a new key instead).
     pub fn get<T: DeserializeOwned>(&self, key: u16) -> Result<Option<T>, Error> {
         let mut buf = [0u8; MAX_VALUE];
         match self.get_bytes(key, &mut buf)? {
@@ -277,6 +316,7 @@ impl<'d> Kv<'d> {
     /// key, packed from the start. Called automatically when an append won't fit.
     /// A pending incremental flip is finished rather than restarted. (Codec in [`tower_kv`].)
     pub fn compact(&mut self) -> Result<(), Error> {
+        self.writable()?;
         tower_kv::compact_with(&mut self.storage, self.capacity, self.maint.pending()).map_err(Error::from)
     }
 
@@ -285,6 +325,9 @@ impl<'d> Kv<'d> {
     /// [`tower_kv::FLIP_THRESHOLD`], or pre-blanks the dead half. Returns whether work remains.
     /// See [`maintenance`] for the task that drives it.
     pub fn maintain(&mut self, budget_words: u32) -> Result<bool, Error> {
+        if self.frozen {
+            return Ok(false); // wiped: nothing to maintain until the reboot
+        }
         tower_kv::maintain(
             &mut self.storage,
             self.capacity,
@@ -295,23 +338,23 @@ impl<'d> Kv<'d> {
         .map_err(Error::from)
     }
 
-    /// Lifetime compaction-flip count (the active-half generation) — a pure read for EEPROM-wear
+    /// Lifetime compaction-flip count (the active-half generation), a pure read for EEPROM-wear
     /// telemetry; see [`tower_kv::generation`] and [`FLIP_BUDGET`]. `0` on a fresh region.
     pub fn flip_generation(&self) -> u32 {
         tower_kv::generation(&self.storage, self.capacity).unwrap_or(0)
     }
 
-    /// Free (appendable) bytes left in the active half — a pure read (`0` on a read fault).
+    /// Free (appendable) bytes left in the active half, a pure read (`0` on a read fault).
     pub fn free_bytes(&self) -> u32 {
         tower_kv::free_bytes(&self.storage, self.capacity).unwrap_or(0)
     }
 
-    /// Bytes the live set (latest record per key) occupies — a pure read (`0` on a read fault).
+    /// Bytes the live set (latest record per key) occupies, a pure read (`0` on a read fault).
     pub fn live_bytes(&self) -> u32 {
         tower_kv::live_bytes(&self.storage, self.capacity).unwrap_or(0)
     }
 
-    /// Whether the dead half is fully pre-blanked (the next flip skips its blank pass) — a pure
+    /// Whether the dead half is fully pre-blanked (the next flip skips its blank pass), a pure
     /// read (`false` on a read fault).
     pub fn dead_half_blank(&self) -> bool {
         tower_kv::dead_half_blank(&self.storage, self.capacity).unwrap_or(false)
@@ -319,17 +362,17 @@ impl<'d> Kv<'d> {
 }
 
 /// The one process-wide [`Kv`] over the EEPROM, behind a blocking mutex + `RefCell`, parked in a
-/// `'static` (see [`Nv::install`]). Every subsystem — radio [`net`](crate::radio::net), the
-/// [`shell`](crate::shell), and apps — borrows it through an [`Nv`] handle.
+/// `'static` (see [`Nv::install`]). Every subsystem (radio [`net`](crate::radio::net), the
+/// [`shell`](crate::shell), and apps) borrows it through an [`Nv`] handle.
 ///
 /// A *blocking* (non-async) mutex suffices: EEPROM access is synchronous and is never held across
 /// `.await` on this single-core cooperative executor. The raw mutex is [`ThreadModeRawMutex`], NOT
 /// `CriticalSectionRawMutex`: every access is task-context (thread mode), so it never needs to mask
-/// interrupts — and it MUST NOT. A compaction flip programs a whole ~3 KB EEPROM half word-by-word
-/// (each ~3.4–6.8 ms), and under a critical-section mutex that ran with all interrupts disabled for
-/// **2.5–5 s** — long enough to overflow the SPIRIT1 RX FIFO and slip every timer, triggered
+/// interrupts, and it MUST NOT. A compaction flip programs a whole ~3 KB EEPROM half word-by-word
+/// (each ~3.4-6.8 ms), and under a critical-section mutex that ran with all interrupts disabled for
+/// **2.5-5 s**, long enough to overflow the SPIRIT1 RX FIFO and slip every timer, triggered
 /// unpredictably from the radio hot path. With `ThreadModeRawMutex` the flip still monopolizes the
-/// *executor* (no other task runs until it returns — no `.await` inside), but the NVIC keeps
+/// *executor* (no other task runs until it returns; no `.await` inside), but the NVIC keeps
 /// servicing interrupts, so the radio and timebase stay alive. `ThreadModeRawMutex` also enforces
 /// the "thread mode only" contract by construction: a stray EEPROM access from an ISR/exception
 /// now panics instead of silently deadlocking.
@@ -344,7 +387,7 @@ pub struct Nv(&'static SharedKv);
 
 impl Nv {
     /// Build the one [`Kv`] over `storage`, park it in a process-wide `static`, and return the
-    /// handle. Call **exactly once** — the [`cortex_m::singleton!`] enforces it (a second call
+    /// handle. Call **exactly once**; the [`cortex_m::singleton!`] enforces it (a second call
     /// panics). The sole caller is [`Board::take`](crate::board::Board::take).
     pub fn install(storage: Storage<'static>) -> Self {
         let cell: &'static SharedKv = cortex_m::singleton!(
@@ -395,47 +438,47 @@ impl Nv {
     /// Reclaim space taken by superseded records (see [`Kv::compact`]).
     pub fn compact(&self) -> Result<(), Error> {
         let r = self.with(|kv| kv.compact());
-        MAINT_WAKE.signal(()); // the flip left a dead, dirty half — pre-blank it
+        MAINT_WAKE.signal(()); // the flip left a dead, dirty half; pre-blank it
         r
     }
 
-    /// Operator-controlled full compaction, **now** and synchronously — for products that want
+    /// Operator-controlled full compaction, **now** and synchronously, for products that want
     /// the (bounded) stall at a moment they control (e.g. a provisioning step) rather than
     /// mid-operation. Same operation as [`compact`](Self::compact); the name states the intent.
     pub fn compact_now(&self) -> Result<(), Error> {
         self.compact()
     }
 
-    /// Factory reset — see [`Kv::wipe`]. Deliberately does not wake the maintenance task:
-    /// the caller reboots immediately and the next boot starts from a virgin store.
+    /// Factory reset; see [`Kv::wipe`]. Leaves the store frozen (writes fail) until the reboot
+    /// the caller owes; the maintenance task is not woken (it idles on a frozen store anyway).
     pub fn wipe(&self) -> Result<(), Error> {
         self.with(|kv| kv.wipe())
     }
 
     /// One bounded maintenance slice (see [`Kv::maintain`]); `false` on error (best-effort,
-    /// like `Kv::new`'s init). Driven by the [`maintenance`] task — call directly only from a
+    /// like `Kv::new`'s init). Driven by the [`maintenance`] task; call directly only from a
     /// custom maintenance loop.
     pub fn maintain(&self, budget_words: u32) -> bool {
         self.with(|kv| kv.maintain(budget_words)).unwrap_or(false)
     }
 
-    /// Free (appendable) bytes left in the active half — a pure read (see [`Kv::free_bytes`]).
+    /// Free (appendable) bytes left in the active half, a pure read (see [`Kv::free_bytes`]).
     pub fn free_bytes(&self) -> u32 {
         self.with(|kv| kv.free_bytes())
     }
 
-    /// Live-set size in bytes — a pure read (see [`Kv::live_bytes`]).
+    /// Live-set size in bytes, a pure read (see [`Kv::live_bytes`]).
     pub fn live_bytes(&self) -> u32 {
         self.with(|kv| kv.live_bytes())
     }
 
-    /// Whether the dead half is fully pre-blanked — a pure read (see [`Kv::dead_half_blank`]).
+    /// Whether the dead half is fully pre-blanked, a pure read (see [`Kv::dead_half_blank`]).
     pub fn dead_half_blank(&self) -> bool {
         self.with(|kv| kv.dead_half_blank())
     }
 
     /// Lifetime compaction-flip count for EEPROM-wear telemetry (see [`Kv::flip_generation`]).
-    /// A pure read — polling it adds no wear. Compare against [`FLIP_BUDGET`].
+    /// A pure read: polling it adds no wear. Compare against [`FLIP_BUDGET`].
     pub fn flip_generation(&self) -> u32 {
         self.with(|kv| kv.flip_generation())
     }
@@ -459,7 +502,7 @@ pub struct Scoped {
 }
 
 impl Scoped {
-    /// The full 16-bit [`Kv`] key this `local` maps to — for APIs that take a raw `u16`.
+    /// The full 16-bit [`Kv`] key this `local` maps to, for APIs that take a raw `u16`.
     pub fn full_key(&self, local: u8) -> u16 {
         ((self.ns as u16) << 8) | local as u16
     }
@@ -479,7 +522,7 @@ impl Scoped {
         self.nv.get_bytes(self.full_key(local), out)
     }
 
-    /// Delete `local` in this namespace (see [`Kv::delete`]) — reads back absent, space reclaimed
+    /// Delete `local` in this namespace (see [`Kv::delete`]): reads back absent, space reclaimed
     /// on the next flip. A wear-free no-op if already absent.
     pub fn delete(&self, local: u8) -> Result<(), Error> {
         self.nv.delete(self.full_key(local))
@@ -499,25 +542,27 @@ impl Scoped {
 // --- background maintenance ----------------------------------------------------------------------
 
 /// Per-slice maintenance budget, in EEPROM word-programs. On the STM32L0 each word program
-/// stalls the whole CPU ~3.4 ms (NVM stall — instruction fetch and thus ISRs freeze), so 4 words
-/// ≈ **14 ms** of stall per slice — comfortably under the radio's ACK window (200 ms) and the
+/// stalls the whole CPU ~3.4 ms (NVM stall: instruction fetch and thus ISRs freeze), so 4 words
+/// ≈ **14 ms** of stall per slice, comfortably under the radio's ACK window (200 ms) and the
 /// console's tolerance, where the old synchronous flip froze the chip for seconds
-/// (docs/storage.md). The slice can overshoot by ~2 words on unaligned copy edges, and the one
-/// commit slice per flip adds the tail catch-up + a 12-byte superblock (still tens of ms).
+/// (docs/storage.md). A copy slice can overshoot by a few programs per record it touches (the
+/// HAL programs an unaligned head/tail as up to 3 single-byte programs each; see `tower_kv`'s
+/// `words`), and the one commit slice per flip adds the tail catch-up + a 12-byte superblock
+/// (still tens of ms).
 pub const MAINT_BUDGET_WORDS: u32 = 4;
 
 /// Wakes [`maintenance`]: signaled by every [`Nv`] write (and once at boot by the task itself
-/// starting). A [`Signal`] — not a timer — so an idle node takes **zero** extra wakeups: the
+/// starting). A [`Signal`] (not a timer), so an idle node takes **zero** extra wakeups: the
 /// task pends here and the low-power executor can keep reaching STOP (see `console::manager`).
 static MAINT_WAKE: Signal<ThreadModeRawMutex, ()> = Signal::new();
 
-/// Background EEPROM-maintenance task — spawned by default by the [`app!`](crate::app) macro
+/// Background EEPROM-maintenance task, spawned by default by the [`app!`](crate::app) macro
 /// ([`spawn_maintenance`]), so every app gets bounded compaction stalls without wiring anything.
 ///
 /// **Event-driven, not polling:** after draining all work it awaits [`MAINT_WAKE`] (raised by KV
 /// writes), so an idle battery node sees no extra wakeups and STOP stays reachable. While work
 /// remains it runs one [`Nv::maintain`] slice (≤ [`MAINT_BUDGET_WORDS`] word-programs ≈ 14 ms of
-/// CPU stall) per executor turn, yielding between slices so the radio/console tasks interleave —
+/// CPU stall) per executor turn, yielding between slices so the radio/console tasks interleave;
 /// the executor simply stays out of STOP until the store is quiescent. The first pass runs at
 /// boot (before the first await completes), pre-blanking a dead half left dirty by a previous
 /// life's flip.
@@ -529,7 +574,7 @@ pub async fn maintenance(kv: Nv) {
     // present and a host actively talking, defer entirely; in the gaps, space slices out so
     // an unlucky late command risks only one ~14 ms window (bench 2026-07-05: back-to-back
     // yield_now-paced slices formed a ~2 s stall wall that ate shell commands). With the
-    // console DOWN (battery mode — the field case) there is nothing to eat: run full speed.
+    // console DOWN (battery mode, the field case) there is nothing to eat: run full speed.
     const HOST_QUIET: Duration = Duration::from_secs(2);
     const SLICE_GAP: Duration = Duration::from_millis(100);
     loop {

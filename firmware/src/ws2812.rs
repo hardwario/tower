@@ -1,4 +1,4 @@
-//! WS2812B / SK6812 addressable-LED driver — timer PWM + DMA.
+//! WS2812B / SK6812 addressable-LED driver: timer PWM + DMA.
 //!
 //! Drives a strip on **PA1** (the TOWER WS2812 data pin) using **TIM2 channel 2**
 //! in PWM mode: one timer period is one protocol bit (~1.25 µs at 800 kHz), and
@@ -13,7 +13,7 @@
 //! sized for: `Ws2812::<N>` where `N` = [`rgb_buf_len`] / [`rgbw_buf_len`].
 //!
 //! **Clock requirement:** the timer must resolve the ~0.4/0.8 µs high-times, so
-//! it needs a fast clock — comfortable at the firmware's 16 MHz sysclk (20 ticks
+//! it needs a fast clock: comfortable at the firmware's 16 MHz sysclk (20 ticks
 //! per bit). It will *not* meet WS2812 timing at the old MSI 4 MHz (~5 ticks).
 //! Compare values are derived from the timer's actual period, so it self-adjusts
 //! to the clock.
@@ -39,11 +39,11 @@ bind_interrupts!(struct Irqs {
     DMA1_CHANNEL2_3 => InterruptHandler<DMA1_CH3>;
 });
 
-/// WS2812 bit rate — one timer period per protocol bit.
+/// WS2812 bit rate: one timer period per protocol bit.
 const BIT_HZ: u32 = 800_000;
 
 /// Reset/latch gap appended after the data, in bit-slots held low.
-/// 64 × 1.25 µs ≈ 80 µs — safe for both WS2812B and SK6812.
+/// 64 × 1.25 µs ≈ 80 µs, safe for both WS2812B and SK6812.
 pub const RESET_SLOTS: usize = 64;
 
 const RGB_BITS: usize = 24;
@@ -89,7 +89,7 @@ pub const fn rgbw_buf_len(pixels: usize) -> usize {
 }
 
 /// WS2812/SK6812 strip on PA1 (TIM2_CH2 + DMA1_CH3). `N` is the compare-value
-/// buffer length — size it with [`rgb_buf_len`] / [`rgbw_buf_len`].
+/// buffer length; size it with [`rgb_buf_len`] / [`rgbw_buf_len`].
 pub struct Ws2812<'d, const N: usize> {
     pwm: SimplePwm<'d, TIM2>,
     dma: Peri<'d, DMA1_CH3>,

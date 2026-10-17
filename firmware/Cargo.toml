@@ -2,13 +2,13 @@
 name = "tower"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.99.1"
 license = "MIT"
 repository = "https://github.com/hardwario/tower-firmware"
 description = "Embassy-based firmware SDK for the HARDWARIO TOWER Core Module (STM32L083CZ): reusable blocks (LED, button, TMP112, LIS2DH12, WS2812 strip, console, EEPROM storage, low power) and a SPIRIT1 sub-GHz radio stack (AES-128-CCM secured network layer), plus runnable examples."
 
 # This package is also the workspace root. `tower-protocol` (the shared no_std wire-format
-# crate) lives in its own repo now — github.com/hardwario/tower-protocol — pinned by git tag
+# crate) lives in its own repo now (github.com/hardwario/tower-protocol), pinned by git tag
 # below and depended on (out-of-tree) by `tower-cli`. To co-develop it locally without
 # re-tagging, add a `paths` override to your `~/.cargo/config.toml` (see crates README/docs).
 [workspace]
@@ -47,7 +47,7 @@ embassy-stm32 = { version = "0.6.0", features = [
     "time-driver-any",
     "executor-thread",
     "low-power",
-    # EXTI line interrupts — used to wake from STOP on the VBUS_SENSE edge (PA12)
+    # EXTI line interrupts, used to wake from STOP on the VBUS_SENSE edge (PA12)
     # and on the SPIRIT1 nIRQ (PA7, EXTI line 7).
     "exti",
     # Expose `embassy_stm32::pac` so the radio's register-level L0 AES driver
@@ -55,14 +55,15 @@ embassy-stm32 = { version = "0.6.0", features = [
     "unstable-pac",
 ] }
 # Note: the SPI HAL (used for the SPIRIT1 radio bus, SPI1 on PB3/PB5/PB4) needs
-# no feature — embassy-stm32 always compiles `spi`. The radio uses blocking SPI
+# no feature: embassy-stm32 always compiles `spi`. The radio uses blocking SPI
 # (Spi::new_blocking): FIFO bursts are ≤96 B at ≤10 MHz (~80 µs), and SPI1's DMA
 # channel (DMA1_CH3) is already owned by the WS2812 strip.
 
 cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
 cortex-m-rt = "0.7.0"
-# Panic handler is provided by the SDK itself (src/console.rs prints the panic
-# to the console, then halts), so no external panic-handler crate is needed.
+# Panic handler is provided by the SDK itself (src/console.rs records a reset-surviving crash
+# breadcrumb, prints the panic to the console if it is up, then RESETS; it does not halt), so
+# no external panic-handler crate is needed.
 
 # Critical-section API (Mutex/with) for the global serial console. The single-core
 # implementation is provided by the cortex-m feature above.
@@ -89,7 +90,7 @@ postcard = { version = "1.0", default-features = false }
 
 # The EEPROM key-value codec (record format / scan / in-place update / compaction). Extracted
 # into its own no_std crate so the firmware can keep using it on thumbv6m AND the logic can be
-# unit-tested on the host (`just test`) — the firmware itself can't `cargo test`. `storage.rs`
+# unit-tested on the host (`just test`); the firmware itself can't `cargo test`. `storage.rs`
 # is the thin adapter that implements `tower_kv::Eeprom` over the L0 data EEPROM.
 tower-kv = { path = "crates/tower-kv" }
 
@@ -114,23 +115,19 @@ tower-gw-core = { path = "crates/tower-gw-core" }
 
 # Pure kernels behind the `addr` shell setting (value parse + the `addr random`
 # xorshift). Extracted like the other `crates/` so the parse/PRNG logic is host-tested
-# (`just test`) — the firmware `src/` is no_std and can't cargo test. no_std.
+# (`just test`); the firmware `src/` is no_std and can't cargo test. no_std.
 tower-shell-core = { path = "crates/tower-shell-core" }
 
 # Shared console wire protocol (framing + CRC + message schema). Its own repo, pinned by tag
 # (bump in lockstep with `tower-cli` on any wire change).
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.5.0" }
+tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.5.1" }
 
 # Bounded buffers for the framed console (the TX queue item, log/print scratch).
 # Matches the version already in the lockfile (pulled transitively by embassy).
 heapless = "0.9"
 
-# Async IO traits for the interrupt-buffered console UART (BufferedUart). Version must
-# match embassy-stm32's (0.7) or the trait impls won't line up.
-embedded-io-async = "0.7"
-
 # Build-time role selection for the two-board radio examples: one source file is
-# built twice with different roles — e.g. `TOWER_FEATURES=role-gateway just flash
+# built twice with different roles, e.g. `TOWER_FEATURES=role-gateway just flash
 # net_confirmed`. These affect only the examples, never the library.
 #   role-node / role-gateway : node vs gateway (gateway = absence of role-node)
 #   role-peer-a / role-peer-b : P2P peers in net_p2p (peer-a = absence of role-peer-b)
@@ -145,15 +142,15 @@ role-peer-a = []
 role-peer-b = []
 node-1 = []
 node-2 = []
-# LSE (32 kHz crystal) drive strength override — default (no feature) = embassy's MediumHigh.
-# Higher drive = more oscillation robustness for ~0.1–0.5 µA extra STOP current (bench-swept
-# 2026-07-05: no effect on the bimodal-boot delay, which is the KV compaction stall — see
+# LSE (32 kHz crystal) drive strength override; default (no feature) = embassy's MediumHigh.
+# Higher drive = more oscillation robustness for ~0.1-0.5 µA extra STOP current (bench-swept
+# 2026-07-05: no effect on the bimodal-boot delay, which is the KV compaction stall; see
 # docs/storage.md; knob kept for marginal-crystal experiments). See board::init.
 lse-drive-low = []
 lse-drive-medium-low = []
 lse-drive-high = []
 
-# Ready-made product firmwares for the TOWER IoT Kit — distinct from the educational
+# Ready-made product firmwares for the TOWER IoT Kit, distinct from the educational
 # `examples/` (which demonstrate one block each). These are full applications, so they are
 # Cargo binaries (`--bin`), built/flashed by name + kind: `just build app radio_push_button`
 # (vs `just build example blinky`). They live in `apps/` (not the default `src/bin/`), so each

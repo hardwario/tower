@@ -18,7 +18,7 @@ const FHSS_SLOT_MS: u64 = 300;
 // --- DutyGovernor: residue / refill-truncation property (the parent's fix) ---------------
 
 /// 1000 calls of `refill_ms(50)` must credit *exactly* the same airtime as one
-/// `refill_ms(50_000)` — no credit lost to per-call integer truncation. This is the residue
+/// `refill_ms(50_000)`: no credit lost to per-call integer truncation. This is the residue
 /// accumulator the parent added: at 1 % (permil = 10), a 50 ms call earns `50·10/1000 = 0` ms
 /// of whole-millisecond refill and, without carrying the 500-permil-ms remainder, would credit
 /// *nothing* over 1000 calls while a single 50 s call credits 500 ms.
@@ -109,7 +109,7 @@ fn hop_channel_is_perfect_permutation() {
             assert!((ch as usize) < FHSS_N, "channel {ch} out of range (seed {seed})");
             assert!(
                 !seen[ch as usize],
-                "channel {ch} repeated (seed {seed}) — not a permutation"
+                "channel {ch} repeated (seed {seed}): not a permutation"
             );
             seen[ch as usize] = true;
         }
@@ -145,7 +145,7 @@ fn hop_channel_fixed_across_cycles_bounds_occupancy() {
                 assert_eq!(
                     hop_channel::<FHSS_N>(seed, cycle, i),
                     hop_channel::<FHSS_N>(seed, 0, i),
-                    "permutation changed across cycles (seed {seed}, slot {i}) — would break §15.247 spacing"
+                    "permutation changed across cycles (seed {seed}, slot {i}); would break §15.247 spacing"
                 );
             }
         }
@@ -169,7 +169,7 @@ fn hop_channel_fixed_across_cycles_bounds_occupancy() {
 // --- frame_toa_ms: never under-counts ----------------------------------------------------
 
 /// Time-on-air is rounded **up** (div_ceil), so the reported airtime is always ≥ the exact
-/// airtime — the regulatory budget is never under-counted. Verify across the full frame-length
+/// airtime; the regulatory budget is never under-counted. Verify across the full frame-length
 /// range that `frame_toa_ms(len)` ≥ the exact ceiling of the on-air bit-time.
 #[test]
 fn frame_toa_never_undercounts() {

@@ -1,4 +1,4 @@
-//! net_confirmed — confirmed delivery with ACK + retransmit (docs/radio.md).
+//! net_confirmed: confirmed delivery with ACK + retransmit (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-node    just flash example net_confirmed   # confirmed sender
 //!   TOWER_FEATURES=role-gateway just flash example net_confirmed   # receiver + auto-ACK

@@ -1,10 +1,10 @@
-//! radio_climate_monitor — TOWER IoT Kit product firmware (SKELETON).
+//! radio_climate_monitor: TOWER IoT Kit product firmware (SKELETON).
 //!
 //! A battery climate node: it wakes on an interval, measures temperature (the on-board
 //! TMP112), (will) send a secured radio reading to the gateway, then returns to STOP
 //! low-power until the next measurement.
 //!
-//! This is a starting skeleton — the measure loop runs and logs; the radio send is marked
+//! This is a starting skeleton: the measure loop runs and logs; the radio send is marked
 //! TODO. The `net_*` examples and `docs/radio.md` (the `net` node role) show the full
 //! pattern: build the radio with `Spirit1::new(b.radio_*)`, then `Net::new(radio, b.kv,
 //! NetConfig { .. })`, pair with a gateway, and `net.send(..)`.
@@ -34,7 +34,7 @@ async fn run(mut b: Board) {
     //                   b.radio_miso, b.radio_cs, b.radio_sdn, b.radio_irq);
     //   let mut net = tower::radio::net::Net::new(radio, b.kv,
     //                   NetConfig { addr, key: KEY, band: Band::Eu868, channel: 0 }).await?;
-    info!(target: "climate", "radio_climate_monitor skeleton — measuring every {MEASURE_INTERVAL_SECS} s");
+    info!(target: "climate", "radio_climate_monitor skeleton: measuring every {MEASURE_INTERVAL_SECS} s");
 
     loop {
         match b.tmp112.oneshot().await {

@@ -2,7 +2,7 @@
 //! node's next uplink.
 //!
 //! Policy (argued in the gateway app):
-//! * **Global pool of [`QUEUE_CAP`] items** (~0.4 KB), NOT per-node arrays — a
+//! * **Global pool of [`QUEUE_CAP`] items** (~0.4 KB), NOT per-node arrays; a
 //!   per-node array for every peer would cost multiples of that on the 20 KB part.
 //! * **Per-node FIFO** ([`PER_NODE_CAP`] deep): commands to one node deliver in order,
 //!   one per uplink cycle (each delivery's ACK re-advertises the pending flag).
@@ -11,15 +11,15 @@
 //! * **Stable u16 ids** (monotonic from 1 per boot, 0 reserved = "not a queue item"
 //!   in `RadioStat::Tx`): the dequeue handle and the TX-report correlator.
 //!
-//! Time is the caller's (`now_ms` in every method) — kernel style, host-testable.
+//! Time is the caller's (`now_ms` in every method): kernel style, host-testable.
 
-/// Global item pool size. 4 × ~104 B ≈ 0.4 KB — sized against the 20 KB part's
-/// measured ~9 KB stack peak (every byte of app statics is stack the part loses).
+/// Global item pool size. 4 × ~104 B ≈ 0.4 KB, sized against the 20 KB part's
+/// ~9 KB stack region (every byte of app statics is stack the part loses).
 /// A full pool answers `MGMT_FULL`; the host retries after deliveries drain it.
 pub const QUEUE_CAP: usize = 4;
 /// Max queued items per node.
 pub const PER_NODE_CAP: usize = 2;
-/// Max payload bytes per item — the radio MTU.
+/// Max payload bytes per item: the radio MTU.
 pub const MAX_ITEM: usize = 74;
 
 /// Why a push was refused.
@@ -40,7 +40,7 @@ pub struct Item {
     pub node_addr: u32,
     pub enqueued_at_ms: u64,
     pub ttl: u16,
-    /// Pool-insertion order — the per-node FIFO key (ids alone would break on u16 wrap).
+    /// Pool-insertion order: the per-node FIFO key (ids alone would break on u16 wrap).
     order: u32,
     len: u8,
     buf: [u8; MAX_ITEM],
@@ -114,7 +114,7 @@ impl Queue {
         Ok(id)
     }
 
-    /// The next (oldest, non-expired) item for `node_addr`, if any — what to transmit on
+    /// The next (oldest, non-expired) item for `node_addr`, if any: what to transmit on
     /// its uplink. Does not remove it; call [`pop`](Self::pop) on delivery.
     pub fn peek_for(&self, node_addr: u32, now_ms: u64) -> Option<&Item> {
         self.slots
@@ -310,7 +310,7 @@ mod tests {
         assert!(q.is_empty());
     }
 
-    /// A per-node slot frees on pop and is reusable — the FIFO cap is by live count, not a
+    /// A per-node slot frees on pop and is reusable; the FIFO cap is by live count, not a
     /// high-water mark.
     #[test]
     fn per_node_slot_reuse_after_pop() {

@@ -1,6 +1,6 @@
 //! SPIRIT1 RF configuration: band/channel, modulation, deviation, RX bandwidth,
-//! sync word, CRC, packet format and PA — derived from the datasheet formulas
-//! for the **50 MHz** crystal in the SPSGRF module.
+//! sync word, CRC, packet format and PA (derived from the datasheet formulas
+//! for the **50 MHz** crystal in the SPSGRF module).
 //!
 //! Crystal handling: f_XO = 50 MHz. The synthesizer and frequency-deviation
 //! formulas use the full f_XO; the digital-domain blocks (data rate, channel
@@ -25,9 +25,9 @@ pub const F_XO: u64 = 50_000_000;
 /// SYNT divider is scaled accordingly.
 const REFDIV: u64 = 2;
 
-/// Operating band. Both lie in the SPIRIT1 *high* VCO band (779–956 MHz), so they
+/// Operating band. Both lie in the SPIRIT1 *high* VCO band (779-956 MHz), so they
 /// share the synthesizer band-select (B=6, BS=1) and every digital-domain setting
-/// (modulation, deviation, RX filter, IF) — only the base frequency and channel
+/// (modulation, deviation, RX filter, IF); only the base frequency and channel
 /// spacing differ, derived from these accessors.
 ///
 /// **Regulatory note:** EU 868 operation here respects the 1 % duty cycle (docs/radio.md).
@@ -39,7 +39,7 @@ const REFDIV: u64 = 2;
 pub enum Band {
     /// EU 868 MHz: base 868.1 MHz, 200 kHz spacing, ch0/1/2 = 868.1/868.3/868.5.
     Eu868,
-    /// US 915 MHz (902–928 ISM): base 915.0 MHz, 200 kHz spacing,
+    /// US 915 MHz (902-928 ISM): base 915.0 MHz, 200 kHz spacing,
     /// ch0/1/2 = 915.0/915.2/915.4. Test/dev only (see the type-level note).
     Us915,
 }
@@ -47,7 +47,7 @@ pub enum Band {
 impl Band {
     /// Band the examples come up on; they can retune at runtime with
     /// [`Net::set_band`](crate::radio::net::Net::set_band) (a single binary supports
-    /// both bands — selection is a runtime decision, never a build flag).
+    /// both bands: selection is a runtime decision, never a build flag).
     pub const DEFAULT: Band = Band::Eu868;
 
     /// Base (channel-0) carrier frequency in Hz.
@@ -138,7 +138,7 @@ fn synt_bytes(f_hz: u64, b_div: u64, bs: u8) -> [u8; 4] {
 }
 
 /// Write the band/channel-dependent synthesizer registers (SYNT3..0, CHSPACE,
-/// CHNUM) — all a band switch needs to rewrite, since every other RF setting is
+/// CHNUM): all a band switch needs to rewrite, since every other RF setting is
 /// band-independent. Shared by [`apply`] and [`set_band`].
 fn write_band_regs(spi: &mut Spirit1Spi, band: Band, channel: u8) -> Result<(), RadioError> {
     // Base frequency: pack SYNT[25:0] + WCP(0) + BS into SYNT3..SYNT0.
@@ -164,17 +164,17 @@ pub async fn set_band(radio: &mut Spirit1, band: Band, channel: u8) -> Result<()
     write_band_regs(radio.spi(), band, channel)
 }
 
-/// Retune to an **arbitrary** carrier `f_hz` in the high VCO band (779–956 MHz) at
+/// Retune to an **arbitrary** carrier `f_hz` in the high VCO band (779-956 MHz) at
 /// runtime: bring the part to READY, write SYNT3..0 directly, and force `CHNUM = 0`
 /// so the carrier equals `f_hz` exactly (no CHSPACE offset). The VCO auto-recalibrates
 /// on the next TX/RX entry (same path [`set_band`] relies on). This is the per-hop /
 /// per-AFA-channel retune primitive used by the FHSS and LBT+AFA spectrum-access modes;
-/// it is cheap (one 4-byte SYNT burst + one CHNUM write). `f_hz` must be in 779–956 MHz
+/// it is cheap (one 4-byte SYNT burst + one CHNUM write). `f_hz` must be in 779-956 MHz
 /// (the band the SPSGRF config is tuned for); callers own the channel-plan math.
 pub async fn set_freq_hz(radio: &mut Spirit1, f_hz: u64) -> Result<(), RadioError> {
     radio.to_ready().await?;
     let spi = radio.spi();
-    // B=6, BS=1 (high band) — matches both Eu868/Us915 band-select.
+    // B=6, BS=1 (high band), matches both Eu868/Us915 band-select.
     spi.write_regs(regs::SYNT3, &synt_bytes(f_hz, 6, 1))?;
     spi.write_reg(regs::CHNUM, 0)?;
     Ok(())
@@ -183,16 +183,16 @@ pub async fn set_freq_hz(radio: &mut Spirit1, f_hz: u64) -> Result<(), RadioErro
 // --- EU 868 LBT+AFA channel plan (EN 300 220) -------------------------------
 // Listen-Before-Talk + Adaptive Frequency Agility lets EU operation relax the
 // 1 % duty limit in sub-bands that permit it. The whole set stays inside the
-// **865.0–868.6 MHz** sub-band (≈25 mW, 1 %-or-LBT+AFA) so the power/duty rule
+// **865.0-868.6 MHz** sub-band (≈25 mW, 1 %-or-LBT+AFA) so the power/duty rule
 // never changes mid-set. (Exact min-channel count, LBT CCA time/threshold, and
 // off-time per EN 300 220-1 / ERC 70-03 are config to **verify** before any
-// product claim — these values are bench defaults that exercise the mechanism.)
+// product claim; these values are bench defaults that exercise the mechanism.)
 
 /// Number of EU AFA channels.
 pub const AFA_N: u8 = 8;
 /// AFA channel-0 carrier (Hz).
 pub const AFA_BASE_HZ: u64 = 865_200_000;
-/// AFA channel spacing (Hz). 400 kHz > the ~60–100 kHz occupied BW (non-overlapping).
+/// AFA channel spacing (Hz). 400 kHz > the ~60-100 kHz occupied BW (non-overlapping).
 pub const AFA_SPACE_HZ: u64 = 400_000;
 
 /// Carrier (Hz) of AFA channel `k` (0..[`AFA_N`)): 865.2 + k·0.4 MHz, ≤ 868.0 MHz.
@@ -200,11 +200,11 @@ pub const fn afa_freq_hz(k: u8) -> u64 {
     AFA_BASE_HZ + (k as u64) * AFA_SPACE_HZ
 }
 
-// All AFA channels stay within the 865.0–868.6 MHz sub-band.
+// All AFA channels stay within the 865.0-868.6 MHz sub-band.
 const _: () = assert!(afa_freq_hz(AFA_N - 1) <= 868_600_000);
 
 // --- US 915 FHSS channel plan (FCC §15.247) ---------------------------------
-// Frequency hopping over the 902–928 MHz ISM band: ≥50 pseudo-random channels,
+// Frequency hopping over the 902-928 MHz ISM band: ≥50 pseudo-random channels,
 // ≤0.4 s occupancy per channel per 20 s. We use **80** channels (well above the
 // minimum 50) so even the *strict* time-tuned occupancy reading has margin (see
 // the slot math in net/fhss.rs), and hop by SYNT rewrite ([`set_freq_hz`]) so the
@@ -215,7 +215,7 @@ const _: () = assert!(afa_freq_hz(AFA_N - 1) <= 868_600_000);
 pub const FHSS_N: u8 = 80;
 /// FHSS channel-0 carrier (Hz).
 pub const FHSS_BASE_HZ: u64 = 903_000_000;
-/// FHSS channel spacing (Hz). 300 kHz > the ~60–100 kHz occupied BW (non-overlapping).
+/// FHSS channel spacing (Hz). 300 kHz > the ~60-100 kHz occupied BW (non-overlapping).
 pub const FHSS_SPACE_HZ: u64 = 300_000;
 /// Fixed channel a scanning node parks on to rendezvous (mid-band; the gateway's
 /// per-cycle permutation visits it exactly once, so lock is bounded by one cycle).
@@ -242,7 +242,7 @@ pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError
         spi.write_reg(regs::GPIO0_CONF, regs::GPIO_CONF_IRQ)?;
 
         // Xtal flag: the digital clock is 25 MHz (50 MHz / 2), so select 24 MHz mode
-        // (ST XTAL_FLAG: <26 MHz → 24 MHz) — clears 24_26MHZ_SELECT in ANA_FUNC_CONF0.
+        // (ST XTAL_FLAG: <26 MHz → 24 MHz), clearing 24_26MHZ_SELECT in ANA_FUNC_CONF0.
         // This tunes the synth loop filter + RCO reference; the reset value (26 MHz)
         // mistunes the loop filter for a 25 MHz clock. Reset 0xC0, clear bit6 → 0x80.
         spi.write_reg(regs::ANA_FUNC_CONF0, 0x80)?;
@@ -264,7 +264,7 @@ pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError
         // Base frequency + channel (the only band-dependent registers).
         write_band_regs(spi, cfg.band, cfg.channel)?;
 
-        // Modulation / data rate / deviation / channel filter — M/E values computed
+        // Modulation / data rate / deviation / channel filter: M/E values computed
         // with the ST library's exact search algorithms for f_XO=50 MHz, divider on:
         //   MOD1 = DATARATE_M = 147 (0x93), MOD0 = GFSK|DATARATE_E(9) = 0x19  -> 19.2 kbps
         //   FDEV0 = FDEV_E(4)<<4 | FDEV_M(5) = 0x45                           -> ~20 kHz
@@ -279,7 +279,7 @@ pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError
         spi.write_regs(0x99, &[0x80, 0xE3])?;
         spi.write_reg(0xBC, 0x22)?;
 
-        // VCO current bump for the 50 MHz crystal (ST WaVcoCalibration) — needed to
+        // VCO current bump for the 50 MHz crystal (ST WaVcoCalibration): needed to
         // lock; the reset VCO_GEN_CURR is too low. Auto VCO calibration (PROTOCOL2.
         // VCO_CALIBRATION, on by default) then recalibrates on each TX/RX entry.
         spi.write_reg(regs::VCO_CONFIG, 0x25)?;
@@ -323,14 +323,14 @@ pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError
         spi.write_reg(regs::PCKTCTRL1, 0x70)?;
 
         // Enable the automatic packet-filtering engine (PROTOCOL1.AUTO_PCKT_FLT,
-        // bit0) and clear the reserved bit0x20 — exactly as ST's SpiritPktBasicInit.
+        // bit0) and clear the reserved bit0x20, exactly as ST's SpiritPktBasicInit.
         let (p1, _) = spi.read_reg(regs::PROTOCOL1)?;
         spi.write_reg(regs::PROTOCOL1, (p1 & !0x20) | 0x01)?;
 
         // PCKT_FLT_OPTIONS = 0x01: the critical RX-completion setting. Clearing
         // RX_TIMEOUT_AND_OR_SELECT (bit6) + no timeout masks selects Table 30 row 1,
         // "the RX timeout never expires and the reception ends at the reception of the
-        // packet" — so RX_DATA_READY fires on a good packet. The reset value (bit6=1)
+        // packet", so RX_DATA_READY fires on a good packet. The reset value (bit6=1)
         // instead leaves the part stuck in RX with the packet in the FIFO (§9.3). bit0
         // = CRC_CHECK (drop bad-CRC frames); source/control filters (bits 4/5) cleared.
         spi.write_reg(regs::PCKT_FLT_OPTIONS, 0x01)?;
@@ -346,7 +346,7 @@ pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError
     // VCO calibration: rely on the SPIRIT1's automatic VCO calibration
     // (PROTOCOL2.VCO_CALIBRATION, enabled by default), which recalibrates on each
     // READY→TX/RX transition. With the VCO current bump above it locks reliably,
-    // and auto-cal tracks temperature drift — verified on hardware. (ST's manual
+    // and auto-cal tracks temperature drift (verified on hardware). (ST's manual
     // one-shot calibration WA, which disables auto-cal and stores fixed words, is
     // not needed here and is less temperature-robust, so it's intentionally omitted.)
     Ok(())

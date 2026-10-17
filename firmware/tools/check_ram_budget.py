@@ -4,7 +4,7 @@
 flip-link places the statics (`.data`/`.bss`/`.uninit`) at the TOP of RAM and the stack
 BELOW them, so a stack overflow faults below the RAM base instead of silently corrupting
 `.bss`. That makes the **stack budget** exactly `(lowest static section address) - RAM_BASE`,
-readable straight from the ELF — no llvm-tools / cargo-binutils needed (this parses the ELF
+readable straight from the ELF, with no llvm-tools / cargo-binutils needed (this parses the ELF
 section headers directly so it runs in CI with only python3).
 
 Every product bin must leave at least `STACK_FLOOR` of stack. The floor is calibrated to the
@@ -14,7 +14,7 @@ measured stack high-water mark (SWD stack-painting on real hardware, 2026-07-11)
     bench-driveable standalone, est. ~7.5 KB worst-case                 (budget 8.6 KB)
 An 8 KB floor keeps ~1 KB over the measured/estimated peaks. If a bin legitimately needs
 more statics, raise STACK_FLOOR *consciously* and re-measure the high-water mark on hardware
-(see docs/gateway.md "RAM budget") — do not just nudge the number to make CI green.
+(see docs/gateway.md "RAM budget"); do not just nudge the number to make CI green.
 
 Usage: check_ram_budget.py <bin-name> [<bin-name> ...]
        (ELFs are read from target/thumbv6m-none-eabi/release/<bin-name>)
@@ -57,7 +57,7 @@ def main(bins) -> None:
     for name in bins:
         elf = TARGET_DIR / name
         if not elf.exists():
-            raise SystemExit(f"{elf} not found — build first (cargo build --release --bins)")
+            raise SystemExit(f"{elf} not found; build first (cargo build --release --bins)")
         top = stack_top(elf.read_bytes())
         stack = top - RAM_BASE
         statics = RAM_SIZE - stack
@@ -68,7 +68,7 @@ def main(bins) -> None:
     if failed:
         print(
             "\nRAM budget exceeded: a bin's statics grew until the stack fell below the floor.\n"
-            "Trim resident state (async task futures dominate — see docs/gateway.md), or, if the\n"
+            "Trim resident state (async task futures dominate; see docs/gateway.md), or, if the\n"
             "growth is justified, raise STACK_FLOOR after re-measuring the stack high-water mark."
         )
         sys.exit(1)

@@ -3,15 +3,19 @@
 //!
 //! `Net` owns the radio + CCM and serializes one transfer at a time (docs/radio.md). A
 //! *node* `send(confirmed)` transmits a DATA frame then opens a 200 ms ACK
-//! window, retransmitting the byte-identical frame on timeout (random 0–100 ms
-//! backoff, 1–10 reps). A *receiver* `recv()` authenticates the frame, applies
-//! the counter/replay rule, and auto-ACKs a confirmed frame — caching the ACK so
+//! window, retransmitting the byte-identical frame on timeout (random 0-100 ms
+//! backoff, 1-10 reps). A *receiver* `recv()` authenticates the frame, applies
+//! the counter/replay rule, and auto-ACKs a confirmed frame, caching the ACK so
 //! a retransmit re-sends the identical bytes without re-delivering.
 //!
 //! Keys are per-peer: [`Net::add_peer`] binds a peer address to its own AES key and
 //! replay lane (star ≤16 / P2P ≤8, docs/radio.md); any unregistered peer falls back to the
-//! [`NetConfig::key`] default lane (the single-link case). The TX counter and each
-//! lane's last-seen are EEPROM-persisted (reserve-ahead watermark / lazy-persist, docs/radio.md).
+//! [`NetConfig::key`] default lane (the single-link case), unless the device runs
+//! **registered peers only** ([`Net::set_default_lane`]`(false)`, what a gateway must do), in
+//! which case an unregistered sender is dropped before any CCM work or ACK. The TX counter and
+//! each lane's last-seen are EEPROM-persisted (reserve-ahead watermark / lazy-persist,
+//! docs/radio.md); every TX path takes its counter from the one allocator,
+//! `Net::alloc_counter`, *before* it awaits anything.
 //!
 //! This module holds the core (peer table + confirmed unicast). The two larger
 //! sub-protocols live alongside it as `impl Net` blocks: [`bulk`] (pull-based bulk
@@ -33,10 +37,16 @@ use embassy_time::{Duration, Instant, Timer};
 // radio/EEPROM flow and delegates each decision there. Zero behavioural change on target.
 pub use tower_net_core::ack::AckMeta;
 use tower_net_core::ack::{AckVerdict, AckWait, ack_flags, ack_meta};
-use tower_net_core::replay::{ReplayLane, ReplayVerdict, assign_lane};
+/// Reserved-address rules shared by pairing, the gateway's `NodeAdd`, a node's `Provision` and
+/// [`Net::add_peer`] (docs/radio.md "Reserved IDs").
+pub use tower_net_core::addr::{ADDR_BROADCAST, ADDR_UNASSIGNED, is_reserved_addr, peer_addr_valid};
+/// Confirmed-send repetition ceiling (`reps` is clamped to `1..=MAX_REPS`); also bounds the
+/// receiver's re-ACKs per counter (`tower_net_core::replay::MAX_REACKS`).
+pub use tower_net_core::replay::MAX_REPS;
+use tower_net_core::replay::{LaneRecord, ReplayLane, ReplayVerdict, assign_lane};
 use tower_net_core::txctr::TxCounter;
 
-use super::ccm::Ccm;
+use super::ccm::{Ccm, TAG_LEN};
 use super::config::{self, Band, RfConfig};
 use super::device::{RadioError, Spirit1};
 use super::duty::{self, DutyGovernor};
@@ -58,6 +68,8 @@ pub(crate) const TX_TIMEOUT: Duration = Duration::from_millis(120);
 pub const DEFAULT_REPS: u8 = 3;
 /// Max inter-rep backoff (ms), randomised to de-sync collided senders.
 const MAX_BACKOFF_MS: u32 = 100;
+/// Minimum spacing (s) between replay-drop warnings (a replay storm must not flood the console).
+const REPLAY_LOG_INTERVAL_S: u32 = 10;
 
 // The TX-counter reserve block (`RESERVE` = 1024) and the receiver lazy-persist period
 // (`P` = 32) live with their kernels in `tower_net_core` (`txctr::RESERVE`, `replay::P`).
@@ -65,22 +77,23 @@ const MAX_BACKOFF_MS: u32 = 100;
 const KEY_WATERMARK: u8 = 0x00;
 const KEY_LASTSEEN: u8 = 0x01;
 /// FHSS gateway epoch (boot-id): a master bumps + persists it each session so its beacons are
-/// strictly newer than any previous session's, and a node refuses to anchor to an older epoch —
+/// strictly newer than any previous session's, and a node refuses to anchor to an older epoch,
 /// defeating a replayed beacon capture. `0x02` is free (peer lanes start at `KEY_LASTSEEN_BASE`).
 const KEY_FHSS_EPOCH: u8 = 0x02;
 
 /// Peer-table capacity. A gateway in a star holds up to 16 nodes; a P2P device
-/// holds up to 8 peers (docs/radio.md). One table size covers both — the topology
+/// holds up to 8 peers (docs/radio.md). One table size covers both: the topology
 /// is a usage policy, not a different type. Sized at 16 (was 64, then 32): the
 /// table (`[Option<Peer>; MAX_PEERS]`, ~36 B/slot) lives in every Net app's
 /// statically-allocated future, and with flip-link each slot is stack headroom the
-/// 20 KB part loses — the gateway product's boot peak is what forced the last
+/// 20 KB part loses; the gateway product's boot peak is what forced the last
 /// halving (2026-07-11: 32 slots left it ~0.7 KB under the ~9 KB measured Net-app
 /// stack peak → HardFault loop before the first Hello). 16 also halves the
 /// replay-lane KV-key census (tower_kv::MAX_KEYS = 64 is a global budget).
 pub const MAX_PEERS: usize = 16;
 /// Local base (within `NS_NET`) for per-peer last-seen lanes (slot `i` → `KEY_LASTSEEN_BASE + i`,
-/// `i < MAX_PEERS = 16`, so lanes occupy locals `0x10..=0x1F`).
+/// `i < MAX_PEERS = 16`, so lanes occupy locals `0x10..=0x1F`). Record layout: see
+/// [`lane_record`].
 const KEY_LASTSEEN_BASE: u8 = 0x10;
 
 /// A registered peer: its address, per-peer AES key, and replay state (docs/radio.md).
@@ -91,17 +104,17 @@ struct Peer {
     /// The peer's replay lane (last-seen + lazy-persist cadence, `tower_net_core::replay`).
     lane: ReplayLane,
     /// KV local (`NS_NET`) where this peer's replay lane is persisted. Bound by *peer addr*
-    /// (`assign_lane`), NOT the table slot — so the lane survives a slot shift when an
+    /// (`assign_lane`), NOT the table slot, so the lane survives a slot shift when an
     /// earlier peer is removed and the table compacts (see [`add_peer`](Net::add_peer)).
     lane_local: u8,
     /// A downlink is queued for this peer (app-maintained via [`Net::set_pending`]);
     /// advertised in the flags byte of every ACK we send it. Must be set *before* the
-    /// uplink that should learn it arrives — the ACK goes out inside [`Net::recv`],
+    /// uplink that should learn it arrives: the ACK goes out inside [`Net::recv`],
     /// before the app sees the frame.
     pending: bool,
 }
 
-/// Outcome of a [`Net::send`]. Inspect it — a `NotDelivered`/`Busy`/`DutyLimited`
+/// Outcome of a [`Net::send`]. Inspect it: a `NotDelivered`/`Busy`/`DutyLimited`
 /// result is a delivery failure the caller must handle, not silently drop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
@@ -196,14 +209,18 @@ pub struct Net {
     addr: u32,
     /// Default key for unregistered peers (see [`NetConfig::key`]).
     default_key: [u8; 16],
+    /// Whether unregistered senders are served on the default lane (`true`, the single-link
+    /// default) or dropped before CCM ("registered peers only",
+    /// [`set_default_lane`](Self::set_default_lane)).
+    default_lane_enabled: bool,
     /// Per-peer (addr, key, last-seen) table; a registered peer overrides the
     /// default key and gets its own replay lane (docs/radio.md).
     peers: [Option<Peer>; MAX_PEERS],
     /// Replay lane for senders not in the peer table (the single-link lane).
     default_lane: ReplayLane,
     /// The TX-counter kernel: monotonic counter + reserve-ahead watermark + the fail-closed
-    /// lock (`tower_net_core::txctr` — the CCM nonce anti-reuse invariant lives there; this
-    /// module owns its EEPROM persistence). See [`advance_tx_counter`](Self::advance_tx_counter)
+    /// lock (`tower_net_core::txctr`: the CCM nonce anti-reuse invariant lives there; this
+    /// module owns its EEPROM persistence). See [`alloc_counter`](Self::alloc_counter)
     /// and `RadioError::NonceLocked`.
     txc: TxCounter,
     /// EEPROM-backed counter persistence (shared handle).
@@ -222,6 +239,10 @@ pub struct Net {
     /// (receiver-side RSSI + the pending-downlink flag). Cleared at the start of each
     /// send; `None` after an unconfirmed or failed one.
     last_ack: Option<AckMeta>,
+    /// Replay-drop warning rate limit: uptime (s) of the last warning (`u32::MAX` = never) and
+    /// the drops counted since.
+    replay_log_s: u32,
+    replay_drops: u16,
 }
 
 impl Net {
@@ -243,19 +264,27 @@ impl Net {
 
         // Reserve-ahead TX counter: resume *at* the persisted watermark (1 on the very first
         // boot, since 0 = "never sent"), then reserve the next block. The resume/fail-closed
-        // decision (incl. the lost-watermark corruption case) is `tower_net_core::txctr` —
+        // decision (incl. the lost-watermark corruption case) is `tower_net_core::txctr`;
         // see `TxCounter::resume` for the full rationale.
         let nkv = kv.scope(NS_NET); // our namespaced view; the raw `kv` is kept for `Net::kv()`
         let stored_watermark = read_u32(nkv, KEY_WATERMARK);
-        let stored_last_seen = read_u32(nkv, KEY_LASTSEEN);
-        let last_seen = stored_last_seen.unwrap_or(0);
-        let (mut txc, boot_watermark) = TxCounter::resume(stored_watermark, stored_last_seen.is_some());
+        let last_seen = read_u32(nkv, KEY_LASTSEEN).unwrap_or(0);
+        // Evidence of prior network use = ANY other NS_NET record: each is written only by a Net
+        // that already booted (and so persisted a watermark first). The products run on peer
+        // lanes alone (the gateway disables the default lane), so counting only the default-lane
+        // last-seen (the original rule) left "watermark lost → fail closed" dead exactly where
+        // it matters: a lost watermark there resumed at counter 1 under the same keys (nonce
+        // reuse). `has_record` takes any length, so a malformed record still counts.
+        let prior_use = has_record(nkv, KEY_LASTSEEN)
+            || has_record(nkv, KEY_FHSS_EPOCH)
+            || (0..MAX_PEERS as u8).any(|l| has_record(nkv, KEY_LASTSEEN_BASE + l));
+        let (mut txc, boot_watermark) = TxCounter::resume(stored_watermark, prior_use);
         if let Some(watermark) = boot_watermark {
             // Persist the reserve watermark AND verify it read back. TX is only nonce-safe while a
             // watermark strictly greater than any counter we will ever send is durably stored. If
             // the write fails or does not read back (EEPROM full/faulted), start TX **locked**:
             // the device can still receive, but sending would risk resuming at a stale watermark
-            // after a reboot and reusing a CCM nonce. (Fail closed — see `TxCounter`.)
+            // after a reboot and reusing a CCM nonce. (Fail closed; see `TxCounter`.)
             let persisted = nkv.set_bytes(KEY_WATERMARK, &watermark.to_le_bytes()).is_ok();
             if !(persisted && read_u32(nkv, KEY_WATERMARK) == Some(watermark)) {
                 txc.lock();
@@ -273,6 +302,7 @@ impl Net {
             ccm: Ccm::new(),
             addr: cfg.addr,
             default_key: cfg.key,
+            default_lane_enabled: true,
             peers: [None; MAX_PEERS],
             default_lane: ReplayLane::new(last_seen),
             txc,
@@ -283,7 +313,25 @@ impl Net {
             afa: afa::Afa::disabled(),
             fhss: fhss::Fhss::disabled(),
             last_ack: None,
+            replay_log_s: u32::MAX,
+            replay_drops: 0,
         })
+    }
+
+    /// Serve unregistered senders on the default lane (`true`, the default: the single-link
+    /// case every `net_*` example relies on) or accept **registered peers only** (`false`).
+    ///
+    /// With the default lane off, [`recv`](Self::recv) drops a frame from any `src` not in the
+    /// peer table on its clear header: before any CCM work, before any ACK, and without
+    /// touching the default lane's EEPROM record. A **gateway must run this way.** Its
+    /// [`NetConfig::key`] is not a secret (the product derives it from its own address, which
+    /// rides in clear in every frame), so with the default lane on, anyone could seal a DATA
+    /// frame from an unregistered `src` (say, a removed node's address) under it: the frame
+    /// authenticated, was ACKed, and was forwarded to the host as a genuine uplink. The same
+    /// door let a CONFIRMED flood drain the EU duty budget through ACKs and grind the EEPROM
+    /// via the default lane's lazy persist.
+    pub fn set_default_lane(&mut self, enabled: bool) {
+        self.default_lane_enabled = enabled;
     }
 
     /// The active spectrum-access mode ([`Access::Duty`] unless AFA/FHSS was enabled).
@@ -324,17 +372,24 @@ impl Net {
     }
 
     /// Register (or re-key) a peer: an explicit `peer_addr` → per-peer `key` binding with
-    /// its own replay lane. The peer's persisted last-seen is restored. Returns
-    /// `false` only if the table is full (and the peer is new) — check the return in
-    /// production code. Up to [`MAX_PEERS`] peers (star ≤16 / P2P ≤8 by policy, docs/radio.md).
+    /// its own replay lane. The peer's persisted last-seen is restored, **only if it was
+    /// tracked under this same key** (the lane record carries the key's check value; see
+    /// [`lane_record`]). Returns `false` if the table is full (and the peer is new), or if
+    /// `peer_addr` is reserved or our own address ([`peer_addr_valid`]: a peer sharing our
+    /// address would collide CCM nonces). Check the return in production code. Up to
+    /// [`MAX_PEERS`] peers (star ≤16 / P2P ≤8 by policy, docs/radio.md).
     pub fn add_peer(&mut self, peer_addr: u32, key: &[u8; 16]) -> bool {
+        if !peer_addr_valid(peer_addr, self.addr) {
+            return false;
+        }
+        let kcv = self.ccm.key_check(key);
         if let Some(i) = self.peer_slot(peer_addr) {
             // Re-key in place. A *changed* key is a disjoint CCM nonce space (docs/radio.md:
-            // "a re-key resets both ends"), so the old last-seen is meaningless — and if the
+            // "a re-key resets both ends"), so the old last-seen is meaningless, and if the
             // re-keyed peer restarts its counter (a re-pair), a stale-high lane would reject
             // its fresh frames as replays. Reset + persist the lane on a key change so a reboot
             // doesn't restore the pre-re-key value. An idempotent re-add with the SAME key
-            // (e.g. the boot mirror then a NodeAdd of an already-known peer) keeps the lane —
+            // (e.g. the boot mirror then a NodeAdd of an already-known peer) keeps the lane;
             // resetting it there would needlessly reopen the replay window.
             let changed = self.peers[i].as_ref().unwrap().key != *key;
             {
@@ -346,7 +401,10 @@ impl Net {
             }
             if changed {
                 let local = self.peers[i].as_ref().unwrap().lane_local;
-                let _ = self.kv.scope(NS_NET).set_bytes(local, &lane_record(peer_addr, 0));
+                let _ = self
+                    .kv
+                    .scope(NS_NET)
+                    .set_bytes(local, &lane_record(peer_addr, 0, kcv));
             }
             return true;
         }
@@ -356,12 +414,13 @@ impl Net {
         let nkv = self.kv.scope(NS_NET);
         // Bind the replay lane by peer *addr*, not by table slot. Snapshot the persisted lane
         // records and the locals already held by live peers, then let `assign_lane` decide
-        // (restore this peer's own record wherever it sits, else claim the lowest free local).
-        // This is why a survivor keeps its replay window when an earlier peer is removed and
-        // the table compacts — its slot shifts but its lane record is found by addr.
+        // (restore this peer's own record wherever it sits, if it was tracked under this key,
+        // else claim a never-written local, evicting a removed peer's record only as a last
+        // resort). This is why a survivor keeps its replay window when an earlier peer is
+        // removed and the table compacts: its slot shifts but its lane record is found by addr.
         let mut records = [None; MAX_PEERS];
         for (l, rec) in records.iter_mut().enumerate() {
-            *rec = read_u32_pair(nkv, KEY_LASTSEEN_BASE + l as u8);
+            *rec = read_lane_record(nkv, KEY_LASTSEEN_BASE + l as u8);
         }
         let used = self
             .peers
@@ -369,13 +428,15 @@ impl Net {
             .flatten()
             .fold(0u32, |m, p| m | 1 << (p.lane_local - KEY_LASTSEEN_BASE));
         // A free table slot guarantees a free local (≤ MAX_PEERS-1 live peers here), so
-        // `assign_lane` returns Some — but fail closed to no-op if that ever changes.
-        let Some(bind) = assign_lane(peer_addr, &records, used) else {
+        // `assign_lane` returns Some, but fail closed to no-op if that ever changes.
+        let Some(bind) = assign_lane(peer_addr, kcv, &records, used) else {
             return false;
         };
         let local = KEY_LASTSEEN_BASE + bind.index as u8;
-        if bind.fresh {
-            let _ = nkv.set_bytes(local, &lane_record(peer_addr, 0)); // claim the local for this addr
+        if bind.persist {
+            // Claim the local for (addr, key), or upgrade a legacy 8-byte record in place so it
+            // carries the KCV from now on. One small append, only on a bind change.
+            let _ = nkv.set_bytes(local, &lane_record(peer_addr, bind.seen, kcv));
         }
         self.peers[slot] = Some(Peer {
             addr: peer_addr,
@@ -388,9 +449,10 @@ impl Net {
     }
 
     /// Remove a peer. Returns whether it was present. (Its persisted last-seen record is
-    /// left in EEPROM tagged with its addr; re-adding the *same* peer — even into a different
-    /// slot — resumes its replay window, while a different peer inheriting the slot starts
-    /// fresh at 0, since restore is now addr-matched. See [`add_peer`](Self::add_peer).)
+    /// left in EEPROM tagged with its addr and key-check value; re-adding the *same* peer under
+    /// the *same* key (even into a different slot) resumes its replay window, while a re-add
+    /// under a new key, or a different peer, starts fresh at 0. A new peer takes a never-written
+    /// lane local before it evicts a removed peer's record. See [`add_peer`](Self::add_peer).)
     pub fn remove_peer(&mut self, peer_addr: u32) -> bool {
         if let Some(i) = self.peer_slot(peer_addr) {
             self.peers[i] = None;
@@ -406,7 +468,7 @@ impl Net {
         self.peers.iter().filter(|p| p.is_some()).count()
     }
 
-    /// Mark whether a downlink is queued for a registered peer — advertised in the
+    /// Mark whether a downlink is queued for a registered peer, advertised in the
     /// flags byte of every ACK sent to it, so a sleeping node knows to hold an RX
     /// window open after its uplink. Set it **before** the uplink that should learn
     /// it: the ACK goes out inside [`recv`](Self::recv), before the app sees the
@@ -452,7 +514,7 @@ impl Net {
         }
     }
 
-    /// The replay lane for `src` (peer lane if registered, else default) — a copy, for the
+    /// The replay lane for `src` (peer lane if registered, else default): a copy, for the
     /// pure [`classify`](ReplayLane::classify) decision.
     fn lane(&self, src: u32) -> ReplayLane {
         match self.peer_slot(src) {
@@ -469,11 +531,14 @@ impl Net {
             Some(i) => {
                 let p = self.peers[i].as_mut().unwrap();
                 if p.lane.accept(counter) {
-                    let (peer_addr, local) = (p.addr, p.lane_local); // addr-bound local, not the slot
+                    let (peer_addr, local, key) = (p.addr, p.lane_local, p.key); // addr-bound local
+                    // The KCV is recomputed (one AES block per P accepts) rather than kept
+                    // resident: 4 B × MAX_PEERS of statics is stack the gateway can't spare.
+                    let kcv = self.ccm.key_check(&key);
                     let _ = self
                         .kv
                         .scope(NS_NET)
-                        .set_bytes(local, &lane_record(peer_addr, counter));
+                        .set_bytes(local, &lane_record(peer_addr, counter, kcv));
                 }
             }
             None => {
@@ -487,22 +552,30 @@ impl Net {
         }
     }
 
-    /// Advance the TX counter, re-reserving + persisting the next block when the
-    /// current reserve is exhausted (the only TX-counter persistence path).
+    /// Allocate the TX counter for **one transfer**: the single allocator every TX path uses
+    /// (DATA, ACK, beacon, bulk announce/session/request, JOIN frames). Call it *before* the
+    /// first await of the transfer: the returned value is already consumed, so a future dropped
+    /// mid-TX/mid-ACK-window (a `select(send, Timer)` timing out, an abandoned bulk) can never
+    /// leave it to be re-read by the next transfer and sealed over a different plaintext; a
+    /// reused `(key, nonce)` is a full CCM break. (`fhss_send`, `afa_send` and bulk used to
+    /// advance only *after* their awaits.) Retransmissions re-send the already-sealed frame and
+    /// never allocate again.
     ///
-    /// The counter arithmetic — saturating at the 2³²−1 ceiling and locking TX there, and the
-    /// reserve-ahead watermark — is [`TxCounter::advance`] (see its docs for the full CCM
-    /// nonce-reuse argument). Here we only execute the persist it requests: if the write
-    /// lands, the reservation is committed; if it fails, TX locks (fail closed) — the guard on
-    /// every send path refuses to transmit while locked.
+    /// `None` = TX is locked (fail closed: the watermark could not be persisted, or the 2³²−1
+    /// ceiling); the caller must not seal anything. The arithmetic is [`TxCounter::alloc`]
+    /// (see its docs for the full nonce-reuse argument); here we only execute the watermark
+    /// persist it requests: if the write lands, the reservation is committed; if it fails, TX
+    /// locks for the *next* allocation (the counter already returned stays nonce-safe: it is
+    /// below the last durable watermark).
     ///
-    /// Latency note: this write (once per `RESERVE` = 1024 sends) could formerly absorb the
+    /// Latency note: this write (once per `RESERVE` = 1024 transfers) could formerly absorb the
     /// whole ~5 s compaction stall if it happened to fill the KV half. With the default
     /// `storage::maintenance` task the store compacts incrementally ahead of time, so the
     /// persist stays a single small append; the synchronous flip is only the fallback path
     /// (docs/storage.md).
-    fn advance_tx_counter(&mut self) {
-        if let Some(next) = self.txc.advance() {
+    pub(crate) fn alloc_counter(&mut self) -> Option<u32> {
+        let (counter, persist) = self.txc.alloc()?;
+        if let Some(next) = persist {
             match self
                 .kv
                 .scope(NS_NET)
@@ -512,6 +585,7 @@ impl Net {
                 Err(_) => self.txc.lock(),
             }
         }
+        Some(counter)
     }
 
     /// Send `data` to `dest`. Confirmed sends open an ACK window and retransmit
@@ -530,7 +604,16 @@ impl Net {
         if data.len() > MAX_PAYLOAD {
             return SendResult::Error(RadioError::TooLong); // MTU: use bulk for >74 B (docs/radio.md)
         }
-        let counter = self.txc.counter();
+        // Consume the counter NOW, before sealing, before anything goes on air or awaits.
+        // The nonce is derived from `counter`, so the counter must be spent even if this
+        // send-future is later cancelled (a `select(send, Timer)` dropped mid-window):
+        // otherwise the next send would read the same value and reuse the (key, nonce) pair:
+        // a full CCM break. Retransmits below reuse the already-sealed `frame_buf`, not a fresh
+        // counter. A never-transmitted counter (duty-limited first rep) just leaves a harmless
+        // hole in the monotonic sequence.
+        let Some(counter) = self.alloc_counter() else {
+            return SendResult::Error(RadioError::NonceLocked); // fail closed (nonce safety)
+        };
         let hdr = Header {
             frame_type: FrameType::Data,
             flags: if confirmed { flags::CONFIRMED } else { 0 },
@@ -546,21 +629,12 @@ impl Net {
             Err(_) => return SendResult::Error(RadioError::TooLong),
         };
 
-        // Consume the counter NOW — after sealing this frame, before it goes on air.
-        // The nonce is derived from `counter`, so the counter must be spent even if this
-        // send-future is later cancelled (a `select(send, Timer)` dropped mid-window):
-        // otherwise the next send would read the same value and reuse the (key, nonce)
-        // pair — a full CCM break. Retransmits below reuse the already-sealed `frame_buf`,
-        // not a fresh counter, so advancing here is correct. A never-transmitted counter
-        // (duty-limited first rep) just leaves a harmless hole in the monotonic sequence.
-        self.advance_tx_counter();
-
         let toa = duty::frame_toa_ms(n);
-        let reps = if confirmed { reps.clamp(1, 10) } else { 1 };
+        let reps = if confirmed { reps.clamp(1, MAX_REPS) } else { 1 };
         let mut result = SendResult::NotDelivered;
         for attempt in 0..reps {
             if attempt > 0 {
-                // Random 0–100 ms backoff before a retransmit (docs/radio.md).
+                // Random 0-100 ms backoff before a retransmit (docs/radio.md).
                 Timer::after(Duration::from_millis(self.backoff_ms() as u64)).await;
             }
             // Duty governor: every TX (incl. retransmits) counts (docs/radio.md).
@@ -601,21 +675,33 @@ impl Net {
         let (len, q) = self.radio.rx(&mut buf, timeout).await.ok()?;
 
         // Peek the clear header (AAD) to learn the src, then CCM-open with that
-        // peer's key — a registered peer uses its own key, others the default.
+        // peer's key: a registered peer uses its own key, others the default.
         let (peek, _) = frame::Header::parse(&buf[..len]).ok()?;
         if peek.dest != self.addr {
             return None; // not for us
         }
+        // Only DATA surfaces here (see the authenticated check below); skip the CCM work for
+        // anything else up front. (The type is in the AAD, so a frame lying about it would fail
+        // CCM anyway; this only saves the AES time, it decides nothing.)
+        if peek.frame_type != FrameType::Data {
+            return None;
+        }
+        let registered = self.peer_slot(peek.src).is_some();
+        if !registered && !self.default_lane_enabled {
+            // Registered peers only (`set_default_lane(false)`): an unregistered sender is
+            // dropped on its clear header: no CCM, no ACK, no default-lane EEPROM write.
+            return None;
+        }
         let key = self.key_for(peek.src);
 
         // CCM-verify first (authenticates the header incl. counter), then decide. The
-        // counter/replay rule is the lane kernel's (`tower_net_core::replay`) — see its docs
+        // counter/replay rule is the lane kernel's (`tower_net_core::replay`); see its docs
         // for why classification must only ever run on an authenticated frame.
         let (hdr, range) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]).ok()?;
 
         // Only application DATA frames surface here. An authenticated ACK / Join / Bulk /
-        // Beacon addressed to us — e.g. a node's ACK arriving *after* our send's window
-        // closed — must NOT advance the replay lane or be returned as an "uplink": those
+        // Beacon addressed to us (e.g. a node's ACK arriving *after* our send's window
+        // closed) must NOT advance the replay lane or be returned as an "uplink": those
         // types are owned by await_ack / pairing / bulk / fhss, each with its own rx path.
         // (Before this filter, a late ACK's own counter would be classified Fresh, advance
         // the src's lane, and be forwarded by the gateway as a 6-byte bogus uplink.)
@@ -625,7 +711,7 @@ impl Net {
 
         match self.lane(hdr.src).classify(hdr.counter) {
             ReplayVerdict::Fresh => {
-                // Fresh — accept, advance the sender's lane, ACK if requested.
+                // Fresh: accept, advance the sender's lane, ACK if requested.
                 self.lane_accept(hdr.src, hdr.counter);
                 let confirmed = hdr.flags & flags::CONFIRMED != 0;
                 if confirmed {
@@ -649,23 +735,59 @@ impl Net {
                 // because its ACK was lost. Re-ACK deterministically (identified by this src's own
                 // lane last-seen), do NOT re-deliver. Keying the re-ACK by (src, counter) rather than
                 // a single global cache means interleaved senders in a star can't evict each other's
-                // pending ACK — the old single-slot cache reported false NotDelivered + app-level
+                // pending ACK; the old single-slot cache reported false NotDelivered + app-level
                 // duplicates under that race (see docs/radio.md). Only confirmed frames were ACKed,
-                // so only re-ACK confirmed ones.
-                if hdr.flags & flags::CONFIRMED != 0 {
+                // so only re-ACK confirmed ones, and at most `MAX_REACKS` times per counter (the
+                // most a legitimate sender can ask for): a byte-identical capture needs no key, so
+                // an unbounded re-ACK let anyone spend our TX counters and duty budget.
+                if hdr.flags & flags::CONFIRMED != 0 && self.lane_reack(hdr.src) {
                     self.send_ack(hdr.src, hdr.counter, q.rssi).await;
                 }
                 None
             }
-            // counter < last-seen → replay; drop silently (replay state untouched).
-            ReplayVerdict::Replay => None,
+            // counter < last-seen → replay; drop (replay state untouched). Logged (rate-limited)
+            // for a registered peer: either a replayed capture, or a peer whose counter restarted
+            // under an unchanged key: both something an operator should see.
+            ReplayVerdict::Replay => {
+                if registered {
+                    self.note_replay(hdr.src, hdr.counter);
+                }
+                None
+            }
         }
+    }
+
+    /// Spend one re-ACK of `src`'s lane allowance ([`ReplayLane::reack`]); `false` = capped.
+    fn lane_reack(&mut self, src: u32) -> bool {
+        match self.peer_slot(src) {
+            Some(i) => self.peers[i].as_mut().unwrap().lane.reack(),
+            None => self.default_lane.reack(),
+        }
+    }
+
+    /// Rate-limited warning for a replay dropped from a registered peer.
+    fn note_replay(&mut self, src: u32, counter: u32) {
+        self.replay_drops = self.replay_drops.saturating_add(1);
+        let now = Instant::now().as_secs() as u32;
+        if self.replay_log_s != u32::MAX && now.wrapping_sub(self.replay_log_s) < REPLAY_LOG_INTERVAL_S {
+            return;
+        }
+        log::warn!(
+            target: "net",
+            "replay dropped: {:08X} counter {} <= last-seen {} ({} drop(s) since last report)",
+            src,
+            counter,
+            self.lane(src).last_seen(),
+            self.replay_drops
+        );
+        self.replay_log_s = now;
+        self.replay_drops = 0;
     }
 
     /// Retune to a different `band`/`channel` at runtime (both ends must agree).
     /// Rewrites the synthesizer registers (VCO recalibrates on the next TX/RX) and
     /// moves the duty policy to match the band (EU 1 % / US 915 unrestricted).
-    /// A single firmware image runs either band — the choice is made here, live.
+    /// A single firmware image runs either band; the choice is made here, live.
     pub async fn set_band(&mut self, band: Band, channel: u8) -> Result<(), RadioError> {
         config::set_band(&mut self.radio, band, channel).await?;
         self.duty = match band {
@@ -679,10 +801,10 @@ impl Net {
     ///
     /// Loops until the window deadline, **ignoring** any frame that isn't the ACK we're waiting
     /// for, rather than giving up on the first one. The SPIRIT1 runs with no address filtering,
-    /// so `rx()` surfaces the first CRC-valid frame from *anyone* — a neighbouring node's uplink
+    /// so `rx()` surfaces the first CRC-valid frame from *anyone*: a neighbouring node's uplink
     /// landing in our 200 ms window is common in a star. Treating that foreign (undecodable under
     /// our key) frame as "no ACK" was a false `NotDelivered` that burned a retransmit and could
-    /// report a delivery failure the gateway had actually received — the exact star-contention
+    /// report a delivery failure the gateway had actually received: the exact star-contention
     /// bug `recv()`'s re-ACK cache fixed on the receive side. This mirrors `recv()` /
     /// `fhss_rx_beacon`: keep listening until the deadline. The accept/ignore decision per
     /// heard frame is the [`AckWait`] kernel's (`tower_net_core::ack`).
@@ -699,20 +821,20 @@ impl Net {
             let (len, _) = match self.radio.rx(&mut buf, remaining).await {
                 Ok(v) => v,
                 // A collided/corrupt frame (CRC or FIFO) is exactly what star contention
-                // produces — the thing this window exists to ride out. Keep waiting rather
+                // produces, the thing this window exists to ride out. Keep waiting rather
                 // than reporting a false NotDelivered (and burning a retransmit) on it.
                 Err(RadioError::CrcError | RadioError::FifoError) => continue,
                 // Timeout over the remaining window, or a real radio fault: window ends.
                 Err(_) => return false,
             };
-            // A foreign / undecodable frame is NOT a failed ACK — skip it and keep waiting.
+            // A foreign / undecodable frame is NOT a failed ACK; skip it and keep waiting.
             let Ok((hdr, range)) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]) else {
                 continue;
             };
             let is_ack = hdr.frame_type == FrameType::Ack;
             if wait.offer(is_ack, hdr.src, hdr.dest, &buf[range.clone()]) == AckVerdict::Resolved {
                 // Keep the resolving ACK's metadata (receiver RSSI + the wire-v3
-                // pending-downlink flag) for `last_ack()` — the sleeping-node cue.
+                // pending-downlink flag) for `last_ack()`: the sleeping-node cue.
                 self.last_ack = Some(ack_meta(&buf[range]));
                 return true;
             }
@@ -728,7 +850,6 @@ impl Net {
         }
         // Let the sender finish its TX→RX turnaround before we transmit.
         Timer::after(ACK_TURNAROUND).await;
-        let ack_counter = self.txc.counter();
         let mut payload = [0u8; 6];
         payload[..4].copy_from_slice(&acked.to_le_bytes());
         // Clamp to i8 range before packing: rssi is i16 and the SPIRIT1 noise floor reaches
@@ -736,11 +857,31 @@ impl Net {
         // the weakest one. Clamp so the reported margin is monotonic at the edges.
         payload[4] = rssi.clamp(i8::MIN as i16, i8::MAX as i16) as i8 as u8;
         // Flags byte (wire v3): advertise a queued downlink so a sleeping sender holds an RX
-        // window open after this uplink. Appending is interop-safe — the ACK acceptance rule is
+        // window open after this uplink. Appending is interop-safe: the ACK acceptance rule is
         // `len >= 4` (pinned in tower-net-core), so pre-v3 peers simply ignore the byte.
         payload[5] = match self.peer_slot(dest) {
             Some(i) if self.peers[i].as_ref().unwrap().pending => ack_flags::PENDING,
             _ => 0,
+        };
+        // ACK airtime is charged to the EU 1 % governor ONLY in Duty mode. AFA/FHSS manage
+        // spectrum access on their own path and are not under the 1 % cap, so metering the
+        // ACK against `self.duty` there (which stays the EU governor) let a drained bucket
+        // silently kill confirmed delivery in a mode that has no duty limit. In Duty mode we
+        // still gate + consume budget; if over budget we skip the ACK and the sender
+        // retransmits (recv re-ACKs by (src, counter)), so no ACK cache is needed. Gated
+        // BEFORE the counter is allocated, so a refused ACK burns no counter (and no watermark
+        // wear); the frame length is fixed: header + this payload + tag.
+        let n = frame::HDR_LEN + payload.len() + TAG_LEN;
+        let may_tx = match self.access {
+            Access::Duty => self.duty.try_tx(duty::frame_toa_ms(n)),
+            _ => true,
+        };
+        if !may_tx {
+            return;
+        }
+        // The ACK consumes a counter of its own (docs/radio.md), allocated before the TX await.
+        let Some(ack_counter) = self.alloc_counter() else {
+            return; // fail closed (nonce safety); the sender retries
         };
         let hdr = Header {
             frame_type: FrameType::Ack,
@@ -753,25 +894,12 @@ impl Net {
         let key = self.key_for(dest);
         let mut ack = [0u8; MAX_FRAME];
         if let Ok(n) = frame::seal_frame(&mut self.ccm, &key, &hdr, &payload, &mut ack) {
-            self.advance_tx_counter(); // ACK consumes a counter (its own, docs/radio.md)
-            // ACK airtime is charged to the EU 1 % governor ONLY in Duty mode. AFA/FHSS manage
-            // spectrum access on their own path and are not under the 1 % cap, so metering the
-            // ACK against `self.duty` there (which stays the EU governor) let a drained bucket
-            // silently kill confirmed delivery in a mode that has no duty limit. In Duty mode we
-            // still gate + consume budget; if over budget we skip the ACK and the sender
-            // retransmits (recv re-ACKs by (src, counter)), so no ACK cache is needed.
-            let may_tx = match self.access {
-                Access::Duty => self.duty.try_tx(duty::frame_toa_ms(n)),
-                _ => true,
-            };
-            if may_tx {
-                let _ = self.radio.tx(&ack[..n], false, TX_TIMEOUT).await;
-            }
+            let _ = self.radio.tx(&ack[..n], false, TX_TIMEOUT).await;
         }
     }
 
     /// Put the radio into its SLEEP state between transfers (registers retained; wake
-    /// with [`wake`](Self::wake) before the next TX/RX). The battery-node pattern —
+    /// with [`wake`](Self::wake) before the next TX/RX). The battery-node pattern:
     /// see `examples/radio_sleep.rs`; `Net` never sleeps the radio on its own.
     pub async fn sleep(&mut self) -> Result<(), RadioError> {
         self.radio.to_sleep().await
@@ -782,10 +910,20 @@ impl Net {
         self.radio.to_ready().await
     }
 
-    /// Sample the ambient RSSI of the current receive channel, in dBm — the
-    /// gateway's channel-diagnostics primitive (`RadioStat::Channel`).
+    /// Sample the ambient RSSI of the current receive channel, in dBm. Opens a ~20 ms window
+    /// in which nothing is received; a receiver that must not miss traffic (the gateway) uses
+    /// [`take_idle_rssi`](Self::take_idle_rssi) instead.
     pub async fn rssi_sample(&mut self) -> Result<i16, RadioError> {
         Ok(config::rssi_to_dbm(self.radio.rssi_sample().await?))
+    }
+
+    /// The ambient channel RSSI (dBm) latched by the most recent idle receive timeout, if one
+    /// happened since the last call: the gateway's channel-diagnostics source
+    /// (`RadioStat::Channel`). Free: it is read as a by-product of the RX timeout's SABORT, so
+    /// unlike [`rssi_sample`](Self::rssi_sample) it costs no deaf window. See
+    /// [`Spirit1::take_idle_rssi`].
+    pub fn take_idle_rssi(&mut self) -> Option<i16> {
+        self.radio.take_idle_rssi().map(config::rssi_to_dbm)
     }
 
     /// Advance the internal xorshift32 PRNG and return the new 32-bit state. Backs the
@@ -817,24 +955,44 @@ fn read_u32(kv: Scoped, local: u8) -> Option<u32> {
     }
 }
 
-/// A per-peer replay-lane record: the peer `addr` it belongs to, then its `last_seen`
-/// counter (both little-endian). Persisting the addr lets [`add_peer`](Net::add_peer)
-/// restore a lane only for the peer that owns it, not whichever peer inherits the slot.
-fn lane_record(addr: u32, last_seen: u32) -> [u8; 8] {
-    let mut b = [0u8; 8];
+/// Whether `local` holds any (non-deleted) record, of any length.
+fn has_record(kv: Scoped, local: u8) -> bool {
+    matches!(kv.get_bytes(local, &mut [0u8; 1]), Ok(Some(_)))
+}
+
+/// A per-peer replay-lane record (12 B): the peer `addr` it belongs to, its `last_seen`
+/// counter, and the **key-check value** of the key the lane was tracked under (all
+/// little-endian). Persisting the addr lets [`add_peer`](Net::add_peer) restore a lane only
+/// for the peer that owns it, not whichever peer inherits the slot; the KCV restricts that to
+/// the *same key*: a peer re-added under a new key (possibly with a restarted counter) starts
+/// fresh instead of having its frames dropped as replays. Format history: the original record
+/// was the 8-byte `addr ‖ last_seen`; [`read_lane_record`] still accepts it (as "KCV unknown,
+/// assume match") and `add_peer` upgrades it in place.
+fn lane_record(addr: u32, last_seen: u32, kcv: u32) -> [u8; 12] {
+    let mut b = [0u8; 12];
     b[..4].copy_from_slice(&addr.to_le_bytes());
-    b[4..].copy_from_slice(&last_seen.to_le_bytes());
+    b[4..8].copy_from_slice(&last_seen.to_le_bytes());
+    b[8..].copy_from_slice(&kcv.to_le_bytes());
     b
 }
 
-/// Read a `(addr, last_seen)` replay-lane record, if present and exactly 8 bytes.
-fn read_u32_pair(kv: Scoped, local: u8) -> Option<(u32, u32)> {
-    let mut b = [0u8; 8];
-    match kv.get_bytes(local, &mut b) {
-        Ok(Some(8)) => Some((
-            u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-            u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
-        )),
+/// Read a replay-lane record: 12 bytes (with KCV) or the legacy 8 (`kcv: None`); anything
+/// else reads as absent.
+fn read_lane_record(kv: Scoped, local: u8) -> Option<LaneRecord> {
+    let mut b = [0u8; 12];
+    let len = kv.get_bytes(local, &mut b).ok()??;
+    let word = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+    match len {
+        8 => Some(LaneRecord {
+            addr: word(0),
+            seen: word(4),
+            kcv: None,
+        }),
+        12 => Some(LaneRecord {
+            addr: word(0),
+            seen: word(4),
+            kcv: Some(word(8)),
+        }),
         _ => None,
     }
 }

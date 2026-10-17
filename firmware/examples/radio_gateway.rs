@@ -1,11 +1,11 @@
-//! radio_gateway — reference gateway (shipped happy-path app, docs/radio.md).
+//! radio_gateway: reference gateway (shipped happy-path app, docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash example radio_gateway
 //!
 //! Pairs with `radio_node`. Listens for confirmed telemetry frames, authenticates
 //! and decrypts them (AES-CCM), applies the replay rule, auto-ACKs, and prints the
 //! decoded sensor sample with link quality. Registers each node in the peer table
-//! so every node is decoded under its own key with its own replay lane — add more
+//! so every node is decoded under its own key with its own replay lane; add more
 //! `add_peer(...)` calls to grow the star (up to 16 nodes).
 
 #![no_std]
@@ -54,6 +54,9 @@ async fn run(b: Board) {
         }
     };
     net.add_peer(NODE_ADDR, &KEY); // register each node with its per-node key
+    // A gateway serves registered nodes only: frames from any other address are dropped before
+    // CCM/ACK (the default lane would otherwise accept anything sealed under `NetConfig::key`).
+    net.set_default_lane(false);
 
     info!(target: "gw", "GATEWAY {:08X}: listening ({} node(s) registered)", GW_ADDR, net.peer_count());
     loop {

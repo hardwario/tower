@@ -1,15 +1,15 @@
 //! CCM nonce construction (moved from `src/radio/frame.rs`; docs/radio.md §Security model).
 //!
-//! The 13-byte nonce is *derived* from the clear frame header — never transmitted — which is
+//! The 13-byte nonce is *derived* from the clear frame header (never transmitted), which is
 //! why it's reconstructable on receive and unique per (key, frame): the key is per-node and
-//! `src` fixes the sender (the two directions never collide even at equal counter values — no
+//! `src` fixes the sender (the two directions never collide even at equal counter values; no
 //! `dir` field needed); the 32-bit `counter` advances one per transfer; `bulk_index` separates
 //! the chunks of one transfer; and a retransmission re-sends the byte-identical frame (same
 //! counter ⇒ same ciphertext ⇒ safe). The host tests here pin the exact byte layout (golden
 //! test) and prove injectivity over the input space by round-trip decoding.
 
 /// Byte length of the CCM nonce (the TOWER radio's fixed CCM parameters: N=13, L=2). Mirrors
-/// `tower_radio_core::ccm::NONCE_LEN` — this crate is dependency-free, so the value is stated
+/// `tower_radio_core::ccm::NONCE_LEN`; this crate is dependency-free, so the value is stated
 /// here and const-asserted equal in the firmware's `frame.rs`.
 pub const NONCE_LEN: usize = 13;
 
@@ -42,7 +42,7 @@ mod tests {
     }
 
     /// Golden byte layout: `src ‖ counter ‖ bulk_index[..3] ‖ 0x0000`, little-endian. A layout
-    /// change (field order, endianness, trailing zeros) must fail THIS test loudly — the layout
+    /// change (field order, endianness, trailing zeros) must fail THIS test loudly: the layout
     /// is the wire-compatibility and nonce-uniqueness contract (docs/radio.md).
     #[test]
     fn golden_layout() {
@@ -70,7 +70,7 @@ mod tests {
     }
 
     /// Round-trip: every `(src, counter, bulk_index)` decodes back to itself (bulk index modulo
-    /// its 24 on-wire bits), over a boundary-heavy grid — injectivity across the input space.
+    /// its 24 on-wire bits), over a boundary-heavy grid: injectivity across the input space.
     #[test]
     fn round_trip_injective_over_grid() {
         let edges = [
@@ -96,7 +96,7 @@ mod tests {
         }
     }
 
-    /// Direction/id separation: two distinct senders never share a nonce, whatever the counter —
+    /// Direction/id separation: two distinct senders never share a nonce, whatever the counter;
     /// this is why the same per-node key can protect both directions (docs/radio.md: "`src`
     /// fixes the sender").
     #[test]
@@ -136,7 +136,7 @@ mod tests {
 
     /// Bulk-chunk separation: the chunks of one transfer (same src, same session counter) get
     /// distinct nonces from their 24-bit `bulk_index`; and a non-bulk frame (index 0) matches
-    /// bulk index 0 ONLY at the same counter — which the bulk protocol never reuses (the
+    /// bulk index 0 ONLY at the same counter, which the bulk protocol never reuses (the
     /// announce and chunk 0 ride *different* counters; see `net/bulk.rs`).
     #[test]
     fn distinct_bulk_index_never_collides() {
@@ -148,7 +148,7 @@ mod tests {
                 assert_ne!(nonce_for(7, 42, i), nonce_for(7, 42, j));
             }
         }
-        // The 24-bit truncation boundary: indices ≥ 2^24 alias low ones — the protocol caps the
+        // The 24-bit truncation boundary: indices ≥ 2^24 alias low ones; the protocol caps the
         // index at 24 bits (16 MiB), so pin the aliasing as the documented contract.
         assert_eq!(nonce_for(7, 42, 0x0100_0005), nonce_for(7, 42, 5));
     }

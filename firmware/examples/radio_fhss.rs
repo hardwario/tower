@@ -1,12 +1,12 @@
-//! radio_fhss — US 915 FHSS link (FCC §15.247), star topology.
+//! radio_fhss: US 915 FHSS link (FCC §15.247), star topology.
 //!
 //!   TOWER_FEATURES=role-gateway just flash example radio_fhss   # hop time-master (beacons)
 //!   TOWER_FEATURES=role-node    just flash example radio_fhss   # follower (scans → locks → sends)
 //!
-//! The gateway runs a free-running hop clock over 80 channels (903.0–926.7 MHz),
+//! The gateway runs a free-running hop clock over 80 channels (903.0-926.7 MHz),
 //! beaconing each 300 ms slot's pseudo-random channel and then listening. The node
 //! parks on the rendezvous channel, catches a beacon within ≤1 cycle (~24 s),
-//! reconstructs the gateway's slot clock, and then hops in lockstep — sending a
+//! reconstructs the gateway's slot clock, and then hops in lockstep, sending a
 //! confirmed uplink each slot (the gateway is listening on that slot's channel) and
 //! re-aligning on every beacon. Reset the gateway to see the node go LOST → rescan →
 //! re-LOCK (F9). Both ends hop; the channel index moves every slot.
@@ -89,7 +89,7 @@ async fn run(b: Board) {
         info!(target: "fhss", "MASTER: hopping 80 ch, beacon+listen per 300 ms slot");
         loop {
             let Some(s) = net.fhss_master_tick().await else {
-                continue; // master mode not active (shouldn't happen — enabled above)
+                continue; // master mode not active (shouldn't happen: enabled above)
             };
             if let Some(rx) = s.received {
                 info!(
@@ -119,7 +119,7 @@ async fn run(b: Board) {
             match slot.state {
                 FhssState::Scanning => {
                     if was_synced {
-                        warn!(target: "fhss", "LOST sync — rescanning");
+                        warn!(target: "fhss", "LOST sync, rescanning");
                         was_synced = false;
                     }
                 }

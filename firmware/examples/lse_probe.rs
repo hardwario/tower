@@ -1,4 +1,4 @@
-//! lse_probe — boot forensics: inherited RTC-domain state + hardware reset cause, per boot.
+//! lse_probe: boot forensics, inherited RTC-domain state + hardware reset cause, per boot.
 //!
 //! Logs ONE line per boot: the raw `RCC_CSR` the boot *inherited* (sampled by `board::init`
 //! before embassy's clock init ran) decoded into the LSE/RTC-domain fields plus this reset's
@@ -6,17 +6,17 @@
 //! probe can time reset→Hello cleanly.
 //!
 //! Reading the line:
-//!   - `lseon/lserdy/rtcsel/rtcen/drv` — the RTC-domain state inherited from before the
+//!   - `lseon/lserdy/rtcsel/rtcen/drv`: the RTC-domain state inherited from before the
 //!     reset. A full match with the wanted config means embassy skipped the LSE cold start;
 //!     a mismatch forces an RTC-domain reset + crystal restart (seconds).
-//!   - `rst=[...]` — which hardware reset happened (pin/por/sft/iwdg/…), per-boot (flags are
+//!   - `rst=[...]`: which hardware reset happened (pin/por/sft/iwdg/…), per-boot (flags are
 //!     cleared after sampling).
 //!
 //! History: written for the 2026-07-05 bimodal-boot investigation, where it RULED the LSE
-//! OUT — every ~5.2 s boot inherited a fully-matched domain (`lseon=1 lserdy=1 rtcsel=1
+//! OUT: every ~5.2 s boot inherited a fully-matched domain (`lseon=1 lserdy=1 rtcsel=1
 //! rtcen=1`) with `rst=[pin]`, and a Low/MediumHigh/High drive sweep showed no effect. The
 //! proven cause (flip-counter 1:1 with slow boots) is the EEPROM KV **compaction CPU stall**
-//! in `init_session`'s session bump — see docs/storage.md.
+//! in `init_session`'s session bump (see docs/storage.md).
 //!
 //!   just build example lse_probe
 //!   TOWER_FEATURES=lse-drive-high just build example lse_probe

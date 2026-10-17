@@ -1,8 +1,8 @@
-//! button — debounced button events ([`button`](tower::button) block).
+//! button: debounced button events ([`button`](tower::button) block).
 //!
 //! Logs every event from the on-board button (PA8): `Press`, `Release`,
 //! `Click` (short press), `Hold` (long press). A click flashes the LED briefly,
-//! a hold flashes it longer — so it's visible with or without `tower logs`.
+//! a hold flashes it longer, so it's visible with or without `tower logs`.
 //!
 //! Tune the debounce / click / hold timings via `button::Config`.
 //!

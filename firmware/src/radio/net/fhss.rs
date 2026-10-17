@@ -6,15 +6,15 @@
 //! pseudo-random channel and broadcasts a **Beacon** (slot index), then listens.
 //! A node blind-rendezvous: it parks on a fixed channel ([`FHSS_RENDEZVOUS_CH`]),
 //! and since the permutation visits every channel exactly once per cycle, the
-//! gateway sweeps onto the rendezvous channel within ≤ 1 cycle — guaranteed. From
+//! gateway sweeps onto the rendezvous channel within ≤ 1 cycle, guaranteed. From
 //! the beacon's slot index + arrival time the node reconstructs the gateway's
 //! epoch, then hops in lockstep, re-aligning on each beacon.
 //!
 //! **Compliance (sized for margin, not the limit):** 80 channels × 300 ms slot →
 //! cycle 24 s > 20 s. The hop permutation is **fixed across cycles** (see
 //! [`hop_channel`]), so a channel recurs at the *same* slot offset every cycle and its
-//! successive visits are exactly 24 s apart — strictly more than the 20 s averaging
-//! window — so it is *tuned* at most once per window = ≤ 0.3 s (25 % under the
+//! successive visits are exactly 24 s apart (strictly more than the 20 s averaging
+//! window), so it is *tuned* at most once per window = ≤ 0.3 s (25 % under the
 //! 0.4 s/20 s limit, strict reading). This spacing is the load-bearing invariant: a
 //! *per-cycle-reshuffled* schedule would NOT bound cross-boundary spacing and could
 //! double a channel's occupancy inside one window (the defect this design fixes).
@@ -44,7 +44,7 @@ use crate::radio::frame::{self, FrameType, HDR_LEN, Header, MAX_FRAME, MAX_PAYLO
 const FHSS_SLOT_MS: u64 = 300;
 /// Per-slot guard (retune lead + clock-skew margin); measured retune ≪ this. Also
 /// the lead by which the node opens its beacon RX *before* the slot boundary, so RX
-/// is armed before the gateway transmits (covers `rx()` setup latency — without it a
+/// is armed before the gateway transmits (covers `rx()` setup latency; without it a
 /// late-armed RX can miss the beacon preamble and drop sync).
 const GUARD: Duration = Duration::from_millis(10);
 /// Node RX window for the per-slot beacon: opened `GUARD` early, so it spans
@@ -101,8 +101,8 @@ pub(crate) struct Fhss {
     /// Slot-clock anchor `(slot, boundary_instant)`: slot `anchor.0` started at
     /// `anchor.1` on *this device's* clock. Re-anchored each beacon (node) or set
     /// once at enable (master, anchor = `(0, epoch)`). Using an anchor of small
-    /// time-deltas — rather than an absolute epoch reconstructed by subtracting
-    /// `slot·SLOT` — avoids `Instant` underflow when the gateway's slot count far
+    /// time-deltas (rather than an absolute epoch reconstructed by subtracting
+    /// `slot·SLOT`) avoids `Instant` underflow when the gateway's slot count far
     /// exceeds the node's uptime.
     anchor: Option<(u32, Instant)>,
     last_beacon: Instant,
@@ -115,12 +115,12 @@ pub(crate) struct Fhss {
     /// `Instant` stays here; elapsed slots are measured against it and passed in). `Some` iff
     /// the gate holds a candidate.
     acquire_t0: Option<Instant>,
-    /// Per-channel transmitted airtime (ms) accumulated this session — a light
+    /// Per-channel transmitted airtime (ms) accumulated this session: a light
     /// *measurement* for the §15.247 compliance histogram. Occupancy itself is
     /// bounded *structurally* (N=80, cycle 24 s > 20 s ⇒ each channel tuned ≤ once
     /// per 20 s ⇒ ≤ one 300 ms slot), so no per-channel enforcement governor is
     /// needed. (A `[DutyGovernor; 80]` here cost 1.6 KB and overflowed the L0
-    /// during deep async poll — this `[u16; 80]` is 160 B.)
+    /// during deep async poll; this `[u16; 80]` is 160 B.)
     airtime_ms: [u16; FHSS_N as usize],
 }
 
@@ -160,14 +160,14 @@ pub struct NodeSlot {
 /// Fisher-Yates shuffle of `0..FHSS_N` → a perfect permutation (every channel exactly
 /// once ⇒ equal use, by construction), deterministic at both ends.
 ///
-/// The permutation is **fixed across cycles** — it is seeded from `seed` alone and does
+/// The permutation is **fixed across cycles**: it is seeded from `seed` alone and does
 /// **not** mix in `cycle`. This is a §15.247 compliance requirement, not a stylistic
 /// choice: a fresh per-cycle shuffle gives *no* minimum spacing across a cycle boundary,
 /// so a channel could fall in the last slot of one cycle and the first slot of the next
 /// (~300 ms apart) and thus be occupied twice inside a single 20 s averaging window,
 /// exceeding the 0.4 s/20 s per-channel limit. With one fixed permutation every channel
-/// recurs at the *same* slot offset each cycle — exactly one cycle
-/// (`FHSS_N · FHSS_SLOT_MS` = 24 s > 20 s) apart — so it is tuned at most once per window
+/// recurs at the *same* slot offset each cycle, exactly one cycle
+/// (`FHSS_N · FHSS_SLOT_MS` = 24 s > 20 s) apart, so it is tuned at most once per window
 /// by construction. `cycle` is kept in the signature (both ends still pass it) for
 /// call-site symmetry with the slot decomposition and to leave room for a future
 /// schedule that re-keys per cycle *without* reintroducing the adjacency hazard.
@@ -176,7 +176,7 @@ pub fn hop_channel(seed: u32, cycle: u32, i: u8) -> u8 {
     // The permutation math lives in the host-testable `tower_radio_core` leaf crate (generic
     // over the channel count), where the perfect-permutation + fixed-cycle-spacing §15.247
     // properties are unit-tested; here we just bind it to this radio's `FHSS_N`. No behavioural
-    // change — the algorithm (seeded xorshift32 Fisher-Yates, cycle-invariant) is identical.
+    // change: the algorithm (seeded xorshift32 Fisher-Yates, cycle-invariant) is identical.
     tower_radio_core::hop_channel::<{ FHSS_N as usize }>(seed, cycle, i)
 }
 
@@ -208,7 +208,7 @@ impl Net {
         match role {
             FhssRole::Master => {
                 // Bump + persist the monotonic epoch so this session's beacons are strictly newer
-                // than any previous session's — nodes reject the older ones as replays. Best
+                // than any previous session's; nodes reject the older ones as replays. Best
                 // effort: if the write fails we still advance in RAM (a reboot might then reuse the
                 // epoch, only weakening replay protection, never breaking sync). The bump rule is
                 // the kernel's (`next_master_epoch`); the EEPROM read/write is ours.
@@ -273,11 +273,11 @@ impl Net {
         anchor.1 + Duration::from_millis((slot_abs - anchor.0) as u64 * FHSS_SLOT_MS)
     }
 
-    /// **Master:** run one slot — retune to the next slot's channel during the
+    /// **Master:** run one slot: retune to the next slot's channel during the
     /// guard, beacon exactly at the slot boundary, then listen the rest of the slot
     /// for an uplink (decoded + auto-ACKed via [`recv`](Self::recv)). Call in a loop.
     ///
-    /// Returns `None` if FHSS master mode is not active (no clock anchor) — e.g. called
+    /// Returns `None` if FHSS master mode is not active (no clock anchor), e.g. called
     /// before `enable_fhss(FhssRole::Master, …)` or on a node-role `Net`. This mirrors the
     /// typed refusal of [`send`](Self::send) (`WrongMode`) / [`fhss_send`](Self::fhss_send)
     /// (`NotSynced`) rather than panicking the device on API misuse.
@@ -299,7 +299,12 @@ impl Net {
 
         self.fhss_tx_beacon(slot, ch).await;
 
-        // Listen for the rest of the slot's active window for an uplink.
+        // Listen for the rest of the slot's active window for an uplink. (`rx` lets a frame whose
+        // sync word arrived before `listen_until` finish, at most `device::SYNC_HOLD` ≈ 55 ms
+        // past it. A node never starts a frame that late: `fhss_send`'s slot-straddle rule makes
+        // its DATA + turnaround + ACK end ≥ GUARD before the slot does, so legitimate uplinks are
+        // complete well inside the window and only a foreign frame can stretch it. The existing
+        // ACK path (turnaround + ACK after a late frame) already had a comparable tail.)
         let listen_until = t_start + Duration::from_millis(FHSS_SLOT_MS) - GUARD;
         let now = Instant::now();
         let received = if listen_until > now {
@@ -317,7 +322,7 @@ impl Net {
     /// **Node:** run one slot. Whenever a clock anchor is held (Synced, or riding
     /// through a transient), predict this slot's channel, open RX a guard before the
     /// boundary, and catch the beacon to re-align. A missed beacon **keeps the anchor
-    /// and keeps predicting** — drift stays ≪ the RX window for many slots, so a fade
+    /// and keeps predicting**: drift stays ≪ the RX window for many slots, so a fade
     /// of up to [`REACQUIRE_LIMIT`](tower_net_core::epoch::REACQUIRE_LIMIT) slots is
     /// ridden through and re-locks within one slot once RF returns (it is *not* a sync
     /// loss). Only after the anchor is too
@@ -345,7 +350,7 @@ impl Net {
 
             // Re-anchor only to a beacon the gate accepts ([`EpochGate::offer_tracked`]): not
             // from an older gateway session (a replayed capture is ignored) and consistent with
-            // our prediction, so a stale replay can't yank our clock — see the kernel docs for
+            // our prediction, so a stale replay can't yank our clock; see the kernel docs for
             // the full argument. A genuinely restarted gateway carries a higher epoch but a slot
             // near 0, so it fails the prediction check here and is recovered via the rescan path
             // (below).
@@ -362,7 +367,7 @@ impl Net {
                 };
             }
 
-            // Missed this slot's beacon (or it failed the gate's checks above) —
+            // Missed this slot's beacon (or it failed the gate's checks above):
             // keep predicting on the (drift-tracked)
             // anchor. Stay Synced through a fade; only give up the anchor once it's
             // too stale to trust (the gate counts the misses), then re-scan from the
@@ -385,7 +390,7 @@ impl Net {
             };
         }
 
-        // No anchor: initial acquisition or post-restart — park on the rendezvous
+        // No anchor: initial acquisition or post-restart: park on the rendezvous
         // channel and listen a wide window for the gateway's once-per-cycle pass.
         let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(FHSS_RENDEZVOUS_CH)).await;
         self.fhss.cur_channel = FHSS_RENDEZVOUS_CH;
@@ -400,8 +405,8 @@ impl Net {
         else {
             return scanning;
         };
-        // The reject/hold/lock decision — the older-session replay reject and the two-beacon
-        // consistency guard — is the gate's ([`EpochGate::offer_scanning`]; see the kernel docs
+        // The reject/hold/lock decision (the older-session replay reject and the two-beacon
+        // consistency guard) is the gate's ([`EpochGate::offer_scanning`]; see the kernel docs
         // for the full argument). We measure the elapsed wall-time since the held candidate in
         // whole slots and keep its `Instant` here (the kernel is time-free).
         let elapsed_slots = self
@@ -422,7 +427,7 @@ impl Net {
             }
             ScanVerdict::Hold { replaced } => {
                 // Re-stamp the candidate-arrival clock ONLY if this beacon became the held
-                // candidate. A beacon behind the held one (`replaced == false` — e.g. a periodic
+                // candidate. A beacon behind the held one (`replaced == false`, e.g. a periodic
                 // replay) must not reset the reference, or the elapsed-time consistency check
                 // never converges and acquisition is denied.
                 if replaced {
@@ -439,7 +444,7 @@ impl Net {
     }
 
     /// **Node:** send one frame on the *current* slot's channel (call right after a
-    /// Synced [`fhss_node_tick`](Self::fhss_node_tick) — the gateway is listening on
+    /// Synced [`fhss_node_tick`](Self::fhss_node_tick): the gateway is listening on
     /// that channel). Refuses (`DutyLimited`) if the slot has too little time left for
     /// the exchange (slot-straddle rule), or `NotSynced` if not locked. Per-channel
     /// occupancy is bounded structurally (the hop schedule), so no airtime governor
@@ -462,25 +467,12 @@ impl Net {
             Some(a) => a,
             None => return SendResult::NotSynced,
         };
-        let addr = self.addr;
-        let counter = self.txc.counter();
-        let key = self.key_for(dest);
-        let hdr = Header {
-            frame_type: FrameType::Data,
-            flags: if confirmed { frame::flags::CONFIRMED } else { 0 },
-            src: addr,
-            dest,
-            counter,
-            bulk_index: None,
-        };
-        let mut buf = [0u8; MAX_FRAME];
-        let n = match frame::seal_frame(&mut self.ccm, &key, &hdr, data, &mut buf) {
-            Ok(n) => n,
-            Err(_) => return SendResult::Error(RadioError::TooLong),
-        };
 
         // Slot-straddle rule: only transmit if data (+ACK turnaround +ACK) + GUARD
-        // finishes before this slot's active window ends.
+        // finishes before this slot's active window ends. Checked BEFORE the counter is
+        // allocated (the sealed length is fixed: header + payload + tag), so a "no room, retry
+        // next slot" refusal burns no counter.
+        let n = HDR_LEN + data.len() + TAG_LEN;
         let now = Instant::now();
         let cur = Self::fhss_cur_slot(anchor, now);
         let ch = Self::fhss_channel_for(self.fhss.seed, cur);
@@ -496,23 +488,42 @@ impl Net {
             return SendResult::DutyLimited; // no room this slot; caller retries next slot
         }
 
+        // Consumed now, before the retune/TX/ACK awaits (see `Net::alloc_counter`): this used
+        // to advance only after the ACK wait, so a cancelled fhss_send left the counter for the
+        // next transfer to seal a different payload under the same nonce.
+        let Some(counter) = self.alloc_counter() else {
+            return SendResult::Error(RadioError::NonceLocked); // fail closed (nonce safety)
+        };
+        let key = self.key_for(dest);
+        let hdr = Header {
+            frame_type: FrameType::Data,
+            flags: if confirmed { frame::flags::CONFIRMED } else { 0 },
+            src: self.addr,
+            dest,
+            counter,
+            bulk_index: None,
+        };
+        let mut buf = [0u8; MAX_FRAME];
+        let n = match frame::seal_frame(&mut self.ccm, &key, &hdr, data, &mut buf) {
+            Ok(n) => n,
+            Err(_) => return SendResult::Error(RadioError::TooLong),
+        };
+
         let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(ch)).await;
         self.fhss.cur_channel = ch;
         self.fhss.airtime_ms[ch as usize] =
             self.fhss.airtime_ms[ch as usize].saturating_add(duty::frame_toa_ms(n) as u16);
-        let result = match self.radio.tx(&buf[..n], false, TX_TIMEOUT).await {
+        match self.radio.tx(&buf[..n], false, TX_TIMEOUT).await {
             // Unconfirmed → delivered once sent; confirmed → wait for the ACK.
             Ok(()) if !confirmed || self.await_ack(dest, counter).await => SendResult::Delivered,
             Ok(()) => SendResult::NotDelivered,
             Err(e) => SendResult::Error(e),
-        };
-        self.advance_tx_counter();
-        result
+        }
     }
 
     /// Lock/re-align the node clock from a beacon for `slot_abs` received at `t_rx`:
     /// the beacon was sent at that slot's boundary, so the boundary instant on the
-    /// node's clock is `t_rx − beacon_toa`. Anchor at `(slot_abs, boundary)` — small
+    /// node's clock is `t_rx − beacon_toa`. Anchor at `(slot_abs, boundary)`: small
     /// subtraction only, never `slot·SLOT` (which would underflow). (The miss counter
     /// was already reset by the gate decision that admitted this beacon.)
     fn fhss_lock(&mut self, slot_abs: u32, t_rx: Instant) {
@@ -536,18 +547,20 @@ impl Net {
         pl[..4].copy_from_slice(&self.fhss.gate.epoch().to_le_bytes());
         pl[4..8].copy_from_slice(&cycle.to_le_bytes());
         pl[8] = i;
+        let Some(counter) = self.alloc_counter() else {
+            return; // fail closed (nonce safety)
+        };
         let hdr = Header {
             frame_type: FrameType::Beacon,
             flags: 0,
             src: self.addr,
             dest: BROADCAST,
-            counter: self.txc.counter(),
+            counter,
             bulk_index: None,
         };
         let mut buf = [0u8; MAX_FRAME];
         let key = self.default_key;
         if let Ok(n) = frame::seal_frame(&mut self.ccm, &key, &hdr, &pl, &mut buf) {
-            self.advance_tx_counter();
             self.fhss.airtime_ms[ch as usize] =
                 self.fhss.airtime_ms[ch as usize].saturating_add(duty::frame_toa_ms(n) as u16);
             let _ = self.radio.tx(&buf[..n], false, TX_TIMEOUT).await;
@@ -555,7 +568,7 @@ impl Net {
     }
 
     /// Receive + authenticate a beacon under the network key (broadcast dest OK). CCM auth proves
-    /// the beacon is genuine but NOT fresh — a captured beacon replayed later still authenticates —
+    /// the beacon is genuine but NOT fresh (a captured beacon replayed later still authenticates),
     /// so the caller enforces freshness via the monotonic `epoch` (reject-backwards) and the
     /// two-beacon acquisition consistency check. Listens until a valid beacon arrives or the
     /// window elapses, ignoring any non-beacon frame in between (so a stray frame in the

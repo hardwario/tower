@@ -1,10 +1,10 @@
-//! Power-loss-safe key-value codec over a byte-addressable EEPROM — the storage engine that
-//! backs [`tower::storage::Kv`] in the firmware.
+//! Power-loss-safe key-value codec over a byte-addressable EEPROM: the storage engine that
+//! backs `tower::storage::Kv` in the firmware.
 //!
 //! It lives in its own crate for one reason: the firmware is `no_std` and targets thumbv6m, so
 //! it cannot `cargo test`. The codec, by contrast, is pure logic over a tiny [`Eeprom`] byte-store
-//! trait — the firmware implements it over the L0 data EEPROM ([`tower::storage::Storage`]); the
-//! tests here implement it over a RAM array — so the layout, the compaction commit, the
+//! trait. The firmware implements it over the L0 data EEPROM (`tower::storage::Storage`); the
+//! tests here implement it over a RAM array, so the layout, the compaction commit, the
 //! power-loss edges, and the legacy migration can all be exercised on the host.
 //!
 //! # Why double-buffered
@@ -21,21 +21,25 @@
 //! ```
 //!
 //! - The **active** half is the one whose superblock is valid and has the highest generation.
-//! - **Updates are append-only** within the active half — a torn write only ever corrupts the
+//! - **Updates are append-only** within the active half: a torn write only ever corrupts the
 //!   *tail* record, so `scan` stops there and every committed record before it survives.
 //! - **Compaction is a flip:** blank the inactive half, write the live set packed into it, then
 //!   write *its* superblock at `generation + 1`. That single CRC'd superblock write is the atomic
-//!   commit — torn before it, the old half is still active (no data lost); torn during it, the
+//!   commit: torn before it, the old half is still active (no data lost); torn during it, the
 //!   superblock fails its CRC and the old half still wins.
 //!
 //! The record format inside a half is unchanged from the firmware's original single-region store
 //! (`[tag(2) | len(2) | crc(4) | value]`, little-endian, CRC over `tag‖len‖value`), so legacy data
-//! migrates without reserialization — see [`init`].
+//! migrates without reserialization; see [`init`].
 //!
-//! **Deletion** rides the same append-only log: [`delete`] writes a **tombstone** — a zero-length
-//! record (`len == 0`) — so the key reads back absent ([`get_bytes`]), and the next flip drops any
+//! **Deletion** rides the same append-only log: [`delete`] writes a **tombstone** (a zero-length
+//! record, `len == 0`), so the key reads back absent ([`get_bytes`]), and the next flip drops any
 //! key whose latest record is a tombstone, reclaiming both the value and the tombstone. `len == 0`
 //! is therefore reserved as the tombstone marker (no caller stores a genuinely empty value).
+//!
+//! **Factory reset** ([`wipe`]) is a flip to an *empty* live set (blank the dead half, commit
+//! its superblock, then scrub the old half), so it is as power-loss-safe as any flip and keeps
+//! the generation (the wear gauge) counting.
 //!
 //! # Incremental maintenance
 //!
@@ -57,7 +61,7 @@ pub const MAX_KEYS: usize = 64;
 /// Record header: tag(2) + value-len(2) + crc32(4). Value bytes follow.
 pub const KV_HEADER: usize = 8;
 
-/// Superblock magic — also distinguishes a double-buffered region from legacy single-region data
+/// Superblock magic; it also distinguishes a double-buffered region from legacy single-region data
 /// (a legacy record's first bytes are a `u16` key, never this magic).
 const SUPER_MAGIC: [u8; 4] = *b"TKV1";
 /// Superblock size: magic(4) + generation(4 LE) + crc(4 LE, over magic‖generation).
@@ -83,7 +87,7 @@ pub enum KvError<E> {
     Backend(E),
     /// A value exceeded [`MAX_VALUE`] bytes.
     ValueTooLarge,
-    /// The store (one half) is full even after a compaction flip — or the legacy live set being
+    /// The store (one half) is full even after a compaction flip, or the legacy live set being
     /// migrated does not fit one half.
     Full,
     /// Key `0` is reserved (it marks the end of the record log).
@@ -109,7 +113,7 @@ impl<E: core::fmt::Display> core::fmt::Display for KvError<E> {
     }
 }
 
-/// CRC-32 (IEEE 802.3) over the record header bytes (`tag ‖ len`) followed by the value — the
+/// CRC-32 (IEEE 802.3) over the record header bytes (`tag ‖ len`) followed by the value; the
 /// `crc` field itself is excluded. Byte-for-byte the firmware's framing, via the shared primitive.
 #[must_use]
 pub fn entry_crc(hdr4: &[u8], value: &[u8]) -> u32 {
@@ -152,7 +156,7 @@ fn read_gen<S: Eeprom>(store: &S, capacity: u32, h: u8) -> Result<Option<u32>, K
     Ok(Some(g))
 }
 
-/// Write half `h`'s superblock with `generation` — the atomic commit point of a flip. The CRC
+/// Write half `h`'s superblock with `generation`: the atomic commit point of a flip. The CRC
 /// makes even a torn superblock write fail closed (it won't validate, so the other half wins).
 fn write_gen<S: Eeprom>(
     store: &mut S,
@@ -192,7 +196,7 @@ fn active<S: Eeprom>(store: &S, capacity: u32) -> Result<Option<(u8, u32)>, KvEr
 type HalfScan = (u32, Option<(u32, u16)>);
 
 /// Scan one half's record area `[base, base + area)`: returns `(free_rel, latest(rel,len))`. Stops
-/// at the first blank (`tag == 0`) or corrupt record — the end of a clean log, and where a torn
+/// at the first blank (`tag == 0`) or corrupt record: the end of a clean log, and where a torn
 /// (tail) append would sit.
 fn scan_half<S: Eeprom>(store: &S, base: u32, area: u32, target: u16) -> Result<HalfScan, KvError<S::Error>> {
     let mut o = 0u32;
@@ -244,7 +248,7 @@ fn append<S: Eeprom>(store: &mut S, at: u32, key: u16, value: &[u8]) -> Result<(
 /// Blank `len` bytes from `at` (so a half's record scan terminates at a clean end).
 ///
 /// **Read-first**: only words that are actually nonzero get programmed, so blanking an
-/// already-blank span (e.g. a dead half pre-blanked by [`blank_dead_step`]) costs reads only —
+/// already-blank span (e.g. a dead half pre-blanked by [`blank_dead_step`]) costs reads only:
 /// no wear, and on the STM32L0 no CPU-stalling word programs. This is what shrinks the in-line
 /// fallback flip from "blank + copy" to "copy" once maintenance has pre-blanked (docs/storage.md).
 fn blank<S: Eeprom>(store: &mut S, at: u32, len: u32) -> Result<(), KvError<S::Error>> {
@@ -253,7 +257,7 @@ fn blank<S: Eeprom>(store: &mut S, at: u32, len: u32) -> Result<(), KvError<S::E
 }
 
 /// Read-first blanking of `[base+from, base+len)`, programming at most `budget` zero-words
-/// (already-zero words are skipped with reads only — idempotent, wear-free on re-runs).
+/// (already-zero words are skipped with reads only; idempotent, wear-free on re-runs).
 /// Returns the new progress offset; `len` means the span is fully blank. The workhorse of
 /// [`blank`] (unbounded) and [`blank_dead_step`]/[`flip_step`] (budgeted).
 fn blank_step_span<S: Eeprom>(
@@ -296,7 +300,7 @@ fn blank_step_span<S: Eeprom>(
 ///
 /// Migration of legacy single-region data is non-destructive in the common case: legacy records
 /// already live in half 0's record area, so if they fit one half this just commits half 0's
-/// superblock (zero data movement — fully power-safe). A legacy log larger than one half is first
+/// superblock (zero data movement, fully power-safe). A legacy log larger than one half is first
 /// packed by a one-time legacy compaction (the only place the old non-atomic pack still runs; if
 /// interrupted, no superblock was written, so the next boot re-migrates).
 pub fn init<S: Eeprom>(store: &mut S, capacity: u32) -> Result<(), KvError<S::Error>> {
@@ -306,14 +310,14 @@ pub fn init<S: Eeprom>(store: &mut S, capacity: u32) -> Result<(), KvError<S::Er
     let half = half_len(capacity);
     let oldfree = legacy_free(store, capacity)?;
     if oldfree > half {
-        // Legacy log spilled past one half — pack its live set to the front so it fits half 0.
+        // Legacy log spilled past one half: pack its live set to the front so it fits half 0.
         let live = legacy_compact(store, capacity)?;
         if live > half {
             return Err(KvError::Full); // live set genuinely too big for a half
         }
     }
     // Legacy records (if any) now occupy `[0, min(oldfree, half))` ⊂ half 0's record area, in the
-    // same record format — so committing half 0's superblock adopts them verbatim. A fresh region
+    // same record format, so committing half 0's superblock adopts them verbatim. A fresh region
     // (oldfree == 0) commits an empty half 0. Half 1's superblock is left blank → invalid.
     write_gen(store, capacity, 0, 1)
 }
@@ -322,7 +326,7 @@ pub fn init<S: Eeprom>(store: &mut S, capacity: u32) -> Result<(), KvError<S::Er
 /// corrupts the tail); when the half is full, a compaction flip frees space and the append retries
 /// in the freshly-packed other half.
 ///
-/// An **empty** `value` writes a delete tombstone (the key reads back absent) — prefer the named
+/// An **empty** `value` writes a delete tombstone (the key reads back absent); prefer the named
 /// [`delete`], which additionally skips the write when the key is already absent.
 pub fn set_bytes<S: Eeprom>(
     store: &mut S,
@@ -335,10 +339,10 @@ pub fn set_bytes<S: Eeprom>(
 
 /// [`set_bytes`], aware of an in-progress incremental flip (`pending`, shared with [`maintain`]).
 ///
-/// Appends keep going to the **source** (active) half while a flip is pending — [`flip_commit`]'s
+/// Appends keep going to the **source** (active) half while a flip is pending; [`flip_commit`]'s
 /// tail catch-up carries them over. If the source fills anyway, the pending flip is **finished
 /// synchronously** (bounded: only its remaining steps + tail, not a from-scratch flip) and the
-/// append retries in the fresh half — this path never fails where plain [`set_bytes`] would have
+/// append retries in the fresh half; this path never fails where plain [`set_bytes`] would have
 /// succeeded. A stale `pending` (a synchronous flip got there first) is simply dropped.
 pub fn set_bytes_with<S: Eeprom>(
     store: &mut S,
@@ -386,7 +390,7 @@ pub fn set_bytes_with<S: Eeprom>(
 }
 
 /// Read the raw bytes stored under `key` into `out`; returns the value's true length (which may
-/// exceed `out.len()` — only `out.len()` bytes are copied), or `None` if the key is absent.
+/// exceed `out.len()`; only `out.len()` bytes are copied), or `None` if the key is absent.
 pub fn get_bytes<S: Eeprom>(
     store: &S,
     capacity: u32,
@@ -416,16 +420,16 @@ pub fn get_bytes<S: Eeprom>(
 }
 
 /// Delete `key`: append a **tombstone** (a zero-length record) so the key reads back absent.
-/// Append-only and power-loss-safe like any [`set_bytes`] — a torn tombstone write only corrupts
+/// Append-only and power-loss-safe like any [`set_bytes`]: a torn tombstone write only corrupts
 /// the tail. The key's old value and the tombstone are both reclaimed by the next compaction
-/// [`flip`] (which drops any key whose latest record is a tombstone); until then they occupy
+/// `flip` (which drops any key whose latest record is a tombstone); until then they occupy
 /// space. A no-op (reads only, no write, no wear) if the key is already absent or tombstoned, so
 /// deleting a missing key never grows the log.
 pub fn delete<S: Eeprom>(store: &mut S, capacity: u32, key: u16) -> Result<(), KvError<S::Error>> {
     delete_with(store, capacity, key, &mut None)
 }
 
-/// [`delete`], aware of an in-progress incremental flip (`pending`, shared with [`maintain`]) —
+/// [`delete`], aware of an in-progress incremental flip (`pending`, shared with [`maintain`]):
 /// the tombstone append follows the same source-half / finish-pending-flip rules as
 /// [`set_bytes_with`].
 pub fn delete_with<S: Eeprom>(
@@ -444,14 +448,14 @@ pub fn delete_with<S: Eeprom>(
         Some((h, _)) => {
             let base = half_base(capacity, h);
             match scan_half(store, base, half_len(capacity), key)?.1 {
-                Some((_, len)) if len > 0 => {} // a live value — fall through to tombstone it
+                Some((_, len)) if len > 0 => {} // a live value: fall through to tombstone it
                 _ => return Ok(()),             // absent or already tombstoned
             }
         }
     }
     // A zero-length value IS the tombstone; reuse the append path (incl. flip-on-full). If the
     // half is full, the flip first packs the live set (this key's value included), then the
-    // tombstone lands in the fresh half and supersedes it — correct, self-healing on the next flip.
+    // tombstone lands in the fresh half and supersedes it; correct, self-healing on the next flip.
     set_bytes_with(store, capacity, key, &[], pending)
 }
 
@@ -466,7 +470,7 @@ pub fn compact<S: Eeprom>(store: &mut S, capacity: u32) -> Result<(), KvError<S:
 }
 
 /// [`compact`], aware of an in-progress incremental flip (`pending`, shared with [`maintain`]):
-/// a fresh pending flip is finished (that *is* the requested compaction — cheaper than starting
+/// a fresh pending flip is finished (that *is* the requested compaction, cheaper than starting
 /// over); a stale or absent one falls back to the synchronous flip. Consumes `pending` either way.
 pub fn compact_with<S: Eeprom>(
     store: &mut S,
@@ -482,7 +486,55 @@ pub fn compact_with<S: Eeprom>(
     }
 }
 
-/// The active half's **generation** — a monotonic counter bumped once per compaction [`flip`]
+/// Factory reset as a **flip to an empty store**: power-loss-safe at every step, wear-gauge
+/// preserving.
+///
+/// The naive reset (zero the region front-to-back, superblocks last) is neither atomic nor
+/// safe: interrupted part-way, the still-valid superblock sits over an active half whose prefix
+/// is zeroed but whose tail survives. The record scan then reads the half as empty, new appends
+/// start at offset 0, and the moment the new log end lands on an old record boundary the old
+/// tail is scanned again: the old records **resurrect**, and (later in the log, latest-wins)
+/// override the newer values. It also reset the generation (the lifetime-flip wear gauge) to 0.
+///
+/// This instead reuses the flip's own commit discipline, with an empty live set:
+///
+/// 1. **Blank the dead half** (read-first; free when maintenance pre-blanked it). Invisible:
+///    the old store stays active.
+/// 2. **Commit** the dead half's superblock at `generation + 1`: the single CRC'd atomic write.
+///    Torn before/during it, the old store is still active and intact (nothing was wiped);
+///    landed, the store reads **empty** from then on. The committed superblock is never zeroed,
+///    and the generation carries on, so the wear gauge keeps counting (a wipe costs one flip).
+/// 3. **Scrub the old half's records** so the wiped keys are not left physically readable.
+///    Invisible: that half is no longer active, and the next flip into it blanks it first
+///    anyway (its superblock is left as an ordinary superseded one, exactly like after a flip).
+///
+/// So a reset at any point leaves either the complete old store or an empty one, never a mix,
+/// and never a half whose tail can resurface. An un-initialized region (fresh, or legacy
+/// single-region data that [`init`] would adopt from offset 0) is committed empty in half 1 at
+/// generation 1 and then scrubbed (half 0 + superblock slot 0, which holds no valid superblock).
+///
+/// Cost: one half of word-programs (~2.6 s of NVM stall on the STM32L0) when the dead half was
+/// pre-blanked, two halves (~5.2 s) otherwise. A caller holding RAM state derived from the store
+/// must stop writing and reboot afterwards (the firmware's `Kv` freezes itself for that).
+pub fn wipe<S: Eeprom>(store: &mut S, capacity: u32) -> Result<(), KvError<S::Error>> {
+    let half = half_len(capacity);
+    match active(store, capacity)? {
+        Some((h, g)) => {
+            let dst = 1 - h;
+            blank(store, half_base(capacity, dst), half)?; // (1) invisible
+            write_gen(store, capacity, dst, g.wrapping_add(1))?; // (2) the commit: empty from here
+            blank(store, half_base(capacity, h), half) // (3) scrub: invisible
+        }
+        None => {
+            blank(store, half_base(capacity, 1), half)?;
+            write_gen(store, capacity, 1, 1)?;
+            blank(store, half_base(capacity, 0), half)?;
+            blank(store, super_off(capacity, 0), SUPER_LEN)
+        }
+    }
+}
+
+/// The active half's **generation**: a monotonic counter bumped once per compaction `flip`
 /// (its atomic commit), so it doubles as the store's **lifetime flip count**: the load-bearing
 /// input to an EEPROM-wear estimate, since each flip cycles ~one half's cells. `0` on an
 /// un-initialized region. A pure read (two superblock reads, no write), so polling it for
@@ -500,11 +552,11 @@ fn flip<S: Eeprom>(store: &mut S, capacity: u32, src_h: u8, src_gen: u32) -> Res
     let dst_base = half_base(capacity, dst_h);
 
     // Pass 1: latest offset per tag in the source half (+ the source log's end).
-    // `tmp` is reused as pass 1's CRC-check scratch and pass 2's record-copy buffer — the two
+    // `tmp` is reused as pass 1's CRC-check scratch and pass 2's record-copy buffer; the two
     // uses are strictly sequential, so one buffer serves both. This keeps a second MAX_VALUE
     // array off the compaction stack: flip runs synchronously inside the executor poll (via
     // set_bytes ← Nv::with ← net.send), the deepest stack path in a radio app, where peak
-    // headroom is tight (see docs/radio.md — no stack guard on this target).
+    // headroom is tight (see docs/radio.md: no stack guard on this target).
     let mut latest: [(u16, u32); MAX_KEYS] = [(0, 0); MAX_KEYS];
     let mut nkeys = 0usize;
     let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
@@ -512,7 +564,7 @@ fn flip<S: Eeprom>(store: &mut S, capacity: u32, src_h: u8, src_gen: u32) -> Res
 
     // Blank the destination half so its scan will terminate cleanly (it may hold stale records
     // from when it was active two generations ago). Its superblock is untouched here, so the
-    // source half stays active throughout — the blank/copy are not yet committed.
+    // source half stays active throughout; the blank/copy are not yet committed.
     blank(store, dst_base, half)?;
 
     // Pass 2: copy each latest record forward into the destination, packed.
@@ -603,7 +655,7 @@ fn walk_latest<S: Eeprom>(
 // same work into bounded, RAM-tracked steps a background task can run a few word-programs at a
 // time. Power-loss safety is inherited from the two-half + superblock-commit design: nothing
 // before [`flip_commit`]'s single superblock write changes the active half, so a reboot anywhere
-// mid-maintenance just forgets the RAM state and restarts from scratch — no on-EEPROM state
+// mid-maintenance just forgets the RAM state and restarts from scratch: no on-EEPROM state
 // machine, no recovery path.
 
 /// Proactive-flip threshold for [`maintain`]: start an incremental flip once the active half's
@@ -612,21 +664,26 @@ fn walk_latest<S: Eeprom>(
 /// Rationale: appends during an incremental flip keep landing in the *source* half, so the
 /// trigger must leave room for the writes that arrive between crossing the threshold and the
 /// commit. Two worst-case records (`2 × (KV_HEADER + MAX_VALUE)` = 528 B) cover the append that
-/// crossed the threshold plus a maximal burst record during the drain — generous, given the
+/// crossed the threshold plus a maximal burst record during the drain. That is generous, given the
 /// maintenance task is woken by that very write and drains the flip in back-to-back slices,
-/// while real SDK records are 4–8 byte scalars. And the guarantee is soft by design: if a
+/// while real SDK records are 4-8 byte scalars. And the guarantee is soft by design: if a
 /// pathological burst fills the source anyway, [`set_bytes_with`] finishes the pending flip
-/// synchronously (bounded by its *remaining* steps) — never a failure, just latency.
+/// synchronously (bounded by its *remaining* steps): never a failure, just latency.
 pub const FLIP_THRESHOLD: u32 = 2 * (KV_HEADER + MAX_VALUE) as u32;
 
-/// Cost of writing `len` bytes, in EEPROM word-programs — the unit of every maintenance budget
-/// (each word program stalls the STM32L0 ~3.4 ms). Conservative rounding; unaligned spans may
-/// add up to two edge programs, so a slice can overshoot its budget by ~2 words (~7 ms).
+/// Cost of writing `len` bytes, in EEPROM word-programs: the unit of every maintenance budget
+/// (each word program stalls the STM32L0 ~3.4 ms). Exact for word-aligned spans (the blank
+/// passes). An **unaligned** span costs more: the HAL (`eeprom_write_slice`) programs its
+/// unaligned head and tail as up to **3 single-byte programs each** (each as slow as a word
+/// program), so one write call can cost up to 4 programs over this estimate, e.g. 6 bytes at
+/// `offset % 4 == 1` = 3 + 3 byte programs vs `words(6)` = 2. Record copies land at arbitrary
+/// offsets, so a copy slice that touches several records can overshoot its budget by a few
+/// programs per record (tens of ms, never seconds).
 fn words(len: u32) -> u32 {
     len.div_ceil(4)
 }
 
-/// Free (appendable) bytes remaining in the active half — a pure read (one record scan). On an
+/// Free (appendable) bytes remaining in the active half, a pure read (one record scan). On an
 /// un-initialized region, reports one full half (what [`init`] would leave). Feeds the
 /// [`maintain`] threshold check and `/system/eeprom print`.
 pub fn free_bytes<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S::Error>> {
@@ -640,7 +697,7 @@ pub fn free_bytes<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S:
     }
 }
 
-/// Bytes the live set (latest record per key) occupies — the packed size a flip would leave.
+/// Bytes the live set (latest record per key) occupies: the packed size a flip would leave.
 /// A pure read; `0` on an un-initialized region. `free_bytes + (used − live_bytes)` is the
 /// space one flip reclaims.
 pub fn live_bytes<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S::Error>> {
@@ -657,7 +714,7 @@ pub fn live_bytes<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S:
         let mut hdr = [0u8; KV_HEADER];
         store.read(base + off, &mut hdr).map_err(KvError::Backend)?;
         let len = u16::from_le_bytes([hdr[2], hdr[3]]);
-        // A tombstoned key (latest len 0) leaves nothing behind after a flip — exclude it so
+        // A tombstoned key (latest len 0) leaves nothing behind after a flip; exclude it so
         // this stays an exact "packed size a flip would leave".
         if len != 0 {
             total += KV_HEADER as u32 + len as u32;
@@ -666,7 +723,7 @@ pub fn live_bytes<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S:
     Ok(total)
 }
 
-/// Whether the dead (inactive) half is fully blank — a pure read; `true` on an un-initialized
+/// Whether the dead (inactive) half is fully blank, a pure read; `true` on an un-initialized
 /// region. Exactly the condition under which the next flip's blank pass costs nothing.
 pub fn dead_half_blank<S: Eeprom>(store: &S, capacity: u32) -> Result<bool, KvError<S::Error>> {
     let Some((h, _)) = active(store, capacity)? else {
@@ -688,8 +745,8 @@ pub fn dead_half_blank<S: Eeprom>(store: &S, capacity: u32) -> Result<bool, KvEr
 }
 
 /// RAM-only progress cursor for [`blank_dead_step`]. A fresh cursor (or a reboot, which loses
-/// it) restarts from the top of the dead half — near-free, because already-blank words are
-/// skipped with reads only. The recorded generation makes it self-healing: when a flip changes
+/// it) restarts from the top of the dead half (near-free, because already-blank words are
+/// skipped with reads only). The recorded generation makes it self-healing: when a flip changes
 /// the active half, the cursor rewinds automatically.
 #[derive(Clone, Copy, Default)]
 pub struct BlankCursor {
@@ -707,7 +764,7 @@ impl BlankCursor {
     }
 }
 
-/// Incrementally blank the **dead** (inactive) half — "pre-blanking", run any time after a flip
+/// Incrementally blank the **dead** (inactive) half ("pre-blanking"), run any time after a flip
 /// commits, so the *next* flip (incremental or the in-line fallback) skips its blank pass.
 /// Programs at most `budget_words` zero-words per call; already-zero words are skipped with
 /// reads only (idempotent, no wear on blank cells). Returns whether blanking work remains.
@@ -718,7 +775,7 @@ pub fn blank_dead_step<S: Eeprom>(
     budget_words: u32,
 ) -> Result<bool, KvError<S::Error>> {
     let Some((h, g)) = active(store, capacity)? else {
-        return Ok(false); // un-initialized region — no dead half yet
+        return Ok(false); // un-initialized region: no dead half yet
     };
     if cur.generation != g {
         *cur = BlankCursor {
@@ -752,13 +809,13 @@ pub struct FlipState {
     blank_off: u32,
     /// Source scan progress of the copy (phase B).
     read_off: u32,
-    /// Bytes of planned records fully copied — the destination write position.
+    /// Bytes of planned records fully copied: the destination write position.
     write_off: u32,
     /// Bytes of the record at `read_off` already copied (mid-record resume between steps).
     rec_copied: u32,
 }
 
-/// Begin an incremental flip: pass-1 scan of the active half into a RAM plan (reads only — no
+/// Begin an incremental flip: pass-1 scan of the active half into a RAM plan (reads only: no
 /// EEPROM writes, no stall). `None` on an un-initialized region.
 pub fn flip_start<S: Eeprom>(store: &S, capacity: u32) -> Result<Option<FlipState>, KvError<S::Error>> {
     let Some((h, g)) = active(store, capacity)? else {
@@ -793,7 +850,7 @@ fn flip_fresh<S: Eeprom>(store: &S, capacity: u32, st: &FlipState) -> Result<boo
     Ok(active(store, capacity)? == Some((st.src_h, st.src_gen)))
 }
 
-/// One bounded slice of flip work: blank the destination if still needed (read-first — free when
+/// One bounded slice of flip work: blank the destination if still needed (read-first; free when
 /// pre-blanked by [`blank_dead_step`]), then copy the planned live set, programming at most
 /// `budget_words` words. Returns whether pre-commit work remains (`false` = ready for
 /// [`flip_commit`]). [`KvError::Stale`] if another flip committed underneath.
@@ -820,7 +877,7 @@ pub fn flip_step<S: Eeprom>(
         }
     }
 
-    // Phase B: copy the planned records forward, packed — resumable mid-record, so one step
+    // Phase B: copy the planned records forward, packed; resumable mid-record, so one step
     // never programs more than the budget even for a MAX_VALUE record. A partially-copied
     // record is harmless: the destination is uncommitted until `flip_commit`.
     let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
@@ -839,7 +896,7 @@ pub fn flip_step<S: Eeprom>(
             .iter()
             .any(|&(t, off)| t == tag && off == st.read_off);
         if !planned || len == 0 {
-            // superseded, or a delete tombstone (len 0) whose key is dropped — skip either way
+            // superseded, or a delete tombstone (len 0) whose key is dropped: skip either way
             st.read_off += size;
             continue;
         }
@@ -868,10 +925,10 @@ pub fn flip_step<S: Eeprom>(
 }
 
 /// Finish an incremental flip: drive any remaining [`flip_step`] work, **catch up the source
-/// tail** (records appended past `src_end` since [`flip_start`], copied verbatim in append order
-/// — a tail record superseding a planned or earlier-tail one lands *later* in the destination,
+/// tail** (records appended past `src_end` since [`flip_start`], copied verbatim in append order;
+/// a tail record superseding a planned or earlier-tail one lands *later* in the destination,
 /// so latest-wins scan semantics resolve it), then commit by writing the destination superblock
-/// at `generation + 1` — the same single CRC'd atomic commit as the synchronous flip.
+/// at `generation + 1`: the same single CRC'd atomic commit as the synchronous flip.
 /// [`KvError::Stale`] if another flip committed underneath (nothing is written in that case).
 pub fn flip_commit<S: Eeprom>(
     store: &mut S,
@@ -915,7 +972,7 @@ pub fn flip_commit<S: Eeprom>(
             )
             .map_err(KvError::Backend)?;
         if entry_crc(&tmp[0..4], &tmp[KV_HEADER..size as usize]) != crc {
-            break; // torn tail append — end of the clean log, drop it as scan would
+            break; // torn tail append: end of the clean log, drop it as scan would
         }
         if st.write_off + size > half {
             return Err(KvError::Full);
@@ -934,7 +991,7 @@ pub fn flip_commit<S: Eeprom>(
 /// RAM-only maintenance state: the pre-blanking cursor plus at most one pending incremental
 /// flip. Keep it next to the store handle and share [`pending`](Self::pending) with
 /// [`set_bytes_with`]/[`compact_with`], so a store that fills mid-flip *finishes* the flip
-/// instead of restarting one. Losing it (reboot) is always safe — see [`FlipState`].
+/// instead of restarting one. Losing it (reboot) is always safe; see [`FlipState`].
 pub struct MaintState {
     blank: BlankCursor,
     flip: Option<FlipState>,
@@ -964,7 +1021,7 @@ impl Default for MaintState {
 /// One bounded maintenance slice (at most `budget_words` EEPROM word-programs). In priority
 /// order: (1) advance/commit a pending incremental flip, (2) start one when the active half's
 /// free space is below `threshold` (see [`FLIP_THRESHOLD`]) *and* a flip would restore it,
-/// (3) pre-blank the dead half. Returns whether work remains — call again (after yielding to
+/// (3) pre-blank the dead half. Returns whether work remains; call again (after yielding to
 /// other tasks) until `false`, then sleep until the next store write.
 ///
 /// The commit slice is the one call that can exceed the budget: it also copies the tail of
@@ -994,7 +1051,7 @@ pub fn maintain<S: Eeprom>(
         return Ok(true); // the old half is now dead + dirty → pre-blanking work remains
     }
 
-    // (2) Start a flip below the threshold — but only if it would lift free space back over it
+    // (2) Start a flip below the threshold, but only if it would lift free space back over it
     // (live + threshold ≤ half). Otherwise the live set is simply too big for proactive help:
     // flipping would burn wear without restoring headroom, so leave it to the in-line fallback
     // (whose blank pass the pre-blanked dead half already halves).
@@ -1208,7 +1265,7 @@ mod tests {
     #[test]
     fn torn_flip_keeps_old_half_active() {
         // Power-safety of compaction: a flip that writes the destination half but loses power
-        // before the superblock commit must leave the OLD half active with the last good values —
+        // before the superblock commit must leave the OLD half active with the last good values,
         // and the next successful set must still see them.
         let mut ram = Ram::new(CAP as usize);
         set(&mut ram, 1, b"committed-1").unwrap();
@@ -1222,7 +1279,7 @@ mod tests {
         blank(&mut ram, dst_base, half).unwrap();
         // (write some plausible-but-uncommitted records into the destination half)
         append(&mut ram, dst_base, 1, b"GARBAGE").unwrap();
-        // ... no write_gen() — power lost here.
+        // ... no write_gen(): power lost here.
 
         // The old half is still active and intact.
         let (now_h, now_gen) = active(&ram, CAP).unwrap().unwrap();
@@ -1238,7 +1295,7 @@ mod tests {
     #[test]
     fn torn_superblock_commit_fails_closed() {
         // If the superblock write itself tears (CRC won't match), that half is treated as invalid
-        // and the other half wins — never a half-committed generation.
+        // and the other half wins; never a half-committed generation.
         let mut ram = Ram::new(CAP as usize);
         set(&mut ram, 1, b"good").unwrap();
         let (src_h, src_gen) = active(&ram, CAP).unwrap().unwrap();
@@ -1322,12 +1379,12 @@ mod tests {
     // --- incremental maintenance ------------------------------------------------------------
 
     /// Fixture for the maintenance tests: one committed flip (so the dead half holds stale
-    /// records — a dirty blank target), then superseded + live records in the active half.
+    /// records, a dirty blank target), then superseded + live records in the active half.
     fn flip_fixture() -> Ram {
         let mut ram = Ram::new(CAP as usize);
         set(&mut ram, 1, b"one-v1").unwrap();
         set(&mut ram, 2, b"two").unwrap();
-        compact(&mut ram, CAP).unwrap(); // gen 2 — the old half is now dead and dirty
+        compact(&mut ram, CAP).unwrap(); // gen 2: the old half is now dead and dirty
         set(&mut ram, 1, b"one-v2").unwrap(); // supersedes the packed copy
         set(&mut ram, 3, &[7u8; 40]).unwrap();
         ram
@@ -1358,7 +1415,7 @@ mod tests {
         }
         assert!(dead_half_blank(&ram, CAP).unwrap());
         // Re-run with a fresh cursor (a "reboot"): every word is already zero, so the pass is
-        // pure reads — zero programs, zero wear — and completes in one call.
+        // pure reads (zero programs, zero wear) and completes in one call.
         let w = ram.words_written;
         let mut cur = BlankCursor::new();
         assert!(!blank_dead_step(&mut ram, CAP, &mut cur, 2).unwrap());
@@ -1474,7 +1531,7 @@ mod tests {
         while maintain(&mut ram, CAP, &mut m, BUDGET, T).unwrap() {}
         assert_eq!(generation(&ram, CAP).unwrap(), g0, "no flip above the threshold");
 
-        // Churn until free space drops below the threshold — never filling the half, so no
+        // Churn until free space drops below the threshold, never filling the half, so no
         // in-line flip fires either.
         while free_bytes(&ram, CAP).unwrap() >= T {
             set(&mut ram, 1, &[9u8; 20]).unwrap();
@@ -1519,13 +1576,13 @@ mod tests {
     fn set_bytes_finishes_pending_flip_when_source_fills() {
         let mut ram = Ram::new(CAP as usize);
         for i in 0..5u8 {
-            set(&mut ram, 1, &[i; 40]).unwrap(); // 5 × 48 B = 240 of 244 — nearly full
+            set(&mut ram, 1, &[i; 40]).unwrap(); // 5 × 48 B = 240 of 244, nearly full
         }
         let (h0, g0) = active(&ram, CAP).unwrap().unwrap();
         let mut pending = flip_start(&ram, CAP).unwrap();
         assert!(flip_step(&mut ram, CAP, pending.as_mut().unwrap(), 1).unwrap()); // barely begun
         // This append cannot fit the source half: set_bytes_with must FINISH the pending flip
-        // (not start a synchronous one from scratch) and then succeed — never failing where
+        // (not start a synchronous one from scratch) and then succeed, never failing where
         // plain set_bytes would have succeeded.
         set_bytes_with(&mut ram, CAP, 2, &[5u8; 100], &mut pending).unwrap();
         assert!(pending.is_none(), "the pending flip must be consumed");
@@ -1639,7 +1696,7 @@ mod tests {
         // Fill the half so the tombstone append itself must flip; the key must end up absent.
         let mut ram = Ram::new(CAP as usize);
         for i in 0..5u8 {
-            set(&mut ram, 1, &[i; 40]).unwrap(); // ~240 of 244 B — nearly full
+            set(&mut ram, 1, &[i; 40]).unwrap(); // ~240 of 244 B, nearly full
         }
         let (_, g0) = active(&ram, CAP).unwrap().unwrap();
         del(&mut ram, 1).unwrap(); // no room for the 8-B tombstone → flips, then tombstones
@@ -1673,5 +1730,159 @@ mod tests {
         compact(&mut ram, CAP).unwrap();
         assert_eq!(get_vec(&ram, 1), None);
         assert_eq!(live_bytes(&ram, CAP).unwrap(), KV_HEADER as u32 + 4);
+    }
+
+    // --- factory reset (wipe) -------------------------------------------------------------------
+
+    /// A [`Ram`] that loses power at write call `cut` (0-based): that call lands only its first
+    /// `torn` bytes and fails, and every later call fails without programming anything; the
+    /// device is dead until the "reboot" (the test reads the surviving buffer back).
+    struct CutRam {
+        ram: Ram,
+        calls: usize,
+        cut: usize,
+        torn: usize,
+    }
+    impl Eeprom for CutRam {
+        type Error = ();
+        fn read(&self, off: u32, buf: &mut [u8]) -> Result<(), ()> {
+            self.ram.read(off, buf)
+        }
+        fn write(&mut self, off: u32, data: &[u8]) -> Result<(), ()> {
+            let n = self.calls;
+            self.calls += 1;
+            if n < self.cut {
+                self.ram.write(off, data)
+            } else {
+                if n == self.cut {
+                    self.ram.torn_write(off, data, self.torn);
+                }
+                Err(())
+            }
+        }
+    }
+
+    /// Fixture keys after the store was wiped: all absent, whatever was written before.
+    fn assert_fixture_gone(ram: &Ram) {
+        for k in [1, 2, 3] {
+            assert_eq!(get_vec(ram, k), None, "wiped key {k} resurrected");
+        }
+    }
+
+    #[test]
+    fn wipe_empties_scrubs_and_keeps_the_generation() {
+        let mut ram = flip_fixture(); // dead half dirty, both superblocks valid
+        let (h0, g0) = active(&ram, CAP).unwrap().unwrap();
+        wipe(&mut ram, CAP).unwrap();
+        let (h1, g1) = active(&ram, CAP).unwrap().unwrap();
+        assert_ne!(h0, h1, "the wipe is a flip");
+        assert_eq!(g1, g0 + 1, "the wear gauge keeps counting (no reset to 0)");
+        assert_fixture_gone(&ram);
+        assert_eq!(live_bytes(&ram, CAP).unwrap(), 0);
+        assert_eq!(free_bytes(&ram, CAP).unwrap(), half_len(CAP));
+        // Both record areas are physically zero: no wiped value left readable.
+        assert!(
+            ram.buf[..2 * half_len(CAP) as usize].iter().all(|&b| b == 0),
+            "record areas must be scrubbed"
+        );
+        // And the store keeps working (flips included) without ever resurfacing old keys.
+        for i in 0..200u32 {
+            set(&mut ram, 9, &i.to_le_bytes()).unwrap();
+            assert_fixture_gone(&ram);
+        }
+        assert_eq!(get_vec(&ram, 9).unwrap(), 199u32.to_le_bytes());
+    }
+
+    #[test]
+    fn wipe_of_an_uninitialized_or_legacy_region() {
+        // Legacy single-region data (no superblock) that init() would otherwise adopt.
+        let mut ram = Ram::new(CAP as usize);
+        let o = ram.legacy_put(0, 1, b"legacy-one");
+        let _ = ram.legacy_put(o, 2, b"legacy-two");
+        wipe(&mut ram, CAP).unwrap();
+        assert_eq!(active(&ram, CAP).unwrap(), Some((1, 1)));
+        assert_fixture_gone(&ram);
+        // Everything except the committed superblock (slot 1) is zero.
+        let s1 = super_off(CAP, 1) as usize;
+        assert!(
+            ram.buf[..s1].iter().all(|&b| b == 0),
+            "legacy residue must be scrubbed"
+        );
+        set(&mut ram, 1, b"new").unwrap();
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"new"[..]));
+    }
+
+    /// The finding this guards against: an interrupted reset must never leave a half whose
+    /// prefix reads empty while its tail survives (new appends would then re-expose the tail).
+    /// Cut power at EVERY write call of the wipe (with the call landing none, part, or all-but-
+    /// one of its bytes), reboot, and require either the complete old store or an empty one;
+    /// then churn the rebooted store through several flips and require that no wiped key ever
+    /// reappears (and that an un-wiped store keeps every value).
+    #[test]
+    fn wipe_is_power_loss_safe_at_every_write() {
+        for preblanked in [false, true] {
+            let fixture = || {
+                let mut ram = flip_fixture();
+                if preblanked {
+                    let mut cur = BlankCursor::new();
+                    while blank_dead_step(&mut ram, CAP, &mut cur, 4).unwrap() {}
+                }
+                ram
+            };
+            // Probe: the number of write calls a clean wipe makes.
+            let mut probe = CutRam {
+                ram: fixture(),
+                calls: 0,
+                cut: usize::MAX,
+                torn: 0,
+            };
+            wipe(&mut probe, CAP).unwrap();
+            let total = probe.calls;
+            assert!(total > 2, "wipe must program the old half + the superblock");
+
+            let (_, g0) = active(&fixture(), CAP).unwrap().unwrap();
+            let mut saw_old = false;
+            let mut saw_empty = false;
+            for cut in 0..=total {
+                for torn in [0usize, 1, 2, 3, 6, 11] {
+                    let mut c = CutRam {
+                        ram: fixture(),
+                        calls: 0,
+                        cut,
+                        torn,
+                    };
+                    let r = wipe(&mut c, CAP);
+                    assert_eq!(r.is_ok(), cut >= total, "cut={cut} torn={torn}");
+                    let mut ram = c.ram; // ← the reboot: only what reached the EEPROM survives
+                    let wiped = match generation(&ram, CAP).unwrap() {
+                        g if g == g0 => {
+                            assert_fixture_live(&ram);
+                            saw_old = true;
+                            false
+                        }
+                        g if g == g0 + 1 => {
+                            assert_fixture_gone(&ram);
+                            saw_empty = true;
+                            true
+                        }
+                        g => panic!("unexpected generation {g} (cut={cut} torn={torn})"),
+                    };
+                    // Life goes on: churn through several flips, checking every step.
+                    for i in 0..120u32 {
+                        set(&mut ram, 9, &i.to_le_bytes()).unwrap();
+                        if wiped {
+                            assert_fixture_gone(&ram);
+                        } else {
+                            assert_fixture_live(&ram);
+                        }
+                    }
+                    assert!(
+                        generation(&ram, CAP).unwrap() > g0 + 1,
+                        "churn must have flipped (cut={cut} torn={torn})"
+                    );
+                }
+            }
+            assert!(saw_old && saw_empty, "the sweep must cover both outcomes");
+        }
     }
 }

@@ -1,8 +1,8 @@
-# HARDWARIO TOWER Firmware SDK — Hardware Test Plan
+# HARDWARIO TOWER Firmware SDK: Hardware Test Plan
 
 A **reusable**, end-to-end validation suite for the TOWER firmware SDK (STM32L083CZ +
-SPIRIT1). It covers every subsystem — drivers, console/shell, crypto, storage, the full
-radio/network stack, and spectrum-access (EU AFA / US FHSS) — with concrete
+SPIRIT1). It covers every subsystem (drivers, console/shell, crypto, storage, the full
+radio/network stack, and spectrum-access: EU AFA / US FHSS) with concrete
 **pass signals** and a catalogue of **edge cases**. Run it whole for a release gate, or pick a
 section for a focused regression. Companion guides: `docs/console.md`, `docs/radio.md`.
 Host-only unit tests: `just test`.
@@ -35,12 +35,12 @@ Host-only unit tests: `just test`.
 |---|---|
 | MCU | STM32L083CZ (Cortex-M0+), chip id `0x447` |
 | Target | `thumbv6m-none-eabi` |
-| Flash transport | Dongle: STM32 UART bootloader via `tower flash` (jolt engine, ~30 s/image). Core: **SWD via probe-rs** (J-Link) — doesn't need the FTDI, so the Core can be measured with USB unplugged. |
+| Flash transport | Dongle: STM32 UART bootloader via `tower flash` (jolt engine, ~30 s/image). Core: **SWD via probe-rs** (J-Link), which doesn't need the FTDI, so the Core can be measured with USB unplugged. |
 | Console | USART1 PA9/PA10, 115200 8N1, COBS+CRC32+postcard framed (`tower-protocol`) |
 | Radio | SPIRIT1 / SPSGRF, SPI1 PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 |
 | Reset/boot | NRST/BOOT0 on FTDI **aux** lines (not DTR/RTS) → opening a port does **not** reset |
 
-**The bench (re-confirm every session — names re-enumerate):**
+**The bench (re-confirm every session; names re-enumerate):**
 
 | Port | Board | Instruments | Role |
 |---|---|---|---|
@@ -49,10 +49,10 @@ Host-only unit tests: `just test`.
 
 Confirm ports with `tower devices`; the automated harness lives in its own repo,
 [tower-hil](https://github.com/hardwario/tower-hil) (run `just hil` / `just hil-power` /
-`just hil-full` there — it builds images from this checkout, default `../firmware`). It reads
+`just hil-full` there; it builds images from this checkout, default `../firmware`). It reads
 this roster from its `hil.toml` and re-resolves it at startup, failing fast if a board is absent. Confirm I2C population by flashing `i2cscan`: with
-no sensor module attached, **`thermometer` and `accelerometer` report a sensor-absent error** —
-expected on a bare Core, not a fault. A sensor module additionally shows `0x49` (TMP112) and `0x19`
+no sensor module attached, **`thermometer` and `accelerometer` report a sensor-absent error**
+(expected on a bare Core, not a fault). A sensor module additionally shows `0x49` (TMP112) and `0x19`
 (LIS2DH12).
 
 Default radio role assignment for two-board tests:
@@ -61,7 +61,7 @@ Default radio role assignment for two-board tests:
 - **GATEWAY / receiver / peer-b** → `/dev/cu.usbserial-2140` (Radio Dongle)
 
 > **Power measurements need the FTDI UNPLUGGED from the Core.** USB/VBUS present keeps the SDK's
-> console alive, which inhibits STOP by design — so a plugged-in board never reaches the µA floor.
+> console alive, which inhibits STOP by design, so a plugged-in board never reaches the µA floor.
 > The PPK2 supplies the Core at **1.8 V** (the regulator/brown-out knee, not 3 V) after a
 > power-cycle (clears the ~200 µA debug-domain residual a probe leaves); readings are never sampled
 > mid-SWD-flash (the PPK2 CDC can desync and report tens of mA of garbage). tower-hil's
@@ -79,7 +79,7 @@ Two facts shape every observation:
 
 Therefore use **two capture modes**:
 
-### Mode A — `tower logs` (decoded, pretty) — for *continuous* output
+### Mode A: `tower logs` (decoded, pretty) for *continuous* output
 For examples that keep printing (radio links, net, `console_demo`, `events_demo`, `net_persist`,
 reference apps). Attach after flashing; you'll catch the steady-state stream.
 
@@ -87,11 +87,11 @@ reference apps). Attach after flashing; you'll catch the steady-state stream.
 python3 tools/hwtest/cap.py <seconds> tower -d <PORT> logs --no-colors
 ```
 
-### Mode B — `jolt monitor --reset` (raw bytes) + `strings` — for *one-shot* output
+### Mode B: `jolt monitor --reset` (raw bytes) + `strings` for *one-shot* output
 `jolt monitor --reset` pulses NRST **then** reads, atomically, so it catches boot output. The
 console payload's **message text is plain ASCII and survives COBS unchanged** (COBS only rewrites
 zero bytes; ASCII has none), so `strings` recovers every log/event message verbatim. Binary
-fields (uptime, level, seq, CRC) become noise — irrelevant for verdict checking.
+fields (uptime, level, seq, CRC) become noise, irrelevant for verdict checking.
 
 ```sh
 python3 tools/hwtest/cap.py <seconds> jolt monitor --reset -d <PORT> > raw.bin
@@ -129,12 +129,12 @@ Radio examples select node/gateway/peer behaviour at **compile time** via cargo 
 (`TOWER_FEATURES=...`). Both ends must share band/channel.
 
 > **Important (verified on HW):** every two-board example gates **only on `role-node` vs
-> default** (`#[cfg(feature="role-node")]` / `#[cfg(not(...))]`). **`role-gateway` is a no-op** —
+> default** (`#[cfg(feature="role-node")]` / `#[cfg(not(...))]`). **`role-gateway` is a no-op**:
 > it compiles to the *default* branch. So the recipe is always: **one board built `role-node`,
 > the other built with no feature** (or `role-gateway`, equivalently). The receiver/gateway/
 > sender/host/master side **is** the default branch. `net_p2p` is the exception (`role-peer-a` /
 > `role-peer-b`); `net_star` node B adds `node-2` on top of `role-node`. Which physical role the
-> `role-node` build plays differs per example — `net_bulk`/`net_pairing` make `role-node` the
+> `role-node` build plays differs per example: `net_bulk`/`net_pairing` make `role-node` the
 > *active* side (requester/joiner), most others make it the sender.
 >
 > **Flash sequentially, not concurrently.** Flashing two FTDIs at once over one USB bus is
@@ -148,7 +148,7 @@ Radio examples select node/gateway/peer behaviour at **compile time** via cargo 
 
 | Example | NODE/sender/A feature | GW/receiver/B feature | Boards |
 |---|---|---|---|
-| radio_id, radio_state, radio_regdump | — | — | 1 |
+| radio_id, radio_state, radio_regdump | none | none | 1 |
 | radio_cw | `role-node` (TX CW) | *(default)* RX/RSSI | 2 |
 | radio_linkdiag | `role-node` (TX) | *(default)* RX | 2 |
 | radio_beacon | `role-node` (TX) | *(default)* RX | 2 |
@@ -160,7 +160,7 @@ Radio examples select node/gateway/peer behaviour at **compile time** via cargo 
 | net_bulk / net_bulk_stress | `role-node` (requester) | *(default)* sender/server | 2 |
 | net_bulk_stream | `role-node` | *(default)* | 2 |
 | net_pairing | `role-node` (joiner) | *(default)* host | 2 |
-| net_star | `role-node` (A) / `role-node,node-2` (B) | *(default)* hub | 2–3 |
+| net_star | `role-node` (A) / `role-node,node-2` (B) | *(default)* hub | 2-3 |
 | net_p2p | `role-peer-a` | `role-peer-b` | 2 |
 | radio_band | `role-node` | `role-gateway` | 2 |
 | radio_afa | `role-node` (LBT+agility node) | *(default)* scanner/gateway | 2 |
@@ -180,12 +180,13 @@ KAT/single-board radio examples that need **no** feature and **no** peer: `net_p
 Legend for **Pass**: the exact substring to grep in the capture. `*` = mode (A=tower logs,
 B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 
-### A. Host-side unit tests (`just test`) — mode H
+### A. Host-side unit tests (`just test`; mode H)
 | ID | What | Pass |
 |---|---|---|
 | H1 | `tower-kv` codec (12 tests: append/latest-wins, torn-append, torn-flip, torn-superblock fail-closed, compaction, full, migrate legacy/fresh, key-zero reserved) | `test result: ok. 12 passed` |
-| H2 | `tower-radio-core` (11 tests: duty token-bucket math + FHSS hop permutation) | `test result: ok. 11 passed` |
-| H3 | `tower-net-core` (61 tests: replay rule, TX-counter watermark/fail-closed nonce safety, ACK resolution, FHSS beacon-epoch acceptance, pairing confirm freshness, CCM nonce layout/uniqueness) | `test result: ok. 61 passed` |
+| H2 | `tower-radio-core` (12 tests: duty token-bucket math + FHSS hop permutation + CCM RFC 3610 / key-check-value KAT) | `test result: ok. 12 passed` |
+| H3 | `tower-net-core` (90 tests: replay rule + re-ACK cap, KCV-checked addr-keyed lane binding, TX-counter watermark/fail-closed nonce safety + the single `alloc` allocator (cancellation, persist failure, ceiling), ACK resolution, FHSS beacon-epoch acceptance, pairing admission/confirm rules, reserved-address rules, CCM nonce layout/uniqueness) | `test result: ok. 90 passed` |
+| H4 | `tower-gw-core` (23 tests: registry codec/capacity, insert-only `add_new` for OTA commits, downlink queue) | `test result: ok. 23 passed` |
 
 ### B. Board bring-up & peripheral drivers
 | ID | Example | Mode | Pass / observable | Edge cases |
@@ -193,7 +194,7 @@ B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 | B1 | i2cscan | B | `scan complete - N device(s)`; lists `0x64` (+`0x49`,`0x19` if sensor board) | wrong/missing pull-ups → 0 devices; TMP112 in shutdown still ACKs |
 | B2 | blinky | X (visual) | boot banner; LED heartbeat (40 ms on / 1960 off) + double-blink every 5 s preempts it | queue depth 8 overflow drops oldest; zero-duration step must not hang; `set_background(None)` idempotent |
 | B3 | button | X | `press/release/click/hold` lines + LED flash on each | click ≤500 ms vs hold ≥1 s boundary; debounce 20 ms; button held at boot; rapid double-tap; bounce on release |
-| B4 | thermometer | B | on sensor board: `NN.NN deg. C` every 2 s; **on these bare boards: `read failed` (NACK) — expected** | negative temps sign-extend; wrong strap → persistent NACK; I2C lockup |
+| B4 | thermometer | B | on sensor board: `NN.NN deg. C` every 2 s; **on these bare boards: `read failed` (NACK), expected** | negative temps sign-extend; wrong strap → persistent NACK; I2C lockup |
 | B5 | accelerometer | X+B | on sensor board: `dice: 1..6` per orientation, `tilt!` on shake (rate-limited 500 ms); **bare boards: WHO_AM_I/absent error** | all 6 faces (opposite faces sum to 7); 45° tilt → no face; sensitivity Ultra vs Low; min_interval throttle |
 | B6 | strip | X (visual) | boot banner; scrolling rainbow on WS2812 (needs a strip on PA1) | brightness 0/100/gamma; RGB vs RGBW; zero-length; len>buffer panics; DMA1_CH3 contention |
 | B7 | storage | B then reset+B | boot 1: `settings initialized to defaults`, `boot #1`; after reset `boot #2`, `#3`… (counter persists) | missing key→default; bad CRC→default; wrong-type read→None; compaction when full; power-loss mid-write keeps prior value |
@@ -202,12 +203,12 @@ B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 | ID | Example | Mode | Pass / observable | Edge cases |
 |---|---|---|---|---|
 | C1 | console_demo | A | logs at ERROR/WARN/INFO/DEBUG/TRACE + `println!`; long line truncated at 192 B on a char boundary; `Dropped{count}` marker after a burst overflows the depth-8 TX queue | UTF-8 (`°C`) not split at truncation; seq increments (check with `tower monitor`); drop-newest policy |
-| C2 | console_panic | B | countdown `alive — deliberate panic in Ns`, then one ERROR frame `panicked at … console_panic.rs:LINE` emitted by the PAC-level panic handler, then a RESET: boot banner + `crash` ERROR frame re-reporting the panic from the breadcrumb (`/system/crash print` agrees) | panic frame leads with `0x00` to flush a partial frame; if console not up, the breadcrumb still records (verify via the post-reset report); message clipped to 192 B; crash-loops by design → bootguard backoff after 8 |
+| C2 | console_panic | B | countdown `alive, deliberate panic in Ns`, then one ERROR frame `panicked at … console_panic.rs:LINE` emitted by the PAC-level panic handler, then a RESET: boot banner + `crash` ERROR frame re-reporting the panic from the breadcrumb (`/system/crash print` agrees) | panic frame leads with `0x00` to flush a partial frame; if console not up, the breadcrumb still records (verify via the post-reset report); message clipped to 192 B; crash-loops by design → bootguard backoff after 8 |
 | C3 | events_demo | A (`tower events`) | `EVENT measurement count=… temp_c=… unit=cdeg` each second + periodic `heartbeat`; interleaves with logs in `tower logs` | field cap 6; value/name length clip on char boundary; events apply backpressure (never dropped) |
 | C4 | shell_demo | S | `tower exec` of `/system/resource print`, `/system/settings print`; set/get all 5 kinds (Str/Uint/Int/Bool/Enum); app cmds merged under `/system`; nested `/radio …`; `/export` | out-of-range rejected (`R_BAD_ARG`); unknown cmd (`R_NOT_FOUND`); TAB ambiguous vs unique (`tower complete`); enum/bool value completion; **persistence across reset**; chunked `resource print` (>192 B → multi-frame) |
 | C5 | console_full | X (TUI) / S | `tower console` shows 3 live panes (Events / Interactive Shell / Logs); or drive shell via `tower exec` | pane focus/zoom/pause; rapid updates no flicker |
 
-### D. Crypto & frame KATs (single board, no peer) — mode B
+### D. Crypto & frame KATs (single board, no peer; mode B)
 | ID | Example | Pass | Vector / edge |
 |---|---|---|---|
 | D1 | crypto_aes_kat | `AES-128 ECB FIPS-197 vector: MATCH ***`; `got` == `69c4e0d8…c55a` | FIPS-197 App. B; mismatch ⇒ key/word/byte order or AES clock |
@@ -218,10 +219,10 @@ B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 ### E. Storage / counter persistence
 | ID | Example | Mode | Pass | Edge |
 |---|---|---|---|---|
-| E1 | storage | B×2 | see B7 — boot counter increments across resets | — |
+| E1 | storage | B×2 | see B7: boot counter increments across resets | none |
 | E2 | net_persist | B×2 | boot 1 `resumed tx_counter=1 reserve_watermark=1025`; advance to ~1025; **after reset**: `resumed tx_counter≥1025 reserve_watermark=2049` (never reuses) | counter must not start at 0 or go backward; watermark jumps by RESERVE=1024 |
 
-### F. Radio bring-up (single board) — mode B
+### F. Radio bring-up (single board; mode B)
 | ID | Example | Pass | Edge |
 |---|---|---|---|
 | F1 | radio_id | `partnum=0x01 version=0x30 … SPIRIT1 verified` | all-0x00/0xFF ⇒ SPI/CS/SDN wiring |
@@ -230,38 +231,38 @@ B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 | F4 | edge_recovery | `edge_recovery: ALL PASS *** (state machine never wedged)` (10/10 RX-timeouts→READY, FIFO flush 0/0, RX→READY cycle, device ID ok) | SABORT path; flush; chip responsive after abuse |
 | F5 | fhss_sweep | `F1 PASS *** all FHSS channels lock`; reports `max retune+lock` + recommended GUARD | band edges 903/926.7 MHz lock; lock-time spread |
 
-### G. Radio RF link (two boards) — mode A both ends
+### G. Radio RF link (two boards; mode A both ends)
 | ID | Example | Pass (node / gateway) | Edge |
 |---|---|---|---|
 | G1 | radio_cw | TX: `CW ON: state=0x5F`; RX RSSI jumps floor (~−110) → carrier (~−40 dBm) | RSSI stuck at floor ⇒ no emission; `error_lock=true` ⇒ synth |
 | G2 | radio_linkdiag | TX: `fifo_loaded=16 … states=03→4F→5F→03 … tx_sent=true fifo_after=0` | FIFO load/drain; IRQ path; state trace |
 | G3 | radio_beacon | TX `tx seq=N ok`; RX `rx len=16 seq=N rssi=… pqi=… sqi=… afc=…`; gap-free seq | data-rate/deviation/filter; gaps = loss; large AFC = drift |
-| G4 | radio_csma | jammer `carrier ON/OFF`; sender `Busy — CCA backed off` during jam, `ok (channel clear)` after | never goes Busy ⇒ CCA broken; backoff jitter 0–100 ms |
+| G4 | radio_csma | jammer `carrier ON/OFF`; sender `Busy: CCA backed off` during jam, `ok (channel clear)` after | never goes Busy ⇒ CCA broken; backoff jitter 0-100 ms |
 | G5 | radio_sleep | node `→ SLEEP/SHUTDOWN`, `woke … in N µs`; GW monotonic `rx seq` re-links after each | SLEEP wake ≪ SHUTDOWN wake; never wakes ⇒ SDN/RCO |
 
-### H. Network layer (two boards) — mode A both ends
+### H. Network layer (two boards; mode A both ends)
 | ID | Example | Pass | Edge |
 |---|---|---|---|
-| H4 | net_secure_ping | RX `AUTH OK: src=… cnt=… "ping NNN"`; forged ⇒ `CCM auth FAIL — dropped` | nonce uniqueness; key mismatch |
+| H4 | net_secure_ping | RX `AUTH OK: src=… cnt=… "ping NNN"`; forged ⇒ `CCM auth FAIL (dropped)` | nonce uniqueness; key mismatch |
 | H5 | net_confirmed | node `seq=N Delivered (ms)`; GW `…(ACKed, per-node key)`; retransmit doesn't double-deliver | NotDelivered storms ⇒ ACK path; replay (cnt≤last_seen) dropped |
 | H6 | net_channel | same as H5 but on **ch2** (868.5 MHz); both ends must set CHANNEL=2 | per-channel VCO lock |
 | H7 | radio_gateway+radio_node | node `seq=N Delivered … vbat=… temp=…`; GW decodes telemetry | marginal link ⇒ high NotDelivered |
 
-### I. Bulk transfer (two boards) — mode A
+### I. Bulk transfer (two boards; mode A)
 | ID | Example | Pass | Edge |
 |---|---|---|---|
 | I1 | net_bulk | requester `fetched 200 bytes (… chunks), verify OK ***` | chunk order; nonce per chunk; 30 s session timeout |
 | I2 | net_bulk_stream | `… B in … chunks, … ms, … bps, PASS ***` cycling 4/16/32/64 KB (US915, fast) | constant RAM across sizes (streaming); 64 KB exceeds old monolithic ceiling |
 | I3 | net_bulk_stress | `fetched 4096 bytes (64 chunks), verify OK ***`; later `DutyLimited` as EU bucket drains | duty enforcement on bulk; CRC-32 |
 
-### J. Pairing & topologies (two boards) — mode A
+### J. Pairing & topologies (two boards; mode A)
 | ID | Example | Pass | Edge |
 |---|---|---|---|
-| J1 | net_pairing | host `PAIRED *** node id=… key[..4]=…`; joiner `JOINED *** … (expect …)` matching key | joiner picks own ID; PAIRING_KEY public (sniffable — by design); 60 s window |
+| J1 | net_pairing | host `PAIRED *** node id=… key[..4]=…`; joiner `JOINED *** … (expect …)` matching key | joiner picks own ID; PAIRING_KEY public (sniffable, by design); 60 s window |
 | J2 | net_star | GW `2 peers registered`; `rx node A … "hello_a"`, `rx node B … "hello_b"` each under its own key | per-peer key + replay lane; B undecodable under A's key |
 | J3 | net_p2p | both `PING/PONG … Delivered`; bidirectional | shared LINK_KEY; RX-window timing |
 
-### K. Spectrum access — band / AFA / FHSS
+### K. Spectrum access: band / AFA / FHSS
 | ID | Example | Mode | Pass | Regulatory |
 |---|---|---|---|---|
 | K1 | net_duty_kat | B | `duty governor KAT: ALL PASS ***` (ToA 30B=18 ms/96B=45 ms; bucket consume/refill/cap) | EN 300 220 1 %/h token bucket |
@@ -271,11 +272,11 @@ B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
 | K5 | radio_afa | A (2 brd) | node `seq=N ch=X Delivered`; channel varies under contention; GW follows | EN 300 220 LBT+AFA, CCA −90 dBm |
 | K6 | radio_fhss | A (2 brd) | master `beaconing slot=… ch=…`; node `LOCKED` then `tx seq=N ch=… Delivered`; re-sync after master restart | 80-ch, 300 ms slot, 24 s cycle |
 
-### L. Stress / recovery / soak (two boards) — mode A
+### L. Stress / recovery / soak (two boards; mode A)
 | ID | Example | Pass | Edge |
 |---|---|---|---|
-| L1 | edge_rapid | node `sent N (delivered=N other=0)`; GW `violations=0 (monotonic OK)` — never `ORDER VIOLATION` | back-to-back confirms; strict-monotonic accept; no double-accept |
-| L2 | radio_interop | GW `VERDICT: PASS`; node logs `seed=…` (replayable); invariants: CRC, order, duty, confirm-resolution, oversize-rejected | run long (minutes–hours); `LATCHED FAIL` lights LED solid |
+| L1 | edge_rapid | node `sent N (delivered=N other=0)`; GW `violations=0 (monotonic OK)`, never `ORDER VIOLATION` | back-to-back confirms; strict-monotonic accept; no double-accept |
+| L2 | radio_interop | GW `VERDICT: PASS`; node logs `seed=…` (replayable); invariants: CRC, order, duty, confirm-resolution, oversize-rejected | run long (minutes to hours); `LATCHED FAIL` lights LED solid |
 
 ---
 
@@ -285,8 +286,12 @@ These are higher-value "be creative" cases to fold into runs as time allows. Man
 tweak or fault injection (note them as separate experiments, don't leave the tree dirty):
 
 **Security / crypto**
-- Replay: re-send a captured frame (cnt ≤ last_seen) → dropped; forged high counter → CCM-rejected *before* it can poison last_seen.
+- Replay: re-send a captured frame (cnt ≤ last_seen) → dropped (logged `net: replay dropped: …` for a registered peer, ≤ 1 line / 10 s); forged high counter → CCM-rejected *before* it can poison last_seen.
+- Re-ACK cap: re-send a peer's *last* confirmed frame N times → at most 9 ACKs come back (sniff with a third board / `radio_beacon` RX), then silence until the peer's next fresh frame.
+- Registered-only gateway: a frame sealed under the gateway's `NetConfig::key` from an unregistered (e.g. just-removed) address → no ACK, no `Uplink` on the host.
 - Counter saturation: near 2³²−1 the link fails closed (no nonce reuse / wrap).
+- Lost watermark with peer-lane records present → boot `NonceLocked` (TX refused), receive still works (needs a KV fault injection: delete `NS_NET` local 0x00, keep a lane record).
+- Lane restore across key change: register a peer, exchange > 32 frames (lane persisted), remove, re-add under a **new** key, factory-reset the peer (counter restarts at 1) → its frames are accepted (fresh lane), not dropped as replays; re-add under the **same** key instead → lane resumes (old captures stay dead).
 
 **Framing / console**
 - Oversized log (>192 B) and oversized shell response (>256 B) clip on a char boundary, never mid-UTF-8.
@@ -307,7 +312,8 @@ tweak or fault injection (note them as separate experiments, don't leave the tre
 - Channel boundaries: ch0/1/2 (EU), all 80 FHSS channels incl. edges.
 - Duty exhaustion on EU: repeated bulk pulls → `DutyLimited`, refill over time.
 - Sleep/shutdown re-link: wake latency SLEEP ≪ SHUTDOWN; both re-establish the link.
-- Pairing window expiry with no joiner; joiner-ID collision (later add_peer overwrites).
+- Pairing window expiry with no joiner; a JOIN_REQ for an already-registered / reserved / host-own address → no JOIN_RESP (host logs `pairing: JOIN_REQ for … refused`); two joiners in one window → each adopts only the JOIN_RESP addressed to it.
+- RX deadline straddle: a frame whose sync lands just before an `rx()` deadline completes (deadline extended once, ≤ ~55 ms) instead of being SABORTed; gateway `RadioStat::Channel` keeps flowing from idle recv-slice timeouts without the old 20 ms `rssi_sample` deaf window.
 
 **Power / low-power**
 - USB present → console UART up, so the enabled USART holds embassy's STOP refcount → STOP inhibited (plain Sleep/WFI); console + EXTI live.

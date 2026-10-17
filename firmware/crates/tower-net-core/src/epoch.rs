@@ -1,8 +1,8 @@
 //! FHSS beacon-epoch acceptance machine (moved from `src/radio/net/fhss.rs`; FCC §15.247
-//! hopping — the sync-security half).
+//! hopping, the sync-security half).
 //!
-//! CCM auth proves a beacon is genuine but NOT fresh — a captured beacon replayed later still
-//! authenticates — so freshness is enforced here: the monotonic gateway **epoch** (boot-id,
+//! CCM auth proves a beacon is genuine but NOT fresh (a captured beacon replayed later still
+//! authenticates), so freshness is enforced here: the monotonic gateway **epoch** (boot-id,
 //! reject-backwards), the **two-beacon consistency guard** during acquisition, and the
 //! **prediction-slack** check while tracking. The [`EpochGate`] is the pure decision machine;
 //! the firmware keeps the radio, the slot clock (`Instant` anchor) and the EEPROM epoch
@@ -13,12 +13,12 @@
 /// gateway once per cycle, so two successive beacons are ~`FHSS_N` slots (one 24 s cycle) apart;
 /// their `slot_abs` advance must match the elapsed wall-time (± this slack). A *replayed* capture
 /// carries a FIXED `slot_abs`, so a second copy fails this check (its slot didn't advance while
-/// time did) and the anchor is never committed — the two-beacon consistency guard.
+/// time did) and the anchor is never committed: the two-beacon consistency guard.
 pub const ACQUIRE_SLOT_SLACK: u32 = 3;
 
 /// Slots of slack allowed between a beacon's slot index and the node's prediction before that
 /// beacon is trusted to re-anchor the clock (while Synced). Real beacons land on the predicted
-/// slot — drift across [`REACQUIRE_LIMIT`] is ≪ one slot — so this is tight; a beacon far off
+/// slot (drift across [`REACQUIRE_LIMIT`] is ≪ one slot), so this is tight; a beacon far off
 /// prediction (e.g. a stale *replayed* capture) is ignored as a miss rather than yanking the
 /// clock. A genuinely restarted gateway (epoch reset to ~0) is still recovered the normal way:
 /// misses accrue → rescan → a fresh acquisition (no anchor held) accepts any beacon.
@@ -28,13 +28,13 @@ pub const FHSS_RESYNC_SLACK: u32 = 2;
 /// (keeping its clock anchor) before giving up and re-scanning from the rendezvous
 /// channel. The anchor's drift over this span (24·300 ms·100 ppm ≈ 720 µs) stays far
 /// inside the beacon RX window, so the prediction is still correct and a fade up to
-/// ~24·300 ms ≈ 7 s re-locks within one slot once RF returns — *without* a sync loss
+/// ~24·300 ms ≈ 7 s re-locks within one slot once RF returns, *without* a sync loss
 /// or a ~1-cycle rendezvous. A genuinely dead/restarted gateway is detected in ~7 s,
 /// then recovered via the rendezvous channel.
 pub const REACQUIRE_LIMIT: u32 = 24;
 
 /// Master epoch bump rule: the next session's epoch is the stored one + 1 (starting from 1 on a
-/// virgin store), saturating — strictly newer than any previous session's, so nodes reject the
+/// virgin store), saturating, strictly newer than any previous session's, so nodes reject the
 /// older sessions' beacons as replays.
 #[must_use]
 pub fn next_master_epoch(stored: Option<u32>) -> u32 {
@@ -46,7 +46,7 @@ pub fn next_master_epoch(stored: Option<u32>) -> u32 {
 pub enum TrackVerdict {
     /// Genuine and on-prediction: re-anchor the clock to it (→ Synced, misses reset).
     ReAnchor,
-    /// From an older session (replay) or off-prediction — do NOT touch the clock; the caller
+    /// From an older session (replay) or off-prediction: do NOT touch the clock; the caller
     /// treats the slot as a miss ([`EpochGate::beacon_missed`]).
     Ignore,
 }
@@ -56,20 +56,20 @@ pub enum TrackVerdict {
 pub enum MissVerdict {
     /// Ride through on the kept anchor (drift ≪ the RX window for many slots).
     KeepPredicting,
-    /// The anchor is too stale to trust ([`REACQUIRE_LIMIT`] consecutive misses) — drop it and
+    /// The anchor is too stale to trust ([`REACQUIRE_LIMIT`] consecutive misses); drop it and
     /// fall back to scanning the rendezvous channel.
     Rescan,
 }
 
-/// Verdict on a beacon received while scanning (no anchor held — acquisition).
+/// Verdict on a beacon received while scanning (acquisition, no anchor held).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanVerdict {
-    /// From an older gateway session (epoch below the highest we've locked to) — a replay;
+    /// From an older gateway session (epoch below the highest we've locked to): a replay;
     /// ignored entirely, not even held as a candidate.
     Reject,
     /// Keep scanning for a time-consistent successor. `replaced` = this beacon became the held
     /// candidate (first beacon, or it advanced past the one held), so the caller re-stamps its
-    /// candidate-arrival clock; `false` = the held candidate stands (this beacon was behind it —
+    /// candidate-arrival clock; `false` = the held candidate stands (this beacon was behind it,
     /// e.g. a replayed capture), so the clock must NOT move or a periodic replay would reset the
     /// elapsed-time reference and deny acquisition indefinitely.
     Hold { replaced: bool },
@@ -129,7 +129,7 @@ impl EpochGate {
 
     /// Offer a beacon received while tracking (anchor held), against the node's
     /// `predicted_slot`. Re-anchor only to a beacon that is (a) not from an older gateway
-    /// session — a replay carrying `epoch < self.epoch` is ignored — and (b) consistent with
+    /// session (a replay carrying `epoch < self.epoch` is ignored) and (b) consistent with
     /// our prediction: a stale replayed capture is far behind the predicted slot and falls to
     /// the miss path, so it can't yank our clock. A real beacon lands on the predicted slot
     /// (± a slot of timing slack, [`FHSS_RESYNC_SLACK`]). A genuinely restarted gateway carries
@@ -164,12 +164,12 @@ impl EpochGate {
     ///
     /// Two-beacon consistency: commit an anchor only once a SECOND beacon of the SAME epoch
     /// advances its slot in step with the real time elapsed since the first. A replayed capture
-    /// repeats one fixed `slot_abs`, so a second copy's slot didn't advance while wall-time did
-    /// — the check fails and no anchor is committed. A real gateway's successive rendezvous
+    /// repeats one fixed `slot_abs`, so a second copy's slot didn't advance while wall-time did;
+    /// the check fails and no anchor is committed. A real gateway's successive rendezvous
     /// beacons advance one cycle (`FHSS_N` slots) per ~24 s, matching the elapsed time.
     pub fn offer_scanning(&mut self, epoch: u32, slot_abs: u32, elapsed_slots: Option<u32>) -> ScanVerdict {
         // A beacon from an older gateway session (epoch below the highest we've locked to) is a
-        // replay — ignore it entirely, don't even hold it as a candidate.
+        // replay; ignore it entirely, don't even hold it as a candidate.
         if epoch < self.epoch {
             return ScanVerdict::Reject;
         }
@@ -187,7 +187,7 @@ impl EpochGate {
         } else {
             // Hold this beacon as the candidate ONLY if it advances past the one we already hold.
             // A replayed capture repeats one fixed (older) slot_abs; if it could evict the genuine
-            // candidate, one replay every few slots would deny acquisition forever — the genuine
+            // candidate, one replay every few slots would deny acquisition forever: the genuine
             // successor never finds its predecessor still held (a keyless, cheaper-than-jamming
             // DoS). A newer epoch, or a higher slot within the same epoch, legitimately wins.
             let replaced = match self.candidate {
@@ -210,7 +210,7 @@ mod tests {
     /// tests exercise realistic one-cycle slot advances without importing the firmware crate.
     const FHSS_N: u32 = 80;
 
-    /// `true` if a verdict is a Hold (of either `replaced` flavour) — for the many asserts that
+    /// `true` if a verdict is a Hold (of either `replaced` flavour), for the many asserts that
     /// only care that acquisition hasn't locked/rejected yet, not which beacon is the candidate.
     fn held(v: ScanVerdict) -> bool {
         matches!(v, ScanVerdict::Hold { .. })
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(g.epoch(), 5);
     }
 
-    /// A single beacon NEVER locks — whatever its epoch or slot. The two-beacon guard means a
+    /// A single beacon NEVER locks, whatever its epoch or slot. The two-beacon guard means a
     /// single replayed capture can't anchor the node.
     #[test]
     fn single_beacon_never_locks() {
@@ -261,10 +261,10 @@ mod tests {
     }
 
     /// A replayed capture repeats one fixed slot_abs: however often it is replayed, and whatever
-    /// real time elapses between copies, the slot never advances (`slot_abs > s0` fails) — the
+    /// real time elapses between copies, the slot never advances (`slot_abs > s0` fails); the
     /// anchor is never committed. Crucially each replay returns `replaced: false`, so it does NOT
-    /// evict the genuine held candidate — the #5 DoS fix. (Before it, a periodic replay reset the
-    /// candidate — and the caller's elapsed-time clock — every time, denying acquisition forever.)
+    /// evict the genuine held candidate: the #5 DoS fix. (Before it, a periodic replay reset the
+    /// candidate, and the caller's elapsed-time clock, every time, denying acquisition forever.)
     #[test]
     fn replayed_fixed_capture_never_anchors() {
         let mut g = EpochGate::new();
@@ -283,7 +283,7 @@ mod tests {
 
     /// The #5 regression, end to end: a genuine first beacon is held, then a periodic replay of
     /// an OLDER capture is interleaved with the genuine successor. The replay must not displace
-    /// the held candidate, so the successor still finds it and LOCKS — acquisition is not denied.
+    /// the held candidate, so the successor still finds it and LOCKS; acquisition is not denied.
     #[test]
     fn replay_does_not_deny_acquisition() {
         let mut g = EpochGate::new();
@@ -306,7 +306,7 @@ mod tests {
     }
 
     /// A replayed *older-session* beacon (epoch below the highest locked-to) is rejected in the
-    /// scanning state — not even held as a candidate that could displace a genuine one.
+    /// scanning state, not even held as a candidate that could displace a genuine one.
     #[test]
     fn scanning_rejects_older_epoch_entirely() {
         let mut g = locked_gate(5, 1000);
@@ -328,8 +328,8 @@ mod tests {
     }
 
     /// Equal-epoch beacons must advance the slot in step with elapsed time, within
-    /// ACQUIRE_SLOT_SLACK — the exact boundary: |slot_adv − time_adv| == SLACK locks,
-    /// SLACK + 1 holds.
+    /// ACQUIRE_SLOT_SLACK (the exact boundary: |slot_adv − time_adv| == SLACK locks,
+    /// SLACK + 1 holds).
     #[test]
     fn acquire_slot_slack_exact_boundary() {
         for (delta, locks) in [
@@ -384,7 +384,7 @@ mod tests {
     }
 
     /// An inconsistent pair replaces the candidate with the newest beacon (the guard restarts
-    /// from it) — a following beacon consistent with the NEW candidate locks.
+    /// from it); a following beacon consistent with the NEW candidate locks.
     #[test]
     fn inconsistent_pair_restarts_from_newest() {
         let mut g = EpochGate::new();
@@ -397,7 +397,7 @@ mod tests {
     }
 
     /// After a gateway restart (epoch bump), a locked-then-lost node re-locks onto the NEW
-    /// session — and from then on the old session's beacons are replays.
+    /// session, and from then on the old session's beacons are replays.
     #[test]
     fn epoch_bump_relocks_and_invalidates_old_session() {
         let mut g = locked_gate(5, 1000);
@@ -436,7 +436,7 @@ mod tests {
     }
 
     /// A replayed older-epoch beacon is ignored in the tracked state even if it happens to land
-    /// on the predicted slot — the epoch test comes first.
+    /// on the predicted slot; the epoch test comes first.
     #[test]
     fn tracked_rejects_older_epoch_on_prediction() {
         let mut g = locked_gate(5, 1000);
@@ -445,7 +445,7 @@ mod tests {
     }
 
     /// A restarted gateway (higher epoch, slot near 0) fails the prediction check while an
-    /// anchor is held — it must be recovered via misses → rescan, never by yanking the clock.
+    /// anchor is held; it must be recovered via misses → rescan, never by yanking the clock.
     #[test]
     fn tracked_ignores_restarted_gateway_off_prediction() {
         let mut g = locked_gate(5, 100_000);
@@ -453,7 +453,7 @@ mod tests {
     }
 
     /// A higher epoch ON prediction is accepted and tracked (the "track the newest epoch seen"
-    /// rule) — after it, the previous epoch's beacons are replays.
+    /// rule); after it, the previous epoch's beacons are replays.
     #[test]
     fn tracked_follows_newest_epoch() {
         let mut g = locked_gate(5, 1000);
@@ -489,7 +489,7 @@ mod tests {
     }
 
     /// An ignored beacon does not itself count a miss (the caller counts the slot once, via
-    /// beacon_missed) — pin the split so double-counting can't creep in.
+    /// beacon_missed); pin the split so double-counting can't creep in.
     #[test]
     fn ignored_beacon_does_not_count_twice() {
         let mut g = locked_gate(5, 1000);

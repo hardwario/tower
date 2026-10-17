@@ -45,7 +45,7 @@ pub enum RadioError {
     /// TX is locked because the reserve-ahead TX-counter watermark could not be
     /// durably persisted (EEPROM full/faulted). Transmitting past the last durable
     /// watermark would, after a reboot that resumes at the stale watermark, reuse a
-    /// CCM nonce — so we fail **closed** rather than risk it. Recovers on the next
+    /// CCM nonce, so we fail **closed** rather than risk it. Recovers on the next
     /// boot once the watermark persists (free EEPROM space) or after a re-key.
     NonceLocked,
 }
@@ -104,12 +104,27 @@ impl DeviceId {
 /// (mirrors the reference driver's 100 ms budget).
 const STATE_POLL_TRIES: u32 = 100;
 
+/// How long [`Spirit1::rx`] keeps listening past its deadline once a **sync word** has been
+/// detected, so a frame already on the air completes instead of being SABORTed mid-packet: the
+/// worst-case time-on-air of a full 96-byte frame (≈44.6 ms; it includes preamble + sync, so
+/// it over-covers the post-sync remainder of ≈41 ms) plus 10 ms of IRQ/SPI/executor latency.
+/// Applied at most **once** per `rx` call, so a caller's window can stretch by at most this.
+pub const SYNC_HOLD: Duration = Duration::from_millis(super::duty::frame_toa_ms(MAX_FRAME) as u64 + 10);
+
+/// Minimum time in RX before an RX-timeout's latched RSSI counts as an ambient-channel sample
+/// (the RSSI filter needs to settle after RX entry: the same 20 ms [`Spirit1::rssi_sample`]
+/// waits).
+const RSSI_SETTLE: Duration = Duration::from_millis(20);
+
 /// The SPIRIT1 transceiver: SPI transport, the SDN pin, and the nIRQ EXTI line
 /// (PA7, active-low) used to await TX/RX completion without busy-polling.
 pub struct Spirit1 {
     spi: Spirit1Spi,
     sdn: Output<'static>,
     irq: ExtiInput<'static, Async>,
+    /// Raw ambient channel RSSI latched by the most recent idle RX timeout (see
+    /// [`take_idle_rssi`](Self::take_idle_rssi)); `None` once taken.
+    idle_rssi: Option<u8>,
 }
 
 impl Spirit1 {
@@ -127,7 +142,12 @@ impl Spirit1 {
     ) -> Self {
         let spi = Spirit1Spi::new(spi, sck, mosi, miso, cs);
         let sdn = Output::new(sdn, Level::High, Speed::Low);
-        Self { spi, sdn, irq }
+        Self {
+            spi,
+            sdn,
+            irq,
+            idle_rssi: None,
+        }
     }
 
     /// Borrow the SPI transport (for layers that need raw register access, e.g.
@@ -211,7 +231,7 @@ impl Spirit1 {
                 self.spi.command(regs::CMD_SABORT)?;
             }
             _ => {
-                // Transient/unknown — a SABORT is always safe to break a deadlock.
+                // Transient/unknown: a SABORT is always safe to break a deadlock.
                 self.spi.command(regs::CMD_SABORT)?;
             }
         }
@@ -235,7 +255,7 @@ impl Spirit1 {
     /// bit survives into SLEEP. On a battery node the nIRQ pin is an STM32 EXTI wake
     /// source (PA7): a stuck-low nIRQ keeps the EXTI pending, so embassy's low-power
     /// executor wakes out of STOP immediately and busy-runs at mA instead of idling at
-    /// µA — the radio itself is asleep, but the *MCU* never STOPs (bench-measured
+    /// µA; the radio itself is asleep, but the *MCU* never STOPs (bench-measured
     /// 2026-07-11: a node locked at ~9.6 mA after its first post-STOP uplink, radio
     /// confirmed in SLEEP the whole time). Masking every IRQ and reading the
     /// read-to-clear status word forces nIRQ high before we sleep, so the pin can't
@@ -253,7 +273,7 @@ impl Spirit1 {
 
     /// Program the SLEEP/LDC wake-up timer: period ≈ `prescaler × counter / f_rco`
     /// (the RC oscillator is ~34.7 kHz). The SLEEP state needs a non-zero counter
-    /// to hold — at the reset value (counter = 0) the timer expires immediately and
+    /// to hold: at the reset value (counter = 0) the timer expires immediately and
     /// the part bounces straight back to READY.
     pub fn set_wake_timer(&mut self, prescaler: u8, counter: u8) -> Result<(), RadioError> {
         self.spi.write_reg(regs::TIMERS3_LDC_PRESCALER, prescaler)?;
@@ -339,7 +359,7 @@ impl Spirit1 {
     }
 
     /// Read the raw RSSI register (0.5 dB/step). NB: RSSI_LEVEL only latches when
-    /// the part leaves RX (SABORT / RX-timeout / sync-detect), not continuously —
+    /// the part leaves RX (SABORT / RX-timeout / sync-detect), not continuously;
     /// use [`rssi_sample`](Self::rssi_sample) for an on-demand channel reading.
     pub fn rssi_raw(&mut self) -> Result<u8, RadioError> {
         let (v, _) = self.spi.read_reg(regs::RSSI_LEVEL)?;
@@ -348,11 +368,24 @@ impl Spirit1 {
 
     /// Sample the channel RSSI on demand: enter RX, let the measurement settle,
     /// then SABORT (which latches RSSI_LEVEL) and read it. Returns the raw value.
+    ///
+    /// Note this is a ~20 ms window in which the radio is **not receiving** frames (RX entry
+    /// flushes the FIFO and the SABORT ends the window); a receiver that must not miss
+    /// traffic should prefer [`take_idle_rssi`](Self::take_idle_rssi), which costs nothing.
     pub async fn rssi_sample(&mut self) -> Result<u8, RadioError> {
         self.enter_rx().await?;
         Timer::after(Duration::from_millis(20)).await;
         self.spi.command(regs::CMD_SABORT)?;
         self.rssi_raw()
+    }
+
+    /// Take the raw ambient channel RSSI latched by the most recent **idle** [`rx`](Self::rx)
+    /// timeout, a free by-product of listening: the timeout's SABORT latches RSSI_LEVEL, and
+    /// with no sync-detected frame in flight that is the channel's ambient level. Returns `None`
+    /// if no such sample was taken since the last call (e.g. every recent `rx` ended on a frame,
+    /// or listened < 20 ms). Unlike [`rssi_sample`](Self::rssi_sample) it opens no deaf window.
+    pub fn take_idle_rssi(&mut self) -> Option<u8> {
+        self.idle_rssi.take()
     }
 
     /// Whether the calibrator flagged a lock error (MC_STATE1.ERROR_LOCK bit0).
@@ -474,6 +507,11 @@ impl Spirit1 {
     /// Receive one frame into `buf`, waiting up to `timeout` for a packet. Returns
     /// the length and signal quality. CRC failures, FIFO errors and oversize
     /// frames are reported; filtered/discarded packets re-arm RX transparently.
+    ///
+    /// A frame whose **sync word** is detected before the deadline is allowed to finish: the
+    /// deadline is extended once, by at most [`SYNC_HOLD`] (≈55 ms), instead of SABORTing the
+    /// packet mid-air. An idle timeout also latches the ambient channel RSSI for
+    /// [`take_idle_rssi`](Self::take_idle_rssi).
     pub async fn rx(
         &mut self,
         buf: &mut [u8],
@@ -482,16 +520,29 @@ impl Spirit1 {
         self.to_ready().await?;
         self.smps_for(true)?;
         self.spi.command(regs::CMD_FLUSHRXFIFO)?;
+        // VALID_SYNC is unmasked so we learn a frame is in flight (the bit is proven on this
+        // part: `radio_linkdiag` masks and reads it). Without it the deadline branch below
+        // SABORTed a frame that was half received: at the gateway's 250 ms recv slices that lost
+        // ~7-11 % of first-attempt uplinks (any frame straddling a slice boundary).
         self.set_irq_mask(
-            regs::IRQ_RX_DATA_READY | regs::IRQ_RX_DATA_DISC | regs::IRQ_CRC_ERROR | regs::IRQ_RX_FIFO_ERROR,
+            regs::IRQ_RX_DATA_READY
+                | regs::IRQ_RX_DATA_DISC
+                | regs::IRQ_CRC_ERROR
+                | regs::IRQ_RX_FIFO_ERROR
+                | regs::IRQ_VALID_SYNC,
         )?;
         let _ = self.irq_status();
         self.spi.command(regs::CMD_RX)?;
+        let mut armed_at = Instant::now();
 
         // Absolute deadline: a stream of filtered/discarded frames re-arms RX
         // (below) but must NOT keep restarting the timeout, or a busy channel
-        // would starve the caller's ACK/bulk window.
-        let deadline = Instant::now() + timeout;
+        // would starve the caller's ACK/bulk window. The one sync-hold extension is
+        // likewise single-shot (`held`), so a stream of sync words can't stretch it either.
+        let mut deadline = Instant::now() + timeout;
+        let mut held = false;
+        // A sync-detected frame is being received (its RSSI latch is the frame's, not ambient).
+        let mut in_frame = false;
         loop {
             match select(self.irq.wait_for_low(), Timer::at(deadline)).await {
                 Either::First(_) => {
@@ -515,14 +566,36 @@ impl Spirit1 {
                         let _ = self.flush_fifos();
                         let _ = self.command(regs::CMD_SABORT);
                         return Err(RadioError::FifoError);
+                    } else if s & regs::IRQ_RX_DATA_DISC == 0 && s & regs::IRQ_VALID_SYNC != 0 {
+                        // Sync detected, packet still arriving: do NOT take the re-arm branch
+                        // below; its FLUSHRXFIFO + RX strobe would kill this very frame. Keep
+                        // waiting for DATA_READY/CRC/DISC; if the frame would outlive the
+                        // deadline, extend it once so the packet can complete.
+                        in_frame = true;
+                        let hold = Instant::now() + SYNC_HOLD;
+                        if !held && hold > deadline {
+                            deadline = hold;
+                            held = true;
+                        }
                     } else {
                         // Discarded/filtered or spurious: re-arm RX and keep waiting.
                         self.spi.command(regs::CMD_FLUSHRXFIFO)?;
                         self.spi.command(regs::CMD_RX)?;
+                        armed_at = Instant::now();
+                        in_frame = false;
                     }
                 }
                 Either::Second(_) => {
                     let _ = self.command(regs::CMD_SABORT);
+                    // Leaving RX latches RSSI_LEVEL. With no frame in flight and the RSSI filter
+                    // settled, that is the ambient channel level; cache it, so a gateway can
+                    // report channel noise without the separate `rssi_sample` deaf window.
+                    if !in_frame
+                        && armed_at.elapsed() >= RSSI_SETTLE
+                        && let Ok(raw) = self.rssi_raw()
+                    {
+                        self.idle_rssi = Some(raw);
+                    }
                     return Err(RadioError::Timeout);
                 }
             }

@@ -1,4 +1,4 @@
-//! radio_cw — CW carrier bring-up, verified with two boards (no SDR needed).
+//! radio_cw: CW carrier bring-up, verified with two boards (no SDR needed).
 //!
 //! Build twice with a role feature:
 //!   TOWER_FEATURES=role-node    just flash example radio_cw   # TX: keys an unmodulated
@@ -9,7 +9,7 @@
 //!
 //! With both on the same band/channel (EU 868.1 MHz, ch0), the RX board's RSSI
 //! jumps from the noise floor (~-110 dBm) to a strong level while the TX keys CW,
-//! and drops back when it stops — proving the synthesizer, PA and frequency math
+//! and drops back when it stops, proving the synthesizer, PA and frequency math
 //! without lab instruments.
 
 #![no_std]

@@ -1,13 +1,13 @@
-//! radio_state — exercise the SPIRIT1 MC state machine and the nIRQ line.
+//! radio_state: exercise the SPIRIT1 MC state machine and the nIRQ line.
 //!
 //! Cycles READY ↔ STANDBY, logging the read-back STATE[6:0] code after each
 //! transition (READY=0x03, STANDBY=0x40). Then it routes the nIRQ to GPIO0 (PA7),
 //! enables the READY interrupt, and confirms that reaching READY pulls nIRQ low
-//! (asserted) and that reading/clearing the IRQ status releases it — proving the
+//! (asserted) and that reading/clearing the IRQ status releases it, proving the
 //! interrupt path before any RF traffic.
 //!
 //! The SLEEP state (0x36) needs the RC oscillator calibrated and the wake timer
-//! running, which is set up in Step 6 — see `radio_sleep`. STANDBY is the
+//! running, which is set up in Step 6 (see `radio_sleep`). STANDBY is the
 //! always-available config-retaining low-power state used here.
 //!
 //!   just flash example radio_state     (watch with: tower logs)

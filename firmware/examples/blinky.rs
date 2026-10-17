@@ -1,4 +1,4 @@
-//! blinky — the on-board LED ([`led`](tower::led) block).
+//! blinky: the on-board LED ([`led`](tower::led) block).
 //!
 //! A slow heartbeat with a double-blink fired every 5 s that preempts it.
 //!

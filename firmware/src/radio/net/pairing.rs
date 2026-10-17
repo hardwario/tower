@@ -2,7 +2,7 @@
 //! block over [`super::Net`].
 //!
 //! The **joiner chooses its own address** and keeps it; the host only hands out the
-//! per-node key — it does NOT assign or override the address. JOIN_REQ(addr) →
+//! per-node key; it does NOT assign or override the address. JOIN_REQ(addr) →
 //! JOIN_RESP(key ‖ challenge) → JOIN_CONFIRM(addr ‖ challenge). Both sides commit
 //! only after the confirm; a lost confirm leaves the host's window to time out (the
 //! entry is never installed) and the joiner retries within its window.
@@ -10,16 +10,23 @@
 //! The host mints a fresh per-session **challenge** in the JOIN_RESP that the joiner
 //! must echo in the JOIN_CONFIRM. This is anti-*replay* within the window (a confirm
 //! captured from a prior session carries a stale challenge and is rejected) on top of
-//! CCM integrity — it does NOT add confidentiality or mutual auth (the challenge rides
+//! CCM integrity; it does NOT add confidentiality or mutual auth (the challenge rides
 //! the public-key frames in the clear-after-decrypt payload).
+//!
+//! **OTA pairing only ever adds a NEW peer.** The host refuses (sends no JOIN_RESP to) a
+//! JOIN_REQ for an address already in its peer table, a reserved address, or its own: with a
+//! public pairing key anyone in range can JOIN_REQ *as a victim*, so answering would hand the
+//! window's key to a hijacker and re-key the victim out of the network. Re-pairing a known node
+//! therefore needs the operator to remove it first (an authenticated host-side action). The
+//! joiner, in turn, only accepts a JOIN_RESP addressed to itself.
 
 use embassy_time::{Duration, Instant, Timer};
-// The confirm freshness/acceptance rule (addr ‖ challenge echo) lives in the host-testable
-// `tower_net_core::pairing` kernel; the challenge minting (Net's PRNG), the windows and the
-// JOIN frame exchange stay here. Zero behavioural change on target.
-use tower_net_core::pairing::confirm_matches;
+// The admission rules (who may be answered / which response is ours) and the confirm
+// freshness rule (addr ‖ challenge echo) live in the host-testable `tower_net_core::pairing`
+// kernel; the challenge minting (Net's PRNG), the windows and the JOIN frame exchange stay here.
+use tower_net_core::pairing::{confirm_matches, join_request_admissible, join_response_for};
 
-use super::{ACK_TURNAROUND, Net, TX_TIMEOUT};
+use super::{ACK_TURNAROUND, Net, TX_TIMEOUT, is_reserved_addr};
 use crate::radio::duty;
 use crate::radio::frame::{self, FrameType, Header, MAX_FRAME};
 
@@ -43,15 +50,20 @@ impl Net {
     /// Host: open a pairing window for `timeout` (use [`PAIRING_WINDOW`] for the
     /// default minute). On the first valid JOIN_REQ, hand out the per-node `key`
     /// (JOIN_RESP) and wait for the JOIN_CONFIRM. Returns the joiner's **own,
-    /// self-chosen** address on commit — the caller installs the peer with
-    /// `add_peer(peer_addr, key)` — or `None` on timeout / lost confirm. The host does
+    /// self-chosen** address on commit (the caller installs the peer with
+    /// `add_peer(peer_addr, key)`), or `None` on timeout / lost confirm. The host does
     /// NOT assign the address. Pairs the first joiner only.
+    ///
+    /// A JOIN_REQ for an address that is **already a registered peer**, reserved, or our own
+    /// is ignored (no JOIN_RESP: the key is never sent; see the module docs): OTA pairing
+    /// never re-keys an existing node. Remove the node first to re-pair it.
     pub async fn open_pairing(&mut self, timeout: Duration, key: &[u8; 16]) -> Option<u32> {
         if self.txc.locked() {
             return None; // fail closed (nonce safety): pairing replies consume TX counters
         }
         let deadline = Instant::now().checked_add(timeout)?;
         let mut buf = [0u8; 24];
+        let mut refusal_logged = false;
         while Instant::now() < deadline {
             let Some((hdr, plen)) = self.rx_pair(PAIR_RX_SLICE, &mut buf).await else {
                 continue;
@@ -60,30 +72,52 @@ impl Net {
                 continue;
             }
             let peer_addr = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            let registered = self.peer_slot(peer_addr).is_some();
+            if !join_request_admissible(peer_addr, hdr.src, self.addr, registered) {
+                if !refusal_logged {
+                    // Once per call: a refused joiner retries every ~300 ms for its whole window.
+                    refusal_logged = true;
+                    log::warn!(
+                        target: "net",
+                        "pairing: JOIN_REQ for {:08X} refused ({})",
+                        peer_addr,
+                        if registered {
+                            "already registered - remove it first to re-pair"
+                        } else {
+                            "invalid address"
+                        }
+                    );
+                }
+                continue;
+            }
             let challenge = self.rand_u32(); // fresh per session; the confirm must echo it
 
             // JOIN_RESP: the per-node key ‖ a fresh challenge (the joiner keeps its own address).
             let mut resp = [0u8; 20];
             resp[..16].copy_from_slice(key);
             resp[16..20].copy_from_slice(&challenge.to_le_bytes());
+            // Counter allocated (consumed) before the turnaround/TX awaits; see `alloc_counter`.
+            let counter = self.alloc_counter()?; // None = TX locked: fail closed
             let resp_hdr = Header {
                 frame_type: FrameType::JoinResp,
                 flags: 0,
                 src: self.addr,
                 dest: peer_addr,
-                counter: self.txc.counter(),
+                counter,
                 bulk_index: None,
             };
             Timer::after(ACK_TURNAROUND).await;
             self.tx_pair(&resp_hdr, &resp).await;
-            self.advance_tx_counter();
 
-            // Wait for the JOIN_CONFIRM (echoes addr ‖ challenge) — the freshness rule
+            // Wait for the JOIN_CONFIRM (echoes addr ‖ challenge); the freshness rule
             // (commit only when both match, so a confirm replayed from a prior session carries
-            // a stale challenge and is rejected) is the kernel's `confirm_matches`.
+            // a stale challenge and is rejected) is the kernel's `confirm_matches`. The confirm
+            // must also come from that joiner and be addressed to us.
             let mut cbuf = [0u8; 8];
             if let Some((chdr, cplen)) = self.rx_pair(JOIN_CONFIRM_WINDOW, &mut cbuf).await
                 && chdr.frame_type == FrameType::JoinConfirm
+                && chdr.src == peer_addr
+                && chdr.dest == self.addr
                 && confirm_matches(&cbuf[..cplen], peer_addr, challenge)
             {
                 return Some(peer_addr);
@@ -96,30 +130,39 @@ impl Net {
     /// Joiner: request pairing using `addr` (the joiner's **own** address, which it
     /// keeps) for up to `timeout` ([`PAIRING_WINDOW`] for the default). Sends
     /// JOIN_REQ, waits for the JOIN_RESP (the per-node key), sends JOIN_CONFIRM,
-    /// and returns `(gw_addr, key)` on commit (or `None` on timeout) — the gateway
+    /// and returns `(gw_addr, key)` on commit (or `None` on timeout); the gateway
     /// address is what a product node persists so it knows *which* gateway to talk to
     /// after a reboot.
+    ///
+    /// Only a JOIN_RESP addressed to `addr` (from a non-reserved host) is accepted: with two
+    /// nodes joining in one window, each must not adopt the other's key. A reserved `addr`
+    /// (`0` / broadcast) can never join.
     pub async fn join(&mut self, addr: u32, timeout: Duration) -> Option<(u32, [u8; 16])> {
         if self.txc.locked() {
             return None; // fail closed (nonce safety): JOIN_REQ/CONFIRM consume TX counters
         }
+        if is_reserved_addr(addr) {
+            return None; // a host refuses it anyway; don't advertise it on air
+        }
         let deadline = Instant::now().checked_add(timeout)?;
         while Instant::now() < deadline {
+            // Each JOIN_REQ consumes a fresh counter, allocated before its TX await.
+            let counter = self.alloc_counter()?; // None = TX locked: fail closed
             let req_hdr = Header {
                 frame_type: FrameType::JoinReq,
                 flags: 0,
                 src: addr,
                 dest: 0, // gateway address not yet known
-                counter: self.txc.counter(),
+                counter,
                 bulk_index: None,
             };
             self.tx_pair(&req_hdr, &addr.to_le_bytes()).await;
-            self.advance_tx_counter();
 
             let mut buf = [0u8; 24];
             if let Some((hdr, plen)) = self.rx_pair(JOIN_RESP_WINDOW, &mut buf).await
                 && hdr.frame_type == FrameType::JoinResp
                 && plen >= 20
+                && join_response_for(hdr.dest, hdr.src, addr)
             {
                 let mut key = [0u8; 16];
                 key.copy_from_slice(&buf[..16]);
@@ -127,17 +170,17 @@ impl Net {
                 let mut conf = [0u8; 8];
                 conf[..4].copy_from_slice(&addr.to_le_bytes());
                 conf[4..8].copy_from_slice(&buf[16..20]);
+                let counter = self.alloc_counter()?; // before the turnaround/TX awaits
                 let conf_hdr = Header {
                     frame_type: FrameType::JoinConfirm,
                     flags: 0,
                     src: addr,
                     dest: hdr.src,
-                    counter: self.txc.counter(),
+                    counter,
                     bulk_index: None,
                 };
                 Timer::after(ACK_TURNAROUND).await;
                 self.tx_pair(&conf_hdr, &conf).await;
-                self.advance_tx_counter();
                 return Some((hdr.src, key));
             }
         }

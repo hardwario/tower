@@ -1,44 +1,44 @@
-//! radio_push_button — TOWER IoT Kit product firmware: a wireless push button with
+//! radio_push_button (TOWER IoT Kit product firmware): a wireless push button with
 //! thermometer + accelerometer, built as a **sleeping node**.
 //!
 //! Every button press / release / click / hold sends a secured radio message carrying
 //! that event's running count; temperature is measured on a settable period and sent
 //! on-change (threshold) or at latest every heartbeat; the accelerometer's tilt
 //! interrupt wakes the node for motion/orientation events. Between events the MCU
-//! STOPs (µA) and the SPIRIT1 sleeps — downlinks reach the node via the gateway's
+//! STOPs (µA) and the SPIRIT1 sleeps; downlinks reach the node via the gateway's
 //! queue: each confirmed uplink's ACK carries a *pending* flag, and when set the node
 //! holds a short RX window, executes the delivered remote-shell line in the standard
 //! shell dispatcher ([`shell::stream_line`]) and streams the response back chunk-by-chunk
-//! (`RadioSink`) — so a full `/export` is never truncated at a fixed buffer. No tab
-//! completion over the air — completion is a per-transport feature the radio doesn't offer.
+//! (`RadioSink`), so a full `/export` is never truncated at a fixed buffer. No tab
+//! completion over the air: completion is a per-transport feature the radio doesn't offer.
 //!
 //! Pairing:
-//! * **OTA** — hold the button ≥1 s while unprovisioned: the node runs the 3-way JOIN
+//! * **OTA**: hold the button ≥1 s while unprovisioned: the node runs the 3-way JOIN
 //!   against any gateway with an open window and persists `(gw, key)`.
-//! * **Cable** — on USB, the node serves the management channel: `Describe` (role
+//! * **Cable**: on USB, the node serves the management channel: `Describe` (role
 //!   probe), `Provision` (host-minted credentials; key never rides the shell), and
 //!   `JoinOpen` (host-initiated OTA join).
 //!
 //! Each of the four button events has a **master enable**: a disabled event is ignored
-//! entirely — neither reported over radio nor shown on the LED. The event *recognition*
-//! timing is configurable (debounce, click-timeout, hold-time — what the physical input
+//! entirely: neither reported over radio nor shown on the LED. The event *recognition*
+//! timing is configurable (debounce, click-timeout, hold-time: what the physical input
 //! means); the LED feedback is a fixed indicator (press/release/hold a single pulse, a
-//! click a double-blink — distinct shapes because a quick tap fires Press on the down
+//! click a double-blink; distinct shapes because a quick tap fires Press on the down
 //! edge and Release+Click together on the up edge, so a shared shape would blend). The
 //! default is the coherent **gesture** scheme: click + hold on, press + release off;
 //! enable press/release for raw-edge reporting.
 //!
 //! All boards also play the common power-on signature first (500 ms off → 2 s on →
-//! 500 ms off, [`Board::boot_indicator`](tower::board::Board::boot_indicator)) — this
+//! 500 ms off, [`Board::boot_indicator`](tower::board::Board::boot_indicator)); this
 //! app's own behaviour begins after that.
 //!
 //! Settings (remote-shell reconfigurable, `/system settings set …`): `therm-period`,
-//! `therm-delta` (centi-°C, 0 = always send), `accel` (off/low/medium/high — applied at
+//! `therm-delta` (centi-°C, 0 = always send), `accel` (off/low/medium/high, applied at
 //! boot), `heartbeat`; per-event `{press,release,click,hold}` (on/off master enable);
 //! button timing `debounce-press`, `debounce-release`, `click-timeout`, `hold-time`
-//! (ms — applied at boot). The `/button simulate <ms>` command injects a synthetic press
+//! (ms, applied at boot). The `/button simulate <ms>` command injects a synthetic press
 //! of that length through the *real* recognition machine (debounce/click/hold) and on
-//! into reporting — the console "finger" for testing without a physical press, also
+//! into reporting: the console "finger" for testing without a physical press, also
 //! used by the HIL bench.
 //!
 //!   just build app radio_push_button
@@ -55,7 +55,7 @@ use tower::board::GuardedI2c;
 use tower::lis2dh12::{self, Lis2dh12, Sensitivity, TiltConfig};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
-use tower::radio::net::{Net, NetConfig, PAIRING_WINDOW, SendResult};
+use tower::radio::net::{Net, NetConfig, PAIRING_WINDOW, SendResult, is_reserved_addr, peer_addr_valid};
 use tower::shell::ShellSink;
 use tower::storage::{NS_APP, NS_SHELL, Nv};
 use tower::tmp112::{self, Tmp112};
@@ -89,7 +89,7 @@ const SET_THERM_DELTA: u8 = 0x11;
 const SET_ACCEL: u8 = 0x12;
 const SET_HEARTBEAT: u8 = 0x13;
 
-// Per-button-event master enable: a disabled event is ignored entirely — NOT reported
+// Per-button-event master enable: a disabled event is ignored entirely: NOT reported
 // over radio and no LED. Each of the four events is independently switchable.
 const SET_PRESS: u8 = 0x20;
 const SET_RELEASE: u8 = 0x22;
@@ -105,7 +105,7 @@ const SET_DEBOUNCE_RELEASE: u8 = 0x31;
 const SET_CLICK_TIMEOUT: u8 = 0x32;
 const SET_HOLD_TIME: u8 = 0x33;
 
-// Fixed LED-feedback shapes/timings (not user-configurable — the LED is just an
+// Fixed LED-feedback shapes/timings (not user-configurable; the LED is just an
 // indicator). press/release/hold flash a single pulse; a click is a double-blink of
 // two `LED_CLICK_MS` blinks so it reads apart from an adjacent press on the one LED.
 const LED_PRESS_MS: u32 = 250;
@@ -138,7 +138,7 @@ static BTN_SETTINGS: &[shell::Setting] = &[
         kind: shell::Kind::Uint { min: 60, max: 86_400 },
         default: "900",
     },
-    // Button events — each a master enable (report over radio + fixed LED feedback); a
+    // Button events: each a master enable (report over radio + fixed LED feedback); a
     // disabled event is ignored entirely. Default = the coherent **gesture** scheme:
     // click + hold ON, press + release OFF (a click is a quick press+release, so
     // reporting all four is redundant and their LEDs blend on a tap; enable
@@ -167,7 +167,7 @@ static BTN_SETTINGS: &[shell::Setting] = &[
         kind: shell::Kind::Bool,
         default: "on",
     },
-    // Button recognition timing (ms) — applied at boot (reboot to change).
+    // Button recognition timing (ms), applied at boot (reboot to change).
     shell::Setting {
         key: SET_DEBOUNCE_PRESS,
         name: "debounce-press",
@@ -199,13 +199,13 @@ static BTN_SETTINGS: &[shell::Setting] = &[
 
 // --- synthetic button press (the console "finger" / HIL bench) ---------------------
 
-/// Longest press `/button simulate` will inject (10 s — well past any hold-time).
+/// Longest press `/button simulate` will inject (10 s, well past any hold-time).
 const SIM_MAX_MS: u32 = 10_000;
 
-/// `/button simulate <ms>` — inject a synthetic press held `<ms>` milliseconds into the
+/// `/button simulate <ms>`: inject a synthetic press held `<ms>` milliseconds into the
 /// button driver, which derives the event(s) through the *real* recognition machine
 /// (debounce / click-timeout / hold-time). So a short press debounces away, a tap
-/// yields a click, a long press yields a hold — the same path a physical press takes,
+/// yields a click, a long press yields a hold: the same path a physical press takes,
 /// exercising the configured button timing (which feeding a finished event would skip).
 fn cmd_simulate(ctx: &mut shell::Ctx<'_>, args: &[&str]) -> shell::Outcome {
     use core::fmt::Write as _;
@@ -241,7 +241,7 @@ static UNPROVISIONED: led::Pattern = &[
 static JOINING: led::Pattern = &[led::Step::on(100), led::Step::off(150)];
 
 /// Post-uplink RX window when the gateway's ACK advertises a queued downlink. The
-/// gateway transmits ~20 ms after our uplink with one retry (~450 ms worst) — 1 s
+/// gateway transmits ~20 ms after our uplink with one retry (~450 ms worst); 1 s
 /// covers it with margin.
 const DOWNLINK_WINDOW: Duration = Duration::from_secs(1);
 /// Shell-response chunks ride confirmed uplinks with extra reps: the gateway's
@@ -278,7 +278,7 @@ fn event_enabled(kv: Nv, ev: button::Event) -> bool {
 
 /// Flash the LED for one (already enabled) button event with its fixed shape:
 /// press/release/hold a single pulse, a click a double-blink so it reads apart from an
-/// adjacent press even on the one LED. Immediate, fire-and-forget — the LED dispatcher
+/// adjacent press even on the one LED. Immediate, fire-and-forget: the LED dispatcher
 /// owns the timing; the uplink follows independently.
 fn led_feedback(led: &led::Led, ev: button::Event) {
     match ev {
@@ -316,7 +316,7 @@ fn read_accel_setting(kv: Nv) -> Option<Sensitivity> {
 
 /// The shared I²C2 bus, resident with the accelerometer (its tilt IRQ needs register
 /// access most often); `measure_temp` borrows it for each one-shot read. `None` only
-/// transiently inside a swap — see `board::Board` for the bus-sharing contract.
+/// transiently inside a swap; see `board::Board` for the bus-sharing contract.
 type AccelBus = Option<Lis2dh12<GuardedI2c>>;
 
 async fn run(b: Board) {
@@ -399,10 +399,16 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            log::error!(target: "button", "net init: {e} — radio dead, local mode only");
+            log::error!(target: "button", "net init: {e}; radio dead, local mode only");
             return;
         }
     };
+    // Registered peers only: the node talks to exactly one peer, its gateway (registered below
+    // or on a later join). With the default lane on, an unprovisioned node's all-zero default
+    // key would be a public key for any frame from an unregistered src; the node never listens
+    // unprovisioned today, but there is no reason to keep that door. Also keeps the default
+    // lane's EEPROM record unused.
+    net.set_default_lane(false);
     if let Some(p) = provision {
         net.add_peer(p.gw_addr, &p.key);
     }
@@ -412,13 +418,13 @@ async fn run(b: Board) {
         target: "button",
         "PUSH-BUTTON {:08X}: {}",
         addr,
-        if provision.is_some() { "paired" } else { "UNPAIRED — hold the button to pair" }
+        if provision.is_some() { "paired" } else { "UNPAIRED (hold the button to pair)" }
     );
     if provision.is_none() {
         led.set_background(Some(UNPROVISIONED));
     }
 
-    // Per-kind running counts since boot (RAM — a reset is a reboot, disambiguated
+    // Per-kind running counts since boot (RAM: a reset is a reboot, disambiguated
     // host-side by the heartbeat's session_id).
     let mut counts = [0u32; 4];
     let mut last_temp_sent: Option<i32> = None;
@@ -436,7 +442,7 @@ async fn run(b: Board) {
         )
         .await
         {
-            // --- button (real or simulated — same recognition path) ---
+            // --- button (real or simulated, same recognition path) ---
             Either4::First(ev) => {
                 let kind = match ev {
                     button::Event::Press => ButtonKind::Press,
@@ -462,12 +468,12 @@ async fn run(b: Board) {
                 }
 
                 // The per-event enable is the master switch: a disabled event is
-                // ignored entirely — no LED, no radio.
+                // ignored entirely: no LED, no radio.
                 if !event_enabled(kv, ev) {
                     continue;
                 }
                 led_feedback(&led, ev); // immediate local feedback (fixed shape)
-                // Click/Hold are the semantic events — worth more repetitions than the
+                // Click/Hold are the semantic events, worth more repetitions than the
                 // raw press/release edges around them.
                 let reps = match kind {
                     ButtonKind::Click | ButtonKind::Hold => 5,
@@ -567,7 +573,7 @@ async fn ota_join(
                 channel,
             };
             if kv.scope(NS_APP).set(KEY_PROVISION, &p).is_err() {
-                warn!(target: "button", "JOINED {:08X} but persist failed — will not survive reboot", gw_addr);
+                warn!(target: "button", "JOINED {:08X} but persist failed; will not survive reboot", gw_addr);
             } else {
                 info!(target: "button", "JOINED gateway {:08X}", gw_addr);
             }
@@ -583,7 +589,7 @@ async fn ota_join(
 }
 
 /// One-shot temperature read: take the bus from the accelerometer, measure, hand it
-/// back (chip register state — the tilt config — persists across the swap).
+/// back (chip register state, the tilt config, persists across the swap).
 async fn measure_temp(bus: &mut AccelBus) -> Option<i32> {
     let mut t = Tmp112::new(bus.take()?.release(), tmp112::ADDR_VPLUS);
     let raw = t.oneshot().await;
@@ -651,14 +657,14 @@ async fn uplink(net: &mut Net, provision: Option<Provisioned>, msg: &NodeMsg<'_>
 
 /// Last remote-shell command executed, for at-least-once dedup: bit 24 = valid,
 /// bits 23..16 = result, bits 15..0 = cmd_id. Written only by the main task (M0+
-/// load/store is enough). RAM-only — survives the delivery retries that matter
+/// load/store is enough). RAM-only: survives the delivery retries that matter
 /// (same boot); a reboot-command redelivery after the reboot re-executes, bounded
 /// by the item's TTL and ended by the first delivery ACK that gets through.
 static LAST_REMOTE_CMD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// The host-process `epoch` of the last remote command (paired with `LAST_REMOTE_CMD`).
 /// The dedup keys on `(epoch, cmd_id)`, so a fresh host that reuses a low `cmd_id`
 /// can't be mistaken for a re-delivery this node already ran. Two u32s, not one u64:
-/// thumbv6m has no 64-bit atomic — and single-task access needs no cross-word atomicity.
+/// thumbv6m has no 64-bit atomic, and single-task access needs no cross-word atomicity.
 static LAST_REMOTE_EPOCH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Hold RX open for one queued downlink; execute it and stream the response. Returns
@@ -674,7 +680,7 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
             return false;
         };
         if rx.src != gw_addr {
-            continue; // another node's traffic — not our downlink
+            continue; // another node's traffic, not our downlink
         }
         match decode_node_cmd(rx.data()) {
             Ok(NodeCmd::Shell { epoch, cmd_id, line }) => {
@@ -694,12 +700,12 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
                     && LAST_REMOTE_EPOCH.load(Relaxed) == epoch
                 {
                     let result = ((last >> 16) & 0xFF) as u8;
-                    info!(target: "button", "remote shell: duplicate cmd {} — not re-run", cmd_id);
+                    info!(target: "button", "remote shell: duplicate cmd {} (not re-run)", cmd_id);
                     sink.done(result).await; // empty reply, cached result
                     return true;
                 }
                 info!(target: "button", "remote shell: {}", line);
-                // Stream the response chunk-by-chunk — no fixed response buffer, so a full
+                // Stream the response chunk-by-chunk: no fixed response buffer, so a full
                 // `/export` or `settings print` is never truncated (the dispatcher owns the
                 // unbounded producers; `RadioSink` owns the radio framing).
                 let (result, reboot) = shell::stream_line(line, &mut sink).await;
@@ -709,7 +715,7 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
                 LAST_REMOTE_CMD.store((1 << 24) | ((result as u32) << 16) | cmd_id as u32, Relaxed);
                 if reboot {
                     // The response is on the air; the reboot request came over radio, so
-                    // there is no console to flush — reset now.
+                    // there is no console to flush; reset now.
                     cortex_m::peripheral::SCB::sys_reset();
                 }
                 return true;
@@ -719,12 +725,12 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
                     target: "button",
                     "downlink schema v{} unsupported (this build: v{})", got, RADIO_SCHEMA_VERSION
                 );
-                // Nothing exchanged that would clear the pending flag — stop chaining
+                // Nothing exchanged that would clear the pending flag; stop chaining
                 // rather than burn another full RX window on the same bad item.
                 return false;
             }
             Err(_) => {
-                warn!(target: "button", "downlink malformed — dropped");
+                warn!(target: "button", "downlink malformed, dropped");
                 return false;
             }
         }
@@ -734,7 +740,7 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
 /// Streams a remote-shell response back as `NodeShellChunk` uplinks (≤ RADIO_SHELL_CHUNK
 /// text bytes each, confirmed). Owns chunk numbering + the `last` flag, so the shell
 /// dispatcher ([`shell::stream_line`]) can emit an unbounded response through a single
-/// [`RADIO_SHELL_CHUNK`]-sized buffer — no `RESP_CAP` ceiling on `/export` & friends.
+/// [`RADIO_SHELL_CHUNK`]-sized buffer: no `RESP_CAP` ceiling on `/export` & friends.
 struct RadioSink<'a> {
     net: &'a mut Net,
     gw_addr: u32,
@@ -780,7 +786,7 @@ impl<'a> RadioSink<'a> {
         if !delivered {
             // A lost chunk shows up host-side as a chunk gap (incomplete response);
             // aborting beats streaming the tail of a response the host can't anchor.
-            warn!(target: "button", "response chunk {} undelivered — aborting", self.chunk - 1);
+            warn!(target: "button", "response chunk {} undelivered, aborting", self.chunk - 1);
             self.ok = false;
         }
         delivered
@@ -800,7 +806,7 @@ impl shell::ShellSink for RadioSink<'_> {
                 take -= 1;
             }
             if take == 0 {
-                // A multi-byte char won't fit the remaining space — flush and retry.
+                // A multi-byte char won't fit the remaining space; flush and retry.
                 if !self.flush(false, 0).await {
                     return false;
                 }
@@ -817,7 +823,7 @@ impl shell::ShellSink for RadioSink<'_> {
 
     async fn done(&mut self, result: u8) -> bool {
         // Always send a final `last` frame (empty if nothing buffered) so the host
-        // completes the command — matching the old one-empty-chunk behaviour.
+        // completes the command, matching the old one-empty-chunk behaviour.
         if !self.ok {
             return false;
         }
@@ -826,7 +832,7 @@ impl shell::ShellSink for RadioSink<'_> {
 }
 
 /// Cable-side management: `Describe` / `Provision` / `JoinOpen` (USB present, since
-/// the console is USB-gated — exactly the cable-pairing situation).
+/// the console is USB-gated: exactly the cable-pairing situation).
 #[allow(clippy::too_many_arguments)]
 async fn handle_mgmt(
     req: MgmtRequest<'_>,
@@ -863,7 +869,16 @@ async fn handle_mgmt(
             .await;
         }
         MgmtOp::Provision(p) => {
-            if p.gw_addr == 0 || p.band > mgmt::BAND_US915 {
+            // The node's address after this provision: an explicit override (0 = keep), else ours.
+            let override_addr = p.addr.filter(|&a| a != 0);
+            let effective_addr = override_addr.unwrap_or(addr);
+            // Same address rules as pairing / `Net::add_peer`: neither end reserved (0 /
+            // broadcast), and the gateway never at our own address (shared `src` ⇒ colliding
+            // CCM nonces under the link key; `add_peer` would refuse it and the node go mute).
+            if p.band > mgmt::BAND_US915
+                || is_reserved_addr(effective_addr)
+                || !peer_addr_valid(p.gw_addr, effective_addr)
+            {
                 respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                 return;
             }
@@ -880,27 +895,22 @@ async fn handle_mgmt(
             // so a storage failure can't leave the node durably provisioned while the
             // host was told MGMT_STORAGE (a dangling address pin, by contrast, has no
             // radio effect until a provision succeeds).
-            let effective_addr = match p.addr {
-                Some(override_addr) if override_addr != 0 => {
-                    if kv
-                        .scope(NS_SHELL)
-                        .set_bytes(shell::ADDR_KEY, &override_addr.to_le_bytes())
-                        .is_err()
-                    {
-                        respond_empty(req_id, mgmt::MGMT_STORAGE).await;
-                        return;
-                    }
-                    override_addr
-                }
-                _ => addr,
-            };
+            if let Some(override_addr) = override_addr
+                && kv
+                    .scope(NS_SHELL)
+                    .set_bytes(shell::ADDR_KEY, &override_addr.to_le_bytes())
+                    .is_err()
+            {
+                respond_empty(req_id, mgmt::MGMT_STORAGE).await;
+                return;
+            }
             if app_kv.set(KEY_PROVISION, &rec).is_err() {
                 respond_empty(req_id, mgmt::MGMT_STORAGE).await;
                 return;
             }
             respond_record(req_id, &ProvisionAck { addr: effective_addr }).await;
-            info!(target: "button", "provisioned for gateway {:08X} — rebooting", p.gw_addr);
-            // Band/channel/id take effect at Net::new — reboot into the new identity
+            info!(target: "button", "provisioned for gateway {:08X}, rebooting", p.gw_addr);
+            // Band/channel/id take effect at Net::new; reboot into the new identity
             // (also bumps session_id, so the host sees the reprovision).
             console::flush().await;
             cortex_m::peripheral::SCB::sys_reset();

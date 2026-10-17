@@ -8,7 +8,7 @@
 //! MSB is A/C (0 = address access, 1 = command) and whose LSB is W/R (1 = read).
 //! All other header bits are 0. So the three header bytes are [`WRITE`], [`READ`]
 //! and [`COMMAND`]. The address auto-increments in burst mode; the FIFO is a
-//! single linear address [`FIFO`] (0xFF) — read for RX, write for TX. The two
+//! single linear address [`FIFO`] (0xFF): read for RX, write for TX. The two
 //! MC_STATE status bytes are returned on MISO during the header + address bytes
 //! of *every* transaction (see [`state_from_status`]).
 
@@ -181,7 +181,7 @@ pub const IRQ_STATUS0: u8 = 0xFD;
 pub const DEVICE_INFO1_PARTNUM: u8 = 0xF0;
 /// VERSION register (0xF1) = 0x30 = 48.
 pub const DEVICE_INFO0_VERSION: u8 = 0xF1;
-/// Expected PARTNUM byte (0x01) — `(PARTNUM<<8)|VERSION == 304`.
+/// Expected PARTNUM byte (0x01): `(PARTNUM<<8)|VERSION == 304`.
 pub const EXPECT_PARTNUM: u8 = 0x01;
 /// Expected VERSION byte (0x30 = 48).
 pub const EXPECT_VERSION: u8 = 0x30;

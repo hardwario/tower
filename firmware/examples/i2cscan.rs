@@ -1,4 +1,4 @@
-//! i2cscan — probe the I2C2 bus (PB10/PB11) and log responding addresses.
+//! i2cscan: probe the I2C2 bus (PB10/PB11) and log responding addresses.
 //!
 //! A maker diagnostic: confirms the bus works and finds device addresses (e.g.
 //! which address the TMP112 is strapped to). Watch with `tower logs`.
@@ -19,7 +19,7 @@ use tower::{
 };
 
 async fn run(b: Board) {
-    // Take the *raw* (unguarded) I2C2 bus from the TMP112 driver for address probing —
+    // Take the *raw* (unguarded) I2C2 bus from the TMP112 driver for address probing:
     // a bus scanner wants to see the real bus, so bypass the AtshaGuard via into_inner().
     let mut i2c = b.tmp112.release().into_inner();
 
@@ -34,7 +34,7 @@ async fn run(b: Board) {
     }
     info!(target: "i2c", "scan complete - {} device(s)", found);
 
-    // The scan probes every address (incl. the ATSHA204A at 0x64) — re-sleep it
+    // The scan probes every address (incl. the ATSHA204A at 0x64); re-sleep it
     // defensively so a probed/woken crypto part can't hold ~200 µA. Good hygiene after
     // any batch of transactions on the shared I2C bus. See `board::atsha_sleep`.
     board::atsha_sleep(&mut i2c);

@@ -1,4 +1,4 @@
-//! radio_regdump — read back the key RF registers after config to confirm the
+//! radio_regdump: read back the key RF registers after config to confirm the
 //! writes actually landed (burst writes, state-gated registers, etc.).
 
 #![no_std]
@@ -28,7 +28,7 @@ async fn run(b: Board) {
         error!(target: "regdump", "config: {e}");
     }
 
-    // (addr, expected) — expected is what config::apply should have written.
+    // (addr, expected): expected is what config::apply should have written.
     let checks: &[(u8, u8, &str)] = &[
         (0x05, 0x02, "GPIO0_CONF nIRQ"),
         (0x9E, 0xDB, "SYNTH_CONFIG1 REFDIV"),
@@ -39,15 +39,15 @@ async fn run(b: Board) {
         (0x1A, 0x93, "MOD1 datarateM=147"),
         (0x1B, 0x19, "MOD0 GFSK|E9"),
         (0x1C, 0x45, "FDEV0 E4 M5"),
-        (0x1D, 0x02, "CHFLT"), // ~216 kHz RX BW — matches config.rs (`write_reg(CHFLT, 0x02)`)
+        (0x1D, 0x02, "CHFLT"), // ~216 kHz RX BW; matches config.rs (`write_reg(CHFLT, 0x02)`)
         (0x1E, 0xC8, "AFC2"),
         (0x99, 0x80, "IQC 0x99"),
         (0x9A, 0xE3, "IQC 0x9A"),
         (0xBC, 0x22, "IQC 0xBC"),
         (0xA1, 0x25, "VCO_CONFIG current"),
         (0x31, 0x07, "PCKTCTRL3"),
-        (0x32, 0x1F, "PCKTCTRL2"), // preamble 4B | sync 4B | var-len — config.rs writes 0x1F
-        (0x33, 0x70, "PCKTCTRL1"), // CRC_MODE(3) | WHIT_EN — config.rs writes 0x70
+        (0x32, 0x1F, "PCKTCTRL2"), // preamble 4B | sync 4B | var-len; config.rs writes 0x1F
+        (0x33, 0x70, "PCKTCTRL1"), // CRC_MODE(3) | WHIT_EN; config.rs writes 0x70
         (0x36, 0xDB, "SYNC4"),
         (0x37, 0x62, "SYNC3"),
         (0x38, 0x47, "SYNC2"),

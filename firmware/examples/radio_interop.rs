@@ -1,4 +1,4 @@
-//! radio_interop — comprehensive semi-fuzzy soak campaign (docs/radio.md).
+//! radio_interop: comprehensive semi-fuzzy soak campaign (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-node    just flash example radio_interop   # randomized sender
 //!   TOWER_FEATURES=role-gateway just flash example radio_interop   # invariant checker
@@ -8,15 +8,15 @@
 //! the seed is logged at boot): random payload size 9..74 B (edges emphasized),
 //! confirmed/unconfirmed, reps 1..10, timing jitter, and a low-probability
 //! oversized `send()` that MUST be locally rejected. Each payload is
-//! self-describing — `[seq:4][len:1][crc32:4][filler…]` — so the gateway verifies
+//! self-describing (`[seq:4][len:1][crc32:4][filler…]`), so the gateway verifies
 //! integrity and ordering without lockstep.
 //!
 //! Invariants (→ §14), latched to the LED (solid = FAIL) and a `VERDICT:` line:
-//!   • payload integrity — embedded crc32 matches recomputed (gateway)
-//!   • strict-monotonic accepted counter per src — no replay/reorder accepted
+//!   • payload integrity: embedded crc32 matches recomputed (gateway)
+//!   • strict-monotonic accepted counter per src: no replay/reorder accepted
 //!   • oversized send always locally rejected (node)
 //!   • confirmed transfers always resolve to Delivered/NotDelivered (by type)
-//!   • duty respected — over-budget TX reports DutyLimited, never silently sent
+//!   • duty respected: over-budget TX reports DutyLimited, never silently sent
 //! Rolling tallies print periodically and persist to EEPROM (survive a reboot).
 
 #![no_std]
@@ -42,7 +42,7 @@ const GW_ADDR: u32 = 0x2222_2222;
 const KEY: [u8; 16] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
-/// EEPROM locals for cumulative soak tallies, in the app namespace (`NS_APP`) — structurally
+/// EEPROM locals for cumulative soak tallies, in the app namespace (`NS_APP`), structurally
 /// clear of every SDK namespace (net/shell), so no manual range-picking.
 const KV_COUNT: u8 = 0x00; // node: tx_ok / gateway: accepted
 const KV_FAIL: u8 = 0x01; // either role: latched failures

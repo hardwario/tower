@@ -1,4 +1,4 @@
-//! fhss_kat — F3/F4/F5 known-answer tests for the FHSS building blocks (1 board,
+//! fhss_kat (F3/F4/F5): known-answer tests for the FHSS building blocks (1 board,
 //! no RF link). Proves the hop permutation, the per-channel dwell bound, and the
 //! beacon frame round-trip before the on-air link is built.
 //!

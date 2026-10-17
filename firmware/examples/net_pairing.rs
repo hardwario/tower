@@ -1,11 +1,11 @@
-//! net_pairing — OTA 3-way pairing under the public pairing key (docs/radio.md).
+//! net_pairing: OTA 3-way pairing under the public pairing key (docs/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash example net_pairing   # host: opens a window
 //!   TOWER_FEATURES=role-node    just flash example net_pairing   # joiner: requests to join
 //!
 //! The host opens a 1-minute pairing window ([`PAIRING_WINDOW`]) and, on the first
 //! JOIN_REQ, hands out a per-node key (JOIN_RESP) and waits for JOIN_CONFIRM. The
-//! **joiner chooses its own address** and keeps it — the host does NOT assign it; the
+//! **joiner chooses its own address** and keeps it. The host does NOT assign it; the
 //! host only learns that address and the key it handed out, to install the peer. Both
 //! log the key (they must match) and the joiner's address (the same on both sides),
 //! proving the handshake. (The key is sniffable in-window by design; see docs/radio.md.)
@@ -22,7 +22,7 @@ use tower::{app, board::Board};
 
 #[cfg(not(feature = "role-node"))]
 const HOST_ADDR: u32 = 0x2222_2222;
-// The joiner's OWN, self-chosen address (kept after pairing — not assigned by the host).
+// The joiner's OWN, self-chosen address (kept after pairing, not assigned by the host).
 #[cfg(feature = "role-node")]
 const MY_ADDR: u32 = 0x0000_00BB;
 // The per-node key the host hands out (would be random in production).

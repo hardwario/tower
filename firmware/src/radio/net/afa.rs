@@ -1,5 +1,5 @@
 //! EU 868 **LBT + AFA** (Listen-Before-Talk + Adaptive Frequency Agility,
-//! EN 300 220) — the EU way to relax the 1 % duty cap. `impl Net` block over
+//! EN 300 220): the EU way to relax the 1 % duty cap. `impl Net` block over
 //! [`super::Net`].
 //!
 //! Unlike US FHSS, **no time-synchronization** is needed: the node listens before
@@ -16,7 +16,7 @@
 
 use embassy_time::{Duration, Instant, Timer};
 
-use super::{Access, Net, Received, SendResult, TX_TIMEOUT};
+use super::{Access, MAX_REPS, Net, Received, SendResult, TX_TIMEOUT};
 use crate::radio::config::{self, AFA_N, Band, afa_freq_hz};
 use crate::radio::device::RadioError;
 use crate::radio::frame::{self, FrameType, Header, MAX_FRAME, MAX_PAYLOAD, flags};
@@ -125,7 +125,12 @@ impl Net {
             return SendResult::Error(RadioError::TooLong);
         }
         let addr = self.addr;
-        let counter = self.txc.counter();
+        // Consumed now, before any retune/LBT/TX/ACK await (see `Net::alloc_counter`): this used
+        // to advance only after the whole rep loop, so a cancelled afa_send left the counter for
+        // the next transfer to seal a different payload under the same nonce.
+        let Some(counter) = self.alloc_counter() else {
+            return SendResult::Error(RadioError::NonceLocked); // fail closed (nonce safety)
+        };
         let key = self.key_for(dest);
         let hdr = Header {
             frame_type: FrameType::Data,
@@ -141,7 +146,7 @@ impl Net {
             Err(_) => return SendResult::Error(RadioError::TooLong),
         };
 
-        let reps = if confirmed { reps.clamp(1, 10) } else { 1 };
+        let reps = if confirmed { reps.clamp(1, MAX_REPS) } else { 1 };
         let mut result = SendResult::NotDelivered;
         'reps: for attempt in 0..reps {
             if attempt > 0 {
@@ -192,14 +197,13 @@ impl Net {
                 break;
             }
         }
-        self.advance_tx_counter();
         result
     }
 
     /// **Gateway:** scan the AFA channel set (favouring `primary`) for up to
     /// `timeout`, dwelling [`AFA_SCAN_SLICE`] per channel. On the first authenticated
     /// frame, decode it, auto-ACK on that channel (via [`recv`](Self::recv)), and
-    /// return it. `None` on timeout. No epoch/beacon — the node's channel choice +
+    /// return it. `None` on timeout. No epoch/beacon: the node's channel choice +
     /// retransmissions guarantee a catch within a scan cycle or two.
     pub async fn afa_serve(&mut self, timeout: Duration) -> Option<Received> {
         let deadline = Instant::now().checked_add(timeout)?;

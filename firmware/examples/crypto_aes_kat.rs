@@ -1,7 +1,7 @@
-//! crypto_aes_kat — validate the L0 hardware AES against the FIPS-197 vector.
+//! crypto_aes_kat: validate the L0 hardware AES against the FIPS-197 vector.
 //!
 //! Single board, no radio. Encrypts the canonical AES-128 ECB known-answer test
-//! (FIPS-197 App. B) and reports MATCH/MISMATCH — proving the register driver's
+//! (FIPS-197 App. B) and reports MATCH/MISMATCH, proving the register driver's
 //! key load, byte ordering and block compute before AES-CCM is built on it.
 //!
 //!   just flash example crypto_aes_kat    (watch with: tower logs)

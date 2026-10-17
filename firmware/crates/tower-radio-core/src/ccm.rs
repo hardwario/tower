@@ -2,13 +2,13 @@
 //!
 //! Extracted from `src/radio/ccm.rs` so the CCM construction can be tested on the host against
 //! the RFC 3610 vectors (the firmware is no_std / thumbv6m and can't `cargo test`). It is
-//! generic over an [`AesBlock`] — the single-block ECB primitive — so the firmware plugs in the
+//! generic over an [`AesBlock`] (the single-block ECB primitive), so the firmware plugs in the
 //! L0 hardware AES engine and the host tests plug in a pure-Rust AES. The math (CBC-MAC + CTR,
 //! N=13/L=2/M=8) is byte-for-byte identical to the on-target original: **zero** behavioural
 //! change on device, this only makes the block cipher a parameter.
 //!
 //! Fixed parameters for the TOWER radio: **13-byte nonce (N=13, L=2)** and an
-//! **8-byte tag (M=8)** — confidentiality + integrity in one AEAD. CCM = CBC-MAC
+//! **8-byte tag (M=8)**, confidentiality + integrity in one AEAD. CCM = CBC-MAC
 //! over the AAD + plaintext for the tag, plus CTR for confidentiality, both from
 //! single-block AES encryption. The nonce is derived from the clear header; the AAD is the
 //! whole cleartext header.
@@ -19,6 +19,11 @@ const L: usize = 2;
 pub const NONCE_LEN: usize = 13;
 /// Authentication tag length.
 pub const TAG_LEN: usize = 8;
+
+// [`Ccm::key_check`] encrypts the all-zero block; that is only harmless because no CCM block
+// built from a flags byte is ever all-zero: both B₀'s and every Aᵢ's flags byte carry `L−1`
+// in their low bits, which is non-zero for L ≥ 2.
+const _: () = assert!(L >= 2);
 /// Maximum supported associated-data length. The CBC-MAC prefixes AAD with a
 /// 2-byte length, so the encoding buffer is `2 + MAX_AAD`. The stack's only AAD
 /// is the frame header (≤ 17 B), so this is generous; callers must not exceed it.
@@ -84,6 +89,22 @@ impl<A: AesBlock> Ccm<A> {
             expected[j] = mac[j] ^ s0[j];
         }
         ct_eq(&expected, tag)
+    }
+
+    /// Key-check value (KCV) of `key`: the first 4 bytes, read little-endian, of
+    /// `AES_K(0¹²⁸)`, the conventional key fingerprint. The network layer persists it next to
+    /// each replay lane so a lane is restored only under the key it was tracked with.
+    ///
+    /// Safe to expose: the all-zero block is never a CCM cipher input here: every B₀ and Aᵢ
+    /// block starts with a non-zero flags byte (const-asserted below), so the KCV reveals no
+    /// keystream or MAC block of any frame. Runs through the same [`AesBlock`], so the
+    /// firmware's hardware key cache stays coherent (a second, independent AES handle loading
+    /// another key behind the cache's back would corrupt the next seal/open).
+    #[must_use]
+    pub fn key_check(&mut self, key: &[u8; 16]) -> u32 {
+        let mut b = [0u8; 16];
+        self.aes.encrypt_block(key, &mut b);
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
     }
 
     /// CBC-MAC over B0 ‖ (len-prefixed AAD, padded) ‖ (payload, padded).

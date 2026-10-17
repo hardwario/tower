@@ -1,4 +1,4 @@
-//! net_secure_ping — the full stack end-to-end over the air: build a CCM-sealed
+//! net_secure_ping: the full stack end-to-end over the air. Build a CCM-sealed
 //! DATA frame, transmit it, receive + authenticate + decrypt on the other board.
 //!
 //!   TOWER_FEATURES=role-node    just flash example net_secure_ping   # sends sealed frames
@@ -110,8 +110,8 @@ async fn gateway(radio: &mut Spirit1, ccm: &mut Ccm) -> ! {
                         q.rssi, text
                     );
                 }
-                Err(frame::FrameError::AuthFail) => warn!(target: "secping", "CCM auth FAIL — dropped"),
-                Err(e) => warn!(target: "secping", "frame error: {e} — dropped"),
+                Err(frame::FrameError::AuthFail) => warn!(target: "secping", "CCM auth FAIL (dropped)"),
+                Err(e) => warn!(target: "secping", "frame error: {e} (dropped)"),
             },
             Err(tower::radio::RadioError::Timeout) => {
                 info!(target: "secping", "...idle")

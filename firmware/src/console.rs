@@ -1,25 +1,25 @@
-//! Framed serial console — the SDK's logging + host-link primitive.
+//! Framed serial console: the SDK's logging + host-link primitive.
 //!
 //! The UART is **always framed** (`tower-protocol`): every log record, `print!`,
 //! event, and the boot `Hello` is a COBS+CRC+postcard frame on USART1 TX (PA9) at
-//! 115200. A raw serial monitor therefore shows binary — use the `tower` host CLI
+//! 115200. A raw serial monitor therefore shows binary; use the `tower` host CLI
 //! (`tower logs`), which decodes the frames.
 //!
-//! Architecture (docs/console.md): the console is **dynamic** — [`manager`] owns USART1
+//! Architecture (docs/console.md): the console is **dynamic**: [`manager`] owns USART1
 //! (PA9 TX / PA10 RX) and, gated on USB presence (`VBUS_SENSE`/PA12), builds a **DMA-backed
-//! `Uart`** while plugged and **drops** it on unplug — releasing embassy's STOP refcount so an
+//! `Uart`** while plugged and **drops** it on unplug, releasing embassy's STOP refcount so an
 //! unplugged node idles at µA. TX runs on DMA1 channel 4, RX on a **circular DMA buffer** on
-//! channel 5 ([`RingBufferedUartRx`]) — a different channel group from the WS2812 strip's channel
+//! channel 5 ([`RingBufferedUartRx`]), a different channel group from the WS2812 strip's channel
 //! 3, so both use DMA at once. While up it splits the UART and runs two halves:
 //!
 //! * producers (the `log` backend, `print!`, `event`, the boot `Hello`) build an owned
-//!   [`Outgoing`] message and `try_send` it into [`TX_CHANNEL`] — non-blocking, drop-newest
+//!   [`Outgoing`] message and `try_send` it into [`TX_CHANNEL`], non-blocking, drop-newest
 //!   on full (a dropped count is reported by the writer); [`writer_loop`] owns the [`UartTx`],
 //!   assigns the per-frame `seq` (so a gap means real wire loss, not a queue drop), encodes, and
-//!   DMA-writes — holding a `WakeGuard` across each burst so the low-power executor uses WFI
+//!   DMA-writes, holding a `WakeGuard` across each burst so the low-power executor uses WFI
 //!   instead of STOP mid-transfer;
 //! * [`rx_loop`] reads the [`RingBufferedUartRx`] and [`route_frame`]s decoded frames into the
-//!   console-owned RX channels by type — shell frames to [`SHELL_RX`]; the shell drains its
+//!   console-owned RX channels by type: shell frames to [`SHELL_RX`]; the shell drains its
 //!   channel on its own task. The console never calls up into that layer, so the transport
 //!   depends only on `tower-protocol`. Because the RX DMA fills the ring in hardware, an incoming
 //!   byte is never lost to receiver overrun while a burst or critical section delays the reader;
@@ -58,7 +58,7 @@ use tower_protocol::{FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, decode_f
 use crate::storage::{NS_SYS, Nv};
 
 // Interrupts for the DMA-backed console UART. USART1 covers idle/error events; TX runs on DMA1
-// channel 4 and the RX ring on channel 5 — both on the shared `DMA1_CHANNEL4_5_6_7` vector, so
+// channel 4 and the RX ring on channel 5, both on the shared `DMA1_CHANNEL4_5_6_7` vector, so
 // BOTH channel handlers are bound to it. This is a DIFFERENT channel group from the WS2812 strip's
 // `DMA1_CH3` (`DMA1_CHANNEL2_3`), so the strip and console coexist on DMA (USART1_RX maps to CH3|CH5).
 bind_interrupts!(pub struct ConsoleIrqs {
@@ -66,15 +66,15 @@ bind_interrupts!(pub struct ConsoleIrqs {
     DMA1_CHANNEL4_5_6_7 => DmaInterruptHandler<DMA1_CH4>, DmaInterruptHandler<DMA1_CH5>;
 });
 
-/// Max log-line / print-text length (clipped past this — fine for a debug console).
+/// Max log-line / print-text length (clipped past this; fine for a debug console).
 const MAX_MSG: usize = 192;
 /// Max module-name length carried per log record.
 const MOD_LEN: usize = 24;
-/// Max shell-response text buffered per message. Longer than one frame holds — the
+/// Max shell-response text buffered per message. Longer than one frame holds: the
 /// writer splits it into [`SHELL_CHUNK`]-sized frames (`chunk`/`last`), which the
 /// host reassembles by `cmd_id`. Must equal [`crate::shell::RESP_CAP`] (asserted): if
 /// this shrank alone, responses would silently clip AFTER the shell already computed
-/// its `R_OK`/`R_TRUNCATED` verdict — a "complete" `/export` that isn't.
+/// its `R_OK`/`R_TRUNCATED` verdict: a "complete" `/export` that isn't.
 const MAX_RESP: usize = 256;
 const _: () = assert!(MAX_RESP == crate::shell::RESP_CAP);
 /// Shell-response text bytes per frame. Kept well under the ~240-byte payload budget
@@ -82,14 +82,15 @@ const _: () = assert!(MAX_RESP == crate::shell::RESP_CAP);
 const SHELL_CHUNK: usize = 192;
 /// Max firmware-name string in `Hello` (the baked-in app/example name).
 const FW_LEN: usize = 32;
-/// Firmware version string carried in `Hello` — the SDK crate version with a leading `v`
+/// Firmware version string carried in `Hello`: the SDK crate version with a leading `v`
 /// (e.g. `"v0.1.0"`), baked at compile time. Distinct from [`FW_NAME`] (the app name).
 const FW_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 /// `NS_SYS` local key for the persisted boot counter (the `Hello` session_id).
 const KEY_BOOT_COUNT: u8 = 0x00;
 /// TX queue depth (frames). 4 (was 8): each slot is a ~280 B `Outgoing`, and on the
 /// 20 KB part every slot is stack the gateway/push-button products can't spare (the
-/// measured `Net`-app stack peak is ~9 KB — see the stack-overflow history). The cost
+/// bench-measured gateway high-water is 7360 B of a ~9 KB stack region, see docs/gateway.md,
+/// `/system stack print`; the push-button peak is ~6.8 KB). The cost
 /// is honest and accounted: a boot burst deeper than 4 frames drops-newest and is
 /// reported by the writer's [`Dropped`] marker; the async producers ([`event`],
 /// [`uplink`], …) apply backpressure instead of dropping while the console is up.
@@ -98,7 +99,7 @@ const TX_DEPTH: usize = 4;
 /// legitimate inner frame is far below `MAX_WIRE`: a `ShellCommand` line caps at the
 /// shell's 96 bytes (~110 B framed) and the biggest `MgmtRequest` (a full-MTU
 /// `QueuePush`) is ~100 B. A frame larger than this fails the copy wholesale
-/// (`heapless` extend rejects, the empty copy is dropped) — same outcome as the
+/// (`heapless` extend rejects, the empty copy is dropped), the same outcome as the
 /// shell's own over-long-line rejection, for 112 fewer bytes per queue slot.
 /// Public: [`mgmt_next`] hands these buffers to apps.
 pub const RX_COPY: usize = 160;
@@ -110,7 +111,7 @@ const EV_NAME: usize = 24;
 const EV_KEY: usize = 12;
 const EV_VAL: usize = 20;
 const EV_FIELDS: usize = 6;
-/// Max forwarded-uplink payload — the radio MTU (`tower_protocol::radio::MAX_RADIO_PAYLOAD`;
+/// Max forwarded-uplink payload: the radio MTU (`tower_protocol::radio::MAX_RADIO_PAYLOAD`;
 /// equality is static-asserted in `radio::frame`).
 const UPLINK_MAX: usize = tower_protocol::radio::MAX_RADIO_PAYLOAD;
 /// Management-response record bytes per frame. Mirrors [`SHELL_CHUNK`]'s reasoning: a
@@ -137,7 +138,7 @@ enum Outgoing {
         result: u8,
         text: String<MAX_RESP>,
     },
-    /// Completion result — all fields borrow the `'static` command tree, so no copy.
+    /// Completion result; all fields borrow the `'static` command tree, so no copy.
     Completions(ShellCompletions<'static>),
     /// One decrypted radio uplink, forwarded verbatim by a gateway app (data ≤ the
     /// radio MTU, so it always fits one frame).
@@ -167,12 +168,12 @@ static TX_CHANNEL: Channel<CriticalSectionRawMutex, Outgoing, TX_DEPTH> = Channe
 /// Decoded host→device **shell** frames (ShellCommand / ShellComplete), copied whole for the
 /// shell to drain on its own task ([`crate::shell::serve_ext`] spawns it). The console owns this
 /// RX buffer and never calls into the shell, so the transport layer doesn't depend on the
-/// (higher) shell layer. [`RX_COPY`]-sized — every legitimate shell frame fits.
+/// (higher) shell layer. [`RX_COPY`]-sized; every legitimate shell frame fits.
 pub(crate) static SHELL_RX: Channel<CriticalSectionRawMutex, Vec<u8, RX_COPY>, 2> = Channel::new();
 /// Decoded host→device **management** frames (MgmtRequest), copied whole for the app to drain
-/// via [`mgmt_next`]/[`mgmt_try_next`] on its own loop — same ownership story as [`SHELL_RX`]
+/// via [`mgmt_next`]/[`mgmt_try_next`] on its own loop; same ownership story as [`SHELL_RX`]
 /// (the console never calls up into the app). Depth 1 (management is strictly
-/// request/response — one outstanding op; a drop just makes the host retry, and the
+/// request/response: one outstanding op; a drop just makes the host retry, and the
 /// 20 KB part wants every spare `MAX_WIRE` buffer back for stack).
 static MGMT_RX: Channel<CriticalSectionRawMutex, Vec<u8, RX_COPY>, 1> = Channel::new();
 /// Whether the console is up (USB present, UART built, [`writer_loop`] draining). Set by
@@ -187,10 +188,10 @@ static DROPPED: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 /// Firmware name for the boot `Hello` (set by [`boot_banner`]); the dynamic console
 /// [`manager`] re-emits `Hello` with it on every USB plug-in so the host resyncs.
 static FW_NAME: Mutex<RefCell<String<FW_LEN>>> = Mutex::new(RefCell::new(String::new()));
-/// Per-boot session id carried in `Hello` — a persisted counter bumped once per boot by
+/// Per-boot session id carried in `Hello`: a persisted counter bumped once per boot by
 /// [`init_session`], so the host can tell a device reboot from a continuous link.
 static SESSION_ID: AtomicU32 = AtomicU32::new(0);
-/// Tick timestamp (low 32 bits of `Instant`) of the last decoded host→device frame — the
+/// Tick timestamp (low 32 bits of `Instant`) of the last decoded host→device frame; the
 /// storage maintenance task defers EEPROM slices while the host is actively talking (a CPU
 /// stall would eat in-flight RX bytes; see `storage::maintenance`). Wrapping-compared, so the
 /// ~36 h wrap at 32 kHz ticks is harmless.
@@ -227,7 +228,7 @@ fn take_dropped() -> u32 {
 }
 
 /// Enqueue an outgoing message, dropping it (drop-newest) and bumping [`DROPPED`] if
-/// the queue is full. Non-blocking — safe from any context (IRQ, the `log` backend).
+/// the queue is full. Non-blocking: safe from any context (IRQ, the `log` backend).
 fn try_enqueue(item: Outgoing) {
     if TX_CHANNEL.try_send(item).is_err() {
         bump_dropped();
@@ -237,13 +238,13 @@ fn try_enqueue(item: Outgoing) {
 /// Enqueue an outgoing message for the "async, never dropped" producers ([`event`],
 /// [`shell_response`], [`shell_completions`]).
 ///
-/// While the console is up ([`CONSOLE_UP`]) this applies real backpressure — awaiting a free
+/// While the console is up ([`CONSOLE_UP`]) this applies real backpressure, awaiting a free
 /// slot so a burst is never dropped. While it is **down** it falls back to non-blocking
 /// drop-newest: with no [`writer_loop`] draining [`TX_CHANNEL`], a plain `send().await` on a
 /// full queue would park the calling task until the next USB plug-in, silently stalling e.g. a
 /// battery node's measure loop. If USB is unplugged *during* a backpressured send, [`manager`]'s
 /// unplugged poll drains the queue (counting drops), which frees a slot and wakes the parked
-/// sender within one poll cycle — so the stall is bounded, never indefinite.
+/// sender within one poll cycle, so the stall is bounded, never indefinite.
 async fn enqueue(item: Outgoing) {
     if CONSOLE_UP.load(Ordering::Relaxed) {
         TX_CHANNEL.send(item).await;
@@ -265,7 +266,7 @@ fn clip<const N: usize>(s: &str) -> String<N> {
 
 /// A `fmt::Write` sink over a bounded [`String`] that **truncates** rather than
 /// failing. A plain `write!` into a `heapless::String` rejects any single piece that
-/// would overflow *wholesale* — so `log::info!("{}", over_long)` would log an **empty**
+/// would overflow *wholesale*, so `log::info!("{}", over_long)` would log an **empty**
 /// line. This sink instead writes what fits (at a char boundary) and silently drops
 /// the rest, so over-long messages clip gracefully.
 struct Clipper<const N: usize>(String<N>);
@@ -323,10 +324,10 @@ static LOGGER: ConsoleLogger = ConsoleLogger;
 
 /// Install the `log` backend at `max_level`. Call once at start-up; the console UART
 /// itself is brought up/down dynamically by [`manager`] as USB is plugged/unplugged,
-/// but the backend (which only enqueues into [`TX_CHANNEL`]) is always present — when
+/// but the backend (which only enqueues into [`TX_CHANNEL`]) is always present; when
 /// no UART exists the queue simply drops (harmless).
 pub fn install_logger(max_level: LevelFilter) {
-    // `_racy` variants: no atomic CAS on M0+. Safe — called once, single-threaded,
+    // `_racy` variants: no atomic CAS on M0+. Safe: called once, single-threaded,
     // before any task or log call runs.
     unsafe {
         let _ = log::set_logger_racy(&LOGGER);
@@ -343,14 +344,14 @@ static mut RX_DMA_BUF: [u8; 256] = [0; 256];
 
 /// USB-presence-gated **dynamic** console. Owns USART1 + PA9/PA10 for the whole run.
 /// While USB is present (`VBUS_SENSE`/PA12 high) it builds the DMA-backed `Uart` and runs
-/// the framed writer + the RX frame-router; on unplug it **drops** the UART — which
+/// the framed writer + the RX frame-router; on unplug it **drops** the UART (which
 /// disables USART1 and releases embassy's STOP refcount, so the low-power executor can
-/// enter STOP and idle at µA — then parks on the PA12 EXTI edge (which wakes the MCU
+/// enter STOP and idle at µA), then parks on the PA12 EXTI edge (which wakes the MCU
 /// out of STOP to bring the console back on plug-in). Spawned by
 /// [`board::Board::take`](crate::board::Board::take).
 ///
 /// `usart1`/`tx_pin`/`rx_pin` are held to reserve the peripherals; each build
-/// re-acquires them with `steal()` (sound — exactly one instance is alive at a time).
+/// re-acquires them with `steal()` (sound: exactly one instance is alive at a time).
 #[embassy_executor::task]
 pub async fn manager(
     usart1: Peri<'static, USART1>,
@@ -364,7 +365,7 @@ pub async fn manager(
     loop {
         // Wait for USB present. The PA12 EXTI edge wakes the low-power executor out of
         // STOP the instant VBUS rises; the periodic re-check is a fallback for a missed
-        // edge — the FT231X (which drives PA12 via CBUS3) only asserts it tens of ms
+        // edge: the FT231X (which drives PA12 via CBUS3) only asserts it tens of ms
         // after power-up, i.e. after the executor has already armed the wait, so relying
         // on the edge alone can hang. The ~500 ms RTC wake while unplugged costs sub-µA.
         //
@@ -377,7 +378,7 @@ pub async fn manager(
             crate::board::apply_stop_tuning();
             // Drain anything left in the queue while there's no writer (counting it as dropped):
             // frees slots so a producer that raced the unplug (checked CONSOLE_UP just before it
-            // cleared) can't stay parked on a full queue — it wakes within one poll cycle.
+            // cleared) can't stay parked on a full queue; it wakes within one poll cycle.
             while TX_CHANNEL.try_receive().is_ok() {
                 bump_dropped();
             }
@@ -394,7 +395,7 @@ pub async fn manager(
                 USART1::steal(),
                 PA10::steal(),     // RX pin
                 PA9::steal(),      // TX pin
-                DMA1_CH4::steal(), // TX DMA (DMA1_CHANNEL4_5_6_7 group — not the strip's CH3)
+                DMA1_CH4::steal(), // TX DMA (DMA1_CHANNEL4_5_6_7 group, not the strip's CH3)
                 DMA1_CH5::steal(), // RX DMA
                 ConsoleIrqs,
                 UartConfig::default(),
@@ -414,7 +415,7 @@ pub async fn manager(
 
         // The writer synthesizes the session `Hello` as its own first frame (see `writer_loop`),
         // so the host resyncs its per-link `seq` on every plug-in WITHOUT the Hello ever riding
-        // the shared producer queue — where a burst of logs racing the plug-in could drop it
+        // the shared producer queue, where a burst of logs racing the plug-in could drop it
         // (drop-newest) and strand the host on a stale seq (docs/console.md).
 
         // Run the writer + RX router until USB is unplugged (debounced), then tear the
@@ -432,16 +433,16 @@ pub async fn manager(
 }
 
 /// TX-drain wait for the writer, **bounded**. embassy's `UartTx::flush` awaits the USART TC flag
-/// via a one-shot TCIE arm — and the RX ring's status sweep (`check_idle_and_errors`, polled by
+/// via a one-shot TCIE arm, and the RX ring's status sweep (`check_idle_and_errors`, polled by
 /// [`rx_loop`] on every wake) clears the WHOLE ISR snapshot to ICR, **TC included**. If TC rises
 /// in the µs gap between the writer's flush poll and the RX sweep in the same executor cycle, the
 /// sweep consumes the flag before flush observes it (in the other interleaving the USART ISR sees
 /// TC already cleared and returns without waking): flush then waits for a TC edge that can never
-/// come — the writer IS the only TX producer — parking it forever. Downstream, `TX_CHANNEL` fills
+/// come (the writer IS the only TX producer), parking it forever. Downstream, `TX_CHANNEL` fills
 /// and every backpressured producer (a gateway's whole main loop) parks with it: silent, deaf,
 /// IWDG still fed. Bench casualty 2026-07-13 (dongle wedged after hours; NRST recovered it).
 /// A full ~270 B frame drains in ~24 ms at 115200, so the 50 ms ceiling never truncates a real
-/// drain — on a consumed TC it merely releases the STOP `WakeGuard` a frame-time early.
+/// drain; on a consumed TC it merely releases the STOP `WakeGuard` a frame-time early.
 async fn flush_bounded(tx: &mut UartTx<'static, Async>) {
     let _ = with_timeout(Duration::from_millis(50), tx.flush()).await;
 }
@@ -474,7 +475,7 @@ impl Drop for OnCancelDrop {
 async fn writer_loop(tx: &mut UartTx<'static, Async>) {
     let mut seq: u16 = 0;
 
-    // The writer emits the session's opening frames ITSELF — not via the shared producer queue —
+    // The writer emits the session's opening frames ITSELF, not via the shared producer queue,
     // so a burst of logs racing a plug-in can never bump the `Hello` out of a full TX_CHANNEL
     // (drop-newest). The host relies on decoding a fresh Hello to reset its per-link `seq`
     // tracking (docs/console.md); dropping it would strand the host on a stale seq and print a
@@ -482,7 +483,7 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
     // host's decoder, then the Hello as seq 0.
     //
     // (Historical: a chatty boot backlog draining right after this Hello used to lose host→device
-    // bytes to receiver overrun — the old interrupt-per-byte RX couldn't be serviced within one
+    // bytes to receiver overrun: the old interrupt-per-byte RX couldn't be serviced within one
     // ~87 µs char-time while the TX flood monopolized the core. RX now runs on a circular DMA
     // buffer (channel 5), filled in hardware independent of CPU/ISR latency, so a byte is no
     // longer dropped during the flood. The host CLI's post-Hello settle stays as belt-and-braces.)
@@ -508,10 +509,10 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
     loop {
         let item = TX_CHANNEL.receive().await;
         // Hold STOP off across the burst so the DMA write completes (redundant with the RX ring's
-        // stop refcount — see `writer_loop` — kept so the TX path is self-contained).
+        // stop refcount, see `writer_loop`; kept so the TX path is self-contained).
         let _guard = WakeGuard::new(StopMode::Stop1);
         // Count this dequeued item as dropped if the writer is cancelled (USB unplug via the
-        // manager's `select3`) before it is handed to the UART — keeps the host's Dropped
+        // manager's `select3`) before it is handed to the UART; this keeps the host's Dropped
         // accounting exact even for the "never dropped" backpressured producers. Disarmed once
         // the item's bytes are written into the UART ring.
         let mut cancel_guard = OnCancelDrop(true);
@@ -609,11 +610,11 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
             }
             Outgoing::RadioStat(stat) => send(tx, &mut seq, MsgType::RadioStat, stat).await,
         }
-        cancel_guard.0 = false; // item's bytes are in the UART ring — not a drop
+        cancel_guard.0 = false; // item's bytes are in the UART ring, not a drop
         // Drain the ring (still under the guard) before idling, so the frames actually
         // leave the wire rather than sitting in the buffer when STOP is next allowed.
         // Bounded: an unbounded flush can lose its TC flag to the RX ring's status
-        // sweep and park the writer — and the whole console — forever (see
+        // sweep and park the writer (and the whole console) forever (see
         // `flush_bounded`).
         flush_bounded(tx).await;
     }
@@ -654,8 +655,8 @@ async fn route_frame(inner: &[u8]) {
         MsgType::ShellCommand | MsgType::ShellComplete => {
             // Copy the whole frame for the shell to re-decode on its drain task. Depth-2 queue;
             // a request/response shell sends one command at a time, so it rarely holds >1, and a
-            // drop (queue full) just makes the host retry — never stalls the RX loop. An
-            // over-RX_COPY frame fails the copy wholesale (empty Vec, dropped below) — no
+            // drop (queue full) just makes the host retry; it never stalls the RX loop. An
+            // over-RX_COPY frame fails the copy wholesale (empty Vec, dropped below); no
             // legitimate frame is that big (see RX_COPY).
             let mut v: Vec<u8, RX_COPY> = Vec::new();
             if v.extend_from_slice(inner).is_ok() {
@@ -680,7 +681,7 @@ pub async fn mgmt_next() -> Vec<u8, RX_COPY> {
     MGMT_RX.receive().await
 }
 
-/// Non-blocking [`mgmt_next`] — for a main loop that polls between radio slices.
+/// Non-blocking [`mgmt_next`], for a main loop that polls between radio slices.
 pub fn mgmt_try_next() -> Option<Vec<u8, RX_COPY>> {
     MGMT_RX.try_receive().ok()
 }
@@ -740,9 +741,9 @@ async fn send_shell_response(
     }
 }
 
-/// Emit a self-describing event (key=value pairs) to the host — rendered by
+/// Emit a self-describing event (key=value pairs) to the host, rendered by
 /// `tower events` without any per-app schema. **Async**: while USB is present it applies
-/// backpressure (never dropped); while unplugged — no host, no writer — it drops (counted in
+/// backpressure (never dropped); while unplugged (no host, no writer) it drops (counted in
 /// the [`Dropped`] marker) rather than parking the caller, so a battery node's measure loop
 /// keeps running. Extra fields beyond [`EV_FIELDS`] and over-long strings are clipped.
 ///
@@ -763,7 +764,7 @@ pub async fn event(name: &str, fields: &[(&str, &str)]) {
 
 /// Send a shell command response. The writer splits `text` into `chunk`/`last` frames
 /// the host reassembles, so it may exceed one frame (up to [`MAX_RESP`], clipped past
-/// that). Async — backpressured while USB is present (a shell command only arrives over a
+/// that). Async: backpressured while USB is present (a shell command only arrives over a
 /// live console, so the writer is up to drain it). Used by the shell engine ([`crate::shell`]).
 pub async fn shell_response(cmd_id: u16, result: u8, text: &str) {
     enqueue(Outgoing::ShellResponse {
@@ -775,14 +776,14 @@ pub async fn shell_response(cmd_id: u16, result: u8, text: &str) {
 }
 
 /// Send a completion result. The candidates borrow the `'static` command tree, so
-/// nothing is copied. Async — never dropped. Used by the shell engine.
+/// nothing is copied. Async: never dropped. Used by the shell engine.
 pub async fn shell_completions(c: tower_protocol::msg::ShellCompletions<'static>) {
     enqueue(Outgoing::Completions(c)).await;
 }
 
-/// Forward one decrypted, authenticated radio uplink to the host, verbatim — the
+/// Forward one decrypted, authenticated radio uplink to the host, verbatim: the
 /// gateway app's bridge primitive. `data` past the radio MTU is clipped (cannot
-/// happen for a frame that came out of the net layer). Async — backpressured while
+/// happen for a frame that came out of the net layer). Async: backpressured while
 /// USB is present (a gateway is USB-powered by definition, so this is the normal
 /// path); drop-newest while down, counted in the [`Dropped`] marker.
 pub async fn uplink(src: u32, counter: u32, rssi: i16, lqi: u8, data: &[u8]) {
@@ -802,7 +803,7 @@ pub async fn uplink(src: u32, counter: u32, rssi: i16, lqi: u8, data: &[u8]) {
 /// caller's job: stream records in ≤ [`MGMT_CHUNK`]-byte (192) `data` pieces with a
 /// running `chunk` index and `last` on the final one; `result` is authoritative only
 /// on that last chunk (mirror of the shell-response discipline). A result-only reply
-/// is a single empty `last` chunk. Async — backpressured while USB is present.
+/// is a single empty `last` chunk. Async: backpressured while USB is present.
 pub async fn mgmt_chunk(req_id: u16, result: u8, chunk: u16, last: bool, data: &[u8]) {
     let mut v: Vec<u8, MGMT_CHUNK> = Vec::new();
     let _ = v.extend_from_slice(&data[..data.len().min(MGMT_CHUNK)]);
@@ -817,7 +818,7 @@ pub async fn mgmt_chunk(req_id: u16, result: u8, chunk: u16, last: bool, data: &
 }
 
 /// Send one radio-diagnostics sample ([`RadioStat`]) for the host's running channel
-/// graph. Async — backpressured while USB is present.
+/// graph. Async: backpressured while USB is present.
 pub async fn radio_stat(stat: RadioStat) {
     enqueue(Outgoing::RadioStat(stat)).await;
 }
@@ -832,7 +833,7 @@ pub fn boot_banner(name: &str) {
     log::info!(target: "boot", "booted: {}", name);
 }
 
-/// The firmware name recorded by [`boot_banner`] — the app/example name carried in `Hello` and
+/// The firmware name recorded by [`boot_banner`]: the app/example name carried in `Hello` and
 /// shown by `tower`'s connect banner. The shell's `resource` command reports this so its
 /// "firmware:" line matches the boot `Hello` (they previously disagreed: Hello carried the name
 /// while the shell printed the SDK crate version, identical for every app).
@@ -853,7 +854,7 @@ pub fn session_id() -> u32 {
 /// Read, increment, and persist the per-boot session counter once at start-up (the `Hello`
 /// `session_id`). Called by the [`app!`](crate::app) macro after the KV store is installed and
 /// before the console emits its first `Hello`. Best-effort: if the store can't be read the
-/// counter restarts at 1, and a failed persist just means two boots may share an id — the id is
+/// counter restarts at 1, and a failed persist just means two boots may share an id; the id is
 /// a reboot *hint* for the host, not a security guarantee (that is the radio TX-counter's job).
 ///
 /// **Boot-loop backoff:** the [`bootguard`](crate::bootguard) tracks consecutive fast resets in
@@ -883,7 +884,7 @@ pub fn init_session(kv: Nv, spawner: crate::Spawner) {
 
 /// Await the writer draining every queued frame, then a short tail for the last frame to clear
 /// the UART. A caller that resets the MCU right after emitting a final response (the shell's
-/// `/system reboot`) uses this so the reset can't cut the response off mid-frame — the old fixed
+/// `/system reboot`) uses this so the reset can't cut the response off mid-frame; the old fixed
 /// 150 ms sleep was shorter than a full `TX_CHANNEL` at 115200 baud (~190 ms). Bounded so an
 /// absent/wedged writer (console down) can't hang the caller.
 pub async fn flush() {
@@ -922,8 +923,8 @@ macro_rules! println {
 
 /// Blocking-write one framed `Error` [`Log`] straight to the USART1 registers via the PAC,
 /// bypassing the (dead) executor and the channel. Shared by the [`on_panic`] handler and the
-/// `HardFault` exception — both run with the executor stopped and interrupts effectively ours.
-/// If the console UART isn't up (USART1 disabled — USB not attached), it's a no-op: there is
+/// `HardFault` exception; both run with the executor stopped and interrupts effectively ours.
+/// If the console UART isn't up (USART1 disabled, USB not attached), it's a no-op: there is
 /// nowhere to send. `uptime_us` is the real timebase (the time driver is a peripheral, still
 /// live here) so the crash time is preserved, not reported as 0.
 fn blocking_emit_error(module: &str, message: &str) {
@@ -961,36 +962,118 @@ fn blocking_emit_error(module: &str, message: &str) {
     }
 }
 
+/// Longest source path kept in a panic record. A dependency's location is an absolute
+/// `~/.cargo/registry/src/<index>/<crate>-<ver>/src/…` path (~110 B), enough to push the
+/// message itself out of the 192-byte record, so only its tail is kept (`…/<crate>-<ver>/src/…`
+/// usually survives).
+const PANIC_PATH_MAX: usize = 48;
+
+/// The last ≤ [`PANIC_PATH_MAX`] bytes of `file`, cut at a `/` so it starts on a path component.
+fn short_path(file: &str) -> &str {
+    if file.len() <= PANIC_PATH_MAX {
+        return file;
+    }
+    let tail = &file[clip_start(file, file.len() - PANIC_PATH_MAX)..];
+    tail.find('/').map_or(tail, |i| &tail[i + 1..])
+}
+
+/// Smallest char boundary of `s` at or after `at` (never splits UTF-8).
+fn clip_start(s: &str, mut at: usize) -> usize {
+    while at < s.len() && !s.is_char_boundary(at) {
+        at += 1;
+    }
+    at
+}
+
 /// SDK panic handler: write the reset-surviving crash breadcrumb, emit one framed error record
-/// (if the console is up — the USB-attached dev case), then **reset**. A field unit recovers
+/// (if the console is up, i.e. the USB-attached dev case), then **reset**. A field unit recovers
 /// service instead of hanging until a battery pull; the breadcrumb re-surfaces the crash on the
 /// next boot ([`emit_crash_report`]), so nothing is lost by rebooting. A crash loop is bounded
 /// by the [`bootguard`](crate::bootguard): after `BOOT_LOOP_THRESHOLD` fast resets the SDK stops
 /// grinding per-boot EEPROM state, and the run length is visible in `/system/eeprom print`.
+///
+/// The record is `<message> @ <short path>:<line>`: message first and **clipped, never dropped**
+/// ([`Clipper`]): a plain `write!` of the whole `PanicInfo` into a bounded `heapless::String`
+/// aborts at the first piece that doesn't fit, so a long (absolute registry) location used to
+/// leave neither message nor location in the record.
 #[panic_handler]
 fn on_panic(info: &PanicInfo) -> ! {
-    let mut msg = String::<MAX_MSG>::new();
-    let _ = write!(msg, "{}", info);
-    crate::crashlog::record(crate::crashlog::Kind::Panic, msg.as_str());
-    blocking_emit_error("panic", msg.as_str());
+    let mut loc = Clipper::<{ PANIC_PATH_MAX + 16 }>(String::new());
+    if let Some(l) = info.location() {
+        let _ = write!(loc, " @ {}:{}", short_path(l.file()), l.line());
+    }
+    let mut msg = Clipper::<MAX_MSG>(String::new());
+    let _ = write!(msg, "{}", info.message());
+    // Clip the message (at a char boundary) so the location still fits after it.
+    let room = MAX_MSG - loc.0.len();
+    if msg.0.len() > room {
+        let mut end = room;
+        while end > 0 && !msg.0.is_char_boundary(end) {
+            end -= 1;
+        }
+        msg.0.truncate(end);
+    }
+    let _ = msg.0.push_str(&loc.0);
+    crate::crashlog::record(crate::crashlog::Kind::Panic, msg.0.as_str());
+    blocking_emit_error("panic", msg.0.as_str());
     cortex_m::peripheral::SCB::sys_reset()
 }
 
-/// HardFault handler: same policy as [`on_panic`] — breadcrumb (with the faulting PC/LR), one
-/// blocking framed report when the console is up, then reset. (cortex-m-rt's default handler
-/// would spin silently.) The post-reset watchdog question is settled: [`crate::watchdog`] is
-/// STOP-aware (its feeder wakes the low-power executor), so apps arm it for the *hang* case,
-/// while this path covers the *fault* case.
-#[cortex_m_rt::exception]
-unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
-    let mut msg = String::<MAX_MSG>::new();
-    let _ = write!(msg, "HardFault pc={:#010x} lr={:#010x}", ef.pc(), ef.lr());
-    crate::crashlog::record(crate::crashlog::Kind::HardFault, msg.as_str());
-    blocking_emit_error("fault", msg.as_str());
+// HardFault entry: hand-written instead of cortex-m-rt's `#[exception]` trampoline so the handler
+// body runs on a **fresh stack**: it reads the faulting PC/LR out of the exception frame first,
+// then points MSP back at `_stack_start` (the top of the stack region) and calls
+// [`tower_hard_fault`]. A HardFault often lands deep in the call graph; running ~1 KB of handler
+// (format buffers, the 272-byte wire frame, the breadcrumb copy) on what is left could push SP
+// below the RAM origin, where (under flip-link) the next push faults *inside* the HardFault
+// handler and the ARMv6-M core locks up with no breadcrumb. Sound because the handler never
+// returns (it resets) and needs nothing from the old stack except the two words copied into r0/r1
+// *before* the switch (the frame itself may be overwritten by the new frames afterwards).
+// Thread mode uses MSP throughout this SDK; the PSP branch is kept for generality.
+//
+// What this cannot catch is the overflow itself: if SP is already below the RAM origin, the
+// exception entry's own stacking faults and the core locks up before this code runs. That case is
+// recovered by an armed IWDG and diagnosed at the next boot from the stack paint (`stack::paint`).
+core::arch::global_asm!(
+    ".section .text.HardFault,\"ax\",%progbits",
+    ".global HardFault",
+    ".type HardFault,%function",
+    ".thumb_func",
+    "HardFault:",
+    "mov r0, lr",
+    "movs r1, #4",
+    "tst r0, r1",
+    "bne 1f",
+    "mrs r2, MSP",
+    "b 2f",
+    "1:",
+    "mrs r2, PSP",
+    "2:",
+    "ldr r0, [r2, #24]", // stacked PC
+    "ldr r1, [r2, #20]", // stacked LR
+    "ldr r2, =_stack_start",
+    "mov sp, r2",
+    "bl {handler}",
+    "b .", // unreachable: the handler resets
+    ".ltorg",
+    ".size HardFault, . - HardFault",
+    handler = sym tower_hard_fault,
+);
+
+/// HardFault handler body (entered from the `HardFault` stub above, on a fresh stack): same policy
+/// as [`on_panic`]: breadcrumb (with the faulting PC/LR), one blocking framed report when the
+/// console is up, then reset. (cortex-m-rt's default handler would spin silently.) The post-reset
+/// watchdog question is settled: [`crate::watchdog`] is STOP-aware (its feeder wakes the
+/// low-power executor), so apps arm it for the *hang* case, while this path covers the *fault*
+/// case.
+extern "C" fn tower_hard_fault(pc: u32, lr: u32) -> ! {
+    let mut msg = Clipper::<MAX_MSG>(String::new());
+    let _ = write!(msg, "HardFault pc={pc:#010x} lr={lr:#010x}");
+    crate::crashlog::record(crate::crashlog::Kind::HardFault, msg.0.as_str());
+    blocking_emit_error("fault", msg.0.as_str());
     cortex_m::peripheral::SCB::sys_reset()
 }
 
-/// Report the previous boot's crash, if the reset-surviving breadcrumb holds one — one ERROR
+/// Report the previous boot's crash, if the reset-surviving breadcrumb holds one, as one ERROR
 /// frame on the `crash` module, emitted through the normal console queue once the manager is
 /// up. Called by the [`app!`](crate::app) macro right after the boot banner; also caches the
 /// record for `/system/crash print`.

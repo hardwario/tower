@@ -1,23 +1,23 @@
 //! The gateway's persistent node registry: `(addr, key, flags, name)` records packed
-//! into buckets, one `tower-kv` value per bucket — accessed **bucket-at-a-time**
+//! into buckets, one `tower-kv` value per bucket, accessed **bucket-at-a-time**
 //! through the [`BucketIo`] trait, never held resident.
 //!
 //! Two constraints shape this module:
 //! * `tower_kv::MAX_KEYS = 64` is a *global* cap on distinct KV keys and `NS_NET`
-//!   alone holds 19, so the registry cannot spend one key per node — six records per
+//!   alone holds 19, so the registry cannot spend one key per node; six records per
 //!   bucket × three buckets covers the 16-peer table in 3 keys.
-//! * The STM32L083 has 20 KB of RAM and a HW-measured ~9 KB stack peak for any `Net`
-//!   app (see the firmware's stack-overflow history): a resident registry copy
+//! * The STM32L083 has 20 KB of RAM and only a ~9 KB stack region for a `Net` app
+//!   (bench-measured gateway high-water 7360 B; see the firmware's stack-overflow history): a resident registry copy
 //!   (~1.7 KB inside the app's statically-allocated task future) is RAM the stack
 //!   cannot afford. Every operation here loads ONE bucket into a ~270 B stack local,
 //!   mutates, writes back, and returns owned/loaned data no larger than one record.
-//!   All functions are synchronous — their locals live on the stack during the call,
+//!   All functions are synchronous: their locals live on the stack during the call,
 //!   not in the app future.
 //!
 //! Registry churn (add / remove / rename) is operator-rate, so a bucket rewrite per
 //! change is wear-trivial next to the net layer's counter traffic. The encoded worst
 //! case is pinned by test against [`MAX_BUCKET_BYTES`] ≤ tower-kv's 256-byte value
-//! cap. The record layout is **persisted** — field order is load-bearing; evolve it
+//! cap. The record layout is **persisted**: field order is load-bearing; evolve it
 //! append-only and bump [`FORMAT_VERSION`] on any change (the app stores the version
 //! at its own key and refuses buckets from a newer format).
 
@@ -26,14 +26,14 @@ use serde::{Deserialize, Serialize};
 
 /// Persisted-format version (the app stores this next to the buckets).
 pub const FORMAT_VERSION: u8 = 1;
-/// Records per bucket. 6 × ~39 B encoded ≈ 235 B — one tower-kv value.
+/// Records per bucket. 6 × ~39 B encoded ≈ 235 B, one tower-kv value.
 pub const PER_BUCKET: usize = 6;
 /// Bucket count. 3 × [`PER_BUCKET`] = 18 slots ≥ the 16-peer capacity.
 pub const BUCKETS: usize = 3;
-/// Usable node capacity — matches the net layer's `MAX_PEERS` (the registry must
+/// Usable node capacity; matches the net layer's `MAX_PEERS` (the registry must
 /// never hold more nodes than the RAM peer table can serve).
 pub const CAPACITY: usize = 16;
-/// Longest node name, bytes (UTF-8) — mirrors `tower_protocol::mgmt::MAX_NODE_NAME`.
+/// Longest node name, bytes (UTF-8); mirrors `tower_protocol::mgmt::MAX_NODE_NAME`.
 pub const MAX_NAME: usize = 16;
 /// Encoded-bucket ceiling, pinned by test. tower-kv's `MAX_VALUE` is 256.
 pub const MAX_BUCKET_BYTES: usize = 256;
@@ -49,7 +49,7 @@ pub struct NodeRecord {
     pub name: String<MAX_NAME>,
 }
 
-/// One bucket of records (a transient stack local — never resident).
+/// One bucket of records (a transient stack local, never resident).
 pub type Bucket = Vec<NodeRecord, PER_BUCKET>;
 
 /// Why a mutation was refused.
@@ -61,6 +61,9 @@ pub enum RegistryError {
     NotFound,
     /// Name over [`MAX_NAME`] bytes.
     BadName,
+    /// [`add_new`] refused: that addr is already registered (an OTA pairing may never
+    /// overwrite an existing node; the operator removes it first).
+    Exists,
     /// The backing store failed to persist; nothing was committed.
     Storage,
 }
@@ -69,7 +72,7 @@ pub enum RegistryError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IoError;
 
-/// Bucket persistence the registry operates over — the L0 data EEPROM in the
+/// Bucket persistence the registry operates over: the L0 data EEPROM in the
 /// firmware (`NS_APP` locals), a RAM array in host tests. Same seam as
 /// `tower_kv::Eeprom`.
 pub trait BucketIo {
@@ -79,7 +82,7 @@ pub trait BucketIo {
     fn store(&mut self, index: usize, bytes: &[u8]) -> Result<(), IoError>;
 }
 
-/// Decode bucket `index`. Absent OR undecodable buckets read as empty — a corrupt
+/// Decode bucket `index`. Absent OR undecodable buckets read as empty: a corrupt
 /// bucket means those nodes re-pair, which beats refusing to serve the rest of the
 /// network (the caller can't do anything smarter with the bytes either way).
 pub fn load(io: &impl BucketIo, index: usize) -> Bucket {
@@ -112,7 +115,7 @@ pub fn find(io: &impl BucketIo, addr: u32) -> Option<NodeRecord> {
     None
 }
 
-/// Add a node (or overwrite the record of an already-registered addr — the
+/// Add a node (or overwrite the record of an already-registered addr, the
 /// cable-pairing re-provision case).
 pub fn add(io: &mut impl BucketIo, rec: &NodeRecord) -> Result<(), RegistryError> {
     // Overwrite in place if the addr exists.
@@ -134,6 +137,18 @@ pub fn add(io: &mut impl BucketIo, rec: &NodeRecord) -> Result<(), RegistryError
         }
     }
     Err(RegistryError::Full)
+}
+
+/// Add a node **only if its addr is not registered yet**: the OTA-pairing commit path. Unlike
+/// [`add`] (the cable path, an authenticated host action that may deliberately re-provision),
+/// an over-the-air JOIN must never overwrite an existing record: the pairing key is public, so
+/// a JOIN carrying a victim's address would otherwise re-key the victim and lock it out. Returns
+/// [`RegistryError::Exists`] and writes nothing in that case.
+pub fn add_new(io: &mut impl BucketIo, rec: &NodeRecord) -> Result<(), RegistryError> {
+    if find(io, rec.addr).is_some() {
+        return Err(RegistryError::Exists);
+    }
+    add(io, rec)
 }
 
 /// Remove a node.
@@ -213,7 +228,7 @@ mod tests {
         }
     }
 
-    /// The persisted `NodeRecord` postcard layout IS the on-EEPROM format — a serde field
+    /// The persisted `NodeRecord` postcard layout IS the on-EEPROM format: a serde field
     /// reorder or a postcard bump would silently mis-decode every stored bucket on upgrade
     /// (the same silent-drift class the protocol golden vectors guard). Pin the exact bytes
     /// AND the format marker, so a layout change is a conscious, versioned decision.
@@ -272,7 +287,7 @@ mod tests {
         assert!(find(&io, 3).is_none());
     }
 
-    /// Garbage bucket bytes read as empty (those nodes re-pair) — never a panic, and
+    /// Garbage bucket bytes read as empty (those nodes re-pair), never a panic, and
     /// the healthy buckets keep working.
     #[test]
     fn garbage_bucket_reads_empty() {
@@ -292,6 +307,33 @@ mod tests {
         add(&mut io, &rec(7, "new")).unwrap();
         assert_eq!(count(&io), 1);
         assert_eq!(find(&io, 7).unwrap().name.as_str(), "new");
+    }
+
+    /// The OTA commit path never overwrites: an existing addr is refused with `Exists` and the
+    /// stored record (its key!) is untouched; after a `remove` the same addr pairs normally.
+    #[test]
+    fn add_new_refuses_existing_addr() {
+        let mut io = Mem::default();
+        let victim = rec(7, "victim");
+        add(&mut io, &victim).unwrap();
+        let mut hijack = rec(7, "");
+        hijack.key = [0xEE; 16];
+        assert_eq!(add_new(&mut io, &hijack), Err(RegistryError::Exists));
+        assert_eq!(find(&io, 7).unwrap(), victim, "the victim's key must survive");
+        assert_eq!(count(&io), 1);
+        remove(&mut io, 7).unwrap();
+        add_new(&mut io, &hijack).unwrap();
+        assert_eq!(find(&io, 7).unwrap().key, [0xEE; 16]);
+    }
+
+    /// `add_new` still enforces capacity like `add`.
+    #[test]
+    fn add_new_respects_capacity() {
+        let mut io = Mem::default();
+        for i in 0..CAPACITY as u32 {
+            add_new(&mut io, &rec(100 + i, "n")).unwrap();
+        }
+        assert_eq!(add_new(&mut io, &rec(999, "n")), Err(RegistryError::Full));
     }
 
     /// Slots free up on remove and are reused; capacity is enforced at CAPACITY (16),
@@ -358,8 +400,8 @@ mod tests {
         assert_eq!(seen, total);
     }
 
-    /// find/update/remove must reach a node that landed in a later bucket, not just bucket 0
-    /// — the cross-bucket loop bodies of those three fns were only asserted on bucket-0 nodes.
+    /// find/update/remove must reach a node that landed in a later bucket, not just bucket 0;
+    /// the cross-bucket loop bodies of those three fns were only asserted on bucket-0 nodes.
     #[test]
     fn mutate_spilled_node() {
         let mut io = Mem::default();

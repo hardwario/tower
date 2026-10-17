@@ -1,4 +1,4 @@
-//! radio_beacon — first real modulated two-board link (one file, two roles).
+//! radio_beacon: first real modulated two-board link (one file, two roles).
 //!
 //! Build twice:
 //!   TOWER_FEATURES=role-node    just flash example radio_beacon   # TX: sends a counter
@@ -10,7 +10,7 @@
 //! The TX sends a small `[seq:4][0xA5 pad...]` payload; the RX prints the received
 //! bytes, the decoded sequence number (checking for gaps), and per-packet signal
 //! quality. This proves the data rate, deviation and channel filter (the digital
-//! domain) on top of the Step 3 carrier — the first end-to-end packet link.
+//! domain) on top of the Step 3 carrier: the first end-to-end packet link.
 
 #![no_std]
 #![no_main]
