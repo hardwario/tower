@@ -243,6 +243,8 @@ pub struct Net {
     /// the drops counted since.
     replay_log_s: u32,
     replay_drops: u16,
+    /// The peer whose keyed join (E4) [`recv`](Self::recv) answered last, until taken.
+    keyed_join: Option<u32>,
 }
 
 impl Net {
@@ -315,6 +317,7 @@ impl Net {
             last_ack: None,
             replay_log_s: u32::MAX,
             replay_drops: 0,
+            keyed_join: None,
         })
     }
 
@@ -490,6 +493,13 @@ impl Net {
     #[must_use]
     pub fn last_ack(&self) -> Option<AckMeta> {
         self.last_ack
+    }
+
+    /// The registered peer whose keyed join (E4, docs/radio.md) [`recv`](Self::recv) answered
+    /// since the last call, if any: for the host's log / UI. `recv` answers keyed joins
+    /// inline and never returns them as an uplink.
+    pub fn take_keyed_join(&mut self) -> Option<u32> {
+        self.keyed_join.take()
     }
 
     /// Last-seen counter for a registered peer (`None` if not registered).
@@ -677,6 +687,14 @@ impl Net {
         // Peek the clear header (AAD) to learn the src, then CCM-open with that
         // peer's key: a registered peer uses its own key, others the default.
         let (peek, _) = frame::Header::parse(&buf[..len]).ok()?;
+        if peek.frame_type == FrameType::JoinReq && peek.flags & flags::KEYED != 0 && peek.dest == 0 {
+            // A keyed join (E4) from a registered peer: answered inline, like an ACK, and
+            // never surfaced as an uplink (pairing.rs).
+            if let Some(peer) = self.answer_keyed_join(&mut buf[..len]).await {
+                self.keyed_join = Some(peer);
+            }
+            return None;
+        }
         if peek.dest != self.addr {
             return None; // not for us
         }

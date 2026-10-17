@@ -114,7 +114,7 @@ Little-endian frame, fits the 96-byte FIFO:
 
 - `ver_type`: bits[7:5] protocol version (=1), bits[4:0] frame type
   (`Data`, `Ack`, `BulkReq`, `BulkData`, `JoinReq`, `JoinResp`, `JoinConfirm`, `Beacon`).
-- `flags`: `CONFIRMED`, `LAST_CHUNK`, `BULK_ANNOUNCE`.
+- `flags`: `CONFIRMED`, `KEYED` (JOIN frames only), `LAST_CHUNK`, `BULK_ANNOUNCE`.
 - The whole cleartext header is the CCM **AAD**; the payload is encrypted.
 - **Nonce** (13 B, not transmitted, reconstructed from the header):
   `nonce_for(src, counter, bulk_index)` = `src ‖ counter ‖ bulk_index ‖ 0x0000`.
@@ -297,6 +297,42 @@ if let Some(peer_addr) = net.open_pairing(PAIRING_WINDOW, &per_node_key).await {
 if let Some((gw_addr, key)) = net.join(addr, PAIRING_WINDOW).await { /* store both */ }
 ```
 
+**Keyed join (E4).** A node whose per-node key the host already holds joins under that key
+instead, with no window and no key on air. The host registered it with `add_peer` (the
+gateway's `NodeAdd`), and the key was provisioned out of band (cable, factory, NFC):
+
+```
+node  JOIN_REQ  flags KEYED, src = node, dest = 0,    payload node(4 LE)          under the node key
+host  JOIN_RESP flags KEYED, src = host, dest = node, payload req counter(4 LE)   under the node key, ACK_TURNAROUND later
+```
+
+- The host answers inside `recv()`, at any time, and only a **registered** peer whose
+  request counter is **fresh** on its replay lane (`keyed_req_admit`); the lane advances, so
+  a recorded request never draws a second response. The host proves the key and its
+  freshness by echoing the request's counter (`keyed_resp_matches`): the joiner's TX
+  counter never repeats, even across a reboot, so no random nonce is needed.
+- Both ends prove the key: this is mutual authentication, and nothing secret travels.
+- Nothing is committed on the host (the peer, key and lane are already installed);
+  `take_keyed_join()` reports the joiner for the log. The joiner learns the host's address
+  and installs it with `add_peer(gw_addr, key)`.
+- Two frames, not three: the host's freshness proof is the echo and the joiner's is the
+  lane, so a confirm would add nothing.
+- It is additive. A stock host drops the request (dest 0 is not its address, and the frame
+  does not open under `PAIRING_KEY` inside a pairing window), and a stock joiner never sets
+  `KEYED`.
+- In a P2P mesh any peer holding the joiner's key answers; the joiner then talks to that
+  peer. In a star the joiner's only key holder is its gateway.
+
+```rust
+// host: the key was installed up front (NodeAdd); recv() answers the join inline
+let _ = net.add_peer(node_addr, &node_key);
+if let Some(node) = net.take_keyed_join() { /* log */ }
+// joiner: same key, own address; returns the host's address
+if let Some(gw_addr) = net.join_keyed(addr, &node_key, Duration::from_secs(10)).await {
+    let _ = net.add_peer(gw_addr, &node_key);
+}
+```
+
 **Duty governor.** A token-bucket meters **all** TX airtime (data, ACKs,
 bulk, pairing); a send that would exceed the budget returns `DutyLimited` instead
 of transmitting. The policy follows the band and is reselected by `set_band`: EU
@@ -366,6 +402,7 @@ Two-board examples are one source file built twice with a role feature (e.g.
 | `net_bulk_stress` | gateway / node | large bulk (multi-KB) + CRC-32 + throughput stress |
 | `net_bulk_stream` | gateway / node | streaming bulk (source/sink), 4-64 KB, constant RAM |
 | `net_pairing` | gateway / node | OTA 3-way JOIN delivers a per-node key |
+| `net_keyed_join` | gateway / node | keyed join (E4) under a per-node key both ends hold |
 | `net_star` | gateway / node[,node-2] | star: per-node keys + per-node replay lanes |
 | `net_p2p` | role-peer-a / role-peer-b | P2P bidirectional confirmed exchange |
 | `net_channel` | node / gateway | secured link on a non-default channel (VCO recal) |
@@ -492,7 +529,8 @@ a practical limit). EEPROM key storage is only as safe as the chip's readout pro
 - **OTA pairing has no confidentiality.** The fixed `PAIRING_KEY` is public, so a
   sniffer in range during the (short, user-initiated) pairing window recovers the
   delivered per-node key, and there is no mutual authentication. Pair at
-  close range / reduced power; enable flash RDP for production key storage.
+  close range / reduced power; enable flash RDP for production key storage. Where the
+  key can be provisioned out of band, the keyed join (E4) avoids both.
 - **US 915 single-channel `Us915` is bench-test only** (runtime-switchable via
   `set_band`, hardware-verified, but **not** FCC 15.247-compliant; use FHSS for a
   compliant US link). EU 868 (duty or LBT+AFA) is the compliant default region.

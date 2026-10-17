@@ -235,6 +235,10 @@ uplink cycle.
   address it **overwrites** the record (an authenticated, host-side re-provision). A node re-added
   under a **new** key starts a fresh replay lane (its counter may have restarted); under the same
   key it resumes its old one.
+- **Keyed join (E4)**: a node registered with `NodeAdd` may also join on air under its own
+  key (docs/radio.md "Keyed join"): the gateway answers it inside the normal receive slice, with
+  no window and nothing to commit, and logs `node … joined (keyed)`. The node learns the
+  gateway's address that way. No management message changes.
 
 ### RAM budget
 

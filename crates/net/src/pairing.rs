@@ -10,8 +10,13 @@
 //! Only this acceptance predicate is extracted; the challenge *minting* (the firmware's
 //! non-cryptographic xorshift32 PRNG), the pairing windows/turnarounds and the JOIN frame
 //! exchange stay in the firmware's radio flow.
+//!
+//! The **keyed join** (E4, docs/radio.md) has its own three predicates below: a node whose
+//! per-node key the gateway already holds (NodeAdd) joins under that key: no key on air,
+//! both ends prove the key, and the node learns the gateway address.
 
 use crate::addr::{is_reserved_addr, peer_addr_valid};
+use crate::replay::ReplayVerdict;
 
 /// Host side: may a JOIN_REQ from `joiner` be answered at all (i.e. may the per-node key be
 /// handed out in a JOIN_RESP)? The joiner must be a valid peer address (not reserved, not the
@@ -46,6 +51,31 @@ pub fn confirm_matches(payload: &[u8], addr: u32, challenge: u32) -> bool {
     payload.len() >= 8
         && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == addr
         && u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) == challenge
+}
+
+/// Keyed join, gateway side: a KEYED `JOIN_REQ` payload is the joiner's own address (4 LE),
+/// which must equal the authenticated header `src` (the same shape as the public JOIN_REQ).
+#[must_use]
+pub fn keyed_req_valid(payload: &[u8], src: u32) -> bool {
+    payload.len() >= 4 && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == src
+}
+
+/// Keyed join, gateway side: answer only a **registered** peer (its key opened the frame, not
+/// the default key) whose JOIN_REQ counter is **fresh** on its replay lane. A replayed or
+/// retransmitted request is dropped, so a recorded JOIN_REQ never draws a second response:
+/// the lane is what authenticates the node's freshness to the gateway.
+#[must_use]
+pub fn keyed_req_admit(registered: bool, verdict: ReplayVerdict) -> bool {
+    registered && verdict == ReplayVerdict::Fresh
+}
+
+/// Keyed join, joiner side: the KEYED `JOIN_RESP` payload echoes the JOIN_REQ's counter
+/// (4 LE). The joiner's TX counter never repeats (reserve-ahead watermark), so a response
+/// recorded from any earlier attempt, before or after a reboot, carries a stale echo and is
+/// rejected: the gateway's freshness proof without a random nonce.
+#[must_use]
+pub fn keyed_resp_matches(payload: &[u8], req_counter: u32) -> bool {
+    payload.len() >= 4 && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == req_counter
 }
 
 #[cfg(test)]
@@ -169,6 +199,40 @@ mod tests {
                 assert!(!confirm_matches(&confirm(id, ch), id, ch.wrapping_add(1)));
                 assert!(!confirm_matches(&confirm(id, ch), id.wrapping_add(1), ch));
             }
+        }
+    }
+
+    /// Keyed JOIN_REQ: the payload address must be the authenticated src, and 4 bytes are
+    /// required.
+    #[test]
+    fn keyed_req_payload_is_the_src() {
+        assert!(keyed_req_valid(&0x0000_0413u32.to_le_bytes(), 0x0000_0413));
+        assert!(!keyed_req_valid(&0x0000_0414u32.to_le_bytes(), 0x0000_0413));
+        let full = 7u32.to_le_bytes();
+        for len in 0..4 {
+            assert!(!keyed_req_valid(&full[..len], 7), "len {len}");
+        }
+    }
+
+    /// The gateway answers a registered peer's fresh request only.
+    #[test]
+    fn keyed_req_admits_registered_fresh_only() {
+        assert!(keyed_req_admit(true, ReplayVerdict::Fresh));
+        assert!(!keyed_req_admit(true, ReplayVerdict::Retransmit));
+        assert!(!keyed_req_admit(true, ReplayVerdict::Replay));
+        assert!(!keyed_req_admit(false, ReplayVerdict::Fresh));
+    }
+
+    /// The response must echo this attempt's request counter exactly; a response from an
+    /// earlier attempt (any other counter) or a short payload is rejected.
+    #[test]
+    fn keyed_resp_echoes_the_request_counter() {
+        assert!(keyed_resp_matches(&88u32.to_le_bytes(), 88));
+        assert!(!keyed_resp_matches(&87u32.to_le_bytes(), 88));
+        assert!(!keyed_resp_matches(&u32::MAX.to_le_bytes(), 0));
+        let full = 88u32.to_le_bytes();
+        for len in 0..4 {
+            assert!(!keyed_resp_matches(&full[..len], 88), "len {len}");
         }
     }
 }

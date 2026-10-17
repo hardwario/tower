@@ -538,6 +538,11 @@ async fn run(b: Board) {
             net.set_pending(rx.src, queue.count_for(rx.src) > 0);
             STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
         }
+        // A registered node's keyed join (E4) was answered inside recv(): nothing to
+        // install (its key and lane already are), just say so.
+        if let Some(node_addr) = net.take_keyed_join() {
+            info!(target: "gateway", "node {:08X} joined (keyed)", node_addr);
+        }
 
         // 4. Housekeeping: TTL expiry (reported as TX_EXPIRED) + the ambient-RSSI tick.
         let mut expired: heapless::Vec<(u16, u32), { tower_gateway::queue::QUEUE_CAP }> =

@@ -19,16 +19,28 @@
 //! window's key to a hijacker and re-key the victim out of the network. Re-pairing a known node
 //! therefore needs the operator to remove it first (an authenticated host-side action). The
 //! joiner, in turn, only accepts a JOIN_RESP addressed to itself.
+//!
+//! **Keyed join (E4).** A node whose per-node key the host already holds (`add_peer`, e.g.
+//! the gateway's NodeAdd) joins under that key instead: KEYED JOIN_REQ(addr), sealed under
+//! the per-node key → KEYED JOIN_RESP(echo of the request's counter), sealed under the same
+//! key. No key travels on air; the node proves the key and its freshness through the host's
+//! replay lane, the host proves the key and its freshness through the echo; the node learns
+//! the host's address. The host answers any time, with no window: the key is the
+//! authorization. A stock host ignores it (dest 0 is not its address, and the frame does not
+//! open under the pairing key), so the extension is additive.
 
 use embassy_time::{Duration, Instant, Timer};
 // The admission rules (who may be answered / which response is ours) and the confirm
 // freshness rule (addr ‖ challenge echo) live in the host-testable `tower_net::pairing`
 // kernel; the challenge minting (Net's PRNG), the windows and the JOIN frame exchange stay here.
-use tower_net::pairing::{confirm_matches, join_request_admissible, join_response_for};
+use tower_net::pairing::{
+    confirm_matches, join_request_admissible, join_response_for, keyed_req_admit, keyed_req_valid,
+    keyed_resp_matches,
+};
 
 use super::{ACK_TURNAROUND, Net, TX_TIMEOUT, is_reserved_addr};
 use crate::radio::duty;
-use crate::radio::frame::{self, FrameType, Header, MAX_FRAME};
+use crate::radio::frame::{self, FrameType, Header, MAX_FRAME, flags};
 
 /// Fixed, **publicly-known** OTA-pairing key (docs/radio.md). It gives the JOIN
 /// frames a uniform CCM format with integrity + in-session replay protection, but
@@ -65,7 +77,7 @@ impl Net {
         let mut buf = [0u8; 24];
         let mut refusal_logged = false;
         while Instant::now() < deadline {
-            let Some((hdr, plen)) = self.rx_pair(PAIR_RX_SLICE, &mut buf).await else {
+            let Some((hdr, plen)) = self.rx_pair(&PAIRING_KEY, PAIR_RX_SLICE, &mut buf).await else {
                 continue;
             };
             if hdr.frame_type != FrameType::JoinReq || plen < 4 {
@@ -107,14 +119,14 @@ impl Net {
                 bulk_index: None,
             };
             Timer::after(ACK_TURNAROUND).await;
-            self.tx_pair(&resp_hdr, &resp).await;
+            self.tx_pair(&PAIRING_KEY, &resp_hdr, &resp).await;
 
             // Wait for the JOIN_CONFIRM (echoes addr ‖ challenge); the freshness rule
             // (commit only when both match, so a confirm replayed from a prior session carries
             // a stale challenge and is rejected) is the kernel's `confirm_matches`. The confirm
             // must also come from that joiner and be addressed to us.
             let mut cbuf = [0u8; 8];
-            if let Some((chdr, cplen)) = self.rx_pair(JOIN_CONFIRM_WINDOW, &mut cbuf).await
+            if let Some((chdr, cplen)) = self.rx_pair(&PAIRING_KEY, JOIN_CONFIRM_WINDOW, &mut cbuf).await
                 && chdr.frame_type == FrameType::JoinConfirm
                 && chdr.src == peer_addr
                 && chdr.dest == self.addr
@@ -156,10 +168,10 @@ impl Net {
                 counter,
                 bulk_index: None,
             };
-            self.tx_pair(&req_hdr, &addr.to_le_bytes()).await;
+            self.tx_pair(&PAIRING_KEY, &req_hdr, &addr.to_le_bytes()).await;
 
             let mut buf = [0u8; 24];
-            if let Some((hdr, plen)) = self.rx_pair(JOIN_RESP_WINDOW, &mut buf).await
+            if let Some((hdr, plen)) = self.rx_pair(&PAIRING_KEY, JOIN_RESP_WINDOW, &mut buf).await
                 && hdr.frame_type == FrameType::JoinResp
                 && plen >= 20
                 && join_response_for(hdr.dest, hdr.src, addr)
@@ -180,17 +192,107 @@ impl Net {
                     bulk_index: None,
                 };
                 Timer::after(ACK_TURNAROUND).await;
-                self.tx_pair(&conf_hdr, &conf).await;
+                self.tx_pair(&PAIRING_KEY, &conf_hdr, &conf).await;
                 return Some((hdr.src, key));
             }
         }
         None
     }
 
-    /// Seal `hdr`+`payload` under the pairing key and transmit (duty-metered).
-    async fn tx_pair(&mut self, hdr: &Header, payload: &[u8]) -> bool {
+    /// Joiner, keyed (E4): join a host that already holds this node's `key`, using `addr` (the
+    /// node's own address) for up to `timeout`. Sends a KEYED JOIN_REQ under `key` and waits
+    /// for the KEYED JOIN_RESP echoing that request's counter; returns the host's address on a
+    /// match (or `None` on timeout). Nothing is committed here: the caller already has the key
+    /// and installs the host with `add_peer(gw_addr, key)`. Each attempt uses a fresh TX
+    /// counter, which is what makes the echo a freshness proof (`keyed_resp_matches`).
+    pub async fn join_keyed(&mut self, addr: u32, key: &[u8; 16], timeout: Duration) -> Option<u32> {
+        if self.txc.locked() {
+            return None; // fail closed (nonce safety): JOIN_REQ consumes TX counters
+        }
+        let deadline = Instant::now().checked_add(timeout)?;
+        while Instant::now() < deadline {
+            let req_counter = self.txc.counter();
+            let req_hdr = Header {
+                frame_type: FrameType::JoinReq,
+                flags: flags::KEYED,
+                src: addr,
+                dest: 0, // gateway address not yet known
+                counter: req_counter,
+                bulk_index: None,
+            };
+            let sent = self.tx_pair(key, &req_hdr, &addr.to_le_bytes()).await;
+            let _ = self.alloc_counter();
+            if !sent {
+                // Duty-limited or a radio error: back off one response window, don't spin.
+                Timer::after(JOIN_RESP_WINDOW).await;
+                continue;
+            }
+
+            // Listen out the whole response window: a foreign frame (another node's uplink,
+            // not openable under our key) must not end it early (same rule as await_ack).
+            let resp_end = Instant::now() + JOIN_RESP_WINDOW;
+            loop {
+                let remaining = resp_end.saturating_duration_since(Instant::now());
+                if remaining.as_ticks() == 0 {
+                    break;
+                }
+                let mut buf = [0u8; 8];
+                if let Some((hdr, plen)) = self.rx_pair(key, remaining, &mut buf).await
+                    && hdr.frame_type == FrameType::JoinResp
+                    && hdr.flags & flags::KEYED != 0
+                    && hdr.dest == addr
+                    && keyed_resp_matches(&buf[..plen], req_counter)
+                {
+                    return Some(hdr.src);
+                }
+            }
+        }
+        None
+    }
+
+    /// Host, keyed (E4): answer a KEYED JOIN_REQ (`frame` = the whole received frame, dest 0)
+    /// from a peer registered with `add_peer`. Opens it under that peer's key, admits it only
+    /// when the counter is fresh on the peer's replay lane (and advances the lane), then sends
+    /// the KEYED JOIN_RESP echoing the request's counter after `ACK_TURNAROUND`. Returns the
+    /// joiner's address when a response went out. Called from [`Net::recv`]; nothing else
+    /// changes: the peer, its key and its lane were already installed.
+    pub(super) async fn answer_keyed_join(&mut self, frame: &mut [u8]) -> Option<u32> {
+        if self.txc.locked() {
+            return None; // fail closed (nonce safety): the JOIN_RESP consumes a TX counter
+        }
+        let (peek, _) = frame::Header::parse(frame).ok()?;
+        let registered = self.peer_slot(peek.src).is_some();
+        if !registered {
+            return None; // never the default key: the per-node key is the authorization
+        }
+        let key = self.key_for(peek.src);
+        let (hdr, range) = frame::open_frame(&mut self.ccm, &key, frame).ok()?;
+        if !keyed_req_valid(&frame[range], hdr.src)
+            || !keyed_req_admit(registered, self.lane(hdr.src).classify(hdr.counter))
+        {
+            return None;
+        }
+        self.lane_accept(hdr.src, hdr.counter);
+
+        let resp_hdr = Header {
+            frame_type: FrameType::JoinResp,
+            flags: flags::KEYED,
+            src: self.addr,
+            dest: hdr.src,
+            counter: self.txc.counter(),
+            bulk_index: None,
+        };
+        Timer::after(ACK_TURNAROUND).await;
+        let sent = self.tx_pair(&key, &resp_hdr, &hdr.counter.to_le_bytes()).await;
+        let _ = self.alloc_counter();
+        sent.then_some(hdr.src)
+    }
+
+    /// Seal `hdr`+`payload` under `key` (the pairing key, or a per-node key for the keyed
+    /// join) and transmit (duty-metered).
+    async fn tx_pair(&mut self, key: &[u8; 16], hdr: &Header, payload: &[u8]) -> bool {
         let mut buf = [0u8; MAX_FRAME];
-        let Ok(n) = frame::seal_frame(&mut self.ccm, &PAIRING_KEY, hdr, payload, &mut buf) else {
+        let Ok(n) = frame::seal_frame(&mut self.ccm, key, hdr, payload, &mut buf) else {
             return false;
         };
         if !self.duty.try_tx(duty::frame_toa_ms(n)) {
@@ -199,11 +301,16 @@ impl Net {
         self.radio.tx(&buf[..n], false, TX_TIMEOUT).await.is_ok()
     }
 
-    /// Receive + CCM-open a frame under the pairing key; copy plaintext to `out`.
-    async fn rx_pair(&mut self, timeout: Duration, out: &mut [u8]) -> Option<(Header, usize)> {
+    /// Receive + CCM-open a frame under `key`; copy plaintext to `out`.
+    async fn rx_pair(
+        &mut self,
+        key: &[u8; 16],
+        timeout: Duration,
+        out: &mut [u8],
+    ) -> Option<(Header, usize)> {
         let mut buf = [0u8; MAX_FRAME];
         let (len, _) = self.radio.rx(&mut buf, timeout).await.ok()?;
-        let (hdr, range) = frame::open_frame(&mut self.ccm, &PAIRING_KEY, &mut buf[..len]).ok()?;
+        let (hdr, range) = frame::open_frame(&mut self.ccm, key, &mut buf[..len]).ok()?;
         let plen = range.end - range.start;
         if plen > out.len() {
             return None;

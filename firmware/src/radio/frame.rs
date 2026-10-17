@@ -77,10 +77,13 @@ impl FrameType {
     }
 }
 
-/// Frame flag bits (docs/radio.md). Bit 1 is unassigned (free for a future flag).
+/// Frame flag bits (docs/radio.md).
 pub mod flags {
     /// bit0: confirmed delivery requested.
     pub const CONFIRMED: u8 = 1 << 0;
+    /// bit1: keyed join (JOIN_REQ / JOIN_RESP only): sealed under the per-node key, not
+    /// the public pairing key (E4, docs/radio.md "Keyed join").
+    pub const KEYED: u8 = 1 << 1;
     /// bit2: last chunk (BULK_DATA).
     pub const LAST_CHUNK: u8 = 1 << 2;
     /// bit3: bulk-announce (DATA frame announcing a pending bulk).

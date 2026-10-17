@@ -104,6 +104,7 @@ examples:
     @echo net_channel
     @echo net_confirmed
     @echo net_duty_kat
+    @echo net_keyed_join
     @echo net_p2p
     @echo net_pairing
     @echo net_persist
