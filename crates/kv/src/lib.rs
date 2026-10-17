@@ -247,6 +247,40 @@ fn append<S: Eeprom>(store: &mut S, at: u32, key: u16, value: &[u8]) -> Result<(
         .map_err(KvError::Backend)
 }
 
+/// Append one record at the log end `free` (relative) of the half at `base` with record area
+/// `area`, first making sure the scan will **stop right after it**.
+///
+/// The scan ends the log at the first blank or unreadable record, and appends land exactly there.
+/// In a healthy half that spot is followed by blank cells, but not after a torn append (power
+/// loss: only a prefix landed) or a corrupted mid-log record: there, a new record SHORTER than the
+/// bad one leaves the bad one's remaining bytes right behind it, and a same-sized one lands
+/// exactly on the intact records that followed it. Either way the next scan walked on past the new
+/// record into those leftovers: a superseded value resurrected over the one just written (a
+/// TX-counter watermark rollback, i.e. CCM nonce reuse), or bytes from inside a value surfaced as a
+/// phantom key. So the tag slot just past the new record is zeroed FIRST (read-first: a 2-byte read
+/// and no write in the normal, already-blank case). Power loss between the two writes is harmless:
+/// the zeroed bytes lie beyond the log end, and a torn append is cut at its CRC as before. By
+/// induction, every completed append is followed by a scan stop. Where no header fits after the
+/// record the scan stops on its own, so there is nothing to zero.
+fn append_end<S: Eeprom>(
+    store: &mut S,
+    base: u32,
+    area: u32,
+    free: u32,
+    key: u16,
+    value: &[u8],
+) -> Result<(), KvError<S::Error>> {
+    let next = free + KV_HEADER as u32 + value.len() as u32;
+    if next + KV_HEADER as u32 <= area {
+        let mut tag = [0u8; 2];
+        store.read(base + next, &mut tag).map_err(KvError::Backend)?;
+        if tag != [0, 0] {
+            store.write(base + next, &[0, 0]).map_err(KvError::Backend)?;
+        }
+    }
+    append(store, base + free, key, value)
+}
+
 /// Blank `len` bytes from `at` (so a half's record scan terminates at a clean end).
 ///
 /// **Read-first**: only words that are actually nonzero get programmed, so blanking an
@@ -372,23 +406,38 @@ pub fn set_bytes_with<S: Eeprom>(
     let base = half_base(capacity, h);
     let (free, _) = scan_half(store, base, half, key)?;
     if free + needed <= half {
-        return append(store, base + free, key, value);
+        return append_end(store, base, half, free, key, value);
     }
 
     // Active half full → flip-compact into the other half, then append there. Prefer finishing
     // a pending incremental flip (its blank/copy work is already partly done); otherwise the
     // synchronous in-line flip, exactly as before.
-    match pending.take() {
-        Some(mut st) if (st.src_h, st.src_gen) == (h, g) => flip_commit(store, capacity, &mut st)?,
-        _ => flip(store, capacity, h, g)?,
+    let finished_pending = match pending.take() {
+        Some(mut st) if (st.src_h, st.src_gen) == (h, g) => {
+            flip_commit(store, capacity, &mut st)?;
+            true
+        }
+        _ => {
+            flip(store, capacity, h, g)?;
+            false
+        }
+    };
+    let (mut h2, g2) = active(store, capacity)?.ok_or(KvError::Full)?;
+    let (mut free2, _) = scan_half(store, half_base(capacity, h2), half, key)?;
+    if free2 + needed > half && finished_pending {
+        // A finished incremental flip carries the source tail over VERBATIM (every record appended
+        // while it ran, superseded ones included; see `flip_commit`), so it can pack looser than a
+        // fresh flip. Failing `Full` here would refuse a write plain `set_bytes` accepts (the
+        // promise above; found while building the `kv_store` fuzz target), so re-flip the fresh half once:
+        // that packs exactly the live set. Rare (only a near-full live set with a superseded tail).
+        flip(store, capacity, h2, g2)?;
+        h2 = active(store, capacity)?.ok_or(KvError::Full)?.0;
+        free2 = scan_half(store, half_base(capacity, h2), half, key)?.0;
     }
-    let (h2, _) = active(store, capacity)?.ok_or(KvError::Full)?;
-    let base2 = half_base(capacity, h2);
-    let (free2, _) = scan_half(store, base2, half, key)?;
     if free2 + needed > half {
         return Err(KvError::Full);
     }
-    append(store, base2 + free2, key, value)
+    append_end(store, half_base(capacity, h2), half, free2, key, value)
 }
 
 /// Read the raw bytes stored under `key` into `out`; returns the value's true length (which may
@@ -1597,6 +1646,41 @@ mod tests {
         assert_eq!(get_vec(&ram, 2).unwrap(), [5u8; 100]);
     }
 
+    /// Regression (found while building the `kv_store` fuzz target): with a pending incremental
+    /// flip, a full source made `set_bytes_with` finish that flip, which carries the source tail
+    /// over verbatim (superseded records included), and then fail `Full` for a record a plain
+    /// `set_bytes` (one fresh flip of the true live set) accepts. It must re-flip instead.
+    #[test]
+    fn set_with_pending_flip_never_fails_where_plain_set_fits() {
+        let build = || {
+            let mut ram = Ram::new(CAP as usize);
+            set(&mut ram, 1, &[0u8; 92]).unwrap();
+            set(&mut ram, 1, &[1u8; 92]).unwrap(); // 200 of 244 B used, 100 B live
+            ram
+        };
+        let mut ram = build();
+        let (_, g0) = active(&ram, CAP).unwrap().unwrap();
+        let mut pending = flip_start(&ram, CAP).unwrap(); // plan: key 1 (100 B)
+        set_bytes_with(&mut ram, CAP, 2, &[2u8; 14], &mut pending).unwrap(); // tail: 22 B
+        set_bytes_with(&mut ram, CAP, 2, &[3u8; 14], &mut pending).unwrap(); // tail: 44 B, full
+        // Live is 100 + 22 = 122 B, so a 108-byte record fits one fresh flip (230 <= 244), while
+        // the finished flip alone holds plan + tail = 144 B (only 100 B free).
+        set_bytes_with(&mut ram, CAP, 3, &[4u8; 100], &mut pending).unwrap();
+        assert!(pending.is_none());
+        assert_eq!(get_vec(&ram, 1).unwrap(), [1u8; 92]);
+        assert_eq!(get_vec(&ram, 2).unwrap(), [3u8; 14]);
+        assert_eq!(get_vec(&ram, 3).unwrap(), [4u8; 100]);
+        let (_, g1) = active(&ram, CAP).unwrap().unwrap();
+        assert_eq!(g1, g0 + 2, "the finished flip plus exactly one re-flip");
+
+        // Plain set_bytes on the same history agrees (one flip).
+        let mut ram = build();
+        set(&mut ram, 2, &[2u8; 14]).unwrap();
+        set(&mut ram, 2, &[3u8; 14]).unwrap();
+        set(&mut ram, 3, &[4u8; 100]).unwrap();
+        assert_eq!(get_vec(&ram, 3).unwrap(), [4u8; 100]);
+    }
+
     #[test]
     fn free_and_live_bytes_match_hand_layout() {
         let mut ram = Ram::new(CAP as usize);
@@ -1734,6 +1818,81 @@ mod tests {
         compact(&mut ram, CAP).unwrap();
         assert_eq!(get_vec(&ram, 1), None);
         assert_eq!(live_bytes(&ram, CAP).unwrap(), KV_HEADER as u32 + 4);
+    }
+
+    // --- leftovers past the log end (found by the `kv_store` fuzz target) -----------------------
+
+    /// `inner` as a complete, CRC-valid record for `key`: apps store arbitrary bytes, so a value
+    /// can contain one.
+    fn embedded_record(key: u16, inner: &[u8]) -> Vec<u8> {
+        let mut rec = key.to_le_bytes().to_vec();
+        rec.extend_from_slice(&(inner.len() as u16).to_le_bytes());
+        let crc = entry_crc(&rec, inner);
+        rec.extend_from_slice(&crc.to_le_bytes());
+        rec.extend_from_slice(inner);
+        rec
+    }
+
+    /// The scan ends the log at the first unreadable record, and the next append lands there.
+    /// When that record is torn and the new one is SHORTER, the torn record's bytes left past the
+    /// new one used to be scanned on as records: a value embedding a valid record surfaced as a
+    /// phantom key. Power loss mid-append, then the next boot's ordinary write, is the path.
+    #[test]
+    fn torn_tail_then_shorter_append_exposes_no_phantom() {
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 1, b"alpha").unwrap();
+        let (h, _) = active(&ram, CAP).unwrap().unwrap();
+        let base = half_base(CAP, h);
+        let (free, _) = scan_half(&ram, base, half_len(CAP), 1).unwrap();
+        // The in-flight record for key 2 carries a valid record for key 3 at exactly the offset
+        // where a 4-byte record ends; power is lost after that part landed (the last byte did not).
+        let mut value = vec![0xAA; 4];
+        value.extend_from_slice(&embedded_record(3, b"phantom"));
+        value.extend_from_slice(&[0xBB; 4]);
+        let mut rec = vec![0u8; KV_HEADER + value.len()];
+        rec[0..2].copy_from_slice(&2u16.to_le_bytes());
+        rec[2..4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+        let crc = entry_crc(&rec[0..4], &value);
+        rec[4..8].copy_from_slice(&crc.to_le_bytes());
+        rec[8..].copy_from_slice(&value);
+        ram.torn_write(base + free, &rec, rec.len() - 1);
+        assert_eq!(get_vec(&ram, 2), None, "the torn record is not part of the log");
+        // Reboot; an ordinary 4-byte write lands on the torn record's offset.
+        set(&mut ram, 4, &[4, 4, 4, 4]).unwrap();
+        assert_eq!(get_vec(&ram, 4).as_deref(), Some(&[4u8, 4, 4, 4][..]));
+        assert_eq!(
+            get_vec(&ram, 3),
+            None,
+            "leftover bytes of a torn record surfaced as a key"
+        );
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"alpha"[..]));
+    }
+
+    /// The same hazard with no crafted content: a bit flip makes a mid-log record unreadable (the
+    /// scan ends there, the later records drop out of view), then the next same-sized append
+    /// lands exactly over it. The scan used to walk on into the intact records past it, so a
+    /// superseded value resurfaced OVER the one just written: for the TX-counter watermark, a
+    /// rollback, i.e. CCM nonce reuse.
+    #[test]
+    fn corrupt_mid_log_record_never_resurrects_the_tail() {
+        let mut ram = Ram::new(CAP as usize);
+        for v in [100u32, 200, 300] {
+            set(&mut ram, 1, &v.to_le_bytes()).unwrap();
+        }
+        let (h, _) = active(&ram, CAP).unwrap().unwrap();
+        let rec = KV_HEADER + 4;
+        ram.buf[half_base(CAP, h) as usize + rec + KV_HEADER] ^= 0x01; // the 200 record fails its CRC
+        assert_eq!(
+            get_vec(&ram, 1).unwrap(),
+            100u32.to_le_bytes(),
+            "the log ends at the bad record"
+        );
+        set(&mut ram, 1, &1124u32.to_le_bytes()).unwrap(); // lands exactly over the bad record
+        assert_eq!(
+            get_vec(&ram, 1).unwrap(),
+            1124u32.to_le_bytes(),
+            "a superseded value resurfaced over the one just written"
+        );
     }
 
     // --- factory reset (wipe) -------------------------------------------------------------------

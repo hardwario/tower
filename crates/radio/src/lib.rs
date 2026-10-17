@@ -38,10 +38,17 @@ pub const FHSS_PERMIL: u32 = 10;
 /// the HW-generated preamble (4) + sync (4) + length (1) + CRC (2), see firmware/docs/radio.md. Rounded
 /// up so the regulatory budget is never under-counted. `const` so radio timing constants can be
 /// derived from it at compile time.
+///
+/// Total for ANY `frame_len`: the arithmetic is widened to `u64` and saturating, and a result
+/// past `u32::MAX` ms clamps to `u32::MAX`. In `u32` (as before) a length past ~536 KB overflowed
+/// the bit-time product (a panic with overflow checks, a wrap to a tiny airtime without them) and
+/// a length past `u32::MAX` was truncated by the cast: both would UNDER-count, the one error this
+/// budget must never make. Real frames (<= 255 B) get the exact same values as before.
 #[must_use]
 pub const fn frame_toa_ms(frame_len: usize) -> u32 {
-    let bytes = 4 + 4 + 1 + frame_len as u32 + 2;
-    (bytes * 8 * 1000).div_ceil(BITRATE)
+    let bytes = (frame_len as u64).saturating_add(4 + 4 + 1 + 2);
+    let ms = bytes.saturating_mul(8 * 1000).div_ceil(BITRATE as u64);
+    if ms > u32::MAX as u64 { u32::MAX } else { ms as u32 }
 }
 
 /// Token-bucket duty governor (pure core, no real-time dependency).

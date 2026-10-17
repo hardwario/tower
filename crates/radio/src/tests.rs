@@ -202,3 +202,34 @@ fn frame_toa_monotonic() {
         prev = toa;
     }
 }
+
+/// Regression (found by the `radio_kernels` fuzz target): `frame_toa_ms` used to compute in `u32`,
+/// so a length past ~536 KB overflowed the bit-time product (a panic with overflow checks, a wrap
+/// to a tiny airtime without) and a length past `u32::MAX` was truncated by the cast; both
+/// under-count. Any length must give the exact ceiling while it fits a `u32`, then saturate.
+#[test]
+fn frame_toa_total_for_any_length() {
+    let exact = |len: usize| ((len as u128 + 11) * 8 * 1000).div_ceil(BITRATE as u128);
+    // The old overflow edge (u32::MAX / 8000 bytes) and well past it, still exact.
+    for len in [536_859usize, 536_860, 1_000_000, 100_000_000] {
+        assert_eq!(frame_toa_ms(len) as u128, exact(len), "len={len}");
+    }
+    // Lengths only a 64-bit host can name (the tests run on the host).
+    #[cfg(target_pointer_width = "64")]
+    {
+        assert_eq!(
+            frame_toa_ms(usize::MAX),
+            u32::MAX,
+            "saturates, never wraps to a small value"
+        );
+        // The last length whose airtime fits a u32, then saturation.
+        let max_fit = (u32::MAX as u128 * BITRATE as u128 / 8000 - 11) as usize;
+        assert_eq!(frame_toa_ms(max_fit) as u128, exact(max_fit));
+        assert_eq!(frame_toa_ms(max_fit + 1), u32::MAX);
+        // Past u32::MAX bytes: the old cast truncated this one to a 5-byte frame.
+        let len = u32::MAX as usize + 5;
+        assert_eq!(frame_toa_ms(len) as u128, exact(len), "no truncating cast");
+        // The fuzzer's input.
+        assert_eq!(frame_toa_ms(17_582_054_044_766_043_904), u32::MAX);
+    }
+}
