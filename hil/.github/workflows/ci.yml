@@ -1,0 +1,112 @@
+# CI for the TOWER HIL harness. There is NO hardware in CI: the bench tests are #[ignore]d, so
+# `cargo test --no-run` proves the harness (all groups, incl. the feature-gated power group)
+# stays compilable against the tower-protocol / jolt tags it pins: the same compile-check
+# tower-firmware ran while the harness lived in its tools/hil.
+#
+# The tower-protocol lockstep gate is mirrored HERE (the `lockstep` job) as well as in
+# tower-firmware's and tower-cli's CI; each repo verifies its own pushes, so a pin bump made
+# in any one of the three fails fast in that repo instead of waiting for a peer's next push.
+#
+# Supply chain: every action is pinned to a full commit SHA (the comment names the release;
+# Dependabot keeps them current), the workflow token is read-only, checkouts don't persist it,
+# every cargo invocation is `--locked`, and RustSec advisories are checked (`audit`).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # MUST equal `channel` in rust-toolchain.toml (the `audit` job enforces it), so CI builds with
+  # exactly the toolchain a local checkout uses. Bump both together.
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  # The golden rule, mirrored on the harness side: tower-protocol is pinned by git tag here AND
+  # in tower-firmware / tower-cli, and postcard is not self-describing: a tag mismatch silently
+  # mis-decodes the very frames the bench asserts on. Without this job, a hil-only pin bump
+  # would compile green here and only be caught by the next firmware push. Runs the shared
+  # checker (tower-firmware's tools/protocol_pin_check.py) over checkouts of all three
+  # consumers: every manifest, the locked commits, and the tag's current upstream commit.
+  lockstep:
+    name: tower-protocol lockstep (vs firmware + cli)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Peers under a hidden dir (the manifest walk skips it).
+      - name: Check out tower-firmware (main)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: hardwario/tower-firmware
+          ref: main
+          path: .lockstep/tower-firmware
+          persist-credentials: false
+      - name: Check out tower-cli (main)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: hardwario/tower-cli
+          ref: main
+          path: .lockstep/tower-cli
+          persist-credentials: false
+      - name: Verify tower-protocol lockstep (hil + firmware + cli)
+        run: >-
+          python3 .lockstep/tower-firmware/tools/protocol_pin_check.py
+          .lockstep/tower-firmware .lockstep/tower-cli . --resolve-remote
+
+  compile:
+    name: harness compiles (no hardware)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml pin)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - name: Install libudev (serialport dep)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Compile every test group (incl. power) without running
+        run: cargo test --locked --no-run --features power
+      - name: clippy (-D warnings)
+        run: cargo clippy --locked --all-targets --features power -- -D warnings
+
+  # RustSec advisories. Vulnerabilities fail the job; informational warnings (unmaintained /
+  # unsound / yanked) are printed but do not.
+  audit:
+    name: cargo audit (RustSec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: CI toolchain == rust-toolchain.toml
+        run: |
+          want="$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' rust-toolchain.toml)"
+          if [ "$want" != "$RUST_TOOLCHAIN" ]; then
+            echo "::error::rust-toolchain.toml pins '$want' but the workflow uses RUST_TOOLCHAIN='$RUST_TOOLCHAIN'; bump both together"
+            exit 1
+          fi
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-audit@0.22.2
+      # `cargo-audit audit`, not `cargo audit`: it only reads Cargo.lock, so no toolchain is
+      # needed (the `cargo` proxy would otherwise resolve rust-toolchain.toml).
+      - name: cargo audit
+        run: cargo-audit audit

@@ -1,0 +1,252 @@
+//! HIL gateway group: the full wire-v3 product path on two boards: Dongle =
+//! `radio_dongle_gateway`, Core = `radio_push_button`. Exercises cable provisioning
+//! (typed mgmt frames on both consoles), the transparent uplink bridge (typed
+//! `Frame::Uplink` with a decodable `radio::NodeMsg`), the downlink queue with the
+//! ACK-pending delivery window (remote shell round-trip), and the RadioStat stream.
+//!
+//! The node's "finger" is its `/button simulate <ms>` shell command; the bench has no
+//! actuator, and a simulated press runs the exact recognition + count/radio path a real
+//! press does (a 100 ms press = a click: > debounce, < click-timeout).
+//!
+//! Sequential flash, sequential per-step captures. `#[ignore]`d: needs the bench +
+//! two boards in RF range; run with `just hil` (`--test-threads=1`, exclusive ports).
+
+use std::time::Duration;
+
+use tower_hil::{Bench, Console, Frame, Role, bench_or_fail, build_image};
+use tower_protocol::mgmt::{self, DeviceInfo, DeviceRole, MgmtOp, Provision, QueueId};
+use tower_protocol::radio::{self, NodeCmd, NodeMsg};
+
+/// Build a product app (`just build app <name>`, TOWER_FEATURES explicitly empty) and flash it to
+/// the board in `role`, identity re-checked right before the erase.
+fn build_and_flash_app(bench: &Bench, role: Role, app: &str) -> Result<(), String> {
+    let bin = build_image("app", app, "")?;
+    bench.flash(role, &bin)
+}
+
+fn describe_full(console: &mut Console, req_id: u16) -> (DeviceRole, u32, u8, u8) {
+    // 10 s, not 4: this is the FIRST mgmt op after a reset, and a gateway with a full registry
+    // spends several seconds at boot arming one radio lane per node before its main loop drains
+    // mgmt, so a near-full store legitimately delays the reply past 4 s (the `tower` CLI uses the
+    // same generous window). A too-tight timeout here was a real cross-run flake when a prior test
+    // left phantom nodes in the registry. Later mgmt ops (below) run once the gateway is up, so
+    // they keep the tighter 4 s.
+    let (result, data) = console
+        .mgmt_roundtrip(req_id, &MgmtOp::Describe, Duration::from_secs(10))
+        .expect("Describe reply");
+    assert_eq!(result, mgmt::MGMT_OK);
+    let info = postcard::from_bytes::<DeviceInfo>(&data).expect("DeviceInfo record");
+    (info.role, info.addr, info.band, info.channel)
+}
+
+/// The whole product story, one flow: provision over the cable, bridge a simulated
+/// click, run a remote shell command through the downlink queue, see stats flow.
+#[test]
+#[ignore = "requires the HIL bench (Dongle=gateway + Core=push-button in RF range)"]
+fn gateway_bridges_push_button_end_to_end() {
+    let bench = bench_or_fail();
+
+    build_and_flash_app(&bench, Role::Dongle, "radio_dongle_gateway").expect("flash gateway");
+    build_and_flash_app(&bench, Role::Core, "radio_push_button").expect("flash push-button");
+
+    let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
+    let mut node = Console::open(&bench.core.serial).expect("open node console");
+    // Each reset drops pre-reset input while the chip is held in reset and re-baselines seq.
+    gw.reset_into_app().expect("reset gateway");
+    node.reset_into_app().expect("reset node");
+    // Both boots settle (Hello + possible compaction stall).
+    let _ = gw.wait_for(Duration::from_secs(10), |f| matches!(f, Frame::Hello { .. }));
+    let _ = node.wait_for(Duration::from_secs(10), |f| matches!(f, Frame::Hello { .. }));
+    std::thread::sleep(Duration::from_millis(300)); // post-Hello boot-burst guard
+
+    // --- role probes (the same check `tower gateway` / `nodes add --port` gate on) ---
+    let (gw_role, gw_addr, band, channel) = describe_full(&mut gw, 1);
+    assert_eq!(gw_role, DeviceRole::Gateway);
+    let (node_role, node_addr, _, _) = describe_full(&mut node, 1);
+    assert_eq!(node_role, DeviceRole::Node);
+
+    // --- cable pairing: host-minted key, gateway-first registration, then Provision ---
+    let key: [u8; 16] = *b"HIL-TEST-KEY-01!";
+    let (result, _) = gw
+        .mgmt_roundtrip(
+            2,
+            &MgmtOp::NodeAdd { addr: node_addr, key, name: "bench", flags: mgmt::NODE_FLAG_SLEEPING },
+            Duration::from_secs(4),
+        )
+        .expect("NodeAdd reply");
+    assert_eq!(result, mgmt::MGMT_OK, "gateway registers the node");
+
+    let (result, data) = node
+        .mgmt_roundtrip(
+            2,
+            &MgmtOp::Provision(Provision { addr: None, gw_addr, key, band, channel }),
+            Duration::from_secs(4),
+        )
+        .expect("Provision reply");
+    assert_eq!(result, mgmt::MGMT_OK, "node accepts the credentials");
+    assert!(!data.is_empty(), "ProvisionAck record present");
+
+    // The node reboots into its new identity; wait for the fresh Hello.
+    node.resync();
+    let hello = node
+        .wait_for(Duration::from_secs(12), |f| matches!(f, Frame::Hello { .. }))
+        .expect("node console read");
+    assert!(hello.is_some(), "node rebooted after provisioning");
+    std::thread::sleep(Duration::from_millis(500));
+
+    // --- uplink bridge: a simulated click must surface as a typed Uplink on the gateway ---
+    node.send_shell(10, "/button simulate 100").expect("sim click");
+    let uplink = gw
+        .wait_for(Duration::from_secs(10), |f| {
+            matches!(f, Frame::Uplink { src, data, .. }
+                if *src == node_addr
+                && matches!(radio::decode_node_msg(data), Ok(NodeMsg::Button { kind: radio::ButtonKind::Click, count: 1 })))
+        })
+        .expect("gateway console read");
+    assert!(uplink.is_some(), "gateway forwarded the click (count=1) verbatim");
+
+    // --- downlink queue + remote shell: enqueue, deliver on the next wake, reply ---
+    let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+    let n = radio::encode_node_cmd(
+        &NodeCmd::Shell { epoch: 0x4849_4C00, cmd_id: 77, line: "/system settings get therm-period" },
+        &mut env,
+    )
+    .expect("encode NodeCmd");
+    let (result, data) = gw
+        .mgmt_roundtrip(3, &MgmtOp::QueuePush { node_addr, ttl: 120, data: &env[..n] }, Duration::from_secs(4))
+        .expect("QueuePush reply");
+    assert_eq!(result, mgmt::MGMT_OK);
+    let item = postcard::from_bytes::<QueueId>(&data).expect("QueueId").item;
+    assert_ne!(item, 0);
+
+    // Wake the node: another simulated click. Its uplink's ACK carries the pending
+    // flag; the gateway delivers; the node executes and streams the reply back.
+    node.send_shell(11, "/button simulate 100").expect("sim click #2");
+    let delivered = gw
+        .wait_for(Duration::from_secs(10), |f| {
+            matches!(f, Frame::Stat(tower_protocol::msg::RadioStat::Tx { item: i, outcome, .. })
+                if *i == item && *outcome == mgmt::TX_DELIVERED)
+        })
+        .expect("gateway console read");
+    assert!(delivered.is_some(), "queued downlink delivered into the wake window");
+
+    let reply = gw
+        .wait_for(Duration::from_secs(10), |f| {
+            matches!(f, Frame::Uplink { src, data, .. }
+                if *src == node_addr
+                && matches!(radio::decode_node_msg(data), Ok(NodeMsg::Shell(c)) if c.cmd_id == 77 && c.last))
+        })
+        .expect("gateway console read");
+    assert!(reply.is_some(), "remote shell reply chunks bridged back");
+
+    // --- ambient stats stream (default 1 Hz) ---
+    let stat = gw
+        .wait_for(Duration::from_secs(5), |f| {
+            matches!(f, Frame::Stat(tower_protocol::msg::RadioStat::Channel { .. }))
+        })
+        .expect("gateway console read");
+    assert!(stat.is_some(), "channel RSSI stats flowing");
+
+    assert_eq!(gw.seq_gaps(), 0, "no frames lost on the gateway console");
+}
+
+/// The byte count from a `/system stack print` line beginning with `prefix` (e.g. `"used:"` in
+/// `"used: 7480 B (45.6%) peak high-water"` → `7480`). The number is the token after the prefix.
+fn stack_bytes(text: &str, prefix: &str) -> Option<u32> {
+    let line = text.lines().find(|l| l.trim_start().starts_with(prefix))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Measured gateway stack **high-water** on its console-reachable deep paths, replacing the
+/// ~7.5 KB estimate in the budget (docs/gateway.md) with a bench number. Fills the node registry
+/// across all EEPROM buckets (each `NodeAdd` loads/rewrites one ~270 B bucket stack-local, the
+/// deepest registry-codec path, and can trigger a KV compaction flip), pushes downlink-queue
+/// items, and lists the whole registry (the mgmt-response chunking path over many entries), then
+/// reads `/system stack print` (painted at boot by `stack::paint`) and asserts the peak stays
+/// under the 8 KB budget floor. Single board (the Dongle in the gateway role) so it is
+/// deterministic; the radio-bridge path is separately exercised by
+/// `gateway_bridges_push_button_end_to_end` (which reaches `net.send` on the same firmware).
+/// Removes the nodes it registered at the end (best-effort), so runs don't accumulate them.
+#[test]
+#[ignore = "requires the HIL bench (Dongle in the gateway role)"]
+fn gateway_stack_high_water_within_budget() {
+    let bench = bench_or_fail();
+    build_and_flash_app(&bench, Role::Dongle, "radio_dongle_gateway").expect("flash gateway");
+
+    let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
+    gw.reset_into_app().expect("reset gateway");
+    let _ = gw.wait_for(Duration::from_secs(10), |f| matches!(f, Frame::Hello { .. }));
+    std::thread::sleep(Duration::from_millis(300)); // post-Hello boot-burst guard
+
+    // Confirm the role (only a gateway answers Describe with role = Gateway).
+    let (role, _addr, _band, _channel) = describe_full(&mut gw, 1);
+    assert_eq!(role, DeviceRole::Gateway);
+
+    // Fill the registry across all three buckets (6 records each): 14 > 2 buckets, so the bucket
+    // pack/unpack codec runs repeatedly and the KV store fills enough to flip.
+    let key = [0x5Au8; 16];
+    let n = 14u32;
+    let mut req = 10u16;
+    for i in 0..n {
+        let (result, _) = gw
+            .mgmt_roundtrip(
+                req,
+                &MgmtOp::NodeAdd { addr: 0x1000_0000 + i, key, name: "n", flags: mgmt::NODE_FLAG_SLEEPING },
+                Duration::from_secs(6),
+            )
+            .expect("NodeAdd reply");
+        assert_eq!(result, mgmt::MGMT_OK, "NodeAdd {i} failed (capacity?)");
+        req += 1;
+    }
+
+    // Push a few downlink-queue items (the RAM queue-policy path).
+    let env = [0u8; 8];
+    for i in 0..4u32 {
+        let (result, _) = gw
+            .mgmt_roundtrip(
+                req,
+                &MgmtOp::QueuePush { node_addr: 0x1000_0000 + i, ttl: 60, data: &env },
+                Duration::from_secs(6),
+            )
+            .expect("QueuePush reply");
+        assert_eq!(result, mgmt::MGMT_OK, "QueuePush {i} failed");
+        req += 1;
+    }
+
+    // List the whole registry: mgmt-response chunking over all N entries.
+    let (result, list) = gw
+        .mgmt_roundtrip(req, &MgmtOp::NodeList, Duration::from_secs(6))
+        .expect("NodeList reply");
+    assert_eq!(result, mgmt::MGMT_OK);
+    assert!(!list.is_empty(), "NodeList returned records");
+
+    // Read the measured stack high-water and hold it to the 8 KB budget floor.
+    let (result, text) = gw
+        .shell_roundtrip(200, "/system stack print", Duration::from_secs(6))
+        .expect("stack print reply");
+    assert_eq!(result, 0, "stack print result code");
+    let used = stack_bytes(&text, "used:").unwrap_or_else(|| panic!("no 'used:' line in:\n{text}"));
+    let total = stack_bytes(&text, "stack:").unwrap_or(0);
+
+    eprintln!("gateway stack high-water: {used} B used / {total} B total (after {n} NodeAdd + queue + NodeList)");
+    let gaps = gw.seq_gaps();
+
+    // Best-effort cleanup BEFORE asserting: remove the nodes this test registered, so the
+    // registry doesn't carry 14 phantoms into the next run (a near-full store slows the gateway's
+    // boot (see describe_full) and leaves only 2 of 16 slots). Deliberately NOT an EEPROM wipe:
+    // its reboot's boot burst trips the seq-gap check (tried, reverted). Queued items for these
+    // addrs expire on their 60 s TTL.
+    for i in 0..n {
+        req += 1;
+        match gw.mgmt_roundtrip(req, &MgmtOp::NodeRemove { addr: 0x1000_0000 + i }, Duration::from_secs(6)) {
+            Ok((result, _)) if result == mgmt::MGMT_OK => {}
+            other => eprintln!("HIL: cleanup NodeRemove {i} → {other:?} (best-effort, continuing)"),
+        }
+    }
+
+    assert!(
+        used < 8192,
+        "gateway stack high-water {used} B ≥ 8 KB budget floor: deep-path regression (total {total} B)"
+    );
+    assert_eq!(gaps, 0, "no frames lost on the gateway console");
+}

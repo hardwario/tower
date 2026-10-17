@@ -1,0 +1,6 @@
+.DS_Store
+/target
+# Python sidecar bytecode (ppk2d.py).
+__pycache__/
+*.pyc
+/.venv/
