@@ -652,9 +652,9 @@ impl Console {
     ///
     /// Line sequence + timings are tower-boot's `Port::reset_into_app` exactly (RTS=T/DTR=F asserts
     /// RESET with BOOT0 low for `RESET_PULSE`, RTS=F releases, `APP_BOOT` settle; the 1 µF NRST
-    /// cap makes the ordering load-bearing), plus the one thing tower-boot (like jolt v1.4.0 before
-    /// it) has no hook for: the input buffer is cleared WHILE the chip is held in reset (as
-    /// tower-cli's `pulse_reset_into_app` does). Clearing after release would race the boot bytes
+    /// cap makes the ordering load-bearing), plus the one thing tower-boot has no hook for: the
+    /// input buffer is cleared WHILE the chip is held in reset (as tower-cli's
+    /// `pulse_reset_into_app` does). Clearing after release would race the boot bytes
     /// we want; not clearing lets pre-reset frames (the gateway's 1 Hz RadioStat, a post-flash
     /// boot's banner) satisfy the next `wait_for` and make the new boot's `seq` 0 look like ~65k
     /// gaps.
@@ -1580,7 +1580,7 @@ mod tests {
         assert_eq!(bench.core.usb_serial.as_deref(), Some("hio-core-module-1"));
         assert_eq!(
             bench.dongle.usb_serial, None,
-            "path-only stays backward compatible"
+            "a path-only entry is a supported mode (identity from the FTDI's board-type tag)"
         );
     }
 

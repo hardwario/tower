@@ -254,7 +254,7 @@ wrappers over `bulk_serve_from(dest, &mut source)` / `bulk_fetch_into(src, &mut
 sink)`, which pull each chunk from a [`BulkSource`] and hand each chunk to a
 [`BulkSink`] as it arrives. Neither side buffers the whole transfer, so RAM is
 **constant regardless of size** (only the slice wrappers are bounded, by their
-slice). This removes the old monolithic-buffer ceiling (~6 KB on this 20 KB part).
+slice), not capped by a whole-transfer buffer (~6 KB on this 20 KB part).
 Verified on hardware to
 **64 KB (1024 chunks)** with constant RAM (see `net_bulk_stream`).
 
@@ -337,8 +337,7 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
   four frames before the link key a CCM format, so a corrupted frame fails its tag and is
   dropped (its bytes still spell `v2`, so an older node's JOIN_REQ opens and is refused on its
   handshake byte). Duty mode only: under LBT+AFA or FHSS both sides refuse (a fixed-channel
-  exchange). The `PAIRING_KEY` key transport of v1 and the three-frame v2 exchange are gone;
-  nothing answers or sends them.
+  exchange).
 - **Cost.** Roughly 16 KB of flash per image (X25519 + SHA-256 + HKDF + HMAC + the exchange: the
   ~22 KB of the three-frame v2, +2.5 KB for the commitment round, -9 KB since SHA-256 is built
   with sha2's compact software backend, the `sha2_backend_soft = "compact"` cfg in

@@ -11,8 +11,8 @@
 //!   * `ShellCommand` → walk the tree → run the command's handler → `ShellResponse`;
 //!   * `ShellComplete` → walk the tree **to the cursor** → `ShellCompletions`.
 //!
-//! Because dispatch runs on its own task (not inline on the RX loop), a slow handler no longer
-//! stalls RX draining, but handlers should still be short, and their
+//! Because dispatch runs on its own task (not inline on the RX loop), a slow handler does not
+//! stall RX draining, but handlers should still be short, and their
 //! `ShellResponse`s go through the bounded `TX_CHANNEL`. Not a place for long-running work.
 //!
 //! Both use the same tokenizer + [`resolve`] walk, so completion can never suggest

@@ -172,7 +172,7 @@ runs before the app's console.)
   unplug branch (`select3`) fires (VBUS debounce is 50 ms).
 - **Host reports a `seq` gap on re-plug** → should not occur: the writer's `seq` resets
   per USB session and `tower` resets its per-link `seq` tracking when it decodes the fresh
-  `Hello`. (Older CLI builds printed a benign one-line gap warning here and kept going.)
+  `Hello`.
 
 ### The panic path
 
@@ -466,8 +466,8 @@ The device auto-detects when exactly one USB serial device is present; otherwise
 | Command | What |
 |---|---|
 | `devices` | list all serial ports (one bare port name per line) |
-| `logs [--no-colors] [--send <text>]` | stream logs + `print!` + the `Dropped` marker; `--send` pokes the device's RX once on connect |
-| `events [--no-colors]` | stream structured events |
+| `logs [--color <when>] [--send <text>]` | stream logs + `print!` + the `Dropped` marker; `--send` pokes the device's RX once on connect |
+| `events [--color <when>]` | stream structured events |
 | `shell` | interactive REPL; TAB completes (via `rustyline`); `exit`/`quit` to leave |
 | `exec "<line>"` | run one command, print the (reassembled) response, exit non-zero on a device error/timeout |
 | `complete "<line>"` | print what the target would complete at the cursor (handy for testing/scripts) |
@@ -653,11 +653,11 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
 
 ## Known limitations & caveats
 
-- **DMA (RX overrun fixed):** the console now uses DMA: TX on `DMA1_CH4`, RX on a circular
-  DMA buffer on `DMA1_CH5` (a different channel group from the WS2812 strip's `DMA1_CH3`, so
-  both coexist). The hardware-filled RX ring removed the old ~1% host → target loss that the
-  interrupt-per-byte path suffered during a TX flood. The writer still holds a `WakeGuard` per
-  burst, now belt-and-braces (the RX ring already holds the STOP inhibit while the console is up).
+- **DMA:** the console uses DMA: TX on `DMA1_CH4`, RX on a circular DMA buffer on `DMA1_CH5`
+  (a different channel group from the WS2812 strip's `DMA1_CH3`, so both coexist). The
+  hardware-filled RX ring loses no host → target bytes during a TX flood (an interrupt-per-byte
+  RX lost ~1% there). The writer still holds a `WakeGuard` per burst, as belt-and-braces (the RX
+  ring already holds the STOP inhibit while the console is up).
 - **`fw ?` in the header** appears only if you attach `tower console` and never see a
   `Hello`; the firmware announces it on boot and on each USB plug-in (when the dynamic
   console rebuilds), not on host connect. The TUI

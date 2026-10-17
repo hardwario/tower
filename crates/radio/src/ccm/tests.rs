@@ -1,10 +1,10 @@
 //! Host tests for the pure AES-128-CCM core.
 //!
-//! The firmware can't `cargo test` (no_std / thumbv6m), so its CCM was previously only
-//! exercised on-device (`firmware/examples/crypto_ccm_kat.rs`). Here we plug a pure-Rust AES block into
+//! The firmware can't `cargo test` (no_std / thumbv6m), so on the device its CCM is exercised
+//! only by `firmware/examples/crypto_ccm_kat.rs`. Here we plug a pure-Rust AES block into
 //! the same [`Ccm`] the firmware uses (the L0 hardware AES is the *other* [`AesBlock`] impl) and
 //! check it against RFC 3610 Packet Vector #1, plus a seal/open round-trip and single-byte
-//! tamper rejection. This is the value of the trait extraction: the CCM math is now covered on
+//! tamper rejection. This is the value of the trait extraction: the CCM math is covered on
 //! the host with **zero** change to the on-device crypto path.
 
 use super::{AesBlock, Ccm, NONCE_LEN, TAG_LEN};

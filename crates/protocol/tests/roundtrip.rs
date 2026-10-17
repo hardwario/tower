@@ -477,7 +477,7 @@ fn unknown_type_is_rejected() {
     let inner = hello_inner();
     let bad = forge_inner(15, CONSOLE_TAG, 1, &inner[5..inner.len() - 4]);
     assert_eq!(decode_frame(&bad), Err(Error::BadType));
-    // A type byte past the old 5-bit range is just as unknown.
+    // A type byte with its high bit set is just as unknown.
     let bad = forge_inner(
         0x80 | MsgType::Hello as u8,
         CONSOLE_TAG,

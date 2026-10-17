@@ -254,7 +254,7 @@ uplink cycle.
   no window and nothing to commit, and logs `node … joined (keyed)`. The node learns the
   gateway's address that way: a node provisioned by cable or in the factory finds its gateway
   without a pairing window, and a replacement gateway that imported the node keys (`NodeAdd` of
-  each entry of the old registry, read with `NodeRevealKey`) is re-joined without re-pairing. No management message changes. The `keyed-join` setting (default
+  each entry of the old registry, read with `NodeRevealKey`) is re-joined without re-pairing. The `keyed-join` setting (default
   `on`) is the operator's switch; a refused keyed join (switched off, unregistered address,
   wrong key, stale counter, ...) is logged as `net: keyed join from XXXXXXXX refused: <reason>`,
   at most one line per 10 s. A node re-provisioned with a new key (and a restarted counter)

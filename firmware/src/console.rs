@@ -843,8 +843,7 @@ pub fn boot_banner(name: &str) {
 
 /// The firmware name recorded by [`boot_banner`]: the app/example name carried in `Hello` and
 /// shown by `tower`'s connect banner. The shell's `resource` command reports this so its
-/// "firmware:" line matches the boot `Hello` (they previously disagreed: Hello carried the name
-/// while the shell printed the SDK crate version, identical for every app).
+/// "firmware:" line matches the boot `Hello`.
 pub fn firmware_name() -> String<FW_LEN> {
     critical_section::with(|cs| FW_NAME.borrow(cs).borrow().clone())
 }

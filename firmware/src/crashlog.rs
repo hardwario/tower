@@ -1,8 +1,8 @@
 //! Crash breadcrumb: a fault record that survives the reset.
 //!
 //! The panic / HardFault handlers can emit one framed error over the console, but only when
-//! USB is attached. A battery node that faults in the field used to halt forever with no
-//! record. Now the handlers write the crash text into a **reset-surviving `.uninit` RAM
+//! USB is attached, so a battery node that faults in the field would halt forever with no
+//! record. Instead the handlers write the crash text into a **reset-surviving `.uninit` RAM
 //! record** (the [`bootguard`](crate::bootguard) pattern: retained across a warm reset, never
 //! persisted, so zero EEPROM wear) and reset. The next boot picks the record up
 //! ([`take`], called via `console::emit_crash_report` from the [`app!`](crate::app) macro),

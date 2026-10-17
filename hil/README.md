@@ -65,8 +65,9 @@ The harness depends on `tower-protocol` **by path** (the root workspace's `crate
 the very source the firmware and the `tower` CLI build. postcard is not self-describing, so a
 schema mismatch would silently mis-decode the frames the tests assert on; with one source tree
 that cannot happen at build time. It can still happen at run time against a board flashed from
-an older tree (or from another checkout via `TOWER_FIRMWARE_DIR`): the harness flags it ("speaks
-tower-protocol wire version N"); rebuild and reflash from the same checkout. The reset pulses come from
+another checkout (or built from one via `TOWER_FIRMWARE_DIR`): every console frame carries the
+firmware's schema tag, and the harness fails fast on a foreign one ("the device's console frames
+carry schema tag ..."); rebuild and reflash from the same checkout. The reset pulses come from
 `tower-boot` (`crates/boot`), also by path.
 
 ## License

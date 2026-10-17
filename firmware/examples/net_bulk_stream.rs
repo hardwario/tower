@@ -4,7 +4,7 @@
 //!   TOWER_FEATURES=role-node    just flash example net_bulk_stream   # requester: streams to a verifying sink
 //!
 //! Proves the streaming path (`bulk_serve_from` / `bulk_fetch_into`) carries
-//! transfers far larger than the old monolithic-buffer ceiling (~6 KB on this 20 KB
+//! transfers far larger than a whole-transfer buffer could hold (~6 KB on this 20 KB
 //! L0). **Neither board ever buffers the whole transfer:** the sender generates each
 //! 64 B chunk on demand from a [`BulkSource`] and the requester verifies + CRCs each
 //! chunk on the fly through a [`BulkSink`], then discards it. RAM is constant
@@ -40,7 +40,7 @@ const KEY: [u8; 16] = [
 ];
 
 /// Firmware-sized blobs the sender cycles through (64-byte chunks → size/64 chunks).
-/// 64 KB exceeds the old ~6 KB monolithic ceiling >10×; here it costs no extra RAM.
+/// 64 KB exceeds a ~6 KB whole-transfer buffer >10×; here it costs no extra RAM.
 #[cfg(not(feature = "role-node"))]
 const SIZES: [usize; 4] = [4096, 16384, 32768, 65536];
 

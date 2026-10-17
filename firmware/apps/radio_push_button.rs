@@ -828,7 +828,7 @@ impl shell::ShellSink for RadioSink<'_> {
 
     async fn done(&mut self, result: u8) -> bool {
         // Always send a final `last` frame (empty if nothing buffered) so the host
-        // completes the command, matching the old one-empty-chunk behaviour.
+        // completes the command.
         if !self.ok {
             return false;
         }

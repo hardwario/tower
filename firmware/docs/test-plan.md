@@ -92,9 +92,7 @@ python3 tools/hwtest/cap.py <seconds> tower -d <PORT> logs --color never
 
 ### Mode B: `tower logs --reset` (decoded, from boot) for *one-shot* output
 `tower logs --reset` pulses NRST on the handle it then streams from, and clears the input buffer
-while the chip is held in reset, so it catches boot output from the first byte, decoded. (Before
-`tower logs` had reset-on-attach, mode B read raw bytes with the old `jolt monitor --reset` and
-recovered the message text with `strings`; the decoded capture replaces that.)
+while the chip is held in reset, so it catches boot output from the first byte, decoded.
 
 ```sh
 python3 tools/hwtest/cap.py <seconds> tower -d <PORT> logs --reset --color never > out.txt
@@ -258,7 +256,7 @@ B=tower logs --reset, H=host, X=interactive, S=shell-exec).
 | ID | Example | Pass | Edge |
 |---|---|---|---|
 | I1 | net_bulk | requester `fetched 200 bytes (… chunks), verify OK ***` | chunk order; nonce per chunk; 30 s session timeout |
-| I2 | net_bulk_stream | `… B in … chunks, … ms, … bps, PASS ***` cycling 4/16/32/64 KB (US915, fast) | constant RAM across sizes (streaming); 64 KB exceeds old monolithic ceiling |
+| I2 | net_bulk_stream | `… B in … chunks, … ms, … bps, PASS ***` cycling 4/16/32/64 KB (US915, fast) | constant RAM across sizes (streaming); 64 KB exceeds a whole-transfer buffer (~6 KB) |
 | I3 | net_bulk_stress | `fetched 4096 bytes (64 chunks), verify OK ***`; later `DutyLimited` as EU bucket drains | duty enforcement on bulk; CRC-32 |
 
 ### J. Pairing & topologies (two boards; mode A)

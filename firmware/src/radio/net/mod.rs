@@ -634,8 +634,8 @@ impl Net {
     /// locks for the *next* allocation (the counter already returned stays nonce-safe: it is
     /// below the last durable watermark).
     ///
-    /// Latency note: this write (once per `RESERVE` = 1024 transfers) could formerly absorb the
-    /// whole ~5 s compaction stall if it happened to fill the KV half. With the default
+    /// Latency note: this write (once per `RESERVE` = 1024 transfers) would absorb the whole
+    /// ~5 s compaction stall if it happened to fill the KV half. With the default
     /// `storage::maintenance` task the store compacts incrementally ahead of time, so the
     /// persist stays a single small append; the synchronous flip is only the fallback path
     /// (docs/storage.md).

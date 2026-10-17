@@ -90,8 +90,7 @@ impl Net {
         // dropped mid-serve (the caller's future cancelled) left it unconsumed and the next
         // transfer reused chunk 0's nonce `(addr, session, 0)`. The allocator also makes the two
         // distinct by construction (each value is handed out once; at the u32 ceiling it returns
-        // `None` rather than a pinned value), which the old explicit `announce == session`
-        // ceiling guard used to check.
+        // `None` rather than a pinned value).
         let Some(announce_counter) = self.alloc_counter() else {
             return false; // TX locked: fail closed
         };

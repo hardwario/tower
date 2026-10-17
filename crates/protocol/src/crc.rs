@@ -5,10 +5,9 @@
 //! more slices into a running value. [`crc32_ieee`] is the one-shot (init
 //! `0xFFFF_FFFF`, finalize `!`) used for a single contiguous buffer.
 //!
-//! `storage.rs`'s `entry_crc` folds two slices (`hdr ‖ value`) through
-//! [`crc32_update`] with that same init/XOR, so moving the primitive here is
-//! **byte-for-byte identical** to the firmware's previous private copy, and
-//! existing EEPROM records stay valid.
+//! `tower_kv::entry_crc` folds two slices (`hdr ‖ value`) through
+//! [`crc32_update`] with that same init/XOR, so the EEPROM records and the
+//! console frames share this one CRC definition.
 
 /// One bitwise CRC-32 pass over `data`, continuing from `crc` (no table).
 /// This is the raw update: apply the `0xFFFF_FFFF` init and final `!` yourself
