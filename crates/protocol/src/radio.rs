@@ -6,8 +6,8 @@
 //! (net layer) and forwards the payload verbatim; it never decodes this schema. Only
 //! the **node firmware** and the **host CLI** must agree on it, which is why it is
 //! versioned independently of the console framing: [`RADIO_SCHEMA_VERSION`] is the
-//! leading byte of every envelope, and a schema change re-pins node firmware + CLI
-//! while the gateway firmware stays put.
+//! leading byte of every envelope, and a schema change means rebuilding node firmware +
+//! CLI while the gateway firmware stays put.
 //!
 //! Envelope: `[RADIO_SCHEMA_VERSION] ‖ postcard(NodeMsg | NodeCmd)`, always ≤
 //! [`MAX_RADIO_PAYLOAD`] bytes (the radio MTU; the firmware static-asserts equality

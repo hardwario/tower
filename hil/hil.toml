@@ -1,4 +1,4 @@
-# HIL bench fixture (tower-firmware docs/test-plan.md §2). Serial names re-enumerate between sessions, so these
+# HIL bench fixture (firmware/docs/test-plan.md §2). Serial names re-enumerate between sessions, so these
 # are only the STARTING guess: the harness re-resolves against the live port roster (the list `tower devices`
 # prints, plus each port's USB serial number) at startup (Bench::resolve) and fails fast if a board is missing.
 # Update these to match the current session's ports (or fix cabling) when the roster message fires.

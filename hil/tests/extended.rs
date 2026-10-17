@@ -1,5 +1,5 @@
 //! HIL extended group: the full example-matrix sweep the two-board bench can exercise
-//! (tower-firmware docs/test-plan.md scope, beyond the committed smoke/radio groups).
+//! (firmware/docs/test-plan.md scope, beyond the committed smoke/radio groups).
 //!
 //! Single-board KATs (crypto, FHSS, duty governor, frame-codec edges) run on the Dongle slot;
 //! two-board RF scenarios (P2P, secure ping, OTA pairing, bulk pull, rapid-fire ordering) use
@@ -16,7 +16,7 @@ use tower_hil::{Bench, Console, Frame, Role, bench_or_fail, build_image, frame_t
 
 /// Build an example (`features` empty = none; `build_image` always sets TOWER_FEATURES explicitly)
 /// and flash it to the board in `role`, identity re-checked right before the erase. Sequential by
-/// design: concurrent FTDI flashing is unreliable (see tower-firmware's tools/hwtest/README.md).
+/// design: concurrent FTDI flashing is unreliable (see firmware/tools/hwtest/README.md).
 fn build_and_flash(bench: &Bench, role: Role, example: &str, features: &str) -> Result<(), String> {
     let bin = build_image("example", example, features)?;
     bench.flash(role, &bin)
@@ -67,7 +67,11 @@ fn run_kat(example: &str, pass: &str, fails: &[&str], secs: u64) {
         text.contains(pass) && !fails.iter().any(|n| text.contains(n)),
         "{example} reported a failure: {text:?}"
     );
-    assert_eq!(console.seq_gaps(), 0, "{example}: transport dropped frames during the KAT");
+    assert_eq!(
+        console.seq_gaps(),
+        0,
+        "{example}: transport dropped frames during the KAT"
+    );
 }
 
 /// Parse the decimal number right after `key` in `text` (e.g. `tx_counter=` -> 1025).
@@ -101,7 +105,12 @@ fn ext_crypto_aes_kat() {
 fn ext_crypto_frame_loopback() {
     // 12 s: the example re-emits its verdict every 5 s (the boot-burst copy can be a casualty
     // of the TX queue), so the window must cover at least one re-emission cycle.
-    run_kat("crypto_frame_loopback", "ALL PASS ***", &["MISMATCH", "expected AuthFail"], 12);
+    run_kat(
+        "crypto_frame_loopback",
+        "ALL PASS ***",
+        &["MISMATCH", "expected AuthFail"],
+        12,
+    );
 }
 
 /// FHSS hop permutation + beacon frame round-trip KAT.
@@ -158,13 +167,15 @@ fn ext_net_p2p_bidirectional() {
         .expect("A console read");
     assert!(a_ping.is_some(), "A never reported a Delivered PING within 30 s");
     assert!(
-        a.wait_for_text(Duration::from_secs(15), "A: rx").expect("A console read"),
+        a.wait_for_text(Duration::from_secs(15), "A: rx")
+            .expect("A console read"),
         "A never received B's PONG"
     );
 
     // B: received A's PING (auto-ACKed) and its own confirmed PONG delivered.
     assert!(
-        b.wait_for_text(Duration::from_secs(15), "B: rx").expect("B console read"),
+        b.wait_for_text(Duration::from_secs(15), "B: rx")
+            .expect("B console read"),
         "B never logged A's PING"
     );
     let b_pong = b
@@ -190,13 +201,27 @@ fn ext_net_secure_ping_auth() {
     node.reset_into_app().expect("reset node");
 
     assert!(
-        node.wait_for_text(Duration::from_secs(20), "tx cnt=").expect("node console read"),
+        node.wait_for_text(Duration::from_secs(20), "tx cnt=")
+            .expect("node console read"),
         "node never sent a sealed frame"
     );
-    let frames = gw.collect_for(Duration::from_secs(15)).expect("gateway console read");
-    let auth_ok = frames.iter().filter_map(frame_text).filter(|t| t.contains("AUTH OK")).count();
-    let auth_fail = frames.iter().filter_map(frame_text).filter(|t| t.contains("auth FAIL")).count();
-    assert!(auth_ok > 0, "gateway never authenticated a frame (frames: {frames:?})");
+    let frames = gw
+        .collect_for(Duration::from_secs(15))
+        .expect("gateway console read");
+    let auth_ok = frames
+        .iter()
+        .filter_map(frame_text)
+        .filter(|t| t.contains("AUTH OK"))
+        .count();
+    let auth_fail = frames
+        .iter()
+        .filter_map(frame_text)
+        .filter(|t| t.contains("auth FAIL"))
+        .count();
+    assert!(
+        auth_ok > 0,
+        "gateway never authenticated a frame (frames: {frames:?})"
+    );
     assert_eq!(auth_fail, 0, "gateway saw CCM auth failures");
 }
 
@@ -239,7 +264,10 @@ fn ext_net_pairing_handshake() {
     // key would panic here on the bench.)
     let host_addr = field_hex32(&ht, "addr=").expect("host PAIRED line has no addr=");
     let joiner_addr = field_hex32(&jt, "addr=").expect("joiner JOINED line has no addr=");
-    assert_eq!(host_addr, joiner_addr, "host installed a different node address than the joiner chose");
+    assert_eq!(
+        host_addr, joiner_addr,
+        "host installed a different node address than the joiner chose"
+    );
 }
 
 /// Bulk pull: requester fetches the 200-byte blob in ≤64 B chunks and verifies the pattern.
@@ -280,7 +308,10 @@ fn ext_net_bulk_pull() {
             assert!(t.contains("fetched 200 bytes"), "unexpected blob size: {t:?}");
             return;
         }
-        assert!(t.contains("bulk_fetch failed"), "bulk pull returned corrupted data (not a flake): {t:?}");
+        assert!(
+            t.contains("bulk_fetch failed"),
+            "bulk pull returned corrupted data (not a flake): {t:?}"
+        );
         last = t.to_string();
     }
     panic!("bulk pull failed twice in a row (not a flake): {last:?}");
@@ -300,14 +331,20 @@ fn ext_edge_rapid_monotonic() {
     // Reset the node WITHOUT keeping its console open; the gateway capture is the assertion.
     tower_hil::reset_into_app(&bench.core.serial).expect("reset node");
 
-    let frames = gw.collect_for(Duration::from_secs(30)).expect("gateway console read");
+    let frames = gw
+        .collect_for(Duration::from_secs(30))
+        .expect("gateway console read");
     let texts: Vec<&str> = frames.iter().filter_map(frame_text).collect();
     assert!(
-        texts.iter().any(|t| t.contains("accepted=") && t.contains("(monotonic OK)")),
+        texts
+            .iter()
+            .any(|t| t.contains("accepted=") && t.contains("(monotonic OK)")),
         "gateway never reported monotonic progress (saw: {texts:?})"
     );
     assert!(
-        !texts.iter().any(|t| t.contains("ORDER VIOLATION") || t.contains("(FAILED)")),
+        !texts
+            .iter()
+            .any(|t| t.contains("ORDER VIOLATION") || t.contains("(FAILED)")),
         "gateway accepted an out-of-order/replayed counter: {texts:?}"
     );
 }
@@ -335,11 +372,16 @@ fn ext_net_persist_counter_resumes() {
     let t1 = frame_text(&boot1).unwrap_or("").to_string();
     let cnt1 = field_u64(&t1, "tx_counter=").expect("boot 1: no tx_counter");
     let wm1 = field_u64(&t1, "reserve_watermark=").expect("boot 1: no watermark");
-    assert!(wm1 > cnt1, "watermark must be reserved ahead of the live counter: {t1:?}");
+    assert!(
+        wm1 > cnt1,
+        "watermark must be reserved ahead of the live counter: {t1:?}"
+    );
 
     // Let it burn a few counter values, then reboot and require the resume-at-watermark jump.
     assert!(
-        console.wait_for_text(Duration::from_secs(10), "sent; tx_counter now").expect("read"),
+        console
+            .wait_for_text(Duration::from_secs(10), "sent; tx_counter now")
+            .expect("read"),
         "net_persist never sent (boot 1)"
     );
     console.reset_into_app().expect("reset (boot 2)");

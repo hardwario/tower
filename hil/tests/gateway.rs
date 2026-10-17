@@ -70,7 +70,12 @@ fn gateway_bridges_push_button_end_to_end() {
     let (result, _) = gw
         .mgmt_roundtrip(
             2,
-            &MgmtOp::NodeAdd { addr: node_addr, key, name: "bench", flags: mgmt::NODE_FLAG_SLEEPING },
+            &MgmtOp::NodeAdd {
+                addr: node_addr,
+                key,
+                name: "bench",
+                flags: mgmt::NODE_FLAG_SLEEPING,
+            },
             Duration::from_secs(4),
         )
         .expect("NodeAdd reply");
@@ -79,7 +84,13 @@ fn gateway_bridges_push_button_end_to_end() {
     let (result, data) = node
         .mgmt_roundtrip(
             2,
-            &MgmtOp::Provision(Provision { addr: None, gw_addr, key, band, channel }),
+            &MgmtOp::Provision(Provision {
+                addr: None,
+                gw_addr,
+                key,
+                band,
+                channel,
+            }),
             Duration::from_secs(4),
         )
         .expect("Provision reply");
@@ -108,12 +119,24 @@ fn gateway_bridges_push_button_end_to_end() {
     // --- downlink queue + remote shell: enqueue, deliver on the next wake, reply ---
     let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
     let n = radio::encode_node_cmd(
-        &NodeCmd::Shell { epoch: 0x4849_4C00, cmd_id: 77, line: "/system settings get therm-period" },
+        &NodeCmd::Shell {
+            epoch: 0x4849_4C00,
+            cmd_id: 77,
+            line: "/system settings get therm-period",
+        },
         &mut env,
     )
     .expect("encode NodeCmd");
     let (result, data) = gw
-        .mgmt_roundtrip(3, &MgmtOp::QueuePush { node_addr, ttl: 120, data: &env[..n] }, Duration::from_secs(4))
+        .mgmt_roundtrip(
+            3,
+            &MgmtOp::QueuePush {
+                node_addr,
+                ttl: 120,
+                data: &env[..n],
+            },
+            Duration::from_secs(4),
+        )
         .expect("QueuePush reply");
     assert_eq!(result, mgmt::MGMT_OK);
     let item = postcard::from_bytes::<QueueId>(&data).expect("QueueId").item;
@@ -128,7 +151,10 @@ fn gateway_bridges_push_button_end_to_end() {
                 if *i == item && *outcome == mgmt::TX_DELIVERED)
         })
         .expect("gateway console read");
-    assert!(delivered.is_some(), "queued downlink delivered into the wake window");
+    assert!(
+        delivered.is_some(),
+        "queued downlink delivered into the wake window"
+    );
 
     let reply = gw
         .wait_for(Duration::from_secs(10), |f| {
@@ -191,7 +217,12 @@ fn gateway_stack_high_water_within_budget() {
         let (result, _) = gw
             .mgmt_roundtrip(
                 req,
-                &MgmtOp::NodeAdd { addr: 0x1000_0000 + i, key, name: "n", flags: mgmt::NODE_FLAG_SLEEPING },
+                &MgmtOp::NodeAdd {
+                    addr: 0x1000_0000 + i,
+                    key,
+                    name: "n",
+                    flags: mgmt::NODE_FLAG_SLEEPING,
+                },
                 Duration::from_secs(6),
             )
             .expect("NodeAdd reply");
@@ -205,7 +236,11 @@ fn gateway_stack_high_water_within_budget() {
         let (result, _) = gw
             .mgmt_roundtrip(
                 req,
-                &MgmtOp::QueuePush { node_addr: 0x1000_0000 + i, ttl: 60, data: &env },
+                &MgmtOp::QueuePush {
+                    node_addr: 0x1000_0000 + i,
+                    ttl: 60,
+                    data: &env,
+                },
                 Duration::from_secs(6),
             )
             .expect("QueuePush reply");
@@ -228,7 +263,9 @@ fn gateway_stack_high_water_within_budget() {
     let used = stack_bytes(&text, "used:").unwrap_or_else(|| panic!("no 'used:' line in:\n{text}"));
     let total = stack_bytes(&text, "stack:").unwrap_or(0);
 
-    eprintln!("gateway stack high-water: {used} B used / {total} B total (after {n} NodeAdd + queue + NodeList)");
+    eprintln!(
+        "gateway stack high-water: {used} B used / {total} B total (after {n} NodeAdd + queue + NodeList)"
+    );
     let gaps = gw.seq_gaps();
 
     // Best-effort cleanup BEFORE asserting: remove the nodes this test registered, so the
@@ -238,7 +275,13 @@ fn gateway_stack_high_water_within_budget() {
     // addrs expire on their 60 s TTL.
     for i in 0..n {
         req += 1;
-        match gw.mgmt_roundtrip(req, &MgmtOp::NodeRemove { addr: 0x1000_0000 + i }, Duration::from_secs(6)) {
+        match gw.mgmt_roundtrip(
+            req,
+            &MgmtOp::NodeRemove {
+                addr: 0x1000_0000 + i,
+            },
+            Duration::from_secs(6),
+        ) {
             Ok((result, _)) if result == mgmt::MGMT_OK => {}
             other => eprintln!("HIL: cleanup NodeRemove {i} → {other:?} (best-effort, continuing)"),
         }

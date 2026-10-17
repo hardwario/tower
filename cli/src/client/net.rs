@@ -61,9 +61,7 @@ fn status(opts: &MqttOpts, json: bool) -> Result<u8> {
         if status.state == "offline" {
             // The LWT fired: the broker only knows we're gone; the other fields
             // are its defaults, not data. Say the one thing that's true.
-            println!(
-                "state:    offline (the gateway's last-will fired; the bridge process is gone)"
-            );
+            println!("state:    offline (the gateway's last-will fired; the bridge process is gone)");
         } else {
             // Retained-topic text anyone with broker access can plant: escape it.
             // The version arrives only in the dongle's boot Hello, which the bridge's startup
@@ -86,10 +84,7 @@ fn status(opts: &MqttOpts, json: bool) -> Result<u8> {
                 sanitize_line(&status.serial_port)
             );
         }
-        println!(
-            "protocol: v{} · mqtt schema v{}",
-            status.protocol, status.schema
-        );
+        println!("protocol: v{} · mqtt schema v{}", status.protocol, status.schema);
         if let Some(st) = &stats {
             println!(
                 "network:  {} node(s), {} uplink(s), {} queued downlink(s)",

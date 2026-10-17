@@ -1,11 +1,10 @@
 # tower-protocol
 
 Shared wire-format crate for the [HARDWARIO TOWER](https://www.hardwario.com/) link:
-the single source of truth that the **firmware**
-([`tower-firmware`](https://github.com/hardwario/tower-firmware)), the **host CLI**
-([`tower-cli`](https://github.com/hardwario/tower-cli)), and the **HIL bench harness**
-([`tower-hil`](https://github.com/hardwario/tower-hil)) all depend on, so no end
-can drift on the bytes they exchange.
+the single source of truth that the **firmware SDK** ([`firmware/`](../../firmware)), the
+**host CLI** ([`cli/`](../../cli), the `tower` binary), and the **HIL bench harness**
+([`hil/`](../../hil)) all build, so no end can drift on the bytes they exchange. It lives in
+the [hardwario/tower](https://github.com/hardwario/tower) monorepo as `crates/protocol`.
 
 `no_std`, no-alloc, builds for `thumbv6m-none-eabi` (the Cortex-M0+ target) as well as the host.
 
@@ -35,28 +34,35 @@ can drift on the bytes they exchange.
 
 ## Use it
 
-It is consumed as a **pinned git dependency** (no crates.io publish):
+Every consumer in the monorepo depends on it **by path** (no git tag, no crates.io publish).
+The host crates inherit it from the root workspace; the firmware workspace points at it
+directly:
 
 ```toml
-[dependencies]
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.5.1" }
+# cli/Cargo.toml, hil/Cargo.toml, crates/kv/Cargo.toml (members of the root host workspace)
+tower-protocol.workspace = true
+
+# firmware/Cargo.toml (its own workspace)
+tower-protocol = { path = "../crates/protocol" }
 ```
 
-Because postcard isn't self-describing, **all ends must build the same version**: pin the same
-tag in the firmware, the host CLI, and the HIL harness, and bump it in lockstep with any wire
-change. A tag mismatch is not guaranteed to error: two tags with the same `PROTOCOL_VERSION`
-but a different schema would *silently* mis-decode.
+Because postcard isn't self-describing, **all ends must build the same schema**. With path
+dependencies that is a compile-time fact: the firmware, the `tower` CLI and the HIL harness
+compile this one source tree, so a schema edit reaches all of them in the same commit. What a
+build cannot catch is an *installed* artifact built from an older tree: a `tower` binary or a
+flashed firmware from before a wire change. After a wire change, reflash the device and rebuild
+the CLI (`just install-cli`, or `cargo install --locked --path cli` at the repo root); the
+`PROTOCOL_VERSION` bump turns the mismatch into a clean `BadVersion` instead of a silent
+mis-decode.
 
-### Developing it alongside a consumer
+Checks, from the repo root:
 
-To hack on the protocol and have a consumer pick up your local edits without re-tagging, add a
-machine-local [`paths` override](https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html#paths-overrides)
-(it is *not* committed). `tower-cli` keeps it in a gitignored `.cargo/config.toml`; for
-`tower-firmware` (whose `.cargo/config.toml` is committed for the build target) put it in your
-`~/.cargo/config.toml` instead:
-
-```toml
-paths = ["/absolute/path/to/tower-protocol"]
+```bash
+cargo test -p tower-protocol
+cargo clippy -p tower-protocol --all-targets -- -D warnings
+cargo build -p tower-protocol --target thumbv6m-none-eabi     # stays no_std / MCU-buildable
+python3 crates/protocol/tools/check_wire_bump.py              # wire-bump guard
+python3 crates/protocol/tools/check_wire_bump.py --self-test
 ```
 
 ## Evolving the schema (read before changing `msg.rs`, `mgmt.rs` or `radio.rs`)
@@ -75,29 +81,32 @@ surface's version constant strictly increased; `--self-test` exercises it):
    a different version (`Error::BadVersion`), but that only protects you if the bump happened:
    postcard itself detects nothing, and two builds whose schemas differ under the *same* version
    silently mis-decode (wrong field values, no error). That is why the bump is mandatory, why
-   the goldens + guard make it mechanical, and why all consumers pin the same tag.
+   the goldens + guard make it mechanical, and why every consumer builds this one tree.
 4. Renaming a field or variant is wire-transparent (names aren't encoded): no version bump, but
-   it is a source-breaking change for consumers, so it still needs a new crate version + tag.
-5. Ship the change with the full lockstep runbook in `AGENTS.md`: new tag, then re-pin
-   `tower-firmware` (two manifests), `tower-cli`, and `tower-hil` in the same change-set.
+   it is a source-breaking change for the consumers, so fix them in the same commit (the path
+   dependencies make the build fail until you do) and give it a new crate version + tag.
+5. Ship the change with the runbook in `AGENTS.md`: one commit covering the protocol and every
+   consumer it touches, then the `protocol-vX.Y.Z` tag.
 
 ## Versioning
 
-`vMAJOR.MINOR.PATCH` git tags (see `CHANGELOG.md`). The console `PROTOCOL_VERSION` (a 3-bit field
+`protocol-vMAJOR.MINOR.PATCH` git tags (see `CHANGELOG.md`; before the monorepo they were plain
+`vX.Y.Z` tags in the old tower-protocol repository, renamed on import). The tags mark protocol
+releases and are the wire-bump guard's baseline; nothing is published from them. The console `PROTOCOL_VERSION` (a 3-bit field
 in every frame header) gates console wire compatibility independently of the crate version; a
 decoder rejects CRC-valid frames whose `PROTOCOL_VERSION` or `MsgType` it doesn't know. The radio
 application schema carries its own `RADIO_SCHEMA_VERSION` byte in every envelope.
 
 | Tag | `PROTOCOL_VERSION` | Contents |
 |---|---|---|
-| `v1.5.1` | 3 | hardening, wire byte-identical: CRC checked before version/type (`BadVersion` = genuine mismatch), trailing bytes rejected (`Malformed`), full golden coverage, per-golden wire-bump guard |
-| `v1.5.0` | 3 | unit-suffix field renames (console wire unchanged); radio schema v2 (`RADIO_SCHEMA_VERSION = 2`): `NodeCmd::Shell` gains `epoch` (downlink re-delivery dedup) |
-| `v1.4.0` | 3 | API rename to `addr` / `gw_addr` / `node_addr` terminology (wire unchanged) |
-| `v1.3.0` | 3 | the gateway link: `Uplink` / `MgmtRequest` / `MgmtResponse` / `RadioStat` + the `mgmt` op schema; new `radio` application schema (own `RADIO_SCHEMA_VERSION = 1`, guarded independently by `tests/radio_golden.rs`) |
-| `v1.2.1` | 2 | deps: cobs 0.5, MSRV declared (wire byte-identical) |
-| `v1.2.0` | 2 | crate API: exported `MAX_PAYLOAD`, non_exhaustive `Error`, doc'd evolution rules (frames byte-identical to v1.1.0) |
-| `v1.1.0` | 2 | `Hello` carries `firmware_name` / `firmware_version` / `session_id`; adds typed one-call `decode_msg` + `Error::Malformed` |
-| `v1.0.0` | 1 | initial release: console framing (COBS + CRC-32) + the postcard message schema |
+| `protocol-v1.5.1` | 3 | hardening, wire byte-identical: CRC checked before version/type (`BadVersion` = genuine mismatch), trailing bytes rejected (`Malformed`), full golden coverage, per-golden wire-bump guard |
+| `protocol-v1.5.0` | 3 | unit-suffix field renames (console wire unchanged); radio schema v2 (`RADIO_SCHEMA_VERSION = 2`): `NodeCmd::Shell` gains `epoch` (downlink re-delivery dedup) |
+| `protocol-v1.4.0` | 3 | API rename to `addr` / `gw_addr` / `node_addr` terminology (wire unchanged) |
+| `protocol-v1.3.0` | 3 | the gateway link: `Uplink` / `MgmtRequest` / `MgmtResponse` / `RadioStat` + the `mgmt` op schema; new `radio` application schema (own `RADIO_SCHEMA_VERSION = 1`, guarded independently by `tests/radio_golden.rs`) |
+| `protocol-v1.2.1` | 2 | deps: cobs 0.5, MSRV declared (wire byte-identical) |
+| `protocol-v1.2.0` | 2 | crate API: exported `MAX_PAYLOAD`, non_exhaustive `Error`, doc'd evolution rules (frames byte-identical to v1.1.0) |
+| `protocol-v1.1.0` | 2 | `Hello` carries `firmware_name` / `firmware_version` / `session_id`; adds typed one-call `decode_msg` + `Error::Malformed` |
+| `protocol-v1.0.0` | 1 | initial release: console framing (COBS + CRC-32) + the postcard message schema |
 
 ## License
 

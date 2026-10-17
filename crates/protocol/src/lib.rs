@@ -1,5 +1,6 @@
 //! TOWER console wire protocol: the single source of truth for the host↔target
-//! link, shared by the `tower` firmware and the `tower-cli` host.
+//! link, shared by the `tower` firmware SDK, the `tower` CLI (tower-cli) and the HIL
+//! harness (tower-hil), which all build this crate by path from the one monorepo tree.
 //!
 //! Frame on the wire:
 //! ```text
@@ -37,9 +38,12 @@
 //!    That rejection is only as good as the bump: postcard itself detects nothing, so two
 //!    builds whose schemas differ under the *same* `PROTOCOL_VERSION` silently mis-decode
 //!    (wrong field values, no error). The golden vectors + the CI wire-bump guard make the
-//!    bump mechanical; pinning the same tag everywhere makes it moot.
-//! 4. Ship it in lockstep: all three consumers (`tower-firmware` in both of its manifests,
-//!    `tower-cli`, `tower-hil`) re-pin the new tag in the same change-set.
+//!    bump mechanical; building every end from the same tree makes it moot.
+//! 4. Ship it as one commit: the firmware, the CLI and the HIL harness depend on this
+//!    crate by path, so they move together by construction; tag the release
+//!    `protocol-vX.Y.Z`. Devices and installed `tower` binaries built from an older tree
+//!    still speak the old version: reflash and reinstall both ends (a mismatch shows up
+//!    as [`Error::BadVersion`]).
 
 #![no_std]
 

@@ -1,43 +1,53 @@
 # tower-cli: working notes for coding agents
 
-The `tower` host CLI: decodes the framed serial link from the TOWER firmware (logs / events /
-shell / TUI) and flashes/erases/resets over the UART bootloader (via the `jolt` engine). It is
-also the gateway/MQTT host: `tower gateway` bridges a Radio Dongle's network to MQTT (embedded
-`rumqttd` broker or external, TUI + `--service`), and `tower nodes` / `tower net` are the MQTT
-client commands (`src/gateway/`, `src/client/`).
+The `tower` host CLI (`cli/` in the hardwario/tower monorepo; read the root `AGENTS.md` first):
+decodes the framed serial link from the TOWER firmware (logs / events / shell / TUI) and
+flashes/erases/resets/identifies the chip over the UART bootloader (`tower flash` / `erase` /
+`reset` / `chip`, via the `tower-boot` library in `crates/boot`, formerly `jolt`). It is also the
+gateway/MQTT host: `tower gateway` bridges a Radio Dongle's network to MQTT (embedded `rumqttd`
+broker or external, TUI + `--service`), and `tower nodes` / `tower net` are the MQTT client
+commands (`src/gateway/`, `src/client/`).
 
-## Shared wire protocol (`tower-protocol`): keep it in lockstep
+## Shared crates (path dependencies)
 
-The wire format lives in a **separate repo**, github.com/hardwario/tower-protocol, pinned here by
-git tag in `Cargo.toml`. The firmware (`tower-firmware`, in **two** manifests) and the HIL bench
-harness (`tower-hil`) pin the **same tag**; all three consumers MUST move together, because
-postcard isn't self-describing (mismatched versions silently mis-decode).
+`tower-protocol` (`crates/protocol`, the wire format) and `tower-boot` (`crates/boot`, the
+bootloader engine) come from the root workspace (`tower-protocol.workspace = true`,
+`tower-boot.workspace = true`). The firmware and the HIL harness build the same
+`crates/protocol` source, so the wire format cannot drift at build time; there is no tag to
+bump and nothing to keep in step by hand. A protocol change is made together with its callers
+here in the same commit (see `crates/protocol/AGENTS.md`, "Releasing a change").
 
-**To bump tower-protocol** (after a change is released there; see that repo's `AGENTS.md`):
+What a build cannot fix is an installed binary: after a wire change, reinstall `tower`
+(`just install-cli` at the repo root, = `cargo install --locked --path cli`), or it reports a
+protocol-version mismatch (`BadVersion`, exit 125) against freshly flashed firmware.
+
+## Checks
+
+From the repo root (`just check` runs every gate):
 
 ```sh
-# set tag = "vX.Y.Z" in Cargo.toml, then:
-# ONLY if a local paths override exists, move it aside so it doesn't shadow the git source
-# (it's gitignored and only present during local co-dev; see "Local dev override" below):
-[ -f .cargo/config.toml ] && mv .cargo/config.toml .cargo/config.toml.bak
-cargo update -p tower-protocol                  # re-resolve the lock to the new tag
-[ -f .cargo/config.toml.bak ] && mv .cargo/config.toml.bak .cargo/config.toml
-cargo build
+cargo fmt --all -- --check
+cargo clippy -p tower-cli --all-targets -- -D warnings
+cargo test -p tower-cli          # unit tests + the assert_cmd tests in tests/cli.rs; no hardware
 ```
 
-…and bump **tower-firmware** (both of its manifests) and **tower-hil** to the same tag in the
-same change-set.
+Linux needs `libudev-dev` + `pkg-config`. The tests never open a real serial port; don't flash
+or attach to a board unless the user asks.
 
-## Local dev override
+## Releasing
 
-`.cargo/config.toml` is **gitignored** and holds a `paths` override to side-by-side checkouts so
-local edits are picked up without re-tagging. The paths are relative to this repo's root (the
-directory holding `.cargo/`): in the TOWER control-plane checkout (`cli/` next to `protocol/` and
-`jolt/`) they are `../protocol` and `../jolt`; with standalone sibling clones (`tower-cli/` next
-to `tower-protocol/` and `jolt/`) they are `../tower-protocol` and `../jolt`. A standalone clone
-without the file builds from the pinned tags. The override does **not** modify
-`Cargo.lock`, and (as above) must be moved aside when you actually want to re-resolve the lock.
+A `cli-vX.Y.Z` tag releases the `tower` binary (`.github/workflows/release-cli.yml`): it gates on
+the tag matching `version` in `cli/Cargo.toml`, the tagged commit being on `main` and CI being
+green for it, then builds cross-platform archives (`tower-cli-vX.Y.Z-<target>`) with checksums and
+signed build-provenance attestations. Bump the version, commit, then tag; push only when the user
+asks.
 
 ## Writing style
 
 No em or en dashes. This applies everywhere: code, comments, docs, UI texts and commit messages. Use a comma, a semicolon, a colon or parentheses, or split the sentence. A plain hyphen is fine.
+
+## Git workflow
+
+- Part of the hardwario/tower monorepo, developed straight on `main`; no feature branches or PRs
+  unless the user asks.
+- Commit, tag and push only when the user requests it.

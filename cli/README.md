@@ -1,30 +1,43 @@
 # tower-cli
 
-Host CLI/TUI for the **HARDWARIO TOWER** console link. The `tower` binary connects to a
-TOWER device over the USB serial port and renders the **framed** host↔target protocol
-(COBS + CRC + postcard) emitted by the [tower firmware](https://github.com/hardwario/tower-firmware):
-logs, events, and an interactive shell. (A plain serial monitor shows that link as raw
-frame bytes; `tower` decodes it.)
+Host CLI/TUI for the **HARDWARIO TOWER** console link (`cli/` in the
+[hardwario/tower](https://github.com/hardwario/tower) monorepo). The `tower` binary connects to
+a TOWER device over the USB serial port and renders the **framed** host↔target protocol
+(COBS + CRC + postcard) emitted by the [TOWER firmware SDK](../firmware): logs, events, and an
+interactive shell. (A plain serial monitor shows that link as raw frame bytes; `tower` decodes
+it.) It also flashes the device over its UART bootloader and bridges a Radio Dongle's network
+to MQTT.
 
-The wire format is shared with the firmware via the `tower-protocol` crate, pinned to a
-`tower-protocol` git tag (the same tag the firmware pins, enforced by a CI lockstep check),
-so the two cannot drift.
+The wire format is shared with the firmware via the [`tower-protocol`](../crates/protocol)
+crate, a path dependency both build from the same source, so the two cannot drift at build
+time. A `tower` binary built before a wire change still speaks the old version: after pulling
+a protocol change, rebuild it (see *Install*); a stale binary reports a protocol-version
+mismatch (exit `125`) rather than mis-decoding.
 
 ## Install
 
-Grab the archive for your platform from the [latest release](https://github.com/hardwario/tower-cli/releases/latest),
-extract it, and put `tower` on your `PATH`:
+From a checkout of the repository (the usual way while developing firmware), at the repo root:
+
+```sh
+cargo install --locked --path cli      # or: just install-cli
+```
+
+Or grab the archive for your platform from a `cli-vX.Y.Z`
+[release](https://github.com/hardwario/tower/releases), extract it, and put `tower` on your
+`PATH`:
 
 ```sh
 # macOS / Linux
-tar -xzf tower-vX.Y.Z-<target>.tar.gz
-sudo mv tower-vX.Y.Z-<target>/tower /usr/local/bin/
+tar -xzf tower-cli-vX.Y.Z-<target>.tar.gz
+sudo mv tower-cli-vX.Y.Z-<target>/tower /usr/local/bin/
 
-# verify the download against its checksum
-shasum -a 256 -c tower-vX.Y.Z-<target>.tar.gz.sha256
+# verify the download against its checksum and its build-provenance attestation
+shasum -a 256 -c tower-cli-vX.Y.Z-<target>.tar.gz.sha256
+gh attestation verify tower-cli-vX.Y.Z-<target>.tar.gz --repo hardwario/tower
 ```
 
-On Windows, extract the `.zip` and put `tower.exe` on your `PATH`.
+On Windows, extract the `.zip` and put `tower.exe` on your `PATH`. (Archives of the 1.x line,
+released from the former tower-cli repository, are named `tower-vX.Y.Z-<target>`.)
 
 | Platform | Target |
 |----------|--------|
@@ -153,7 +166,7 @@ the cause of a failure:
 | `1`  | tool error: I/O (incl. a port that fails mid-command, or a `logs`/`events` link lost under `--no-reconnect`), bad file, encode/decode, truncated/incomplete device response |
 | `2`  | usage error (bad arguments, emitted by clap) |
 | `124`| device command timed out (no response at all to `exec` / `complete`; also: no gateway reply to an MQTT RPC) |
-| `125`| protocol-version mismatch (device speaks a different `tower-protocol` tag; rebuild/re-pin) |
+| `125`| protocol-version mismatch (device speaks a different `PROTOCOL_VERSION`; rebuild `tower` or reflash the device from the same tree) |
 | `126`| wrong firmware role (`tower gateway`/`nodes add --port` pointed at the wrong kind of device) |
 | `1..=123` | `exec` only: the device-reported shell result (clamped into this range) |
 
@@ -161,15 +174,15 @@ A response that arrives but is missing chunks (or runs past 256 KiB without endi
 `1`, not `124`: the device *did* answer, the output just can't be trusted. Likewise a port
 that errors out (unplugged mid-command) is `1`: `124` strictly means a live link on which
 the device stayed silent. `125` is deliberately distinct so CI can
-detect the lockstep failure mode (stale `tower` binary vs. freshly flashed firmware)
+detect the version-mismatch failure mode (stale `tower` binary vs. freshly flashed firmware)
 instead of misreading it as a timeout.
 
 ## Flashing firmware
 
 `tower` can program the device's STM32L0 over its UART bootloader (toggling
 NRST/BOOT0 through the USB-UART bridge), so a separate flashing tool isn't
-needed. The bootloader engine is the [`jolt`](https://github.com/hardwario/jolt)
-crate, integrated as a library:
+needed. The bootloader engine is the [`tower-boot`](../crates/boot) library
+(formerly the `jolt` flasher, whose commands live here now):
 
 ```sh
 tower flash firmware.bin     # erase, write, verify, then reset into the app
@@ -177,7 +190,14 @@ tower flash firmware.bin --no-verify --no-run
 tower erase                  # erase the whole flash, reset into the app
 tower reset                  # reset into the application
 tower reset --bootloader     # reset into the system bootloader
+tower chip                   # chip id + family, bootloader version, supported commands
 ```
+
+`tower chip` is read-only (the former `jolt info`): it enters the bootloader, reads `Get ID`
+and `Get`, then resets back into the application on every path. The data goes to stdout,
+status lines to stderr; `-v` prints the bootloader connect diagnostics (as for `flash` /
+`erase`). The former `jolt monitor` raw serial monitor has no counterpart: `tower monitor
+--hex` dumps every received byte.
 
 Firmware must be a raw `.bin` (convert `.elf`/`.hex` with
 `arm-none-eabi-objcopy -O binary in.elf out.bin`). The device is auto-detected when
@@ -185,13 +205,16 @@ exactly one USB serial device is present; otherwise pass `--device`.
 
 ## Build from source
 
-Requires a Rust toolchain. On Linux the `serialport` dependency needs libudev:
+The crate is a member of the repository's host workspace; the toolchain is pinned by the
+repo-root `rust-toolchain.toml` (rustup installs it). On Linux the `serialport` dependency
+needs libudev:
 
 ```sh
 sudo apt-get install -y libudev-dev pkg-config   # Debian/Ubuntu
-cargo build --release                            # binary at target/release/tower
+cargo build --release -p tower-cli               # at the repo root; binary at target/release/tower
+cargo test -p tower-cli                          # no hardware needed
 ```
 
 ## License
 
-MIT © 2026 HARDWARIO a.s.
+MIT © 2026 HARDWARIO a.s. (see the repo-root `LICENSE`).

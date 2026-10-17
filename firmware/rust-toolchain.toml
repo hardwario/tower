@@ -1,4 +1,0 @@
-[toolchain]
-channel = "1.99.1"
-components = ["rustfmt", "clippy", "llvm-tools"]
-targets = ["thumbv6m-none-eabi"]

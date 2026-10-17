@@ -1,0 +1,10 @@
+# The one Rust toolchain for the whole monorepo (host crates and firmware alike; rustup finds
+# this file from any subdirectory). CI installs exactly this channel through the RUST_TOOLCHAIN
+# env in .github/workflows/*.yml, and the `audit` job fails while the two differ: bump both
+# together (Dependabot's rust-toolchain PRs need the workflow lines added).
+#   llvm-tools          : `cargo objcopy` / `cargo size` (cargo-binutils) in firmware/justfile
+#   thumbv6m-none-eabi  : the STM32L083CZ (Cortex-M0+) firmware target
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy", "llvm-tools"]
+targets = ["thumbv6m-none-eabi"]

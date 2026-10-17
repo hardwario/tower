@@ -1,22 +1,22 @@
 [package]
 name = "tower-protocol"
 version = "1.5.1"
-edition = "2024"
-rust-version = "1.99.1"
-license = "MIT"
-description = "Shared wire protocol for the HARDWARIO TOWER link: COBS framing + CRC + postcard console message schema. no_std; used by both the `tower` firmware and the `tower-cli` host so the two cannot drift."
-repository = "https://github.com/hardwario/tower-protocol"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared wire protocol for the HARDWARIO TOWER link: COBS framing + CRC + postcard console, management and radio schemas. no_std; the firmware, the `tower` CLI and the HIL harness all build this one source tree by path, so no end can drift."
 readme = "README.md"
 keywords = ["hardwario", "tower", "embedded", "no-std", "protocol"]
 categories = ["embedded", "no-std", "encoding"]
 
 [dependencies]
-# Schema is postcard (not self-describing): both ends MUST share these exact
+# Schema is postcard (not self-describing): every end MUST share these exact
 # struct definitions, which is the whole reason this crate exists.
-serde = { version = "1.0", default-features = false, features = ["derive"] }
-postcard = { version = "1.0", default-features = false }
+serde.workspace = true
+postcard.workspace = true
 # COBS frame sync (0x00 delimiter). Used directly, not via postcard's accumulator,
 # because our inner frame carries a trailing CRC after the postcard payload.
 cobs = { version = "0.5", default-features = false }
 # Bounded collections for the candidate/field lists; `serde` feature for (de)ser.
-heapless = { version = "0.9", default-features = false, features = ["serde"] }
+heapless.workspace = true

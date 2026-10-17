@@ -46,7 +46,7 @@ use embassy_time::Instant;
 use heapless::{String, Vec};
 use tower_protocol::msg::{Candidate, CandidateKind, ShellCommand, ShellComplete, ShellCompletions};
 use tower_protocol::{MsgType, PROTOCOL_VERSION, decode_frame};
-use tower_shell_core::{CompletionBudget, Window};
+use tower_shell::{CompletionBudget, Window};
 
 use crate::console;
 use crate::storage::{FLIP_BUDGET, NS_SHELL, Nv, Scoped};
@@ -1084,7 +1084,7 @@ fn encode_value(kind: Kind, value: &str, buf: &mut [u8; MAX_SETTING]) -> Result<
         // `random` is resolved to a generated hex value in `settings_set` before this,
         // so here `Addr` only ever sees `auto` (→ 0) or a hex literal.
         Kind::Addr => {
-            let v = tower_shell_core::parse_addr(value).ok_or(())?;
+            let v = tower_shell::parse_addr(value).ok_or(())?;
             buf[..4].copy_from_slice(&v.to_le_bytes());
             Ok(4)
         }
@@ -1290,8 +1290,8 @@ fn complete(
         req_id,
         token_start: token_start as u16,
         // Char-safe: app enum values may be non-ASCII, and a byte-wise prefix sliced mid-char
-        // would panic on TAB (host-tested in `tower_shell_core::common_prefix`).
-        common_prefix: tower_shell_core::common_prefix(candidates.iter().map(|c| c.text)),
+        // would panic on TAB (host-tested in `tower_shell::common_prefix`).
+        common_prefix: tower_shell::common_prefix(candidates.iter().map(|c| c.text)),
         candidates,
         more,
     }

@@ -47,9 +47,7 @@ impl ColorMode {
         match self {
             ColorMode::Always => true,
             ColorMode::Never => false,
-            ColorMode::Auto => {
-                std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
-            }
+            ColorMode::Auto => std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal(),
         }
     }
 }
@@ -167,9 +165,7 @@ fn json_str(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control()
-                || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') =>
-            {
+            c if c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') => {
                 out.push_str(&format!("\\u{:04x}", c as u32))
             }
             c => out.push(c),
@@ -207,7 +203,7 @@ pub(crate) fn warn_protocol_mismatch(device: u8) {
     );
     eprintln!("[tower] postcard is NOT self-describing: frames will silently mis-decode. Rebuild");
     eprintln!(
-        "[tower] `tower` and the firmware against the SAME tower-protocol tag (the lockstep rule)."
+        "[tower] `tower` and the firmware from the SAME checkout of crates/protocol (the lockstep rule)."
     );
     eprintln!("[tower] ============================================================");
 }
@@ -599,10 +595,7 @@ mod tests {
     #[test]
     fn json_escapes_c1_del_and_bidi_losslessly() {
         // Beyond JSON's mandatory C0 escapes, DEL / C1 / bidi controls are \u-escaped too…
-        assert_eq!(
-            json_str("a\u{9b}b\x7fc\u{202e}d"),
-            r#""a\u009bb\u007fc\u202ed""#
-        );
+        assert_eq!(json_str("a\u{9b}b\x7fc\u{202e}d"), r#""a\u009bb\u007fc\u202ed""#);
         // …which a JSON parser decodes back to the identical string: nothing is altered.
         let raw = "x\u{9b}\x1b[31m\u{2066}y\r\n";
         let back: String = serde_json::from_str(&json_str(raw)).unwrap();

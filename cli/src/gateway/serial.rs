@@ -37,34 +37,30 @@ pub(crate) fn to_serial_msg(inner: &[u8]) -> Option<SerialMsg> {
                 firmware_version: h.firmware_version.to_string(),
                 session_id: h.session_id,
             }),
-        MsgType::Log => postcard::from_bytes::<Log>(payload)
-            .ok()
-            .map(|l| SerialMsg::Log {
-                line: format!(
-                    "[{:5}.{:03}] {} {}: {}",
-                    l.uptime_us / 1_000_000,
-                    (l.uptime_us % 1_000_000) / 1000,
-                    level_tag(l.level),
-                    l.module,
-                    l.message
-                ),
-            }),
+        MsgType::Log => postcard::from_bytes::<Log>(payload).ok().map(|l| SerialMsg::Log {
+            line: format!(
+                "[{:5}.{:03}] {} {}: {}",
+                l.uptime_us / 1_000_000,
+                (l.uptime_us % 1_000_000) / 1000,
+                level_tag(l.level),
+                l.module,
+                l.message
+            ),
+        }),
         MsgType::Print => postcard::from_bytes::<Print>(payload)
             .ok()
             .map(|p| SerialMsg::Log {
                 line: p.text.trim_end().to_string(),
             }),
-        MsgType::Uplink => {
-            postcard::from_bytes::<Uplink>(payload)
-                .ok()
-                .map(|u| SerialMsg::Uplink {
-                    src: u.src,
-                    counter: u.counter,
-                    rssi: u.rssi,
-                    lqi: u.lqi,
-                    data: u.data.to_vec(),
-                })
-        }
+        MsgType::Uplink => postcard::from_bytes::<Uplink>(payload)
+            .ok()
+            .map(|u| SerialMsg::Uplink {
+                src: u.src,
+                counter: u.counter,
+                rssi: u.rssi,
+                lqi: u.lqi,
+                data: u.data.to_vec(),
+            }),
         MsgType::MgmtResponse => {
             postcard::from_bytes::<MgmtResponse>(payload)
                 .ok()
@@ -161,12 +157,7 @@ pub(crate) fn run(
             Err(e) => {
                 up = false;
                 dec.reset();
-                if input
-                    .send(Input::SerialDown {
-                        error: e.to_string(),
-                    })
-                    .is_err()
-                {
+                if input.send(Input::SerialDown { error: e.to_string() }).is_err() {
                     return;
                 }
             }
@@ -333,11 +324,7 @@ mod tests {
                 firmware_version,
                 session_id,
             } => assert_eq!(
-                (
-                    firmware_name.as_str(),
-                    firmware_version.as_str(),
-                    session_id
-                ),
+                (firmware_name.as_str(), firmware_version.as_str(), session_id),
                 ("radio_dongle_gateway", "v0.1.0", 9)
             ),
             other => panic!("expected Hello, got {other:?}"),

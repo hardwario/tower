@@ -515,12 +515,8 @@ impl Engine {
                 payload,
                 retain,
             } => self.on_mqtt(&topic, &payload, retain, &mut out),
-            Input::Frontend(FrontendCmd::Rpc(req)) => {
-                self.on_rpc(req, RpcOrigin::Frontend, &mut out)
-            }
-            Input::Frontend(FrontendCmd::Shell { node, req }) => {
-                self.on_shell_req(node, req, &mut out)
-            }
+            Input::Frontend(FrontendCmd::Rpc(req)) => self.on_rpc(req, RpcOrigin::Frontend, &mut out),
+            Input::Frontend(FrontendCmd::Shell { node, req }) => self.on_shell_req(node, req, &mut out),
             Input::Tick => self.on_tick(&mut out),
         }
         out
@@ -800,12 +796,7 @@ impl Engine {
     }
 
     /// One remote-shell response chunk from a node → the MQTT dialog + frontend.
-    fn on_shell_chunk(
-        &mut self,
-        src: u32,
-        chunk: &radio::NodeShellChunk<'_>,
-        out: &mut Vec<Output>,
-    ) {
+    fn on_shell_chunk(&mut self, src: u32, chunk: &radio::NodeShellChunk<'_>, out: &mut Vec<Output>) {
         let Some(i) = self.nodes.iter().position(|n| n.entry.addr == src) else {
             return;
         };
@@ -952,8 +943,7 @@ impl Engine {
         match (&p.op, err) {
             // ---- happy paths ----
             (OpKind::Describe, None) => {
-                if let Ok(info) = postcard::from_bytes::<tower_protocol::mgmt::DeviceInfo>(&p.data)
-                {
+                if let Ok(info) = postcard::from_bytes::<tower_protocol::mgmt::DeviceInfo>(&p.data) {
                     self.describe = info.into();
                     self.publish_status(out);
                 }
@@ -1104,8 +1094,7 @@ impl Engine {
                 // live commands on a chunk loss; the next resync tries again.
                 if !p.truncated {
                     let entries: Vec<QueueEntry> = parse_records(&p.data);
-                    let device: Vec<(u32, u16)> =
-                        entries.iter().map(|e| (e.node_addr, e.item)).collect();
+                    let device: Vec<(u32, u16)> = entries.iter().map(|e| (e.node_addr, e.item)).collect();
                     self.reconcile_queue(&device, out);
                 }
             }
@@ -1207,18 +1196,14 @@ impl Engine {
                 }
                 Err(e) => out.push(Output::Event(Event::Log(format!("bad RPC payload: {e}")))),
             },
-            topics::Inbound::ShellReq(node) => {
-                match serde_json::from_slice::<payload::ShellReq>(data) {
-                    Ok(req) => {
-                        if self.accept_request_id(&req.id, topic, out) {
-                            self.on_shell_req(node, req, out);
-                        }
-                    }
-                    Err(e) => {
-                        out.push(Output::Event(Event::Log(format!("bad shell request: {e}"))))
+            topics::Inbound::ShellReq(node) => match serde_json::from_slice::<payload::ShellReq>(data) {
+                Ok(req) => {
+                    if self.accept_request_id(&req.id, topic, out) {
+                        self.on_shell_req(node, req, out);
                     }
                 }
-            }
+                Err(e) => out.push(Output::Event(Event::Log(format!("bad shell request: {e}")))),
+            },
             topics::Inbound::Other => {}
         }
     }
@@ -1279,12 +1264,7 @@ impl Engine {
     }
 
     /// Enqueue one remote-shell line for `node` (from `nodes/{id}/shell/req`).
-    pub(crate) fn on_shell_req(
-        &mut self,
-        node: u32,
-        req: payload::ShellReq,
-        out: &mut Vec<Output>,
-    ) {
+    pub(crate) fn on_shell_req(&mut self, node: u32, req: payload::ShellReq, out: &mut Vec<Output>) {
         let fail = |engine: &Engine, out: &mut Vec<Output>, error: &str| {
             let rsp = payload::ShellRsp {
                 id: req.id.clone(),
@@ -1316,11 +1296,7 @@ impl Engine {
             );
         }
         let cmd_id = self.next_cmd;
-        self.next_cmd = self
-            .next_cmd
-            .checked_add(1)
-            .filter(|&v| v != 0)
-            .unwrap_or(1);
+        self.next_cmd = self.next_cmd.checked_add(1).filter(|&v| v != 0).unwrap_or(1);
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let Ok(n) = radio::encode_node_cmd(
             &NodeCmd::Shell {
@@ -1386,19 +1362,13 @@ impl Engine {
                     .get("addr")
                     .and_then(|v| v.as_str())
                     .and_then(topics::parse_node_hex);
-                let key = params
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .and_then(parse_key_hex);
+                let key = params.get("key").and_then(|v| v.as_str()).and_then(parse_key_hex);
                 let name = params
                     .get("name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let sleeping = params
-                    .get("sleeping")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
+                let sleeping = params.get("sleeping").and_then(|v| v.as_bool()).unwrap_or(true);
                 let (Some(id), Some(key)) = (id, key) else {
                     return self.rpc_err_direct(out, &me, "node_add needs addr + key (hex)");
                 };
@@ -1407,11 +1377,7 @@ impl Engine {
                 {
                     return self.rpc_err_direct(out, &me, &e);
                 }
-                let mut flags = if sleeping {
-                    mgmt::NODE_FLAG_SLEEPING
-                } else {
-                    0
-                };
+                let mut flags = if sleeping { mgmt::NODE_FLAG_SLEEPING } else { 0 };
                 if name.is_empty() {
                     flags |= mgmt::NODE_FLAG_UNNAMED;
                 }
@@ -1504,12 +1470,7 @@ impl Engine {
             }
             "queue_list" => {
                 let node = node_param().unwrap_or(0);
-                self.issue(
-                    out,
-                    OpKind::QueueList,
-                    MgmtOp::QueueList { node_addr: node },
-                    rpc,
-                );
+                self.issue(out, OpKind::QueueList, MgmtOp::QueueList { node_addr: node }, rpc);
             }
             "queue_drop" => {
                 let Some(node) = node_param() else {
@@ -1519,18 +1480,10 @@ impl Engine {
                 // id: `as u16` used to truncate 65536+ into some *other* live item.
                 let item = match params.get("ref") {
                     None | Some(serde_json::Value::Null) => None,
-                    Some(v) => match v
-                        .as_u64()
-                        .and_then(|v| u16::try_from(v).ok())
-                        .filter(|&v| v != 0)
-                    {
+                    Some(v) => match v.as_u64().and_then(|v| u16::try_from(v).ok()).filter(|&v| v != 0) {
                         Some(it) => Some(it),
                         None => {
-                            return self.rpc_err_direct(
-                                out,
-                                &me,
-                                "ref must be a queue item id (1..=65535)",
-                            );
+                            return self.rpc_err_direct(out, &me, "ref must be a queue item id (1..=65535)");
                         }
                     },
                 };
@@ -1610,21 +1563,13 @@ impl Engine {
             self.fail_op(out, p.op, p.rpc.as_ref(), "device did not answer (timeout)");
         }
         if resync_queue {
-            self.issue(
-                out,
-                OpKind::QueueSync,
-                MgmtOp::QueueList { node_addr: 0 },
-                None,
-            );
+            self.issue(out, OpKind::QueueSync, MgmtOp::QueueList { node_addr: 0 }, None);
         }
         // The startup registry sync must land eventually: uplinks are held until it does,
         // so a refused/timed-out first NodeList is retried rather than leaving them parked.
         if !self.registry_synced
             && self.serial_up
-            && !self
-                .pending_mgmt
-                .iter()
-                .any(|p| matches!(p.op, OpKind::NodeList))
+            && !self.pending_mgmt.iter().any(|p| matches!(p.op, OpKind::NodeList))
         {
             self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
         }
@@ -1686,11 +1631,7 @@ impl Engine {
             return self.fail_op(out, kind, rpc.as_ref(), "gateway serial link is down");
         }
         let req_id = self.next_req;
-        self.next_req = self
-            .next_req
-            .checked_add(1)
-            .filter(|&v| v != 0)
-            .unwrap_or(1);
+        self.next_req = self.next_req.checked_add(1).filter(|&v| v != 0).unwrap_or(1);
         let seq = self.seq;
         self.seq = self.seq.wrapping_add(1);
         match encode_mgmt(seq, req_id, &op) {
@@ -1962,8 +1903,7 @@ impl Engine {
                 kind: n.kind.clone(),
                 sleeping: n.entry.flags & mgmt::NODE_FLAG_SLEEPING != 0,
                 unnamed: n.entry.flags & mgmt::NODE_FLAG_UNNAMED != 0,
-                last_seen: (n.entry.last_seen != mgmt::LAST_SEEN_NEVER)
-                    .then_some(n.entry.last_seen),
+                last_seen: (n.entry.last_seen != mgmt::LAST_SEEN_NEVER).then_some(n.entry.last_seen),
                 rssi: (n.entry.rssi != mgmt::RSSI_NONE).then_some(n.entry.rssi),
                 uplinks: n.entry.uplinks,
                 queued: n.entry.queued.max(n.pending.len() as u8),
@@ -2008,8 +1948,7 @@ impl Engine {
                 kind: n.kind.clone(),
                 sleeping: n.entry.flags & mgmt::NODE_FLAG_SLEEPING != 0,
                 unnamed: n.entry.flags & mgmt::NODE_FLAG_UNNAMED != 0,
-                last_seen: (n.entry.last_seen != mgmt::LAST_SEEN_NEVER)
-                    .then_some(n.entry.last_seen),
+                last_seen: (n.entry.last_seen != mgmt::LAST_SEEN_NEVER).then_some(n.entry.last_seen),
                 rssi: (n.entry.rssi != mgmt::RSSI_NONE).then_some(n.entry.rssi),
                 uplinks: n.entry.uplinks,
                 queued: n.entry.queued.max(n.pending.len() as u8),
@@ -2128,9 +2067,7 @@ mod tests {
             return None;
         };
         let mut dec = tower_protocol::FrameDecoder::new();
-        let inner: Vec<u8> = frame
-            .iter()
-            .find_map(|&b| dec.push(b).map(|s| s.to_vec()))?;
+        let inner: Vec<u8> = frame.iter().find_map(|&b| dec.push(b).map(|s| s.to_vec()))?;
         let (mt, _, payload) = decode_frame(&inner).ok()?;
         if mt != MsgType::MgmtRequest {
             return None;
@@ -2177,10 +2114,7 @@ mod tests {
     /// Install one node into the engine mirror via a NodeList round-trip.
     fn with_node(e: &mut Engine, id: u32, name: &str, flags: u8) {
         let start = e.start();
-        let (req_id, op) = start
-            .iter()
-            .find_map(sent_op)
-            .expect("start issues NodeList");
+        let (req_id, op) = start.iter().find_map(sent_op).expect("start issues NodeList");
         assert!(op.contains("NodeList"));
         let out = reply(e, req_id, MGMT_OK, &node_entry_record(id, name, flags));
         assert!(!publishes(&out, &format!("tower/nodes/{}", topics::node_hex(id))).is_empty());
@@ -2199,10 +2133,7 @@ mod tests {
             .collect();
         assert!(subs.iter().any(|f| *f == "tower/gateway/cmd"));
         assert!(subs.iter().any(|f| *f == "tower/nodes/+/shell/req"));
-        assert!(
-            out.iter().find_map(sent_op).is_some(),
-            "a NodeList goes out"
-        );
+        assert!(out.iter().find_map(sent_op).is_some(), "a NodeList goes out");
     }
 
     #[test]
@@ -2522,10 +2453,7 @@ mod tests {
         // Chunk 0 arrives cleanly (cmd_id 1 = the first allocated shell cmd_id).
         let out = shell_chunk_uplink(&mut e, 0xAB12, 1, 0, false, "aa");
         let rsp = last_shell_rsp(&out);
-        assert_eq!(
-            (rsp.chunk, rsp.text.as_str(), rsp.truncated),
-            (0, "aa", false)
-        );
+        assert_eq!((rsp.chunk, rsp.text.as_str(), rsp.truncated), (0, "aa", false));
         // Chunk 1 was CRC-dropped: chunk 2 (last) opens a gap → truncated, but the text that
         // did arrive is still delivered.
         let out = shell_chunk_uplink(&mut e, 0xAB12, 1, 2, true, "cc");
@@ -2553,10 +2481,7 @@ mod tests {
         let rsp = last_shell_rsp(&out);
         assert!(rsp.done);
         assert!(
-            rsp.error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("TTL expired"),
+            rsp.error.as_deref().unwrap_or_default().contains("TTL expired"),
             "{:?}",
             rsp.error
         );
@@ -2592,10 +2517,7 @@ mod tests {
         let rsp = timed_out.expect("a delivered-but-unanswered command must time out");
         assert!(rsp.done);
         assert!(
-            rsp.error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("no reply"),
+            rsp.error.as_deref().unwrap_or_default().contains("no reply"),
             "{:?}",
             rsp.error
         );
@@ -2615,8 +2537,7 @@ mod tests {
         let (req_id, op) = out.iter().find_map(sent_op).expect("NodeRevealKey issued");
         assert!(op.contains("NodeRevealKey"), "{op}");
         let key = [
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
-            0x06, 0x07,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
         ];
         let rec = postcard::to_stdvec(&NodeKey { addr: 0xAB12, key }).unwrap();
         let out = reply(&mut e, req_id, MGMT_OK, &rec);
@@ -2653,8 +2574,7 @@ mod tests {
             });
             assert!(cleared, "missing empty retained publish for {topic}");
         }
-        let rsp: RpcResponse =
-            serde_json::from_slice(publishes(&out, "tower/gateway/rsp/u-rm")[0]).unwrap();
+        let rsp: RpcResponse = serde_json::from_slice(publishes(&out, "tower/gateway/rsp/u-rm")[0]).unwrap();
         assert!(rsp.ok);
     }
 
@@ -2731,9 +2651,8 @@ mod tests {
         assert_eq!((a.event.as_str(), a.face, a.counter), ("motion", 0, 4));
         // Accel events are transient (not retained).
         assert!(
-            out.iter().any(
-                |o| matches!(o, Output::Publish { topic: t, retain: false, .. } if t == topic)
-            )
+            out.iter()
+                .any(|o| matches!(o, Output::Publish { topic: t, retain: false, .. } if t == topic))
         );
     }
 
@@ -2769,10 +2688,7 @@ mod tests {
         let mut e = engine();
         e.describe.band = 1;
         e.describe.channel = 2;
-        let out = e.handle(mqtt_in(
-            "tower/gateway/cmd",
-            br#"{"id":"u-d","op":"describe"}"#,
-        ));
+        let out = e.handle(mqtt_in("tower/gateway/cmd", br#"{"id":"u-d","op":"describe"}"#));
         let (req_id, _) = out.iter().find_map(sent_op).expect("Describe issued");
         // A reply that doesn't parse leaves the startup describe authoritative.
         let out = reply(&mut e, req_id, MGMT_OK, &[]);
@@ -2791,9 +2707,8 @@ mod tests {
         for topic in ["tower/gateway/cmd", "tower/nodes/0x0000ab12/shell/req"] {
             let out = e.handle(Input::MqttIn {
                 topic: topic.into(),
-                payload:
-                    br#"{"id":"u-r","op":"node_remove","line":"/x","params":{"addr":"0x0000ab12"}}"#
-                        .to_vec(),
+                payload: br#"{"id":"u-r","op":"node_remove","line":"/x","params":{"addr":"0x0000ab12"}}"#
+                    .to_vec(),
                 retain: true,
             });
             assert!(
@@ -2820,10 +2735,7 @@ mod tests {
         for id in ["a/b", "+", long.as_str()] {
             let rpc = format!(r#"{{"id":"{id}","op":"node_list"}}"#);
             let out = e.handle(mqtt_in("tower/gateway/cmd", rpc.as_bytes()));
-            assert!(
-                out.iter().find_map(sent_op).is_none(),
-                "{id:?} must not run"
-            );
+            assert!(out.iter().find_map(sent_op).is_none(), "{id:?} must not run");
             assert!(
                 !out.iter().any(|o| matches!(o, Output::Publish { .. })),
                 "no response topic can be built from {id:?}"
@@ -2867,10 +2779,7 @@ mod tests {
             br#"{"id":"tui-cbl-0","op":"frobnicate"}"#,
         ));
         assert!(!rpc_rsp(&out, "tui-cbl-0").ok);
-        assert!(
-            !out.iter()
-                .any(|o| matches!(o, Output::Event(Event::Rpc(_))))
-        );
+        assert!(!out.iter().any(|o| matches!(o, Output::Event(Event::Rpc(_)))));
         // …and a frontend RPC with any id comes back as an event, never published.
         let out = e.handle(Input::Frontend(FrontendCmd::Rpc(RpcRequest {
             id: "anything".into(),
@@ -2905,9 +2814,7 @@ mod tests {
         assert_eq!(rsp.id, "u-q");
         assert!(rsp.done && rsp.error.as_deref().unwrap().contains("not queued"));
         assert!(
-            e.pending_mgmt
-                .iter()
-                .any(|p| matches!(p.op, OpKind::QueueSync)),
+            e.pending_mgmt.iter().any(|p| matches!(p.op, OpKind::QueueSync)),
             "a queue resync follows, to drop the item if only the reply was lost"
         );
     }
@@ -2928,16 +2835,8 @@ mod tests {
             "frame would be dropped"
         );
         let rsp = last_shell_rsp(&out);
-        assert!(
-            rsp.error
-                .as_deref()
-                .unwrap()
-                .contains("serial link is down")
-        );
-        let out = e.handle(mqtt_in(
-            "tower/gateway/cmd",
-            br#"{"id":"u-l","op":"node_list"}"#,
-        ));
+        assert!(rsp.error.as_deref().unwrap().contains("serial link is down"));
+        let out = e.handle(mqtt_in("tower/gateway/cmd", br#"{"id":"u-l","op":"node_list"}"#));
         assert!(
             rpc_rsp(&out, "u-l")
                 .error
@@ -2952,12 +2851,7 @@ mod tests {
         let start = e.start();
         let ops: Vec<(u16, String)> = start.iter().filter_map(sent_op).collect();
         assert!(ops[1].1.contains("QueueList"), "{ops:?}");
-        let _ = reply(
-            &mut e,
-            ops[0].0,
-            MGMT_OK,
-            &node_entry_record(0xAB12, "k", 0),
-        );
+        let _ = reply(&mut e, ops[0].0, MGMT_OK, &node_entry_record(0xAB12, "k", 0));
         // The device still holds item 5 for 0xAB12 from a previous `tower gateway`.
         let stale = postcard::to_stdvec(&QueueEntry {
             node_addr: 0xAB12,
@@ -3024,11 +2918,7 @@ mod tests {
             }
         }
         let rsp = failed.expect("the pending entry must not live forever");
-        assert!(
-            rsp.error.as_deref().unwrap().contains("TTL"),
-            "{:?}",
-            rsp.error
-        );
+        assert!(rsp.error.as_deref().unwrap().contains("TTL"), "{:?}", rsp.error);
     }
 
     #[test]
@@ -3056,9 +2946,8 @@ mod tests {
         with_node(&mut e, 0xAB12, "kitchen", 0);
         for (i, r) in ["65545", "0", "-1", "\"9\""].iter().enumerate() {
             let id = format!("u-r{i}");
-            let req = format!(
-                r#"{{"id":"{id}","op":"queue_drop","params":{{"addr":"0x0000ab12","ref":{r}}}}}"#
-            );
+            let req =
+                format!(r#"{{"id":"{id}","op":"queue_drop","params":{{"addr":"0x0000ab12","ref":{r}}}}}"#);
             let out = e.handle(mqtt_in("tower/gateway/cmd", req.as_bytes()));
             assert!(
                 out.iter().find_map(sent_op).is_none(),
@@ -3087,14 +2976,8 @@ mod tests {
             let req = serde_json::json!({
                 "id": id, "op": "node_rename", "params": { "addr": "0x0000cd34", "name": name }
             });
-            let out = e.handle(mqtt_in(
-                "tower/gateway/cmd",
-                &serde_json::to_vec(&req).unwrap(),
-            ));
-            assert!(
-                out.iter().find_map(sent_op).is_none(),
-                "{name:?} must be refused"
-            );
+            let out = e.handle(mqtt_in("tower/gateway/cmd", &serde_json::to_vec(&req).unwrap()));
+            assert!(out.iter().find_map(sent_op).is_none(), "{name:?} must be refused");
             assert!(!rpc_rsp(&out, &id).ok);
         }
         // Renaming a node to its own current name is fine; so is a fresh printable name.
@@ -3105,10 +2988,7 @@ mod tests {
             let mut e2 = engine();
             e2.nodes = e.nodes.clone();
             e2.registry_synced = true;
-            let out = e2.handle(mqtt_in(
-                "tower/gateway/cmd",
-                &serde_json::to_vec(&req).unwrap(),
-            ));
+            let out = e2.handle(mqtt_in("tower/gateway/cmd", &serde_json::to_vec(&req).unwrap()));
             assert!(out.iter().find_map(sent_op).is_some(), "{name:?} is valid");
         }
         // node_add validates the same way.
@@ -3116,12 +2996,7 @@ mod tests {
             "tower/gateway/cmd",
             br#"{"id":"u-add","op":"node_add","params":{"addr":"0x0000ef56","key":"00112233445566778899aabbccddeeff","name":"garage"}}"#,
         ));
-        assert!(
-            rpc_rsp(&out, "u-add")
-                .error
-                .unwrap()
-                .contains("already used")
-        );
+        assert!(rpc_rsp(&out, "u-add").error.unwrap().contains("already used"));
     }
 
     fn button_uplink(src: u32) -> Input {
@@ -3172,10 +3047,7 @@ mod tests {
         let start = e.start();
         let (req_id, _) = start.iter().find_map(sent_op).unwrap();
         let out = e.handle(button_uplink(0xAB12));
-        assert!(
-            out.is_empty(),
-            "held, not dropped, before the mirror exists"
-        );
+        assert!(out.is_empty(), "held, not dropped, before the mirror exists");
         let out = reply(&mut e, req_id, MGMT_OK, &node_entry_record(0xAB12, "k", 0));
         assert_eq!(
             publishes(&out, "tower/nodes/0x0000ab12/event/button").len(),
@@ -3232,9 +3104,7 @@ mod tests {
         });
         assert!(logs(&out)[0].contains("cannot connect to the broker: connection refused"));
         let _ = e.handle(Input::MqttUp);
-        let out = e.handle(Input::MqttDown {
-            error: "eof".into(),
-        });
+        let out = e.handle(Input::MqttDown { error: "eof".into() });
         assert!(logs(&out)[0].starts_with("mqtt lost"));
     }
 }

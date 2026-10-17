@@ -1,10 +1,11 @@
 # tower-hil: working notes for coding agents
 
-Std host crate: the HIL bench harness for the TOWER firmware SDK (extracted from
-tower-firmware's `tools/hil`). A plain `cargo test` compiles the `#[ignore]`d hardware tests
-and runs only the host unit tests, safe anywhere. The `just hil` / `just hil-power` /
-`just hil-full` recipes opt INTO the bench run and **flash real hardware**: never run them
-unless the user asks and the bench is cabled.
+Std host crate: the HIL bench harness for the TOWER firmware SDK (`hil/` in the hardwario/tower
+monorepo, a member of the root host workspace; read the root `AGENTS.md` first). A plain
+`cargo test` (here, or `cargo test -p tower-hil` at the root) compiles the `#[ignore]`d hardware
+tests and runs only the host unit tests, safe anywhere. The `just hil` / `just hil-power` /
+`just hil-full` recipes (also `just hil <recipe>` from the repo root) opt INTO the bench run and
+**flash real hardware**: never run them unless the user asks and the bench is cabled.
 
 ## Load-bearing invariants
 
@@ -13,21 +14,32 @@ unless the user asks and the bench is cabled.
   without the filter the run would also pull in smoke/radio/extended, whose `tower flash` of
   the Core times out on a power bench (it is PPK2-powered behind a data-only FTDI, so it is
   unpowered unless the sidecar sources it).
-- **Firmware checkout discovery** (`firmware_dir()` in src/lib.rs): default `../firmware`
-  (the control-plane layout), `TOWER_FIRMWARE_DIR` overrides. The harness builds images via
-  the firmware repo's `just build example <name>` (and `just build app <name>` for the gateway
-  group's product firmwares; the power group builds `lowpower` via `cargo … --example`).
+- **Firmware discovery** (`firmware_dir()` in src/lib.rs): default `../firmware`, the sibling
+  firmware workspace in this repository; `TOWER_FIRMWARE_DIR` overrides. The harness builds
+  images via the firmware's `just build example <name>` (and `just build app <name>` for the
+  gateway group's product firmwares; the power group builds `lowpower` via
+  `cargo … --example`), always run inside that directory so its `.cargo/config.toml`
+  (thumbv6m + flip-link) applies.
 - **hil.toml** is bench-local operator config (port serials re-enumerate); don't assert on
   its concrete values in tests.
 
-## The golden rule (wire-format lockstep)
+## Shared crates (path dependencies)
 
-`tower-protocol` is pinned by git tag in `Cargo.toml` and MUST carry the same tag as
-tower-firmware (two manifests) and tower-cli. postcard is not self-describing: a mismatch
-silently mis-decodes the frames this harness asserts on. Bump the pin only as part of the
-coordinated change-set driven from the control plane (github.com/hardwario/tower, `/lockstep`
-+ the protocol-bump runbook in its AGENTS.md). The `jolt` tag pin is an ordinary dependency
-(a mismatch is a compile error, not an interop hazard).
+`tower-protocol` (`crates/protocol`) and `tower-boot` (`crates/boot`, the NRST/BOOT0 reset
+pulses) come from the root workspace by path. The harness decodes exactly the schema the
+firmware and the `tower` CLI build, so a wire mismatch cannot arise at build time; a protocol
+change updates the harness in the same commit (see `crates/protocol/AGENTS.md`, "Releasing a
+change"). At run time a board flashed from another tree still shows up as a wire-version
+mismatch in the console decode.
+
+## Checks
+
+```sh
+just check                                                   # = cargo test --locked --no-run --features power
+cargo clippy -p tower-hil --all-targets --features power -- -D warnings   # from the repo root
+```
+
+The repo-root `just check` runs both (CI's `host` job too).
 
 ## Writing style
 
@@ -35,7 +47,8 @@ No em or en dashes. This applies everywhere: code, comments, docs, UI texts and 
 
 ## Git workflow
 
-- Developed straight on `main`; no feature branches or PRs unless the user asks.
+- Part of the hardwario/tower monorepo, developed straight on `main`; no feature branches or PRs
+  unless the user asks.
 - Commit and push only when the user requests it.
 - MIT © 2026 HARDWARIO a.s. Design-rationale comments (confounders, reset sequencing,
   TIOCEXCL handling) are hard-won; don't strip them.

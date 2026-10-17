@@ -452,7 +452,7 @@ fn rand_u32_trng() -> Option<u32> {
 
 /// Software fallback for [`rand_u32`], **not cryptographic**. Mixes the chip UID, the
 /// uptime tick, and a rolling internal state, then runs one xorshift step (host-tested in
-/// [`tower_shell_core::xorshift32_nonzero`], which forces the seed non-zero). Used only if
+/// [`tower_shell::xorshift32_nonzero`], which forces the seed non-zero). Used only if
 /// the hardware TRNG is somehow unavailable (reported by [`rand_source`]); successive calls
 /// (and different units) diverge.
 fn rand_u32_sw() -> u32 {
@@ -460,7 +460,7 @@ fn rand_u32_sw() -> u32 {
     static STATE: AtomicU32 = AtomicU32::new(0);
     let seed =
         STATE.load(Ordering::Relaxed) ^ unique_id32() ^ (embassy_time::Instant::now().as_ticks() as u32);
-    let x = tower_shell_core::xorshift32_nonzero(seed);
+    let x = tower_shell::xorshift32_nonzero(seed);
     STATE.store(x, Ordering::Relaxed);
     x
 }

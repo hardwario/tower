@@ -1,6 +1,6 @@
 //! Hardware-in-the-loop harness library for the TOWER firmware SDK. Bench inventory,
-//! cabling, and setup: `docs/bench.md` (in this repo); the test catalogue is
-//! tower-firmware's docs/test-plan.md.
+//! cabling, and setup: `hil/docs/bench.md`; the test catalogue is
+//! `firmware/docs/test-plan.md`.
 //!
 //! The bench (see `hil.toml`):
 //!
@@ -13,11 +13,11 @@
 //! Each slot is identity-checked against the live roster (the board-type tag in the FTDI's USB
 //! serial number, or a pinned `usb_serial`) before anything is flashed (see [`Bench::resolve`]).
 //!
-//! The images under test are built from a `tower-firmware` checkout located by
-//! [`firmware_dir`] (default `../firmware`, the control-plane layout; override with
-//! `TOWER_FIRMWARE_DIR`).
+//! The images under test are built from the firmware workspace located by
+//! [`firmware_dir`] (default `../firmware`, the sibling directory in the monorepo; override
+//! with `TOWER_FIRMWARE_DIR`).
 //!
-//! The value over tower-firmware's old `tools/hwtest` shell scripts (`strings | grep`) is that this decodes
+//! The value over the firmware's old `tools/hwtest` shell scripts (`strings | grep`) is that this decodes
 //! the framed console **natively** with `tower-protocol`, so a test asserts on typed
 //! [`Frame::Log`] / [`Frame::Event`] payloads and on **sequence gaps** (dropped/duplicated
 //! frames the byte-grep can't see), against the exact same wire version the firmware ships.
@@ -42,10 +42,10 @@ pub const CONSOLE_BAUD: u32 = 115_200;
 // Firmware checkout (the harness builds the images it flashes)
 // ---------------------------------------------------------------------------
 
-/// Locate the `tower-firmware` checkout the bench tests build images from (`just build
-/// example …`). Default: a `firmware` checkout NEXT TO this repo: the TOWER control-plane
-/// layout, where `hil/` and `firmware/` are sibling submodules of one root. For any other
-/// layout, point `TOWER_FIRMWARE_DIR` at the checkout. Validated by the presence of its
+/// Locate the firmware workspace the bench tests build images from (`just build
+/// example …`). Default: `../firmware` relative to this crate, its sibling in the monorepo
+/// (`hil/` and `firmware/` share one root). For any other layout, point `TOWER_FIRMWARE_DIR`
+/// at a firmware checkout. Validated by the presence of its
 /// `justfile` (the harness drives builds through `just`), so a wrong path fails HERE with
 /// instructions instead of as a cryptic spawn error inside a test.
 pub fn firmware_dir() -> Result<PathBuf, String> {
@@ -57,9 +57,9 @@ pub fn firmware_dir() -> Result<PathBuf, String> {
         Ok(dir)
     } else {
         Err(format!(
-            "HIL: no tower-firmware checkout at {} (its justfile is missing). The default is a \
-             `firmware` checkout next to this repo (the TOWER control-plane layout); set \
-             TOWER_FIRMWARE_DIR=/path/to/tower-firmware for any other layout.",
+            "HIL: no firmware workspace at {} (its justfile is missing). The default is the \
+             `firmware` directory next to `hil/` (the monorepo layout); set \
+             TOWER_FIRMWARE_DIR=/path/to/firmware for any other layout.",
             dir.display()
         ))
     }
@@ -166,10 +166,16 @@ pub fn live_ports() -> Vec<LivePort> {
         .unwrap_or_default()
         .into_iter()
         .map(|p| match p.port_type {
-            serialport::SerialPortType::UsbPort(info) => {
-                LivePort { path: p.port_name, usb: true, usb_serial: info.serial_number }
-            }
-            _ => LivePort { path: p.port_name, usb: false, usb_serial: None },
+            serialport::SerialPortType::UsbPort(info) => LivePort {
+                path: p.port_name,
+                usb: true,
+                usb_serial: info.serial_number,
+            },
+            _ => LivePort {
+                path: p.port_name,
+                usb: false,
+                usb_serial: None,
+            },
         })
         .collect()
 }
@@ -200,16 +206,25 @@ fn resolve_board(role: Role, board: &Board, live: &[LivePort]) -> Result<String,
                 role.other().name()
             ));
         }
-        let mut hits: Vec<&LivePort> = live.iter().filter(|p| p.usb_serial.as_deref() == Some(sn)).collect();
+        let mut hits: Vec<&LivePort> = live
+            .iter()
+            .filter(|p| p.usb_serial.as_deref() == Some(sn))
+            .collect();
         // One device = one hit after folding the macOS tty./cu. twins (prefer the cu. node).
         hits.sort_by_key(|p| p.path.starts_with("/dev/tty."));
         hits.dedup_by(|a, b| same_device(&a.path, &b.path));
         return match hits.as_slice() {
             [one] => Ok(one.path.clone()),
-            [] => Err(format!("{r}: no port with USB serial {sn} (fixture path hint {})", board.serial)),
+            [] => Err(format!(
+                "{r}: no port with USB serial {sn} (fixture path hint {})",
+                board.serial
+            )),
             many => Err(format!(
                 "{r}: USB serial {sn} matches several devices ({}): ambiguous, refusing to guess",
-                many.iter().map(|p| p.path.as_str()).collect::<Vec<_>>().join(", ")
+                many.iter()
+                    .map(|p| p.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         };
     }
@@ -217,7 +232,10 @@ fn resolve_board(role: Role, board: &Board, live: &[LivePort]) -> Result<String,
         return Err(format!("{r}: fixture serial {} not present", board.serial));
     };
     if !port.usb {
-        return Err(format!("{r}: {} is not a USB serial port, so not a TOWER board", port.path));
+        return Err(format!(
+            "{r}: {} is not a USB serial port, so not a TOWER board",
+            port.path
+        ));
     }
     match &port.usb_serial {
         Some(sn) if sn.contains(role.usb_tag()) => Ok(board.serial.clone()),
@@ -279,12 +297,16 @@ impl Bench {
     fn resolve_against(&mut self, live: &[LivePort]) -> Result<(), String> {
         let core = resolve_board(Role::Core, &self.core, live);
         let dongle = resolve_board(Role::Dongle, &self.dongle, live);
-        let mut problems: Vec<String> =
-            [&core, &dongle].into_iter().filter_map(|r| r.as_ref().err().cloned()).collect();
+        let mut problems: Vec<String> = [&core, &dongle]
+            .into_iter()
+            .filter_map(|r| r.as_ref().err().cloned())
+            .collect();
         if let (Ok(c), Ok(d)) = (&core, &dongle)
             && same_device(c, d)
         {
-            problems.push(format!("core and dongle both resolve to {c}; one board can't fill both slots"));
+            problems.push(format!(
+                "core and dongle both resolve to {c}; one board can't fill both slots"
+            ));
         }
         if problems.is_empty() {
             self.core.serial = core.unwrap_or_default();
@@ -295,7 +317,11 @@ impl Bench {
             "HIL bench roster mismatch: re-resolve ports (they re-enumerate each session):\n{}\n\
              ports present now:\n{}\n\
              Fix hil.toml (serial paths, or pin usb_serial) or the cabling, then re-run.",
-            problems.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n"),
+            problems
+                .iter()
+                .map(|p| format!("  {p}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             roster_listing(live)
         ))
     }
@@ -303,7 +329,7 @@ impl Bench {
     /// Flash `bin` to the board in `role` over the UART bootloader (`tower flash`), re-verifying the
     /// slot's identity against the live roster IMMEDIATELY before the erase, since a build can take long
     /// enough for a cable to be moved. Sequential by design (concurrent FTDI flashing is unreliable
-    /// (Write-Memory timeouts / re-enumeration, see tower-firmware's tools/hwtest/README.md).
+    /// (Write-Memory timeouts / re-enumeration, see firmware/tools/hwtest/README.md).
     pub fn flash(&self, role: Role, bin: &Path) -> Result<(), String> {
         let path = resolve_board(role, self.board(role), &live_ports())
             .map_err(|e| format!("HIL: refusing to flash: {e}"))?;
@@ -395,24 +421,55 @@ pub fn build_image(kind: &str, name: &str, features: &str) -> Result<PathBuf, St
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     /// Boot banner: protocol version, firmware name + version, and per-boot session id.
-    Hello { protocol_version: u8, firmware_name: String, firmware_version: String, session_id: u32 },
+    Hello {
+        protocol_version: u8,
+        firmware_name: String,
+        firmware_version: String,
+        session_id: u32,
+    },
     /// A `log::` record.
-    Log { level: Level, uptime_us: u64, module: String, message: String },
+    Log {
+        level: Level,
+        uptime_us: u64,
+        module: String,
+        message: String,
+    },
     /// A `println!`-style print.
     Print { text: String },
     /// A structured `console::event(...)`.
-    Event { name: String, fields: Vec<(String, String)> },
+    Event {
+        name: String,
+        fields: Vec<(String, String)>,
+    },
     /// The writer's dropped-frame marker (queue overflow / unplugged drain).
     Dropped { count: u32 },
     /// A forwarded radio uplink from the gateway firmware (wire v3): the decrypted,
     /// authenticated payload verbatim, plus reception metadata.
-    Uplink { src: u32, counter: u32, rssi: i16, lqi: u8, data: Vec<u8> },
+    Uplink {
+        src: u32,
+        counter: u32,
+        rssi: i16,
+        lqi: u8,
+        data: Vec<u8>,
+    },
     /// One chunk of a management reply (wire v3); reassemble by `req_id` (see
     /// [`Console::mgmt_roundtrip`]).
-    Mgmt { req_id: u16, result: u8, chunk: u16, last: bool, data: Vec<u8> },
+    Mgmt {
+        req_id: u16,
+        result: u8,
+        chunk: u16,
+        last: bool,
+        data: Vec<u8>,
+    },
     /// One chunk of a shell-command reply; reassemble by `cmd_id` (see
     /// [`Console::shell_roundtrip`]). `text` chunks concatenate; `result` is authoritative on `last`.
-    Shell { cmd_id: u16, result: u8, chunk: u16, last: bool, text: String },
+    Shell {
+        cmd_id: u16,
+        result: u8,
+        chunk: u16,
+        last: bool,
+        text: String,
+    },
     /// A radio-diagnostics sample (wire v3): ambient channel RSSI or a TX report.
     Stat(RadioStat),
     /// A frame whose `MsgType` we don't model here (e.g. shell traffic), kept so seq accounting
@@ -450,7 +507,7 @@ pub struct Console {
 impl Console {
     /// Open `path` at the console baud with a short read timeout (so reads poll rather than block
     /// forever), then drive the modem lines to the RUN baseline (RTS + DTR asserted). The bridge's
-    /// RTS/DTR drive NRST/BOOT0 through the board's transistor pair (the jolt / tower-cli wiring:
+    /// RTS/DTR drive NRST/BOOT0 through the board's transistor pair (the tower-boot / tower-cli wiring:
     /// only RTS-asserted + DTR-released holds RESET); the OS asserts both on open anyway, and
     /// re-driving them explicitly (like tower-cli's `open_console`) guarantees merely attaching
     /// can't leave the MCU held in reset, and does not perturb a running app.
@@ -460,18 +517,18 @@ impl Console {
             .timeout(Duration::from_millis(50))
             .open_native()
             .map_err(|e| format!("HIL: open console {path}: {e}"))?;
-        // serialport-rs opens TTYs with TIOCEXCL by default, which makes jolt's re-open of the
-        // same tty (reset_into_app's NRST pulse, while the console stays attached to catch the
-        // boot burst) fail with EBUSY. Clear it: jolt only toggles modem lines, it never reads,
+        // serialport-rs opens TTYs with TIOCEXCL by default, which makes tower-boot's re-open of
+        // the same tty (reset_into_app's NRST pulse, while the console stays attached to catch the
+        // boot burst) fail with EBUSY. Clear it: tower-boot only toggles modem lines, it never reads,
         // so sharing the tty with the console reader is safe.
         #[cfg(unix)]
         port.set_exclusive(false)
             .map_err(|e| format!("HIL: clear TIOCEXCL on {path}: {e}"))?;
-        // Run baseline (RTS=T, DTR=T), with jolt's tuned settle.
+        // Run baseline (RTS=T, DTR=T), with tower-boot's tuned settle.
         serialport::SerialPort::write_request_to_send(&mut port, true)
             .and_then(|()| serialport::SerialPort::write_data_terminal_ready(&mut port, true))
             .map_err(|e| format!("HIL: drive run-state lines on {path}: {e}"))?;
-        std::thread::sleep(jolt::port::RUN_SETTLE);
+        std::thread::sleep(tower_boot::port::RUN_SETTLE);
         Ok(Self {
             port: Some(Box::new(port)),
             decoder: FrameDecoder::new(),
@@ -492,13 +549,17 @@ impl Console {
             .map_err(|e| format!("HIL: encode {msg_type:?}: {e}"))?;
         self.tx_seq = self.tx_seq.wrapping_add(1);
         let port = self.port.as_mut().ok_or("HIL: console handle loaned out")?;
-        port.write_all(&buf[..n]).map_err(|e| format!("HIL: write: {e}"))?;
+        port.write_all(&buf[..n])
+            .map_err(|e| format!("HIL: write: {e}"))?;
         port.flush().map_err(|e| format!("HIL: flush: {e}"))
     }
 
     /// Send a `ShellCommand` (the console shell, not the radio remote shell).
     pub fn send_shell(&mut self, cmd_id: u16, line: &str) -> Result<(), String> {
-        self.send_frame(MsgType::ShellCommand, &tower_protocol::msg::ShellCommand { cmd_id, line })
+        self.send_frame(
+            MsgType::ShellCommand,
+            &tower_protocol::msg::ShellCommand { cmd_id, line },
+        )
     }
 
     /// One shell round-trip: send `line` as a `ShellCommand`, reassemble the chunked
@@ -516,7 +577,13 @@ impl Console {
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match self.next(remaining)? {
-                Some(Frame::Shell { cmd_id: c, result, text: t, last, .. }) if c == cmd_id => {
+                Some(Frame::Shell {
+                    cmd_id: c,
+                    result,
+                    text: t,
+                    last,
+                    ..
+                }) if c == cmd_id => {
                     deadline = Instant::now() + timeout;
                     text.push_str(&t);
                     if last {
@@ -527,7 +594,10 @@ impl Console {
                 None => break,
             }
         }
-        Err(format!("HIL: shell cmd {cmd_id} got no complete reply{}", self.decode_note()))
+        Err(format!(
+            "HIL: shell cmd {cmd_id} got no complete reply{}",
+            self.decode_note()
+        ))
     }
 
     /// One management round-trip: send `op`, reassemble the chunked reply for `req_id`.
@@ -540,13 +610,25 @@ impl Console {
         op: &MgmtOp<'_>,
         timeout: Duration,
     ) -> Result<(u8, Vec<u8>), String> {
-        self.send_frame(MsgType::MgmtRequest, &MgmtRequest { req_id, op: op.clone() })?;
+        self.send_frame(
+            MsgType::MgmtRequest,
+            &MgmtRequest {
+                req_id,
+                op: op.clone(),
+            },
+        )?;
         let mut data = Vec::new();
         let mut deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match self.next(remaining)? {
-                Some(Frame::Mgmt { req_id: r, result, data: d, last, .. }) if r == req_id => {
+                Some(Frame::Mgmt {
+                    req_id: r,
+                    result,
+                    data: d,
+                    last,
+                    ..
+                }) if r == req_id => {
                     deadline = Instant::now() + timeout;
                     data.extend_from_slice(&d);
                     if last {
@@ -557,20 +639,24 @@ impl Console {
                 None => break,
             }
         }
-        Err(format!("HIL: mgmt req {req_id} got no complete reply{}", self.decode_note()))
+        Err(format!(
+            "HIL: mgmt req {req_id} got no complete reply{}",
+            self.decode_note()
+        ))
     }
 
     /// Pulse NRST so the board reboots into its application, WITHOUT re-opening the tty (a second
     /// open fails on serialport 4.9, which flocks the tty on every open). The reset only toggles
     /// modem lines, so the console's 115200 8N1 frame format is untouched.
     ///
-    /// Line sequence + timings are jolt's `Port::reset_into_app` exactly (RTS=T/DTR=F asserts
+    /// Line sequence + timings are tower-boot's `Port::reset_into_app` exactly (RTS=T/DTR=F asserts
     /// RESET with BOOT0 low for `RESET_PULSE`, RTS=F releases, `APP_BOOT` settle; the 1 µF NRST
-    /// cap makes the ordering load-bearing), plus the one thing jolt v1.4.0 has no hook for: the
-    /// input buffer is cleared WHILE the chip is held in reset (as tower-cli's
-    /// `pulse_reset_into_app` does). Clearing after release would race the boot bytes we want;
-    /// not clearing lets pre-reset frames (the gateway's 1 Hz RadioStat, a post-flash boot's
-    /// banner) satisfy the next `wait_for` and make the new boot's `seq` 0 look like ~65k gaps.
+    /// cap makes the ordering load-bearing), plus the one thing tower-boot (like jolt v1.4.0 before
+    /// it) has no hook for: the input buffer is cleared WHILE the chip is held in reset (as
+    /// tower-cli's `pulse_reset_into_app` does). Clearing after release would race the boot bytes
+    /// we want; not clearing lets pre-reset frames (the gateway's 1 Hz RadioStat, a post-flash
+    /// boot's banner) satisfy the next `wait_for` and make the new boot's `seq` 0 look like ~65k
+    /// gaps.
     /// Decode + seq state is re-baselined too: everything after this belongs to the new boot.
     pub fn reset_into_app(&mut self) -> Result<(), String> {
         let port = self.port.as_mut().ok_or("HIL: console has no port")?;
@@ -695,10 +781,7 @@ impl Console {
             }
         }
         if self.decode_errors > errors_before {
-            eprintln!(
-                "HIL: wait_for timed out after {timeout:?}{}",
-                self.decode_note()
-            );
+            eprintln!("HIL: wait_for timed out after {timeout:?}{}", self.decode_note());
         }
         Ok(None)
     }
@@ -706,7 +789,9 @@ impl Console {
     /// Convenience: await a Log/Print frame whose text contains `needle` (the framed equivalent
     /// of the old `strings | grep`, but on decoded ASCII with version + CRC already validated).
     pub fn wait_for_text(&mut self, timeout: Duration, needle: &str) -> Result<bool, String> {
-        Ok(self.wait_for(timeout, |f| frame_text(f).is_some_and(|t| t.contains(needle)))?.is_some())
+        Ok(self
+            .wait_for(timeout, |f| frame_text(f).is_some_and(|t| t.contains(needle)))?
+            .is_some())
     }
 
     /// Per-frame bookkeeping: a `Hello` opens a new device session (the firmware restarts its
@@ -748,14 +833,15 @@ impl Console {
     }
 }
 
-/// The NRST pulse of [`Console::reset_into_app`] on a borrowed handle: jolt's line order and
+/// The NRST pulse of [`Console::reset_into_app`] on a borrowed handle: tower-boot's line order and
 /// timings, with the input buffer cleared while RESET is held. On a line-write failure the run
-/// state (RTS=T, DTR=T) is restored best-effort, as jolt does, so the board isn't left in reset.
+/// state (RTS=T, DTR=T) is restored best-effort, as tower-boot does, so the board isn't left in
+/// reset.
 fn pulse_reset_clearing_input(sp: &mut dyn serialport::SerialPort) -> Result<(), String> {
     let mut pulse = || -> serialport::Result<()> {
         sp.write_request_to_send(true)?;
         sp.write_data_terminal_ready(false)?; // RESET asserted, BOOT0 low
-        std::thread::sleep(jolt::port::RESET_PULSE);
+        std::thread::sleep(tower_boot::port::RESET_PULSE);
         sp.clear(serialport::ClearBuffer::Input)?; // drop pre-reset bytes while held in reset
         sp.write_request_to_send(false) // RESET released -> boot main flash
     };
@@ -764,7 +850,7 @@ fn pulse_reset_clearing_input(sp: &mut dyn serialport::SerialPort) -> Result<(),
         let _ = sp.write_data_terminal_ready(true);
         return Err(format!("HIL: reset-into-app: {e}"));
     }
-    std::thread::sleep(jolt::port::APP_BOOT);
+    std::thread::sleep(tower_boot::port::APP_BOOT);
     Ok(())
 }
 
@@ -784,9 +870,8 @@ fn crc_valid(inner: &[u8]) -> bool {
 fn lockstep_break(got: u8) -> String {
     format!(
         "HIL: the device speaks tower-protocol wire version {got}, but this harness decodes version \
-         {}: a lockstep break (postcard would silently mis-decode). Rebuild the firmware and \
-         re-pin tower-firmware / tower-cli / tower-hil to the SAME tower-protocol tag (control \
-         plane `/lockstep`).",
+         {}: a lockstep break (postcard would silently mis-decode). Rebuild and reflash the \
+         firmware from this checkout, so it and the harness share the one crates/protocol.",
         tower_protocol::PROTOCOL_VERSION
     )
 }
@@ -814,13 +899,19 @@ fn to_frame(msg_type: MsgType, payload: &[u8]) -> Frame {
             Err(_) => Frame::Other(msg_type),
         },
         MsgType::Print => match postcard::from_bytes::<Print>(payload) {
-            Ok(p) => Frame::Print { text: p.text.to_string() },
+            Ok(p) => Frame::Print {
+                text: p.text.to_string(),
+            },
             Err(_) => Frame::Other(msg_type),
         },
         MsgType::Event => match postcard::from_bytes::<Event>(payload) {
             Ok(e) => Frame::Event {
                 name: e.name.to_string(),
-                fields: e.fields.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                fields: e
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
             },
             Err(_) => Frame::Other(msg_type),
         },
@@ -876,16 +967,19 @@ pub fn frame_text(f: &Frame) -> Option<&str> {
 }
 
 // ---------------------------------------------------------------------------
-// Reset over the FTDI modem lines (jolt): RTS drives NRST, DTR drives BOOT0
+// Reset over the FTDI modem lines (tower-boot): RTS drives NRST, DTR drives BOOT0
 // ---------------------------------------------------------------------------
 
-/// Pulse NRST so the board reboots into its application, using jolt's tuned reset sequence (the
-/// 1 µF NRST cap makes the line ordering load-bearing; we reuse jolt's, not a hand-rolled one).
+/// Pulse NRST so the board reboots into its application, using tower-boot's tuned reset sequence
+/// (the 1 µF NRST cap makes the line ordering load-bearing; we reuse tower-boot's, not a
+/// hand-rolled one).
 /// For a port with NO console attached (it opens the tty itself); with a [`Console`] open on the
 /// port use [`Console::reset_into_app`] instead.
 pub fn reset_into_app(path: &str) -> Result<(), String> {
-    let mut port = jolt::port::Port::open(path).map_err(|e| format!("HIL: jolt open {path}: {e}"))?;
-    port.reset_into_app().map_err(|e| format!("HIL: reset-into-app {path}: {e}"))
+    let mut port =
+        tower_boot::port::Port::open(path).map_err(|e| format!("HIL: tower-boot open {path}: {e}"))?;
+    port.reset_into_app()
+        .map_err(|e| format!("HIL: reset-into-app {path}: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -963,7 +1057,12 @@ impl Ppk2 {
                 }
             }
         });
-        let mut ppk2 = Self { child, stdin, replies, backend: String::new() };
+        let mut ppk2 = Self {
+            child,
+            stdin,
+            replies,
+            backend: String::new(),
+        };
         let hello = ppk2.recv(PPK2_STARTUP_TIMEOUT, "startup")?;
         ppk2.backend = json_str(&hello, "backend").unwrap_or_default();
         let stub_ok = std::env::var("TOWER_PPK2_STUB").is_ok_and(|v| v == "1");
@@ -999,7 +1098,9 @@ impl Ppk2 {
                     std::sync::mpsc::RecvTimeoutError::Timeout => format!("no reply within {timeout:?}"),
                     std::sync::mpsc::RecvTimeoutError::Disconnected => "closed the pipe".to_string(),
                 };
-                return Err(format!("HIL: ppk2d {why} ({what}); killed it (its stderr is above)"));
+                return Err(format!(
+                    "HIL: ppk2d {why} ({what}); killed it (its stderr is above)"
+                ));
             }
         };
         if json_raw(&line, "ok") == Some("true") {
@@ -1020,12 +1121,14 @@ impl Ppk2 {
     /// debug probe leaves the STM32 debug domain powered (~+200 µA) until a clean power cycle
     /// (confounder #1). Always cycle before measuring.
     pub fn cycle(&mut self, mv: u32) -> Result<(), String> {
-        self.send(&format!("{{\"cmd\":\"cycle\",\"mv\":{mv}}}"), PPK2_CMD_TIMEOUT).map(drop)
+        self.send(&format!("{{\"cmd\":\"cycle\",\"mv\":{mv}}}"), PPK2_CMD_TIMEOUT)
+            .map(drop)
     }
 
     /// Enable the supply at `mv`.
     pub fn on(&mut self, mv: u32) -> Result<(), String> {
-        self.send(&format!("{{\"cmd\":\"on\",\"mv\":{mv}}}"), PPK2_CMD_TIMEOUT).map(drop)
+        self.send(&format!("{{\"cmd\":\"on\",\"mv\":{mv}}}"), PPK2_CMD_TIMEOUT)
+            .map(drop)
     }
 
     /// Disable the supply.
@@ -1114,7 +1217,12 @@ fn json_str(reply: &str, key: &str) -> Option<String> {
             'r' => out.push('\r'),
             'u' => {
                 let hex: String = chars.by_ref().take(4).collect();
-                out.push(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32).unwrap_or('\u{FFFD}'));
+                out.push(
+                    u32::from_str_radix(&hex, 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                        .unwrap_or('\u{FFFD}'),
+                );
             }
             other => out.push(other), // \" \\ \/
         }
@@ -1145,7 +1253,10 @@ mod tests {
         // Errors: ok is false, the message is unescaped (µ arrives as \u00b5), quotes survive.
         let err = "{\"ok\": false, \"error\": \"averaged 6e4 \\u00b5A > max \\\"x\\\", ok\"}";
         assert_eq!(json_raw(err, "ok"), Some("false"));
-        assert_eq!(json_str(err, "error").as_deref(), Some("averaged 6e4 µA > max \"x\", ok"));
+        assert_eq!(
+            json_str(err, "error").as_deref(),
+            Some("averaged 6e4 µA > max \"x\", ok")
+        );
 
         // The startup line.
         let hello = "{\"ok\": true, \"backend\": \"real\", \"port\": \"/dev/cu.usbmodem1\"}";
@@ -1222,7 +1333,12 @@ mod tests {
         let (_, frame) = decode_via_wire(
             MsgType::Log,
             2,
-            &Log { level: Level::Warn, uptime_us: 1_234_567, module: "radio", message: "carrier lost" },
+            &Log {
+                level: Level::Warn,
+                uptime_us: 1_234_567,
+                module: "radio",
+                message: "carrier lost",
+            },
         );
         assert_eq!(
             frame,
@@ -1238,14 +1354,22 @@ mod tests {
     #[test]
     fn to_frame_maps_print() {
         let (_, frame) = decode_via_wire(MsgType::Print, 3, &Print { text: "hello world" });
-        assert_eq!(frame, Frame::Print { text: "hello world".to_string() });
+        assert_eq!(
+            frame,
+            Frame::Print {
+                text: "hello world".to_string()
+            }
+        );
     }
 
     #[test]
     fn to_frame_maps_event() {
         // `Event.fields` is a heapless Vec; build it via Default + push so the test needs no
         // direct heapless dep (the type is inferred from the field).
-        let mut ev = Event { name: "boot", fields: Default::default() };
+        let mut ev = Event {
+            name: "boot",
+            fields: Default::default(),
+        };
         ev.fields.push(("phase", "init")).unwrap();
         ev.fields.push(("rc", "0")).unwrap();
         let (_, frame) = decode_via_wire(MsgType::Event, 4, &ev);
@@ -1253,7 +1377,10 @@ mod tests {
             frame,
             Frame::Event {
                 name: "boot".to_string(),
-                fields: vec![("phase".to_string(), "init".to_string()), ("rc".to_string(), "0".to_string())],
+                fields: vec![
+                    ("phase".to_string(), "init".to_string()),
+                    ("rc".to_string(), "0".to_string())
+                ],
             }
         );
     }
@@ -1270,11 +1397,23 @@ mod tests {
         let (_, frame) = decode_via_wire(
             MsgType::Uplink,
             6,
-            &Uplink { src: 0x1122_3344, counter: 7, rssi: -80, lqi: 12, data: &[1, 2, 3, 4] },
+            &Uplink {
+                src: 0x1122_3344,
+                counter: 7,
+                rssi: -80,
+                lqi: 12,
+                data: &[1, 2, 3, 4],
+            },
         );
         assert_eq!(
             frame,
-            Frame::Uplink { src: 0x1122_3344, counter: 7, rssi: -80, lqi: 12, data: vec![1, 2, 3, 4] }
+            Frame::Uplink {
+                src: 0x1122_3344,
+                counter: 7,
+                rssi: -80,
+                lqi: 12,
+                data: vec![1, 2, 3, 4]
+            }
         );
     }
 
@@ -1284,18 +1423,51 @@ mod tests {
         let (_, frame) = decode_via_wire(
             MsgType::MgmtResponse,
             7,
-            &MgmtResponse { req_id: 5, result: 0, chunk: 1, last: true, data: &[9, 8, 7] },
+            &MgmtResponse {
+                req_id: 5,
+                result: 0,
+                chunk: 1,
+                last: true,
+                data: &[9, 8, 7],
+            },
         );
-        assert_eq!(frame, Frame::Mgmt { req_id: 5, result: 0, chunk: 1, last: true, data: vec![9, 8, 7] });
+        assert_eq!(
+            frame,
+            Frame::Mgmt {
+                req_id: 5,
+                result: 0,
+                chunk: 1,
+                last: true,
+                data: vec![9, 8, 7]
+            }
+        );
     }
 
     #[test]
     fn to_frame_maps_radio_stat() {
         // wire-v3 gateway frame: both RadioStat variants map verbatim into Frame::Stat.
-        let (_, ch) = decode_via_wire(MsgType::RadioStat, 8, &RadioStat::Channel { channel: 4, rssi: -95 });
-        assert_eq!(ch, Frame::Stat(RadioStat::Channel { channel: 4, rssi: -95 }));
+        let (_, ch) = decode_via_wire(
+            MsgType::RadioStat,
+            8,
+            &RadioStat::Channel {
+                channel: 4,
+                rssi: -95,
+            },
+        );
+        assert_eq!(
+            ch,
+            Frame::Stat(RadioStat::Channel {
+                channel: 4,
+                rssi: -95
+            })
+        );
 
-        let tx = RadioStat::Tx { dest: 0x00AA_BB00, item: 3, outcome: 1, ack_rssi: Some(-70) };
+        let tx = RadioStat::Tx {
+            dest: 0x00AA_BB00,
+            item: 3,
+            outcome: 1,
+            ack_rssi: Some(-70),
+        };
         let (_, txf) = decode_via_wire(MsgType::RadioStat, 9, &tx);
         assert_eq!(txf, Frame::Stat(tx));
     }
@@ -1319,7 +1491,11 @@ mod tests {
         let mut console = Console::for_test();
         console.account_seq(seq_unknown);
         console.account_seq(seq_trunc);
-        assert_eq!(console.seq_gaps(), 0, "consecutive Other frames advance seq with no gap");
+        assert_eq!(
+            console.seq_gaps(),
+            0,
+            "consecutive Other frames advance seq with no gap"
+        );
     }
 
     #[test]
@@ -1353,7 +1529,7 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&base);
 
-        // Default (no override) is the sibling `../firmware` checkout (the control-plane layout),
+        // Default (no override) is the sibling `../firmware` directory (the monorepo layout),
         // whether or not it exists on this machine: Ok carries that path, Err names it.
         let expected_default = Path::new(env!("CARGO_MANIFEST_DIR")).join("../firmware");
         match default_res {
@@ -1369,8 +1545,14 @@ mod tests {
 
         // Override → a dir WITHOUT a justfile is an Err naming the path and the missing justfile.
         let err = without_res.expect_err("dir without a justfile must fail");
-        assert!(err.contains(&without.display().to_string()), "err names the bad path: {err}");
-        assert!(err.contains("justfile"), "err mentions the missing justfile: {err}");
+        assert!(
+            err.contains(&without.display().to_string()),
+            "err names the bad path: {err}"
+        );
+        assert!(
+            err.contains("justfile"),
+            "err mentions the missing justfile: {err}"
+        );
     }
 
     #[test]
@@ -1400,7 +1582,10 @@ mod tests {
         );
         let bench: Bench = toml::from_str(text).expect("fixture with usb_serial parses");
         assert_eq!(bench.core.usb_serial.as_deref(), Some("hio-core-module-1"));
-        assert_eq!(bench.dongle.usb_serial, None, "path-only stays backward compatible");
+        assert_eq!(
+            bench.dongle.usb_serial, None,
+            "path-only stays backward compatible"
+        );
     }
 
     // --- Roster identity (H5): pure, over a synthetic live roster ------------------------
@@ -1409,13 +1594,21 @@ mod tests {
     const DONGLE_SN: &str = "bc-usb-dongle-r1.0-6435252593b5";
 
     fn port(path: &str, sn: Option<&str>) -> LivePort {
-        LivePort { path: path.to_string(), usb: true, usb_serial: sn.map(str::to_string) }
+        LivePort {
+            path: path.to_string(),
+            usb: true,
+            usb_serial: sn.map(str::to_string),
+        }
     }
 
     /// The macOS shape: every USB-UART twice (cu./tty.), plus non-USB ports.
     fn mac_roster() -> Vec<LivePort> {
         vec![
-            LivePort { path: "/dev/cu.Bluetooth-Incoming-Port".into(), usb: false, usb_serial: None },
+            LivePort {
+                path: "/dev/cu.Bluetooth-Incoming-Port".into(),
+                usb: false,
+                usb_serial: None,
+            },
             port("/dev/cu.usbserial-2110", Some(CORE_SN)),
             port("/dev/tty.usbserial-2110", Some(CORE_SN)),
             port("/dev/cu.usbserial-120", Some(DONGLE_SN)),
@@ -1425,7 +1618,10 @@ mod tests {
     }
 
     fn board(path: &str, sn: Option<&str>) -> Board {
-        Board { serial: path.to_string(), usb_serial: sn.map(str::to_string) }
+        Board {
+            serial: path.to_string(),
+            usb_serial: sn.map(str::to_string),
+        }
     }
 
     #[test]
@@ -1446,10 +1642,14 @@ mod tests {
         let swapped = resolve_board(Role::Core, &board("/dev/cu.usbserial-120", None), &live).unwrap_err();
         assert!(swapped.contains("swapped"), "{swapped}");
         let unknown = resolve_board(Role::Dongle, &board("/dev/cu.usbserial-999", None), &live).unwrap_err();
-        assert!(unknown.contains("usb_serial = \"FT8X1234\""), "tells how to vouch: {unknown}");
+        assert!(
+            unknown.contains("usb_serial = \"FT8X1234\""),
+            "tells how to vouch: {unknown}"
+        );
         let missing = resolve_board(Role::Core, &board("/dev/cu.usbserial-140", None), &live).unwrap_err();
         assert!(missing.contains("not present"), "{missing}");
-        let bt = resolve_board(Role::Core, &board("/dev/cu.Bluetooth-Incoming-Port", None), &live).unwrap_err();
+        let bt =
+            resolve_board(Role::Core, &board("/dev/cu.Bluetooth-Incoming-Port", None), &live).unwrap_err();
         assert!(bt.contains("not a USB"), "{bt}");
     }
 
@@ -1485,7 +1685,10 @@ mod tests {
             ppk2: Ppk2Config { supply_mv: 1800 },
         };
         bench.resolve_against(&live).expect("resolves");
-        assert_eq!(bench.core.serial, "/dev/cu.usbserial-2110", "re-enumerated path picked up");
+        assert_eq!(
+            bench.core.serial, "/dev/cu.usbserial-2110",
+            "re-enumerated path picked up"
+        );
 
         let mut same = Bench {
             core: board("", Some("FT8X1234")),
@@ -1545,7 +1748,10 @@ mod tests {
         let body = foreign.len() - 4;
         let crc = tower_protocol::crc::crc32_ieee(&foreign[..body]).to_le_bytes();
         foreign[body..].copy_from_slice(&crc);
-        assert!(matches!(decode_frame(&foreign), Err(tower_protocol::Error::BadVersion { .. })));
+        assert!(matches!(
+            decode_frame(&foreign),
+            Err(tower_protocol::Error::BadVersion { .. })
+        ));
         assert!(crc_valid(&foreign), "genuine mismatch → fail fast");
         assert!(lockstep_break(other).contains("lockstep"));
 

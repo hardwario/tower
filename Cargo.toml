@@ -1,0 +1,35 @@
+# HARDWARIO TOWER monorepo: the HOST workspace.
+#
+# Naming rule: the directory `crates/X` holds the package `tower-X` (short directories,
+# prefixed packages). `cli/` is `tower-cli` (the `tower` binary), `hil/` is `tower-hil`.
+#
+# `firmware/` is deliberately NOT a member: it is its own workspace, built for the
+# STM32L083CZ (thumbv6m-none-eabi) with the target, linker (flip-link) and size-tuned
+# profiles of `firmware/.cargo/config.toml` + `firmware/Cargo.toml`, which only apply when
+# cargo runs inside that directory (see firmware/justfile). It depends on `crates/*` by path,
+# so the firmware, the `tower` CLI and the HIL harness all compile against the one
+# `crates/protocol` source tree: the wire-format lockstep is a compile-time fact.
+[workspace]
+members = ["crates/*", "cli", "hil"]
+exclude = ["firmware"]
+resolver = "3"
+
+# Inherited by every member (`edition.workspace = true`, ...). `version` stays per crate.
+[workspace.package]
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT"
+repository = "https://github.com/hardwario/tower"
+
+[workspace.dependencies]
+# Internal crates, by path (never by tag or registry).
+tower-protocol = { path = "crates/protocol" }
+tower-boot = { path = "crates/boot" }
+
+# Third-party crates shared by several members. Declared no_std-safe (default features off)
+# because the firmware workspace builds the `crates/*` that inherit these for thumbv6m; a host
+# member that wants std turns it on with its own `features = [...]`.
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+postcard = { version = "1.0", default-features = false }
+heapless = { version = "0.9", default-features = false, features = ["serde"] }
+serialport = "4.9"

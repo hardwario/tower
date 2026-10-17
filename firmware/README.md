@@ -1,7 +1,9 @@
 # HARDWARIO TOWER Firmware SDK (Embassy)
 
 An [Embassy](https://embassy.dev) firmware SDK for the **HARDWARIO TOWER Core
-Module** (STM32L083CZ). The crate is a **library** of reusable blocks (LED,
+Module** (STM32L083CZ), the `firmware/` directory of the
+[hardwario/tower](https://github.com/hardwario/tower) monorepo. The package is `tower-sdk`; its
+library is the crate `tower` (`use tower::...`). The crate is a **library** of reusable blocks (LED,
 button, TMP112 thermometer, LIS2DH12 accelerometer, addressable-LED strip, a
 framed host↔target **console** (logs/events/shell), EEPROM storage, USB-gated low
 power) plus a **SPIRIT1 sub-GHz radio stack** (secured AES-128-CCM network layer:
@@ -31,9 +33,11 @@ Each subsystem has a guide: [`docs/console.md`](docs/console.md),
 
 ```sh
 # One-time: cargo install --locked just flip-link cargo-binutils
-#           (Rust 1.99.1 + thumbv6m + llvm-tools come from rust-toolchain.toml via rustup)
-#           install the `tower` CLI for UART flashing + console (github.com/hardwario/tower-cli)
+#           (Rust 1.99.1 + thumbv6m + llvm-tools come from the repo-root rust-toolchain.toml)
+#           install the `tower` CLI for UART flashing + console: `just install-cli` at the
+#           repo root (= cargo install --locked --path cli)
 #           (add probe-rs-tools only for SWD `cargo run`; tower UART flashing doesn't need it)
+# Run these inside firmware/, or from the repo root as `just fw <recipe>`.
 just examples                  # list example names      (just apps → product names)
 just run example thermometer    # build + flash an example, then open the console TUI from boot
 just run app radio_push_button  # same, for a ready-made TOWER IoT Kit product (apps/)
@@ -59,14 +63,18 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/radio/` | SPIRIT1 sub-GHz radio stack: chip driver (SPI/state machine/CSMA/sleep), RF config, hardware AES-128-CCM, frame codec, EU duty governor, and a secured network layer (`net`) with per-peer keys, confirmed delivery, replay protection, bulk transfer and OTA pairing; see [`docs/radio.md`](docs/radio.md) |
 | `src/board.rs` | `Board::take()` + `app!`, the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns the USB-gated `console::manager`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
 
-The shared wire-format crate
-**`tower-protocol`** lives in [its own repo](https://github.com/hardwario/tower-protocol),
-pinned here by git tag, the **same tag** the [`tower-cli`](https://github.com/hardwario/tower-cli)
-host and the [`tower-hil`](https://github.com/hardwario/tower-hil) bench harness pin (postcard is
-not self-describing, so all three move together; CI's `lockstep` job checks all three repos with
-`tools/protocol_pin_check.py`). To co-develop it locally without re-tagging, add a `paths` override to your
-`~/.cargo/config.toml` (the repo's `.cargo/config.toml` is committed for the build target, so
-the override can't live there): `paths = ["/path/to/tower-protocol"]`.
+The SDK builds on the monorepo's shared `no_std` crates, all **path dependencies** in
+[`Cargo.toml`](Cargo.toml): [`tower-protocol`](../crates/protocol) (the console wire format:
+COBS + CRC + postcard), [`tower-kv`](../crates/kv) (the EEPROM key-value codec behind
+`storage::Kv`), [`tower-net`](../crates/net) (the network layer's security decision kernels),
+[`tower-radio`](../crates/radio) (hardware-free radio timing / CCM / compliance arithmetic; the
+SPIRIT1 driver itself is `src/radio/`), [`tower-gateway`](../crates/gateway) (the gateway app's
+node registry + downlink queue core) and [`tower-shell`](../crates/shell) (the shell's parser,
+PRNG, pagination and completion kernels). Their host tests run with `just test` (here) or from
+the repo root. Because the [`tower`](../cli) CLI and the [HIL harness](../hil) build the very
+same `crates/protocol` source, the two ends of the console link cannot drift at build time
+(postcard is not self-describing, so that matters); after a wire change, reflash the board and
+reinstall the CLI.
 
 ### LED indication
 
@@ -141,7 +149,7 @@ Flashable programs come in two kinds:
   one block. Add your own by dropping a `.rs` there. Cargo picks it up automatically
   (`just build example <name>`); also add an `@echo <name>` line to the `examples` recipe in the
   [`justfile`](justfile) so `just examples` lists it (that list is hand-maintained to keep the
-  recipe OS-independent; CI fails if it drifts from `examples/*.rs`).
+  recipe OS-independent; `just lists`, run by CI, fails if it drifts from `examples/*.rs`).
 - **Applications**: TOWER IoT Kit **products** in [`apps/`](apps). `radio_push_button`
   (a sleeping sensor node: button events, thermometer, accelerometer) and
   `radio_dongle_gateway` (a radio↔serial bridge + node coordinator) are **complete,
@@ -211,9 +219,16 @@ Prerequisites (one-time): `cargo install --locked just flip-link cargo-binutils`
 `flip-link` is the linker `.cargo/config.toml` selects (nothing links without it) and
 `cargo-binutils` provides the `cargo objcopy`/`cargo size` that `just build` runs. The Rust
 toolchain itself (1.99.1, the `thumbv6m-none-eabi` target, `rustfmt`/`clippy`/`llvm-tools`) is
-pinned in [`rust-toolchain.toml`](rust-toolchain.toml) and installed by rustup. Add
-`probe-rs-tools` only for SWD flashing (`cargo run`). `just check` compile-checks the library,
-every app and every example for the MCU (what CI's embedded build runs).
+pinned in the repo-root [`rust-toolchain.toml`](../rust-toolchain.toml) and installed by rustup.
+Add `probe-rs-tools` only for SWD flashing (`cargo run`). `just check` compile-checks the
+library, every app and every example for the MCU; `just ci` runs every hardware-free firmware
+gate (fmt, that build, the RAM budget, clippy + the role-feature variants, rustdoc, the example
+list check), exactly what CI's `firmware` job runs.
+
+This directory is its own Cargo workspace (the repo root's host workspace excludes it), so run
+cargo **inside `firmware/`**: `.cargo/config.toml` (thumbv6m target, flip-link linker) is read
+from the current directory, and `cargo build --manifest-path firmware/Cargo.toml` from the repo
+root would silently skip it. From the root, `just fw <recipe>` runs any recipe here.
 
 `build`/`flash`/`run`/`size` take a kind (`example` or `app`) then the name:
 
@@ -227,11 +242,12 @@ tower logs                           # stream the framed console from the runnin
 just flash example blinky --no-verify  # extra args pass through to `tower flash`
 ```
 
-Flashing + console use the [`tower`](https://github.com/hardwario/tower-cli) CLI (it
-programs the STM32L0 over the UART bootloader and decodes the framed console); install it
-on your `PATH`. Set `TOWER_DEVICE=/dev/cu.usbserial-XXXX` if more than one serial port is
-present. `cargo run --release --example blinky` also flashes via the SWD probe-rs runner
-in `.cargo/config.toml` if you use a J-Link/ST-Link instead.
+Flashing + console use the [`tower`](../cli) CLI (it programs the STM32L0 over the UART
+bootloader and decodes the framed console); install it on your `PATH` with `just install-cli`
+at the repo root (or grab a `cli-v*` release archive). Set
+`TOWER_DEVICE=/dev/cu.usbserial-XXXX` if more than one serial port is present.
+`cargo run --release --example blinky` also flashes via the SWD probe-rs runner in
+`.cargo/config.toml` if you use a J-Link/ST-Link instead.
 
 `just build KIND NAME` runs `cargo objcopy` (`--example NAME` for `example`, `--bin NAME`
 for `app`) → `target/firmware.bin` (linked at `0x08000000`). The console is **framed** (COBS+CRC+postcard), so use
@@ -267,4 +283,4 @@ live in each `examples/*.rs` and are meant to be edited or copied. Common knobs:
 
 ## License
 
-MIT (see [LICENSE](LICENSE)). © 2026 HARDWARIO a.s.
+MIT (see the repo-root [LICENSE](../LICENSE)). © 2026 HARDWARIO a.s.

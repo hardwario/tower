@@ -121,10 +121,7 @@ fn dispatch(cmd: NodesCmd, opts: &MqttOpts) -> Result<u8> {
                 bail!("node vanished from the registry");
             };
             let key = if keys {
-                let data = s.rpc_ok(
-                    "reveal_key",
-                    serde_json::json!({ "addr": topics::node_hex(id) }),
-                )?;
+                let data = s.rpc_ok("reveal_key", serde_json::json!({ "addr": topics::node_hex(id) }))?;
                 data.get("key").and_then(|v| v.as_str()).map(String::from)
             } else {
                 None
@@ -159,10 +156,7 @@ fn dispatch(cmd: NodesCmd, opts: &MqttOpts) -> Result<u8> {
         NodesCmd::Add { .. } => bail!("pick a pairing path: --ota or --port <SERIAL>"),
         NodesCmd::Remove { node } => {
             let id = s.resolve_node(&node)?;
-            s.rpc_ok(
-                "node_remove",
-                serde_json::json!({ "addr": topics::node_hex(id) }),
-            )?;
+            s.rpc_ok("node_remove", serde_json::json!({ "addr": topics::node_hex(id) }))?;
             println!("removed {}", topics::node_hex(id));
             Ok(EXIT_OK)
         }
@@ -172,11 +166,7 @@ fn dispatch(cmd: NodesCmd, opts: &MqttOpts) -> Result<u8> {
                 "node_rename",
                 serde_json::json!({ "addr": topics::node_hex(id), "name": name }),
             )?;
-            println!(
-                "renamed {} to \"{}\"",
-                topics::node_hex(id),
-                sanitize_line(&name)
-            );
+            println!("renamed {} to \"{}\"", topics::node_hex(id), sanitize_line(&name));
             Ok(EXIT_OK)
         }
         NodesCmd::Shell {
@@ -185,14 +175,7 @@ fn dispatch(cmd: NodesCmd, opts: &MqttOpts) -> Result<u8> {
             ttl,
             timeout,
             no_wait,
-        } => shell(
-            &mut s,
-            &node,
-            &line,
-            ttl,
-            Duration::from_millis(timeout),
-            no_wait,
-        ),
+        } => shell(&mut s, &node, &line, ttl, Duration::from_millis(timeout), no_wait),
         NodesCmd::Pending { node, json } => {
             let id = s.resolve_node(&node)?;
             let raw = s
@@ -264,9 +247,7 @@ fn table_row(n: &Node) -> String {
         n.last_seen
             .map(|s| format!("{s}s"))
             .unwrap_or_else(|| "never".into()),
-        n.rssi
-            .map(|r| format!("{r}dBm"))
-            .unwrap_or_else(|| "-".into()),
+        n.rssi.map(|r| format!("{r}dBm")).unwrap_or_else(|| "-".into()),
         n.uplinks,
         n.queued,
         if n.sleeping { "yes" } else { "no" },
@@ -301,14 +282,7 @@ fn add_ota(s: &mut Session, window: u16, name: Option<&str>) -> Result<u8> {
     }
 }
 
-fn shell(
-    s: &mut Session,
-    node: &str,
-    line: &str,
-    ttl: u16,
-    timeout: Duration,
-    no_wait: bool,
-) -> Result<u8> {
+fn shell(s: &mut Session, node: &str, line: &str, ttl: u16, timeout: Duration, no_wait: bool) -> Result<u8> {
     let id = s.resolve_node(node)?;
     let req_id = uuid::Uuid::new_v4().to_string();
     let rsp_topic = topics::node_shell_rsp(&s.prefix.clone(), id);
@@ -433,9 +407,6 @@ mod tests {
             ..n
         };
         assert!(table_row(&plain).starts_with("0x0000ab12   kitchen          push-button "));
-        assert_eq!(
-            table_header().find("NAME"),
-            table_row(&plain).find("kitchen")
-        );
+        assert_eq!(table_header().find("NAME"), table_row(&plain).find("kitchen"));
     }
 }

@@ -3,7 +3,7 @@
 //! exchange over the air (the node logs `Delivered`/ACKed, the gateway logs the received frame).
 //!
 //! Sequential flash, then concurrent capture (concurrent FTDI flashing is unreliable; see
-//! tower-firmware's tools/hwtest/README.md). `#[ignore]`d: needs the bench + two boards in RF
+//! firmware/tools/hwtest/README.md). `#[ignore]`d: needs the bench + two boards in RF
 //! range; run with `just hil` (`--test-threads=1`, exclusive ports).
 
 use std::time::{Duration, Instant};
@@ -76,5 +76,8 @@ fn radio_net_confirmed_delivered_and_acked() {
             frame_text(f).is_some_and(|t| t.starts_with("rx src=") && t.contains("(ACKed)"))
         })
         .expect("gateway console read");
-    assert!(got_rx.is_some(), "gateway never logged a received + ACKed frame from the node");
+    assert!(
+        got_rx.is_some(),
+        "gateway never logged a received + ACKed frame from the node"
+    );
 }

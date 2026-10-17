@@ -86,9 +86,7 @@ pub(crate) fn split_host_port(s: &str) -> (String, u16) {
         return (h.to_string(), port);
     }
     match s.rsplit_once(':') {
-        Some((h, p))
-            if !h.contains(':') && p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() =>
-        {
+        Some((h, p)) if !h.contains(':') && p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
             (h.to_string(), p.parse().unwrap_or(1883))
         }
         _ => (s.to_string(), 1883),
@@ -168,9 +166,7 @@ pub(crate) fn verify_gateway(port: &str, reset: bool) -> Result<Verified> {
             GateDecision::Retry => {}
         }
     }
-    eprintln!(
-        "[tower] {port}: no answer to the management probe; not a gateway (or pre-v3 firmware)?"
-    );
+    eprintln!("[tower] {port}: no answer to the management probe; not a gateway (or pre-v3 firmware)?");
     Ok(Err(EXIT_DEVICE_TIMEOUT))
 }
 
@@ -537,20 +533,12 @@ mod tests {
         // The two non-Describe outcomes of the gate: a header version mismatch is the lockstep
         // failure (125, not retryable); a mute probe is inconclusive and asks for a retry.
         assert_eq!(EXIT_PROTOCOL_MISMATCH, 125);
-        match gate_describe(
-            "/dev/ttyTEST",
-            DescribeOutcome::Timeout {
-                bad_version: Some(1),
-            },
-        ) {
+        match gate_describe("/dev/ttyTEST", DescribeOutcome::Timeout { bad_version: Some(1) }) {
             GateDecision::Reject(code) => assert_eq!(code, EXIT_PROTOCOL_MISMATCH),
             _ => panic!("a version mismatch must be refused as 125"),
         }
         assert!(matches!(
-            gate_describe(
-                "/dev/ttyTEST",
-                DescribeOutcome::Timeout { bad_version: None }
-            ),
+            gate_describe("/dev/ttyTEST", DescribeOutcome::Timeout { bad_version: None }),
             GateDecision::Retry
         ));
     }
@@ -572,7 +560,8 @@ mod tests {
     fn mqtt_mirror_never_carries_a_node_key() {
         // Both directions: a client's node_add params (in) and a reveal_key answer (out).
         let inbound = br#"{"id":"u1","op":"node_add","params":{"addr":"0x0000ab12","key":"00112233445566778899aabbccddeeff"}}"#;
-        let outbound = br#"{"id":"u2","ok":true,"data":{"addr":"0x0000ab12","key":"a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"}}"#;
+        let outbound =
+            br#"{"id":"u2","ok":true,"data":{"addr":"0x0000ab12","key":"a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"}}"#;
         for (dir, payload) in [(MqttDir::In, &inbound[..]), (MqttDir::Out, &outbound[..])] {
             let Event::Mqtt(m) = mirror(dir, "tower/gateway/cmd", payload, true) else {
                 panic!("an MQTT mirror event");
@@ -583,10 +572,7 @@ mod tests {
                 "{text}"
             );
             assert!(text.contains(r#""key":"<redacted>""#), "{text}");
-            assert!(
-                m.retain,
-                "the inbound retain flag is mirrored, not hard-coded"
-            );
+            assert!(m.retain, "the inbound retain flag is mirrored, not hard-coded");
         }
     }
 }

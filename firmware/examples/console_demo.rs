@@ -2,7 +2,7 @@
 //!
 //! Logs at every level + a `println!`, every 2 s, after a boot burst that
 //! deliberately overflows the TX queue so the host shows a `Dropped` marker.
-//! Render with the host CLI:  `tower logs`  (raw `jolt monitor` shows binary now).
+//! Render with the host CLI:  `tower logs`  (a raw byte dump, `tower monitor --hex`, shows binary).
 
 #![no_std]
 #![no_main]

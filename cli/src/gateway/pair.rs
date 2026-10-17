@@ -162,9 +162,7 @@ fn run(
         }),
     )?;
     if !rsp.ok {
-        return Err(rsp
-            .error
-            .unwrap_or_else(|| "gateway refused node_add".into()));
+        return Err(rsp.error.unwrap_or_else(|| "gateway refused node_add".into()));
     }
 
     // 4. Install the credentials on the node; it acks and reboots. A failure

@@ -73,10 +73,7 @@ mod tests {
     fn escapes_terminal_controls() {
         // OSC 52 clipboard write, CSI cursor-up, bare CR, BEL, DEL, 8-bit CSI, RTL override.
         assert_eq!(sanitize("\x1b]52;c;aGk=\x07"), "\\x1b]52;c;aGk=\\x07");
-        assert_eq!(
-            sanitize("ok\x1b[1A\r[tower] fake"),
-            "ok\\x1b[1A\\x0d[tower] fake"
-        );
+        assert_eq!(sanitize("ok\x1b[1A\r[tower] fake"), "ok\\x1b[1A\\x0d[tower] fake");
         assert_eq!(sanitize("a\x7fb"), "a\\x7fb");
         assert_eq!(sanitize("a\u{9b}31mb"), "a\\u{9b}31mb");
         assert_eq!(sanitize("txt\u{202E}gpj.exe"), "txt\\u{202e}gpj.exe");

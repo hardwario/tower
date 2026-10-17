@@ -1,45 +1,50 @@
 # tower-hil
 
 Hardware-in-the-loop (HIL) test harness for the [HARDWARIO TOWER firmware
-SDK](https://github.com/hardwario/tower-firmware). It drives a real bench (a **TOWER Core
-Module** with SEGGER J-Link SWD + Nordic PPK2, and a **TOWER Radio Dongle** on USB) and asserts
-smoke, radio, extended, and power behaviour against the firmware's **framed console decoded
-natively** with [`tower-protocol`](https://github.com/hardwario/tower-protocol): tests match on
-typed `Log`/`Event` frames and on sequence gaps, not `strings | grep`.
+SDK](../firmware) (`hil/` in the [hardwario/tower](https://github.com/hardwario/tower)
+monorepo). It drives a real bench (a **TOWER Core Module** with SEGGER J-Link SWD + Nordic
+PPK2, and a **TOWER Radio Dongle** on USB) and asserts smoke, radio, extended, and power
+behaviour against the firmware's **framed console decoded natively** with
+[`tower-protocol`](../crates/protocol): tests match on typed `Log`/`Event` frames and on
+sequence gaps, not `strings | grep`.
 
 **Bench inventory, cabling, and setup live in [`docs/bench.md`](docs/bench.md)**; start there
 to assemble the bench from scratch. The test *catalogue* (what each firmware example asserts,
-the example×role matrix) is documented in tower-firmware's `docs/test-plan.md`.
+the example×role matrix) is documented in the firmware's
+[`docs/test-plan.md`](../firmware/docs/test-plan.md).
 
 ## Layout: where the firmware comes from
 
-The harness **builds the images it flashes** from a `tower-firmware` checkout. By default it
-looks **next to this repo** (`../firmware`, the [TOWER control
-plane](https://github.com/hardwario/tower) layout, where `hil/` and `firmware/` are sibling
-submodules). Any other layout:
+The harness **builds the images it flashes** from the firmware workspace, by default its
+sibling **`../firmware`** in this repository (`firmware_dir()` in `src/lib.rs`), with that
+directory's own `just build` recipes. To test images from another checkout:
 
 ```sh
-TOWER_FIRMWARE_DIR=/path/to/tower-firmware just hil
+TOWER_FIRMWARE_DIR=/path/to/tower/firmware just hil
 ```
 
 ## Running
 
+Run these inside `hil/`, or from the repo root as `just hil <recipe>` (e.g. `just hil check`).
+
 ```sh
 just check        # no hardware: compiles EVERY bench group incl. the feature-gated power group (= CI)
 cargo test        # no hardware: runs only host unit tests; compiles the #[ignore]d smoke/radio/
-                  # extended/gateway groups, but NOT power (that needs `--features power`)
+                  # extended/gateway groups, but NOT power (that needs `--features power`);
+                  # from the repo root: cargo test -p tower-hil
 just hil          # bench: smoke + radio + extended + gateway groups (Dongle + Core over UART bootloader)
 just hil-power    # bench: STOP-floor current measurement (J-Link + PPK2, no USB power; see below)
 just hil-full     # bench: everything, on the fully-cabled bench
 ```
 
-Prerequisites: the [`tower` CLI](https://github.com/hardwario/tower-cli) and
+Prerequisites: the [`tower` CLI](../cli) (`just install-cli` at the repo root) and
 [`just`](https://just.systems) on `PATH`; the power group also needs
 [`probe-rs`](https://probe.rs) and `python3` (the `ppk2d.py` PPK2 sidecar; real hardware needs
-its `.venv`, see [`docs/bench.md`](docs/bench.md)). The Rust toolchain (1.99.1) is pinned in
-`rust-toolchain.toml`. Linux builds need `libudev-dev` + `pkg-config` (the `serialport`
-dependency). The images under test are built by the firmware checkout's own `just` recipes, so
-its prerequisites (`flip-link`, `cargo-binutils`) apply too; see tower-firmware's README.
+its `.venv`, see [`docs/bench.md`](docs/bench.md)). The Rust toolchain (1.99.1) is pinned in the
+repo-root `rust-toolchain.toml`. Linux builds need `libudev-dev` + `pkg-config` (the `serialport`
+dependency). The images under test are built by the firmware's own `just` recipes, so its
+prerequisites (`flip-link`, `cargo-binutils`) apply too; see the [firmware
+README](../firmware/README.md).
 
 The bench roster (which serial port is the Core, which is the Dongle, the PPK2 supply voltage)
 lives in **`hil.toml`** and is re-resolved against the live port roster and identity-checked
@@ -54,16 +59,16 @@ attached during power runs.
 `--test-threads=1` (baked into the `just` recipes) is load-bearing: the serial ports are
 exclusive, so bench tests must not run concurrently.
 
-## The golden rule (wire-format lockstep)
+## The wire format (one source tree)
 
-This crate pins `tower-protocol` by git tag: the **same tag** `tower-firmware` and `tower-cli`
-pin. postcard is not self-describing: a mismatched pin silently mis-decodes the very frames the
-tests assert on. Pin bumps happen as one coordinated change-set across all three consumers,
-driven from the [control plane](https://github.com/hardwario/tower) (`/lockstep` checks it).
-This repo's CI `lockstep` job checks out tower-firmware and tower-cli and runs the shared
-checker (tower-firmware's `tools/protocol_pin_check.py`) across all three: every manifest pin,
-the resolved `Cargo.lock` commits, and the tag's current upstream commit.
+The harness depends on `tower-protocol` **by path** (the root workspace's `crates/protocol`),
+the very source the firmware and the `tower` CLI build. postcard is not self-describing, so a
+schema mismatch would silently mis-decode the frames the tests assert on; with one source tree
+that cannot happen at build time. It can still happen at run time against a board flashed from
+an older tree (or from another checkout via `TOWER_FIRMWARE_DIR`): the harness flags it ("speaks
+tower-protocol wire version N"); rebuild and reflash from the same checkout. The reset pulses come from
+`tower-boot` (`crates/boot`), also by path.
 
 ## License
 
-MIT © 2026 HARDWARIO a.s.
+MIT © 2026 HARDWARIO a.s. (see the repo-root `LICENSE`).

@@ -1,73 +1,75 @@
 # tower-protocol: working notes for coding agents
 
-The shared wire-format crate. It is consumed **by git tag** (not a path, not crates.io) by
-**three** repos that MUST stay in lockstep with it:
+The shared wire-format crate (`crates/protocol` in the hardwario/tower monorepo; read the root
+`AGENTS.md` first). Every end of the TOWER link builds this one source tree **by path**:
 
-- **`tower-firmware`** (github.com/hardwario/tower-firmware): pins the tag in **two**
-  manifests: the `tower` lib (`Cargo.toml`) and the `tower-kv` crate
-  (`crates/tower-kv/Cargo.toml`, which shares the CRC primitive).
-- **`tower-cli`** (github.com/hardwario/tower-cli): the host CLI (`Cargo.toml`).
-- **`tower-hil`** (github.com/hardwario/tower-hil): the HIL bench harness (`Cargo.toml`);
-  decodes the framed console natively. (It lived at `tower-firmware/tools/hil` until
-  2026-07-05; it is its own repo now.)
+- **the firmware SDK** (`firmware/Cargo.toml`, `tower-protocol = { path = "../crates/protocol" }`),
+  and through it every example and product app;
+- **`tower-kv`** (`crates/kv`), which shares the CRC primitive so EEPROM records stay
+  byte-compatible with the firmware;
+- **the `tower` CLI** (`cli/`) and **the HIL bench harness** (`hil/`), which decodes the framed
+  console natively.
 
 **Cardinal rule:** postcard is *not* self-describing: a producer and a consumer built against
-different versions silently mis-decode. All ends must always build the **same tag**. This already
-bit once (a consumer pinned a tag that didn't exist yet); don't let it drift.
+different schemas silently mis-decode. With path dependencies every *build* agrees by
+construction; what can still disagree is an *installed* artifact from an older tree (a `tower`
+binary, a flashed board). That is what the version constants are for: bump them on every wire
+change so the stale side fails loudly with `BadVersion` instead of decoding garbage.
 
-## Releasing a change (do this whenever you change anything that ships)
+## Releasing a change
 
-1. **If the wire format changed**, meaning any postcard struct/enum (field *or* variant **order**
-   counts), the framing, or a `MsgType` discriminant: bump `PROTOCOL_VERSION` in `src/lib.rs`
-   and regenerate the golden vectors (`tests/golden.rs`). **The radio application schema
-   (`src/radio.rs`) is a second, independently-versioned surface**: a change there bumps
-   `RADIO_SCHEMA_VERSION` (not `PROTOCOL_VERSION`) and regenerates `tests/radio_golden.rs`.
-   CI enforces both pairings: the `test` job fails if the goldens no longer match the code,
-   and the `wire-bump-guard` job (`tools/check_wire_bump.py`) checks each golden file against
-   its own version constant, failing if any pre-existing golden fn (one holding hex literals)
-   was edited, renamed or removed relative to the latest tag while that constant did not
-   strictly increase (a decrease always fails). New coverage = a NEW golden fn, never an edit
-   to an existing one. Variant-order pins are hex tables (`(Variant, 0x02)`), never
-   `i as u8`. Changing the guard? Run `python3 tools/check_wire_bump.py --self-test`
-   (`--base REF` compares against any ref instead of the latest tag).
-2. **Bump `version` in `Cargo.toml`** (semver: wire/behaviour change → minor; fix → patch), and
-   add a `CHANGELOG.md` entry.
-3. **Commit, push `main`, tag, push the tag:**
+1. **Change the types.** Any postcard struct/enum change (field *or* variant **order** counts,
+   and appending is a change too), the framing, or a `MsgType` discriminant.
+2. **Bump the version constant of the surface you touched.** The console wire is
+   `PROTOCOL_VERSION` in `src/lib.rs`. **The radio application schema (`src/radio.rs`) is a
+   second, independently-versioned surface**: a change there bumps `RADIO_SCHEMA_VERSION` (not
+   `PROTOCOL_VERSION`).
+3. **Update the goldens** (`tests/golden.rs` for the console, `tests/radio_golden.rs` for the
+   radio schema) and the variant-order fingerprint pins, if the change touches them. New
+   coverage = a NEW golden fn, never an edit to an existing one. Variant-order pins are hex
+   tables (`(Variant, 0x02)`), never `i as u8`.
+4. **Bump `version` in `Cargo.toml`** (semver: wire/behaviour change: minor; fix: patch) and add
+   a `CHANGELOG.md` entry. Fix every consumer the change breaks (firmware, cli, hil, kv) **in the
+   same commit**; the path dependencies make the build fail until you do.
+5. **One commit, then tag it** `protocol-vX.Y.Z`:
    ```sh
-   git push origin main
-   git tag -a vX.Y.Z -m "tower-protocol X.Y.Z" && git push origin vX.Y.Z
+   git tag -a protocol-vX.Y.Z -m "tower-protocol X.Y.Z"
    ```
-   (CI auto-creates the tag from the `Cargo.toml` version as a backstop if you forget, but tag it
-   yourself so the consumers can be bumped right away. Pushes need **SSH**: `git@github.com:…`.)
-4. **Propagate to ALL THREE consumers in the same change-set**; never bump one without the
-   others:
-   - **tower-firmware:** set `tag = "vX.Y.Z"` in `Cargo.toml` **and**
-     `crates/tower-kv/Cargo.toml`; then `cargo update -p tower-protocol` (covers the workspace);
-     `just test` + build an example; commit + push.
-   - **tower-cli:** set `tag = "vX.Y.Z"` in `Cargo.toml`; `cargo update -p tower-protocol`; build;
-     commit + push. ⚠️ tower-cli may have a **gitignored `.cargo/config.toml` `paths` override**
-     that shadows the git source; move it aside before `cargo update` (else the lock won't
-     re-resolve to the new tag), then restore it.
-   - **tower-hil:** set `tag = "vX.Y.Z"` in `Cargo.toml`; `cargo update -p tower-protocol`;
-     `cargo test --no-run` (compile-check; no bench hardware needed); commit + push.
-5. In the control-plane repo (`hardwario/tower`), run `/lockstep` to verify the alignment, then
-   `/pin` to freeze the new SHAs.
+   The tag marks the release and is the next baseline of the wire-bump guard; nothing is
+   published from it (no crates.io, no GitHub Release). Push only when the user asks.
+6. Rebuild what is installed: reflash the boards and reinstall the CLI (`just install-cli`), or
+   the old binary reports `BadVersion` against the new firmware.
+
+CI enforces both pairings: the `host` job fails if the goldens no longer match the code, and the
+`wire-guard` job (`tools/check_wire_bump.py`) checks each golden file against its own version
+constant, failing if any pre-existing golden fn (one holding hex literals) was edited, renamed
+or removed relative to the latest `protocol-v*` tag while that constant did not strictly
+increase (a decrease always fails). The guard runs from the repo root or from this directory
+(`python3 crates/protocol/tools/check_wire_bump.py`); `--base REF` compares against any ref
+instead of the latest tag. Changing the guard? Run it with `--self-test`.
 
 ## Tests / checks
 
-`cargo test` and `cargo clippy --all-targets -- -D warnings`
-(both in CI, plus a `thumbv6m-none-eabi` no_std build and the wire-bump guard). The crate is
-**hand-formatted**: there is no `rustfmt` gate; do **not** bulk-reformat.
+From the repo root (`just check` runs them all, with every other gate):
 
-## Local co-development
+```sh
+cargo test -p tower-protocol
+cargo clippy -p tower-protocol --all-targets -- -D warnings
+cargo build -p tower-protocol --target thumbv6m-none-eabi
+python3 crates/protocol/tools/check_wire_bump.py
+python3 crates/protocol/tools/check_wire_bump.py --self-test
+```
 
-cargo fetches this public repo over HTTPS fine; **pushes need SSH**. To have a consumer pick up
-local edits without re-tagging, use a `paths` override (`paths = ["/abs/path/to/tower-protocol"]`):
-tower-cli keeps it in its gitignored `.cargo/config.toml`; tower-firmware can't (its
-`.cargo/config.toml` is committed for the build target), so put it in your `~/.cargo/config.toml`
-or, when working from the `hardwario/tower` control plane, in the root's git-ignored
-`.cargo/config.toml`, which covers all the checkouts at once. Remove the override before pinning.
+The crate is formatted by the repo-wide `cargo fmt` gate (the root `rustfmt.toml`); it is no
+longer hand-formatted. Reformatting never trips the wire-bump guard: its fingerprints ignore
+whitespace, line wrapping and comments.
 
 ## Writing style
 
 No em or en dashes. This applies everywhere: code, comments, docs, UI texts and commit messages. Use a comma, a semicolon, a colon or parentheses, or split the sentence. A plain hyphen is fine.
+
+## Git workflow
+
+- Part of the hardwario/tower monorepo, developed straight on `main`; no feature branches or PRs
+  unless the user asks.
+- Commit, tag and push only when the user requests it.

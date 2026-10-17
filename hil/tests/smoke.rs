@@ -1,5 +1,5 @@
 //! HIL smoke group: flash a self-checking KAT example to the Dongle, decode its framed boot
-//! output natively, and await the `ALL PASS` verdict (tower-firmware docs/test-plan.md §1:
+//! output natively, and await the `ALL PASS` verdict (firmware/docs/test-plan.md §1:
 //! self-checking KATs).
 //!
 //! These need the bench, so they are `#[ignore]`d: `cargo test` COMPILES them (proving the
@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use tower_hil::{Frame, Role, bench_or_fail, build_image, frame_text, Console};
+use tower_hil::{Console, Frame, Role, bench_or_fail, build_image, frame_text};
 
 /// crypto_ccm_kat is a one-shot KAT: it prints RFC 3610 vector verdicts then `*** ALL PASS ***`
 /// (or an `error!` FAIL line) within ms of boot. Flash it to the Dongle, reset, and await PASS.
@@ -46,7 +46,11 @@ fn smoke_ccm_kat_all_pass() {
     );
 
     // Bonus over `strings | grep`: the boot stream must be gap-free (no dropped console frames).
-    assert_eq!(console.seq_gaps(), 0, "console dropped frames during the KAT boot");
+    assert_eq!(
+        console.seq_gaps(),
+        0,
+        "console dropped frames during the KAT boot"
+    );
 }
 
 /// The boot banner is a typed `Hello` we can inspect (protocol version must match the wire crate
@@ -72,7 +76,9 @@ fn smoke_hello_banner_decodes() {
     for attempt in 0..2 {
         if attempt > 0 {
             eprintln!("HIL: no Hello on attempt 1; re-pulsing reset for one retry");
-            console.reset_into_app().expect("reset the Dongle into the app (retry)");
+            console
+                .reset_into_app()
+                .expect("reset the Dongle into the app (retry)");
         }
         if let Some(f) = console
             .wait_for(Duration::from_secs(10), |f| matches!(f, Frame::Hello { .. }))
@@ -83,8 +89,18 @@ fn smoke_hello_banner_decodes() {
         }
     }
     let hello = hello.expect("no Hello banner within 10 s, even after a reset retry");
-    if let Frame::Hello { protocol_version, firmware_name, firmware_version, session_id } = hello {
-        assert_eq!(protocol_version, tower_protocol::PROTOCOL_VERSION, "protocol version drift");
+    if let Frame::Hello {
+        protocol_version,
+        firmware_name,
+        firmware_version,
+        session_id,
+    } = hello
+    {
+        assert_eq!(
+            protocol_version,
+            tower_protocol::PROTOCOL_VERSION,
+            "protocol version drift"
+        );
         assert!(!firmware_name.is_empty(), "empty firmware name in Hello");
         assert!(!firmware_version.is_empty(), "empty firmware version in Hello");
         assert!(session_id > 0, "session_id should be a bumped boot counter (>=1)");

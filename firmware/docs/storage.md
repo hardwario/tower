@@ -145,7 +145,7 @@ scales with load is a **busy gateway's last-seen** persistence (see `P` below).
 
 ## Tuning knobs (wear vs. behaviour)
 
-Both live in the host-tested `crates/tower-net-core` decision crate (`txctr::RESERVE`,
+Both live in the host-tested `tower-net` decision crate (`crates/net`: `txctr::RESERVE`,
 `replay::P`), used by `src/radio/net/mod.rs`:
 
 - **`RESERVE`** (watermark reserve block, default 1024): larger = fewer watermark writes, at the

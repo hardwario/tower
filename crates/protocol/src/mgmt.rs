@@ -113,11 +113,20 @@ pub enum MgmtOp<'a> {
     /// Install a node paired over the cable: persist `(addr, key, name, flags)` and
     /// start accepting its traffic. The host minted `key` and provisioned the node
     /// on its own serial port. Gateway.
-    NodeAdd { addr: u32, key: [u8; 16], name: &'a str, flags: u8 },
+    NodeAdd {
+        addr: u32,
+        key: [u8; 16],
+        name: &'a str,
+        flags: u8,
+    },
     /// Forget a node: registry, RAM peer slot, and its queued downlinks. Gateway.
     NodeRemove { addr: u32 },
     /// Update mutable metadata; `None` keeps the current value. Gateway.
-    NodeUpdate { addr: u32, name: Option<&'a str>, flags: Option<u8> },
+    NodeUpdate {
+        addr: u32,
+        name: Option<&'a str>,
+        flags: Option<u8>,
+    },
     /// Return the node's AES key as a [`NodeKey`] record (the only path that ever
     /// discloses a stored key). Gateway.
     NodeRevealKey { addr: u32 },
@@ -128,7 +137,11 @@ pub enum MgmtOp<'a> {
     PairingCancel,
     /// Enqueue an opaque downlink (a `radio::NodeCmd` envelope built by the host)
     /// for delivery on the node's next uplink. Replies [`QueueId`]. Gateway.
-    QueuePush { node_addr: u32, ttl: u16, data: &'a [u8] },
+    QueuePush {
+        node_addr: u32,
+        ttl: u16,
+        data: &'a [u8],
+    },
     /// Stream pending downlinks as [`QueueEntry`] records; `node_addr = 0` = all. Gateway.
     QueueList { node_addr: u32 },
     /// Drop one queued item (`Some(item)`) or a node's whole queue (`None`). Gateway.

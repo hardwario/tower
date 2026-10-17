@@ -596,10 +596,7 @@ mod tests {
             serde_json::to_string(&t).unwrap(),
             r#"{"dest":"0x0000ab12","item":9,"outcome":"delivered","ack_rssi":-42,"ts":1700000000}"#
         );
-        let t = RadioTx {
-            ack_rssi: None,
-            ..t
-        };
+        let t = RadioTx { ack_rssi: None, ..t };
         assert_eq!(
             serde_json::to_string(&t).unwrap(),
             r#"{"dest":"0x0000ab12","item":9,"outcome":"delivered","ack_rssi":null,"ts":1700000000}"#
@@ -650,10 +647,7 @@ mod tests {
         assert!(valid_request_id("3f2b8c1e-4d5a-4b6c-8d7e-9f0a1b2c3d4e"));
         assert!(valid_request_id("tui-cbl-7"));
         assert!(!valid_request_id(""));
-        assert!(
-            !valid_request_id("a/b"),
-            "a slash would forge the response topic"
-        );
+        assert!(!valid_request_id("a/b"), "a slash would forge the response topic");
         assert!(
             !valid_request_id("a+"),
             "wildcards are invalid in a publish topic"
@@ -677,16 +671,10 @@ mod tests {
         let s = std::str::from_utf8(&red).unwrap();
         assert!(!s.contains("a0a1a2a3"), "{s}");
         assert!(s.contains(r#""key" : "<redacted>" }"#), "{s}");
-        assert!(
-            serde_json::from_str::<serde_json::Value>(s).is_ok(),
-            "stays JSON"
-        );
+        assert!(serde_json::from_str::<serde_json::Value>(s).is_ok(), "stays JSON");
         // A value that merely EQUALS "key" (not an object key) is not a secret.
         let plain = br#"{"name":"key","line":"/x key"}"#;
-        assert!(matches!(
-            redact_secrets(plain),
-            std::borrow::Cow::Borrowed(_)
-        ));
+        assert!(matches!(redact_secrets(plain), std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]
@@ -710,20 +698,14 @@ mod tests {
         );
         // Truncated JSON is still scrubbed (the lexer is total).
         let cut = br#"{"key":"0011223"#;
-        assert_eq!(
-            redact_secrets(cut).as_ref(),
-            br#"{"key":"<redacted>""#.as_slice()
-        );
+        assert_eq!(redact_secrets(cut).as_ref(), br#"{"key":"<redacted>""#.as_slice());
         // Non-UTF-8 passes through untouched (rendered as "(N B binary)").
         assert_eq!(redact_secrets(&[0xFF, 0x00]).as_ref(), &[0xFF, 0x00]);
     }
 
     #[test]
     fn outcome_strings() {
-        assert_eq!(
-            tx_outcome_str(tower_protocol::mgmt::TX_DELIVERED),
-            "delivered"
-        );
+        assert_eq!(tx_outcome_str(tower_protocol::mgmt::TX_DELIVERED), "delivered");
         assert_eq!(tx_outcome_str(tower_protocol::mgmt::TX_EXPIRED), "expired");
         assert_eq!(mgmt_error_str(tower_protocol::mgmt::MGMT_OK), None);
         assert!(mgmt_error_str(tower_protocol::mgmt::MGMT_FULL).is_some());

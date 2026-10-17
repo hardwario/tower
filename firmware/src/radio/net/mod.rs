@@ -33,18 +33,18 @@ pub use pairing::{PAIRING_KEY, PAIRING_WINDOW};
 
 use embassy_time::{Duration, Instant, Timer};
 // The security-critical *decision* kernels (replay rule, TX-counter watermark/fail-closed,
-// ACK resolution) live in the host-testable `tower_net_core` leaf crate; this module keeps the
+// ACK resolution) live in the host-testable `tower_net` leaf crate; this module keeps the
 // radio/EEPROM flow and delegates each decision there. Zero behavioural change on target.
-pub use tower_net_core::ack::AckMeta;
-use tower_net_core::ack::{AckVerdict, AckWait, ack_flags, ack_meta};
+pub use tower_net::ack::AckMeta;
+use tower_net::ack::{AckVerdict, AckWait, ack_flags, ack_meta};
 /// Reserved-address rules shared by pairing, the gateway's `NodeAdd`, a node's `Provision` and
 /// [`Net::add_peer`] (docs/radio.md "Reserved IDs").
-pub use tower_net_core::addr::{ADDR_BROADCAST, ADDR_UNASSIGNED, is_reserved_addr, peer_addr_valid};
+pub use tower_net::addr::{ADDR_BROADCAST, ADDR_UNASSIGNED, is_reserved_addr, peer_addr_valid};
 /// Confirmed-send repetition ceiling (`reps` is clamped to `1..=MAX_REPS`); also bounds the
-/// receiver's re-ACKs per counter (`tower_net_core::replay::MAX_REACKS`).
-pub use tower_net_core::replay::MAX_REPS;
-use tower_net_core::replay::{LaneRecord, ReplayLane, ReplayVerdict, assign_lane};
-use tower_net_core::txctr::TxCounter;
+/// receiver's re-ACKs per counter (`tower_net::replay::MAX_REACKS`).
+pub use tower_net::replay::MAX_REPS;
+use tower_net::replay::{LaneRecord, ReplayLane, ReplayVerdict, assign_lane};
+use tower_net::txctr::TxCounter;
 
 use super::ccm::{Ccm, TAG_LEN};
 use super::config::{self, Band, RfConfig};
@@ -72,7 +72,7 @@ const MAX_BACKOFF_MS: u32 = 100;
 const REPLAY_LOG_INTERVAL_S: u32 = 10;
 
 // The TX-counter reserve block (`RESERVE` = 1024) and the receiver lazy-persist period
-// (`P` = 32) live with their kernels in `tower_net_core` (`txctr::RESERVE`, `replay::P`).
+// (`P` = 32) live with their kernels in `tower_net` (`txctr::RESERVE`, `replay::P`).
 /// EEPROM local keys (within `NS_NET`) for the persisted counter state.
 const KEY_WATERMARK: u8 = 0x00;
 const KEY_LASTSEEN: u8 = 0x01;
@@ -101,7 +101,7 @@ const KEY_LASTSEEN_BASE: u8 = 0x10;
 struct Peer {
     addr: u32,
     key: [u8; 16],
-    /// The peer's replay lane (last-seen + lazy-persist cadence, `tower_net_core::replay`).
+    /// The peer's replay lane (last-seen + lazy-persist cadence, `tower_net::replay`).
     lane: ReplayLane,
     /// KV local (`NS_NET`) where this peer's replay lane is persisted. Bound by *peer addr*
     /// (`assign_lane`), NOT the table slot, so the lane survives a slot shift when an
@@ -219,7 +219,7 @@ pub struct Net {
     /// Replay lane for senders not in the peer table (the single-link lane).
     default_lane: ReplayLane,
     /// The TX-counter kernel: monotonic counter + reserve-ahead watermark + the fail-closed
-    /// lock (`tower_net_core::txctr`: the CCM nonce anti-reuse invariant lives there; this
+    /// lock (`tower_net::txctr`: the CCM nonce anti-reuse invariant lives there; this
     /// module owns its EEPROM persistence). See [`alloc_counter`](Self::alloc_counter)
     /// and `RadioError::NonceLocked`.
     txc: TxCounter,
@@ -264,7 +264,7 @@ impl Net {
 
         // Reserve-ahead TX counter: resume *at* the persisted watermark (1 on the very first
         // boot, since 0 = "never sent"), then reserve the next block. The resume/fail-closed
-        // decision (incl. the lost-watermark corruption case) is `tower_net_core::txctr`;
+        // decision (incl. the lost-watermark corruption case) is `tower_net::txctr`;
         // see `TxCounter::resume` for the full rationale.
         let nkv = kv.scope(NS_NET); // our namespaced view; the raw `kv` is kept for `Net::kv()`
         let stored_watermark = read_u32(nkv, KEY_WATERMARK);
@@ -695,7 +695,7 @@ impl Net {
         let key = self.key_for(peek.src);
 
         // CCM-verify first (authenticates the header incl. counter), then decide. The
-        // counter/replay rule is the lane kernel's (`tower_net_core::replay`); see its docs
+        // counter/replay rule is the lane kernel's (`tower_net::replay`); see its docs
         // for why classification must only ever run on an authenticated frame.
         let (hdr, range) = frame::open_frame(&mut self.ccm, &key, &mut buf[..len]).ok()?;
 
@@ -807,7 +807,7 @@ impl Net {
     /// report a delivery failure the gateway had actually received: the exact star-contention
     /// bug `recv()`'s re-ACK cache fixed on the receive side. This mirrors `recv()` /
     /// `fhss_rx_beacon`: keep listening until the deadline. The accept/ignore decision per
-    /// heard frame is the [`AckWait`] kernel's (`tower_net_core::ack`).
+    /// heard frame is the [`AckWait`] kernel's (`tower_net::ack`).
     async fn await_ack(&mut self, dest: u32, counter: u32) -> bool {
         let key = self.key_for(dest);
         let mut wait = AckWait::new(self.addr, dest, counter);
@@ -858,7 +858,7 @@ impl Net {
         payload[4] = rssi.clamp(i8::MIN as i16, i8::MAX as i16) as i8 as u8;
         // Flags byte (wire v3): advertise a queued downlink so a sleeping sender holds an RX
         // window open after this uplink. Appending is interop-safe: the ACK acceptance rule is
-        // `len >= 4` (pinned in tower-net-core), so pre-v3 peers simply ignore the byte.
+        // `len >= 4` (pinned in tower-net), so pre-v3 peers simply ignore the byte.
         payload[5] = match self.peer_slot(dest) {
             Some(i) if self.peers[i].as_ref().unwrap().pending => ack_flags::PENDING,
             _ => 0,

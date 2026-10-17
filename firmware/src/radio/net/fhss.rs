@@ -26,11 +26,11 @@
 use embassy_time::{Duration, Instant, Timer};
 // The beacon-epoch acceptance machine (reject-backwards epochs, the two-beacon acquisition
 // consistency guard, prediction-slack re-anchoring, the miss/rescan rule) lives in the
-// host-testable `tower_net_core::epoch` kernel, together with its tuning constants
+// host-testable `tower_net::epoch` kernel, together with its tuning constants
 // (`ACQUIRE_SLOT_SLACK`, `FHSS_RESYNC_SLACK`, `REACQUIRE_LIMIT`). This module keeps the radio,
 // the `Instant`-based slot clock and the EEPROM epoch persistence, and delegates each
 // accept/reject/lock decision there. Zero behavioural change on target.
-use tower_net_core::epoch::{EpochGate, MissVerdict, ScanVerdict, TrackVerdict, next_master_epoch};
+use tower_net::epoch::{EpochGate, MissVerdict, ScanVerdict, TrackVerdict, next_master_epoch};
 
 use super::{Access, KEY_FHSS_EPOCH, NS_NET, Net, Received, SendResult, TX_TIMEOUT, read_u32};
 use crate::radio::ccm::TAG_LEN;
@@ -56,7 +56,7 @@ const BEACON_RX_MS: u64 = 100;
 const RENDEZVOUS_RX_MS: u64 = 350;
 // `REACQUIRE_LIMIT` (misses ridden through before rescanning), `ACQUIRE_SLOT_SLACK` (the
 // two-beacon acquisition consistency slack) and `FHSS_RESYNC_SLACK` (the tracked-beacon
-// prediction slack) moved, docs and all, to `tower_net_core::epoch` with the decisions they tune.
+// prediction slack) moved, docs and all, to `tower_net::epoch` with the decisions they tune.
 /// Beacon payload: epoch(4 LE) ‖ cycle(4 LE) ‖ slot_index(1). The leading `epoch` is the
 /// gateway's monotonic boot-id (see [`crate::radio::net`]'s `KEY_FHSS_EPOCH`): a node refuses to
 /// anchor to an epoch older than the highest it has seen, so a captured beacon replayed from a
@@ -107,7 +107,7 @@ pub(crate) struct Fhss {
     anchor: Option<(u32, Instant)>,
     last_beacon: Instant,
     cur_channel: u8,
-    /// The epoch/freshness decision machine (`tower_net_core::epoch`): the session epoch
+    /// The epoch/freshness decision machine (`tower_net::epoch`): the session epoch
     /// (master boot-id / node highest-seen), the miss counter, and the `(epoch, slot)` of the
     /// held acquisition candidate.
     gate: EpochGate,
@@ -173,11 +173,11 @@ pub struct NodeSlot {
 /// schedule that re-keys per cycle *without* reintroducing the adjacency hazard.
 #[must_use]
 pub fn hop_channel(seed: u32, cycle: u32, i: u8) -> u8 {
-    // The permutation math lives in the host-testable `tower_radio_core` leaf crate (generic
+    // The permutation math lives in the host-testable `tower_radio` leaf crate (generic
     // over the channel count), where the perfect-permutation + fixed-cycle-spacing §15.247
     // properties are unit-tested; here we just bind it to this radio's `FHSS_N`. No behavioural
     // change: the algorithm (seeded xorshift32 Fisher-Yates, cycle-invariant) is identical.
-    tower_radio_core::hop_channel::<{ FHSS_N as usize }>(seed, cycle, i)
+    tower_radio::hop_channel::<{ FHSS_N as usize }>(seed, cycle, i)
 }
 
 /// Beacon time-on-air (ms): a sealed beacon is HDR_LEN + payload + tag bytes.
@@ -323,7 +323,7 @@ impl Net {
     /// through a transient), predict this slot's channel, open RX a guard before the
     /// boundary, and catch the beacon to re-align. A missed beacon **keeps the anchor
     /// and keeps predicting**: drift stays ≪ the RX window for many slots, so a fade
-    /// of up to [`REACQUIRE_LIMIT`](tower_net_core::epoch::REACQUIRE_LIMIT) slots is
+    /// of up to [`REACQUIRE_LIMIT`](tower_net::epoch::REACQUIRE_LIMIT) slots is
     /// ridden through and re-locks within one slot once RF returns (it is *not* a sync
     /// loss). Only after the anchor is too
     /// stale to trust (the gap exceeds that, e.g. the gateway restarted onto a new

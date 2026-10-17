@@ -1,11 +1,32 @@
 # Dependabot version updates (security updates are a repo setting; see SECURITY.md).
-# The control plane has no Cargo manifest and its submodule pins move only via /pin (never a
-# bot), so only the SHA-pinned workflow actions are tracked here.
 # Weekly, grouped, with a 7-day cooldown so a freshly published (possibly compromised) release
 # is never picked up the day it appears. The GitHub Actions are pinned to full commit SHAs with a
 # `# vX.Y.Z` comment; Dependabot bumps the SHA and the comment together.
+#
+# The internal crates (crates/*, cli, hil) are path dependencies, which Dependabot never bumps:
+# the wire-format lockstep needs no ignore rules any more.
 version: 2
 updates:
+  # The host workspace: Cargo.lock at the root (crates/*, cli, hil).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+  # The firmware workspace: its own firmware/Cargo.lock (embassy, cortex-m, ...).
+  - package-ecosystem: cargo
+    directory: /firmware
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -15,3 +36,12 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+  # rust-toolchain.toml `channel`. The workflows pin the same version in RUST_TOOLCHAIN (env) and
+  # ci.yml's `audit` job fails while they differ, so push the matching RUST_TOOLCHAIN bumps
+  # (ci.yml + release-cli.yml) onto the PR.
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

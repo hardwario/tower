@@ -1,277 +1,177 @@
-# AGENTS.md: TOWER control plane
+# AGENTS.md: the TOWER monorepo
 
-This repository is the **control plane** for the HARDWARIO TOWER ecosystem. You
-(the coding agent) are expected to drive work across five child repositories from
-this one session. The children are Git **submodules** at the repo root:
+This repository (`github.com/hardwario/tower`) holds the whole HARDWARIO TOWER software stack:
+the shared wire protocol, the firmware SDK and product apps, the host `tower` CLI, the
+bootloader engine and the HIL bench harness. It used to be a control plane over five
+submodule repos; their full histories were imported, and every sibling is now a **path
+dependency**, so the wire-format lockstep is a compile-time fact instead of a tag-pinning
+discipline.
 
-| Submodule  | Upstream                                   | Role |
-|------------|--------------------------------------------|------|
-| `protocol` | `github.com/hardwario/tower-protocol`      | Shared `no_std` wire-format crate: the contract |
-| `firmware` | `github.com/hardwario/tower-firmware`      | Rust/Embassy firmware SDK and product apps |
-| `cli`      | `github.com/hardwario/tower-cli`           | Host-side `tower` CLI/TUI |
-| `jolt`     | `github.com/hardwario/jolt`                | STM32L0 UART-bootloader flasher (library) used by `cli` + `hil` |
-| `hil`      | `github.com/hardwario/tower-hil`           | HIL bench harness (std host crate; builds images from `firmware/`) |
-
-Each child has its **own `AGENTS.md`** (with a `CLAUDE.md` stub that imports it). When you
-work inside a child, read and obey that file; it is authoritative for that repo. This file
-governs how the pieces fit together and how to change more than one at once.
+Each component directory below that has an `AGENTS.md` (with a `CLAUDE.md` stub importing it)
+carries its own working notes; when you work inside one, read and obey that file too. This
+file governs the layout, the naming, and the changes that span several components.
 
 ---
 
 ## What TOWER is
 
 TOWER is HARDWARIO's wireless, modular IoT kit. The Core Module is an **STM32L083CZ**
-(Arm Cortex-M0+) with a **SPIRIT1 sub-GHz radio** (EU 868 / US 915 MHz, AES-128-CCM
-secured network with confirmed delivery, replay protection, OTA pairing). The
-firmware streams a **framed serial console** to a host, where the `tower` CLI decodes
-and renders it.
+(Arm Cortex-M0+, 192 KB flash / 20 KB RAM) with a **SPIRIT1 sub-GHz radio** (EU 868 / US
+915 MHz, AES-128-CCM secured network with confirmed delivery, replay protection, OTA pairing).
+The firmware streams a **framed serial console** to a host, where the `tower` CLI decodes and
+renders it. Firmware is loaded over the wire (the STM32 ROM UART bootloader via `tower flash`,
+or SWD); there is no over-the-air update path, by design.
+
+## Layout and naming
+
+**Naming rule:** the directory `crates/X` holds the package `tower-X` (short directories,
+prefixed packages; the Rust crate name is `tower_X`).
+
+| Path | Package | What it is |
+|------|---------|------------|
+| `crates/protocol` | `tower-protocol` | The wire contract (`no_std`): COBS + CRC-32 framing, the postcard console / management / radio schemas. Version 1.5.1. |
+| `crates/kv` | `tower-kv` | Power-loss-safe EEPROM key-value codec behind the SDK's `tower::storage::Kv` (`no_std`, hardware-free). |
+| `crates/net` | `tower-net` | Decision kernels of the radio network layer's security invariants (replay, TX-counter watermark, ACK, FHSS epoch, pairing, CCM nonce). Not the network layer itself (`tower::radio::net`). |
+| `crates/radio` | `tower-radio` | Radio timing / CCM / compliance logic (duty token buckets, time-on-air, FHSS hop permutation). Not the SPIRIT1 driver (`tower::radio`). |
+| `crates/gateway` | `tower-gateway` | Decision core of the Radio Dongle gateway firmware (node-registry codec, downlink queue). Not the host `tower gateway` MQTT bridge (that is in `cli`). |
+| `crates/shell` | `tower-shell` | Pure kernels behind the device shell (`addr` parser + PRNG, pagination window, TAB completion). Not the shell itself (`tower::shell`). |
+| `crates/boot` | `tower-boot` | Boot control around the STM32 ROM UART bootloader (AN3155): flash / erase / verify, chip info, NRST/BOOT0 reset pulses. Library only; **formerly the `jolt` flasher** (its binary is gone, its commands live in `tower`). Version 1.5.0. |
+| `firmware/` | `tower-sdk` (lib `tower`) | Embassy firmware SDK for the Core Module, `examples/` (demos) and `apps/` (TOWER IoT Kit products). Its **own Cargo workspace** (thumbv6m + flip-link). |
+| `cli/` | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip, the `tower gateway` radio-to-MQTT bridge, `tower nodes` / `tower net`. Version 2.0.0. |
+| `hil/` | `tower-hil` | Hardware-in-the-loop bench harness: builds images from `../firmware`, flashes real boards, decodes the console natively, measures power (PPK2). |
+
+Two Cargo workspaces:
+
+- **Host workspace** (root `Cargo.toml`): `members = ["crates/*", "cli", "hil"]`, one root
+  `Cargo.lock`, `[workspace.package]` (edition 2024, `rust-version` 1.99.1, MIT, repository)
+  inherited by every member, shared versions in `[workspace.dependencies]`; each crate keeps
+  its own `version`.
+- **Firmware workspace** (`firmware/`, excluded from the host workspace): only the SDK package,
+  with `firmware/.cargo/config.toml` (target `thumbv6m-none-eabi`, linker `flip-link`), the
+  size-tuned profiles and its own `firmware/Cargo.lock`. It depends on `../crates/*` by path.
+  That cargo config applies only when cargo runs **inside** `firmware/`, so never build it with
+  `--manifest-path firmware/...` from the root: go through `just fw <recipe>`.
+
+One `rust-toolchain.toml` (channel 1.99.1 + rustfmt, clippy, llvm-tools + thumbv6m), one
+`rustfmt.toml` (110 columns, applied to everything: there are no hand-formatted crates any
+more), one `LICENSE`, one `SECURITY.md`, one `.github/`.
 
 ### Data flow
 
 ```
-                 tower-protocol  (COBS + CRC-32 + postcard frames)
-                 ▲                                              ▲
-                 │ pins tag                                     │ pins same tag
-   ┌─────────────┴───────────────┐                ┌─────────────┴───────────────┐
-   │  tower-firmware (device)     │   USB serial   │  tower-cli (host)            │
-   │  STM32L083CZ · Embassy       │ ──── frames ──▶ │  decodes logs/events/shell   │
-   │  emits framed console        │ ◀─── shell ──── │  flashes (UART)              │
-   └──────────────────────────────┘                └──────────────────────────────┘
+                     crates/protocol  (COBS + CRC-32 + postcard frames)
+                     ▲  path dep             ▲ path dep              ▲ path dep
+   ┌─────────────────┴──────────┐   ┌────────┴──────────────────┐   ┌┴──────────────────────┐
+   │ firmware/ (device)          │   │ cli/  `tower` (host)       │   │ hil/ (bench harness)   │
+   │ STM32L083CZ, Embassy        │──▶│ decodes logs/events/shell  │   │ builds ../firmware,    │
+   │ framed console over USB UART│◀──│ flash/erase/reset/chip     │   │ flashes, decodes,      │
+   │ uses crates/kv net radio    │   │ (crates/boot), MQTT bridge │   │ measures (PPK2)        │
+   │ gateway shell               │   └────────────────────────────┘   └────────────────────────┘
+   └─────────────────────────────┘
 ```
 
-The wire format lives in **one place** (`protocol`) and both ends depend on it. So does
-`hil`, the bench harness: it decodes the same framed console natively to assert on typed
-frames, and builds the images it flashes from the `firmware/` checkout next door.
+Every end decodes with the same `crates/protocol` source tree, so a build can no longer mix
+wire versions. What can still differ at **run time** is a device flashed, or a `tower` binary
+installed, from an older tree: that shows up as `BadVersion` / exit 125. After a wire change,
+reflash the boards and reinstall the CLI (`just install-cli`).
 
 ---
 
-## 🔒 The golden rule: protocol lockstep
+## Commands (root `justfile`)
 
-`firmware`, `cli`, and `hil` each pin `tower-protocol` **by git tag** in their `Cargo.toml`.
-**They must all pin the *same* tag.** The wire format is `postcard`, which is **not
-self-describing**: a tag mismatch does not error; it **silently mis-decodes** bytes.
-This has bitten production before.
+```bash
+just check                     # every hardware-free gate CI runs, both workspaces (see below)
+just test                      # host workspace tests (cargo test --workspace --locked)
+just fw <recipe...>            # a firmware/justfile recipe, run inside firmware/
+just hil <recipe...>           # a hil/justfile recipe, run inside hil/
+just install-cli               # cargo install --locked --path cli
+just fmt                       # rustfmt both workspaces
+```
 
-- Current alignment: whatever `/lockstep` prints: the one tag (and resolved commit) all three
-  consumers pin. At the last edit of this file that was **v1.5.1** (`35904dd`); trust the
-  script over this line.
-- `firmware` references `tower-protocol` in **two** manifests: `firmware/Cargo.toml` and
-  `firmware/crates/tower-kv/Cargo.toml`.
-- `cli` references it in `cli/Cargo.toml`, `hil` in `hil/Cargo.toml` (one place each). The
-  checkers don't rely on this list: they walk **every** `Cargo.toml` in each consumer, so a new
-  crate or a second pin (dev/target deps, `[patch]`) is caught too.
-- Any change to the wire format (struct/enum field order, `MsgType` discriminants,
-  frame layout) **must** bump `PROTOCOL_VERSION` in `protocol/src/lib.rs`.
+`just check` = `check-host` (fmt, clippy `-D warnings`, tests, `tower-hil --features power`
+clippy + compile, the no_std build of the shared crates, rustdoc) + `check-firmware`
+(`just fw ci`: fmt, MCU build, RAM budget, clippy + the five role variants, rustdoc, example /
+app list drift; plus `just fw build example blinky`) + `check-wire` (the wire-bump guard and its
+self-test) + `audit` (`cargo audit` on both lockfiles). It needs `flip-link`, `cargo-binutils`,
+`cargo-audit`, `python3` >= 3.11 and network access for the advisory DB.
 
-**Never bump the protocol tag in one consumer without the others, in the same change-set.**
-`/lockstep` is the dedicated check (`tools/check_lockstep.py`: every manifest's tag pin, each
-lockfile's `?tag=` + resolved SHA, and that SHA == the commit the tag names in `protocol/`, so a
-re-cut tag is caught too); `/sync` and `/pin` (`--strict`) run it as their gate, and the control
-plane's CI runs it on every push. The push-time half lives in each consumer's CI: firmware, cli
-and hil all run tower-firmware's `tools/protocol_pin_check.py` (same rules) over checkouts of
-the three repos.
+Firmware day to day (`just fw` lists everything): `just fw examples`, `just fw build example
+blinky`, `just fw flash example blinky` and `just fw run app radio_push_button` (these two need
+the `tower` CLI on `PATH` and a board), `just fw test` (host tests of the shared crates the
+firmware builds on). HIL: `just hil check` compiles the harness; `just hil hil`,
+`hil-power`, `hil-full` FLASH the bench: only when the user asks and the bench is cabled.
 
----
+Plain cargo works for the host workspace from the root: `cargo test -p tower-protocol`,
+`cargo build --release -p tower-cli` (binary `target/release/tower`). Linux needs
+`libudev-dev` + `pkg-config` (serialport).
 
-## Per-repo cheat sheet
+## Skills
 
-### `protocol/`: the contract (`no_std`, edition 2024, MIT; version = the tag `/lockstep` reports)
-- Defines: COBS framing + CRC-32 (`src/lib.rs`, `src/crc.rs`) and the postcard message
-  schema (`src/msg.rs`: `Hello`, `Log`, `Print`, `Event`, `ShellCommand`, …).
-- Verify locally:
-  ```bash
-  cargo test --manifest-path protocol/Cargo.toml
-  cargo clippy --manifest-path protocol/Cargo.toml --all-targets -- -D warnings
-  cargo build --manifest-path protocol/Cargo.toml --target thumbv6m-none-eabi
-  ```
-- Has CI (`.github/workflows/ci.yml`): host test + clippy, embedded build, the wire-bump guard
-  (+ its self-test), cargo-audit, and a `release` job on green pushes to `main` that creates the
-  `vX.Y.Z` tag for the `Cargo.toml` version **if missing** and the GitHub Release for that tag
-  **if missing** (idempotent: a manually pushed tag still gets its Release on the next green
-  push). Tag manually anyway so consumers can be bumped immediately.
+| Skill | Use it to... |
+|-------|--------------|
+| `/bootstrap` | Check a fresh clone: rustup + the pinned toolchain (components, thumbv6m), just, flip-link, cargo-binutils, python3 >= 3.11, the `tower` CLI build. Reports; installs only rustup targets/components. |
+| `/build` | Run the root gates (`just check`, or one part of it). Hardware-free, never flashes. |
 
-### `firmware/`: device SDK (`no_std`, edition 2024, v0.1.0, MIT)
-- Target: **`thumbv6m-none-eabi`** (Cortex-M0+). Uses **`just`** as the task runner.
-- Workspace members: `crates/tower-kv` (EEPROM key-value codec), `crates/tower-radio-core`
-  (host-testable radio-timing/compliance math), `crates/tower-net-core` (host-testable
-  security decision kernels: replay rule, TX-counter watermark/fail-closed, ACK dedup,
-  FHSS epoch gate, nonce construction), `crates/tower-gw-core` (host-testable gateway
-  decision core: EEPROM node-registry bucket codec + RAM downlink-queue policy), and
-  `crates/tower-shell-core` (host-testable `address`-setting parser + PRNG kernels).
-  `examples/` = demos, `apps/` = product firmwares. (The HIL harness lives in the `hil/`
-  submodule, its own repo.)
-- Common commands (read `firmware/justfile` for the full set):
-  ```bash
-  just -f firmware/justfile examples            # list example names
-  just -f firmware/justfile check               # lib + apps + examples for the MCU (= CI embedded build)
-  just -f firmware/justfile build example blinky
-  just -f firmware/justfile flash example blinky   # needs `tower` CLI on PATH + hardware
-  just -f firmware/justfile run   example blinky   # build + flash + stream console
-  just -f firmware/justfile test                # host tests (tower-kv, tower-net-core, tower-radio-core, tower-gw-core, tower-shell-core)
-  ```
-  Or run inside the dir: `cd firmware && just <recipe>`.
-- **Do NOT** assume a plain `cargo build` for firmware: it is an embedded target with
-  a custom runner and linker scripts. Go through `just`.
-- Flashing/console requires the **`tower` CLI** (the `cli/` submodule) on `PATH` and
-  physical hardware. CI (`.github/workflows/ci.yml`) runs the embedded build (incl. role-gated
-  example variants) + RAM-budget guard, host tests (`just test`) + a check that `just examples`/
-  `just apps` match the files on disk, clippy, rustfmt, rustdoc (`-D warnings`), cargo-audit, and
-  the **tower-protocol lockstep** job (checks out `tower-cli` **and** `tower-hil` and runs
-  `tools/protocol_pin_check.py` across all three). `cli` mirrors the gate (a `lockstep` CI job
-  plus a release-workflow gate) and so does `hil`; all three run that same script. Local
-  check: `/lockstep`. `just check` = the CI embedded build (lib + apps + examples, no flashing).
-- Toolchain: `rust-toolchain.toml` (channel + `rustfmt`, `clippy`, `llvm-tools`, thumbv6m);
-  `just build` also needs `flip-link` (the linker) and `cargo-binutils` (`cargo objcopy`).
-
-### `cli/`: host tool (`tower` binary, edition 2024, v2.0.0, MIT)
-- Single crate. Stack: clap 4, ratatui, serialport, rustyline; plus the gateway/MQTT
-  stack: `rumqttc` (sync client) and `rumqttd` (embedded broker, behind the default-on
-  `embedded-broker` feature), `serde_json`, `uuid`. Depends on `tower-protocol` (wire
-  codec) **and the `jolt/` submodule** (`v1.5.0`, the STM32L0 UART-bootloader flasher),
-  which it links as a **library** (`jolt::firmware::load`, `jolt::port::Port`,
-  `jolt::flash::FlashOptions`) for `flash`/`erase`/`reset`.
-- Common commands:
-  ```bash
-  cargo build --manifest-path cli/Cargo.toml --release    # binary: cli/target/release/tower
-  cargo fmt   --manifest-path cli/Cargo.toml --all -- --check
-  cargo clippy --manifest-path cli/Cargo.toml --all-targets -- -D warnings
-  cargo test  --manifest-path cli/Cargo.toml
-  ```
-- Runtime: `tower` (TUI on auto-detected port), `tower devices|logs|events|shell|console|monitor`,
-  `tower exec "<line>"` (one shell command, for scripts), `tower complete` (target-side TAB
-  completion), `tower flash <bin>`, `tower erase`, `tower reset [--bootloader]`. Gateway product surface:
-  `tower gateway` (radio↔MQTT bridge, TUI + `--service`), `tower nodes` (list/add/remove/
-  rename/shell/…), `tower net` (network status): the MQTT client commands.
-- Linux build needs `libudev-dev` + `pkg-config`. Has CI (fmt/clippy/test, 3-OS build+test,
-  cargo-audit, lockstep) and a release workflow on `v*` tags: gated on the tag being on `main`
-  with green CI, lockstep, fmt+clippy+test; multi-platform archives get signed build-provenance
-  attestations (`gh attestation verify`). **Not on crates.io.**
-
-### `jolt/`: UART flasher (lib + `jolt` binary, edition 2024, v1.5.0, MIT)
-- "Tiny Rust CLI that flashes an STM32L083CZ over the UART bootloader." Library modules:
-  `bootloader`, `error`, `firmware`, `flash`, `port`, `target` (`cli`/`commands` are
-  binary-only). `cli` consumes its **library** API; it is also usable standalone as the `jolt`
-  binary.
-- Pinned by `cli` **and `hil`** via git tag (`jolt = { git = "…/jolt", tag = "v1.5.0" }`).
-  Unlike the `tower-protocol` lockstep, a tag mismatch here is a **compile error** in the
-  consumer, not a silent failure, so it is a normal dependency bump, not an interop
-  hazard. Keep the two consumers' tags equal anyway (`/lockstep` flags a divergence,
-  informationally).
-- Build/test from the root: `cargo build --manifest-path jolt/Cargo.toml` /
-  `cargo test --manifest-path jolt/Cargo.toml`. Linux needs `libudev-dev` + `pkg-config`
-  (same serial-port dependency as `cli`). Has its own CI + tagged releases (same release gates
-  and provenance attestations as `cli`).
-
-### `hil/`: HIL bench harness (std host crate, edition 2024, v0.1.0, MIT)
-- Drives the physical bench: a TOWER Core Module (J-Link SWD + Nordic PPK2) and a TOWER
-  Radio Dongle (USB). Decodes the framed console **natively** (`tower-protocol`) and asserts
-  on typed Log/Event frames + seq gaps; uses `jolt` as a library for the reset pulses.
-- **Builds the images it flashes from the `firmware/` checkout next door** (default
-  `../firmware` relative to `hil/`, exactly this control-plane layout; `TOWER_FIRMWARE_DIR`
-  overrides). The bench roster is `hil/hil.toml`, re-resolved against `tower devices`.
-- Compile-check from the root (no hardware): `cargo test --manifest-path hil/Cargo.toml --no-run --features power`
-  (`--features power` includes the feature-gated power group, as CI and `just check` do).
-  Bench runs happen **inside** `hil/` via `just hil` / `just hil-power` / `just hil-full`;
-  they flash real hardware; only run them when the user asks and the bench is cabled.
-- All hardware tests are `#[ignore]`d; its CI compile-checks (`--features power`, = `just check`)
-  + clippy + cargo-audit + lockstep. Linux needs `libudev-dev` + `pkg-config`.
+Definitions live in `.claude/skills/<name>/SKILL.md`.
 
 ---
 
-## Skills (this repo's workflow)
+## Changing the wire format (the runbook)
 
-| Skill         | Use it to… |
-|---------------|------------|
-| `/bootstrap`  | Set up a fresh clone: init submodules, verify toolchains. |
-| `/build`      | Compile in dependency order (`protocol → jolt → cli → firmware → hil`), or one repo. |
-| `/sync`       | Pull each submodule to upstream `main`, then verify protocol lockstep. |
-| `/lockstep`   | Just the golden-rule check: protocol tag pins + resolved lockfile SHAs, local trees. |
-| `/pin`        | Freeze the current submodule SHAs as a committed known-good snapshot. |
+postcard is **not self-describing**: field order and variant indices are the wire. One commit
+does it all:
 
-Definitions live in `.claude/skills/<name>/SKILL.md` (invoked as `/<name>`; `/bootstrap`,
-`/sync` and `/pin` change state, so they run only when invoked explicitly, and each skill's
-`allowed-tools` pre-approves only the specific commands it needs, no blanket `git -C`/`cargo`).
-The mental model: **`/bootstrap` provisions**,
-**`/build` compiles**, **`/sync` advances** the working trees toward upstream,
-**`/lockstep` checks** the wire-format invariant, and **`/pin` freezes** the trees into a
-control-plane commit you can return to. Typical loop: `/sync` → `/build` → `/pin`.
+1. **Change the types** in `crates/protocol` (`src/msg.rs`, `src/mgmt.rs`: console;
+   `src/radio.rs`: the radio application schema) and every caller in `firmware/`, `cli/` and
+   `hil/` (they build against the change at once; the compiler finds them).
+2. **Bump the version constant** of the surface you touched: `PROTOCOL_VERSION`
+   (`src/lib.rs`, the console framing) or `RADIO_SCHEMA_VERSION` (`src/radio.rs`, versioned
+   independently because the gateway forwards it opaquely).
+3. **Update the goldens** (`tests/golden.rs` / `tests/radio_golden.rs`) and the variant-order
+   fingerprint pins if the change touches them; new coverage is a NEW golden fn, never an edit
+   of an existing one. Bump `crates/protocol/Cargo.toml` `version` (minor for a wire change,
+   patch for a fix) and add a `CHANGELOG.md` entry.
+4. **One commit**, all gates green (`just check`; the wire-bump guard fails if a golden changed
+   without its constant strictly increasing).
+5. **Tag** `protocol-vX.Y.Z` (the guard's next baseline). Then reflash devices and reinstall
+   the CLI.
 
----
+Details: `crates/protocol/AGENTS.md`, "Releasing a change".
 
-## Submodule mechanics (handle gitlinks correctly)
+## Tags and releases
 
-- The control plane stores each child as a **gitlink**: a recorded SHA, not the files.
-  `git status` in the root shows a child as modified when its checked-out SHA differs
-  from the recorded one.
-- To record new child SHAs, stage the gitlink: `git add firmware cli protocol jolt hil`,
-  then commit (this is what `/pin` does). The commit message should list each SHA.
-- **Never** `git add` a child's *file contents* from the root; changes to a child are
-  committed *inside that child* and pushed to its own upstream first.
-- **Never pin a child to a commit that isn't pushed** to its remote: a fresh clone
-  could not fetch it. `/pin` guards against this.
-- Develop a child by `cd`-ing into it (or `git -C <child>`); it is a full clone of the
-  upstream repo on its own branch.
+- `cli-vX.Y.Z` releases the `tower` binary: `.github/workflows/release-cli.yml` checks that the
+  tag matches `cli/Cargo.toml`, the commit is on `main` and CI is green for it, then builds
+  cross-platform archives (`tower-cli-vX.Y.Z-<target>`) with checksums and signed
+  build-provenance attestations.
+- `protocol-vX.Y.Z` marks a wire-format release (no build; the wire-bump guard's baseline).
+- `tower-boot` and the other `crates/*` are internal path dependencies: no releases. The
+  imported `jolt-v*` tags (tower-boot's history) and `cli-v1.0.0` are history.
 
 ---
 
-## Cross-repo runbook: bumping the wire protocol
+## Conventions
 
-The highest-stakes operation. Do it as one coordinated change-set:
-
-1. **In `protocol/`**: make the wire change. If the format changed at all, bump
-   `PROTOCOL_VERSION` in `src/lib.rs`. Bump `version` in `protocol/Cargo.toml`
-   (minor for a wire/behaviour change, patch for a fix). Run the `protocol` test +
-   clippy + embedded builds above. Commit, push `main`, then tag:
-   `git -C protocol tag -a vX.Y.Z -m "…" && git -C protocol push origin main vX.Y.Z`.
-2. **In `firmware/`**: update the tag to `vX.Y.Z` in **both** manifests listed
-   above, then `cargo update -p tower-protocol`. Rebuild/test via `just`.
-3. **In `cli/`**: update the tag to `vX.Y.Z` in `cli/Cargo.toml`, then
-   `cargo update -p tower-protocol`. Build + test. Note: `cli` may have a local
-   `.cargo/config.toml` `paths` override shadowing the git source; move it aside
-   before `cargo update` so the lockfile re-resolves (see `cli/AGENTS.md`).
-4. **In `hil/`**: update the tag to `vX.Y.Z` in `hil/Cargo.toml`, then
-   `cargo update -p tower-protocol` and `cargo test --no-run` (compile-check; no bench).
-5. Commit firmware, cli, and hil (in their own repos), push. Run `/lockstep`. Each consumer's
-   CI `lockstep` job compares against the *other two repos' `main`*, so whichever lands first is
-   red until the other two follow (expected); push the three back-to-back (re-run the red job
-   afterwards). The checker itself lives in `firmware/tools/protocol_pin_check.py`, so a change
-   to it must land in firmware before cli/hil CI can use it.
-6. **Back here**: `/pin` to record the new, aligned SHAs as a snapshot.
-
-### Local co-development (no re-tagging)
-
-Because the repos sit side by side under this root, you can test a local
-`protocol` change against `firmware`/`cli`/`hil` without tagging, via a cargo `paths`
-override pointing at `protocol/`. Keep such overrides **local and uncommitted**
-(the root `.cargo/config.toml` is git-ignored here for exactly this). Remove the
-override and go back to the pinned tag before you `/pin` or hand off.
-
----
-
-## Conventions (inherited from the children)
-
-- **The TOWER repos develop straight on `main`.** No feature branches unless the
-  user explicitly asks. **Commit and push only when the user requests it**; this
-  applies to the children *and* to this control plane.
-- License is **MIT** across the ecosystem (© 2026 HARDWARIO a.s.).
-- Pushes to children use SSH (`git@github.com:hardwario/…`).
-- Regulatory citations in firmware radio code (e.g. FCC §15.247, EU duty-cycle) are
-  real and load-bearing: **never** remove or alter them.
-- **Toolchain:** every repo pins Rust in `rust-toolchain.toml` (channel `1.99.1` at the last
-  edit, + `rust-version` in each manifest). CI installs exactly that channel via a
-  `RUST_TOOLCHAIN` env in each workflow; an `audit`-job step fails if the two differ, so bump
-  both together (Dependabot's `rust-toolchain` PRs need the workflow line added).
-- **CI / supply chain:** every GitHub Action is pinned to a full commit SHA with a `# vX.Y.Z`
-  comment (Dependabot, `.github/dependabot.yml`, bumps them weekly with a 7-day cooldown and
-  ignores `tower-protocol`/`jolt`, which move only via the lockstep runbook); workflow tokens are
-  read-only by default (`permissions: contents: read`, write only on protocol's tag job and the
-  release `publish` jobs); checkouts use `persist-credentials: false`; every cargo call is
-  `--locked`; each repo runs `cargo-audit` (vulnerabilities fail, unmaintained warnings don't).
-  Security reports go through GitHub private vulnerability reporting (`SECURITY.md` per repo).
-- `protocol` and `hil` are hand-formatted (no fmt gate); respect existing style;
-  `firmware`, `cli`, and `jolt` are rustfmt-gated in CI (firmware at 110 cols per its
-  `rustfmt.toml`). Everywhere: the design-rationale comments are load-bearing; don't
-  strip them.
+- **Develop straight on `main`.** No feature branches unless the user explicitly asks.
+  **Commit, tag and push only when the user requests it.** Pushes use SSH
+  (`git@github.com:hardwario/tower.git`).
+- License is **MIT** (© 2026 HARDWARIO a.s.), one root `LICENSE`.
+- Regulatory citations in the radio code (FCC §15.247, EN 300 220, the EU duty cycle) are real
+  and load-bearing: **never** remove or alter them.
+- The design-rationale comments are load-bearing everywhere; don't strip them.
+- **Toolchain:** `rust-toolchain.toml` pins Rust (channel 1.99.1; `rust-version` is inherited
+  from `[workspace.package]`, the firmware sets its own). CI installs exactly that channel via
+  the `RUST_TOOLCHAIN` env of each workflow; the `audit` job fails if they differ, so bump them
+  together (Dependabot's rust-toolchain PRs need the workflow lines added).
+- **Formatting:** one `rustfmt.toml` (110 cols, stable options only; comment content is never
+  reflowed), `cargo fmt --all` in both workspaces (`just fmt`), gated in CI.
+- **CI / supply chain:** `.github/workflows/ci.yml` (jobs `host`, `host-os`, `firmware`,
+  `wire-guard`, `audit`) and `release-cli.yml`. Every GitHub Action is pinned to a full commit
+  SHA with a `# vX.Y.Z` comment (Dependabot bumps them weekly with a 7-day cooldown); workflow
+  tokens are read-only by default (`permissions: contents: read`; write only in the release
+  `publish` job); checkouts use `persist-credentials: false`; every cargo call is `--locked`;
+  `cargo-audit` checks both lockfiles (vulnerabilities fail, unmaintained warnings don't).
+  Security reports go through GitHub private vulnerability reporting (`SECURITY.md`).
 
 ## Writing style
 
@@ -279,13 +179,16 @@ No em or en dashes. This applies everywhere: code, comments, docs, UI texts and 
 
 ## Don't
 
-- Don't bump `tower-protocol` in one consumer without the others (`firmware`, `cli`, `hil`).
-- Don't change the wire format without bumping `PROTOCOL_VERSION`.
-- Don't `git add`/commit a child's files from the control-plane root.
-- Don't `/pin` a child commit that hasn't been pushed upstream.
-- Don't run a bare `cargo build` against `firmware`; use `just`.
-- Don't run `hil`'s bench recipes (`just hil*`), which flash hardware, unless the user asks.
+- Don't change the wire format without bumping `PROTOCOL_VERSION` (or `RADIO_SCHEMA_VERSION`)
+  and updating the goldens in the same commit.
+- Don't edit an existing golden fn to make it pass; add a new one.
+- Don't depend on a sibling crate by git tag or registry version; use the workspace path
+  dependency (`tower-protocol.workspace = true`, or `{ path = "../crates/..." }` from the
+  firmware).
+- Don't build the firmware with a bare `cargo build` from the root or with `--manifest-path
+  firmware/...`; run cargo inside `firmware/` (`just fw <recipe>`).
+- Don't run `hil`'s bench recipes (`just hil hil*`), which flash hardware, unless the user asks.
 - Don't reference a GitHub Action by tag or branch, or widen a workflow's `permissions:`; pin
   the full commit SHA (with its `# vX.Y.Z` comment) and grant write only to the job that needs it.
-- Don't commit or push anything unless the user asked.
+- Don't commit, tag or push anything unless the user asked.
 - Don't use em or en dashes anywhere (see *Writing style*).

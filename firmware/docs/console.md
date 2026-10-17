@@ -13,7 +13,8 @@ framework**. The host side is the **`tower`** CLI/TUI.
 > settings framework (6 kinds, range/enum validation, value completion), the
 > app-extensible deep-merge command tree, and the `tower` CLI + TUI are all
 > implemented and tested on real hardware. The codec has 20 host tests including
-> 9000 fuzz iterations (run in the tower-protocol repo).
+> 9000 fuzz iterations (in `crates/protocol`, run with `cargo test -p tower-protocol` at the
+> repo root).
 
 This is the standalone reference for using and maintaining the console subsystem:
 architecture, wire protocol, the firmware + host APIs, and a worked example per feature.
@@ -24,12 +25,12 @@ architecture, wire protocol, the firmware + host APIs, and a worked example per 
 
 | Piece | Where | What it is |
 |---|---|---|
-| **Firmware SDK** | this repo: `src/console.rs`, `src/shell.rs` | the on-MCU console: logging backend, event/shell APIs, the framed UART transport |
-| **`tower` host CLI** | `github.com/hardwario/tower-cli` (binary `tower`) | decodes the framed link on your machine: logs / events / shell / TUI |
-| **`tower-protocol`** | `github.com/hardwario/tower-protocol` (shared, `no_std`) | the single source of truth for the wire format, used by *both* ends |
+| **Firmware SDK** | `firmware/`: `src/console.rs`, `src/shell.rs` | the on-MCU console: logging backend, event/shell APIs, the framed UART transport |
+| **`tower` host CLI** | `cli/` (package `tower-cli`, binary `tower`) | decodes the framed link on your machine: logs / events / shell / TUI |
+| **`tower-protocol`** | `crates/protocol` (shared, `no_std`) | the single source of truth for the wire format, used by *both* ends |
 
 Because `tower-protocol` is shared, the wire format cannot drift between firmware
-and host. Both ends pin it to the same git tag (currently `v1.3.0`).
+and host: both ends build the same `crates/protocol` source as a path dependency.
 
 ## Hardware
 
@@ -57,8 +58,8 @@ which decodes the frames.
 # Firmware: flash any example (it auto-starts the console).
 TOWER_DEVICE=/dev/cu.usbserial-140 just flash example console_demo
 
-# Host: build the CLI once, then stream the device.
-cd ../tower-cli && cargo build --release      # produces `tower`
+# Host: install the CLI once (from the repo root), then stream the device.
+just install-cli                              # = cargo install --locked --path cli
 tower logs                                    # auto-detects a single USB serial port
 tower -d /dev/cu.usbserial-140 logs           # or name the device explicitly
 ```
@@ -529,7 +530,7 @@ inner:  ver_type(1) │ seq(2, LE) │ payload(postcard) │ crc32(4, LE)
   the EEPROM KV store uses).
 - **postcard** for the payload: compact and `no_std`, but **not self-describing**, so
   both ends must share the exact struct/enum definitions. That's why `tower-protocol`
-  is one crate, version-pinned.
+  is one crate that both ends build from the same source.
 - **`seq`** (writer-assigned) lets the host detect real wire loss.
 
 Message types (the low 5 bits of `ver_type`; target→host are 0..15, host→target 16+):
@@ -612,11 +613,11 @@ then drive with `tower shell` / `tower logs` / `tower console`.
 
 ## Testing
 
-The wire codec lives in its own repo now
-([`tower-protocol`](https://github.com/hardwario/tower-protocol)); its host tests run there:
+The wire codec lives in the shared [`tower-protocol`](../../crates/protocol) crate; its host
+tests run in the repo's host workspace:
 
 ```sh
-cargo test   # in a tower-protocol checkout
+cargo test -p tower-protocol   # at the repo root (or `just test` for the whole host workspace)
 ```
 
 These cover round-trips for every message, boundary frame sizes, the decoder's
@@ -650,7 +651,8 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
 - **Setting values can't contain `/`, space, or tab**: those are command tokenizers.
   Enum values dodge this by being a fixed set.
 - **postcard is not self-describing:** any change to a payload struct/enum is a wire
-  change: bump `PROTOCOL_VERSION` and re-tag `tower-protocol`; both ends (firmware + host)
-  pin the new tag in lockstep. Today's tag is `v1.3.0`.
+  change: bump `PROTOCOL_VERSION` and follow the runbook in `crates/protocol/AGENTS.md`
+  (goldens, one commit, a `protocol-vX.Y.Z` tag). Both ends build the change together; then
+  reflash the board and reinstall the `tower` CLI, or the stale side reports `BadVersion`.
 - **A response is capped at `MAX_SETTING`/`MAX_RESP`-sized text** before chunking; very
   large dumps are clipped. Raise the caps (and `MAX_RESP`) if you need more.

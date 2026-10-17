@@ -144,7 +144,12 @@ pub enum RadioStat {
     /// One gateway TX attempt. `item` is the downlink-queue id it carried (0 = not
     /// a queue item); `outcome` is a `mgmt::TX_*` code; `ack_rssi` is the
     /// receiver-side RSSI the node reported inside its ACK (`None` = no ACK).
-    Tx { dest: u32, item: u16, outcome: u8, ack_rssi: Option<i8> },
+    Tx {
+        dest: u32,
+        item: u16,
+        outcome: u8,
+        ack_rssi: Option<i8>,
+    },
 }
 
 /// Host → target: a shell command line. `cmd_id` correlates the response.

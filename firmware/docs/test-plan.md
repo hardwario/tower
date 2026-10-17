@@ -5,7 +5,8 @@ SPIRIT1). It covers every subsystem (drivers, console/shell, crypto, storage, th
 radio/network stack, and spectrum-access: EU AFA / US FHSS) with concrete
 **pass signals** and a catalogue of **edge cases**. Run it whole for a release gate, or pick a
 section for a focused regression. Companion guides: `docs/console.md`, `docs/radio.md`.
-Host-only unit tests: `just test`.
+Host-only unit tests: `just test` (here: the shared crates the firmware builds on; at the repo
+root: the whole host workspace).
 
 > This document is intended to be re-run by a human or by an agent. Section 3 explains the
 > capture mechanics that make the firmware's "print once at boot" examples observable; the
@@ -35,7 +36,7 @@ Host-only unit tests: `just test`.
 |---|---|
 | MCU | STM32L083CZ (Cortex-M0+), chip id `0x447` |
 | Target | `thumbv6m-none-eabi` |
-| Flash transport | Dongle: STM32 UART bootloader via `tower flash` (jolt engine, ~30 s/image). Core: **SWD via probe-rs** (J-Link), which doesn't need the FTDI, so the Core can be measured with USB unplugged. |
+| Flash transport | Dongle: STM32 UART bootloader via `tower flash` (tower-boot engine, ~30 s/image). Core: **SWD via probe-rs** (J-Link), which doesn't need the FTDI, so the Core can be measured with USB unplugged. |
 | Console | USART1 PA9/PA10, 115200 8N1, COBS+CRC32+postcard framed (`tower-protocol`) |
 | Radio | SPIRIT1 / SPSGRF, SPI1 PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 |
 | Reset/boot | NRST/BOOT0 on FTDI **aux** lines (not DTR/RTS) → opening a port does **not** reset |
@@ -47,10 +48,11 @@ Host-only unit tests: `just test`.
 | `/dev/cu.usbserial-2120` | **TOWER Core Module** | SEGGER **J-Link** (SWD flash via `probe-rs`) + Nordic **PPK2** (scriptable current supply/measure) | radio NODE; the **power** target (STOP-floor measurements) |
 | `/dev/cu.usbserial-2140` | **TOWER Radio Dongle** | USB-powered (VBUS); flashed via `tower flash` | radio GATEWAY; the **smoke** target (one-shot KAT verdicts) |
 
-Confirm ports with `tower devices`; the automated harness lives in its own repo,
-[tower-hil](https://github.com/hardwario/tower-hil) (run `just hil` / `just hil-power` /
-`just hil-full` there; it builds images from this checkout, default `../firmware`). It reads
-this roster from its `hil.toml` and re-resolves it at startup, failing fast if a board is absent. Confirm I2C population by flashing `i2cscan`: with
+Confirm ports with `tower devices`; the automated harness is the HIL crate,
+[`hil/`](../../hil) (run `just hil` / `just hil-power` / `just hil-full` there, or `just hil
+<recipe>` from the repo root; it builds images from this directory, its sibling `../firmware`).
+It reads this roster from its `hil.toml` and re-resolves it at startup, failing fast if a board
+is absent. Confirm I2C population by flashing `i2cscan`: with
 no sensor module attached, **`thermometer` and `accelerometer` report a sensor-absent error**
 (expected on a bare Core, not a fault). A sensor module additionally shows `0x49` (TMP112) and `0x19`
 (LIS2DH12).
@@ -64,7 +66,7 @@ Default radio role assignment for two-board tests:
 > console alive, which inhibits STOP by design, so a plugged-in board never reaches the µA floor.
 > The PPK2 supplies the Core at **1.8 V** (the regulator/brown-out knee, not 3 V) after a
 > power-cycle (clears the ~200 µA debug-domain residual a probe leaves); readings are never sampled
-> mid-SWD-flash (the PPK2 CDC can desync and report tens of mA of garbage). tower-hil's
+> mid-SWD-flash (the PPK2 CDC can desync and report tens of mA of garbage). The HIL harness's
 > `just hil-power` test enforces all three, and skips with an "unplug the FTDI" message if the
 > console still answers.
 
@@ -75,7 +77,8 @@ Two facts shape every observation:
 1. **No host handshake.** `Board::take` brings up the console and the app logs immediately.
    A KAT prints its verdict within milliseconds of reset, then idles in `loop { Timer::after_secs(5) }`.
 2. **Flash resets into the app at the end** (unless `--no-run`). So by the time a *separate*
-   `tower logs` attaches, a one-shot verdict is already gone. `tower logs` has **no** reset-on-attach.
+   `tower logs` attaches, a one-shot verdict is already gone, unless it resets on attach
+   (`tower logs --reset`).
 
 Therefore use **two capture modes**:
 
@@ -84,18 +87,18 @@ For examples that keep printing (radio links, net, `console_demo`, `events_demo`
 reference apps). Attach after flashing; you'll catch the steady-state stream.
 
 ```sh
-python3 tools/hwtest/cap.py <seconds> tower -d <PORT> logs --no-colors
+python3 tools/hwtest/cap.py <seconds> tower -d <PORT> logs --color never
 ```
 
-### Mode B: `jolt monitor --reset` (raw bytes) + `strings` for *one-shot* output
-`jolt monitor --reset` pulses NRST **then** reads, atomically, so it catches boot output. The
-console payload's **message text is plain ASCII and survives COBS unchanged** (COBS only rewrites
-zero bytes; ASCII has none), so `strings` recovers every log/event message verbatim. Binary
-fields (uptime, level, seq, CRC) become noise, irrelevant for verdict checking.
+### Mode B: `tower logs --reset` (decoded, from boot) for *one-shot* output
+`tower logs --reset` pulses NRST on the handle it then streams from, and clears the input buffer
+while the chip is held in reset, so it catches boot output from the first byte, decoded. (Before
+`tower logs` had reset-on-attach, mode B read raw bytes with the old `jolt monitor --reset` and
+recovered the message text with `strings`; the decoded capture replaces that.)
 
 ```sh
-python3 tools/hwtest/cap.py <seconds> jolt monitor --reset -d <PORT> > raw.bin
-strings -n 3 raw.bin            # human-readable log/event text, incl. the verdict line
+python3 tools/hwtest/cap.py <seconds> tower -d <PORT> logs --reset --color never > out.txt
+grep -iE 'PASS|FAIL|MISMATCH|VIOLATION' out.txt   # the verdict line
 ```
 
 Use Mode B for: all crypto/frame/duty/fhss KATs, `edge_recovery`, `radio_id/state/regdump`,
@@ -178,15 +181,15 @@ KAT/single-board radio examples that need **no** feature and **no** peer: `net_p
 ## 5. Test matrix
 
 Legend for **Pass**: the exact substring to grep in the capture. `*` = mode (A=tower logs,
-B=jolt --reset+strings, H=host, X=interactive, S=shell-exec).
+B=tower logs --reset, H=host, X=interactive, S=shell-exec).
 
 ### A. Host-side unit tests (`just test`; mode H)
 | ID | What | Pass |
 |---|---|---|
 | H1 | `tower-kv` codec (12 tests: append/latest-wins, torn-append, torn-flip, torn-superblock fail-closed, compaction, full, migrate legacy/fresh, key-zero reserved) | `test result: ok. 12 passed` |
-| H2 | `tower-radio-core` (12 tests: duty token-bucket math + FHSS hop permutation + CCM RFC 3610 / key-check-value KAT) | `test result: ok. 12 passed` |
-| H3 | `tower-net-core` (90 tests: replay rule + re-ACK cap, KCV-checked addr-keyed lane binding, TX-counter watermark/fail-closed nonce safety + the single `alloc` allocator (cancellation, persist failure, ceiling), ACK resolution, FHSS beacon-epoch acceptance, pairing admission/confirm rules, reserved-address rules, CCM nonce layout/uniqueness) | `test result: ok. 90 passed` |
-| H4 | `tower-gw-core` (23 tests: registry codec/capacity, insert-only `add_new` for OTA commits, downlink queue) | `test result: ok. 23 passed` |
+| H2 | `tower-radio` (12 tests: duty token-bucket math + FHSS hop permutation + CCM RFC 3610 / key-check-value KAT) | `test result: ok. 12 passed` |
+| H3 | `tower-net` (90 tests: replay rule + re-ACK cap, KCV-checked addr-keyed lane binding, TX-counter watermark/fail-closed nonce safety + the single `alloc` allocator (cancellation, persist failure, ceiling), ACK resolution, FHSS beacon-epoch acceptance, pairing admission/confirm rules, reserved-address rules, CCM nonce layout/uniqueness) | `test result: ok. 90 passed` |
+| H4 | `tower-gateway` (23 tests: registry codec/capacity, insert-only `add_new` for OTA commits, downlink queue) | `test result: ok. 23 passed` |
 
 ### B. Board bring-up & peripheral drivers
 | ID | Example | Mode | Pass / observable | Edge cases |

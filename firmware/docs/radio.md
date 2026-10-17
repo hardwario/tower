@@ -179,7 +179,7 @@ every `P=32` accepts (replay window ≤ P across a receiver reboot). CCM verify
 happens *before* the replay comparison, so a forged frame can't poison the state.
 
 Every TX path (DATA, ACK, FHSS beacon, bulk announce/session/request, JOIN frames) takes its
-counter from **one allocator** (`TxCounter::alloc` in `tower-net-core`, driven by
+counter from **one allocator** (`TxCounter::alloc` in `tower-net`, driven by
 `Net::alloc_counter`) that hands the value out *already consumed*, **before** the transfer
 awaits anything. A future dropped mid-flight (a `select(send, Timer)` timing out, an abandoned
 bulk) therefore can't leave its counter for the next transfer to seal different plaintext under

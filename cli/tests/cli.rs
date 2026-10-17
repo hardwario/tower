@@ -23,6 +23,7 @@ fn help_lists_all_subcommands() {
         .stdout(predicate::str::contains("shell"))
         .stdout(predicate::str::contains("exec"))
         .stdout(predicate::str::contains("console"))
+        .stdout(predicate::str::contains("chip"))
         // The bare-`tower` UX: the command is optional (no subcommand → TUI).
         .stdout(predicate::str::contains("[COMMAND]"));
 }
@@ -54,10 +55,7 @@ fn unknown_subcommand_is_a_usage_error() {
 #[test]
 fn color_rejects_invalid_value() {
     // `--color` is an enum {auto,always,never}; anything else is a usage error.
-    tower()
-        .args(["logs", "--color", "rainbow"])
-        .assert()
-        .code(2);
+    tower().args(["logs", "--color", "rainbow"]).assert().code(2);
 }
 
 #[test]
@@ -105,6 +103,17 @@ fn console_nonexistent_device_first_open_is_fatal() {
         .stderr(predicate::str::contains("error"));
 }
 
+#[test]
+fn chip_nonexistent_device_is_a_tool_error() {
+    // `tower chip` opens the port before any bootloader traffic, so a bad `--device` fails fast
+    // with exit 1 (tool error) and never touches hardware.
+    tower()
+        .args(["chip", "--device", "/dev/tower-cli-test-nonexistent"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("error"));
+}
+
 // ---- gateway / nodes / net surfaces (no hardware, no broker) ---------------------
 
 #[test]
@@ -137,13 +146,7 @@ fn gateway_broker_conflicts_with_mqtt() {
     // Usage errors are clap's: exit 2.
     Command::cargo_bin("tower")
         .unwrap()
-        .args([
-            "gateway",
-            "--broker",
-            "127.0.0.1:1883",
-            "--mqtt",
-            "host:1883",
-        ])
+        .args(["gateway", "--broker", "127.0.0.1:1883", "--mqtt", "host:1883"])
         .assert()
         .code(2);
 }

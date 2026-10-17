@@ -1,0 +1,15 @@
+[package]
+name = "tower-net"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "no_std, hardware-free decision core of the HARDWARIO TOWER radio network layer's security invariants: the per-peer replay-acceptance rule, the TX-counter reserve-ahead watermark + fail-closed nonce-safety kernel, ACK delivery resolution, the FHSS beacon-epoch acceptance machine, the OTA-pairing confirm freshness rule, and the CCM nonce construction. Not the network layer itself (that is the SDK's `tower::radio::net`); split out so the security-critical accept/reject arithmetic is unit-tested on the host."
+
+# Leaf crate: NO dependencies (not even tower-radio: the one shared constant, the CCM
+# nonce length, is mirrored and const-asserted equal in the firmware). That keeps this crate
+# host-buildable AND host-testable with plain `cargo test`, exactly like crates/kv and
+# crates/radio. The firmware keeps all I/O, async, radio and EEPROM flow and
+# delegates each *decision* here, so no external API changes.
+[dependencies]

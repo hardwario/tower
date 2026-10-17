@@ -239,13 +239,13 @@ impl App {
 
     fn rpc(&mut self, op: &str, params: serde_json::Value) {
         self.next_req += 1;
-        let _ = self.input.send(Input::Frontend(FrontendCmd::Rpc(
-            super::payload::RpcRequest {
+        let _ = self
+            .input
+            .send(Input::Frontend(FrontendCmd::Rpc(super::payload::RpcRequest {
                 id: format!("tui-{}", self.next_req),
                 op: op.into(),
                 params,
-            },
-        )));
+            })));
     }
 
     fn on_event(&mut self, ev: Event) {
@@ -500,10 +500,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
 /// footer chips double as buttons: a click presses the chip's key, and a
 /// Shift-click on the F1 chip walks focus counter-clockwise like Shift-F1.
 fn handle_mouse(app: &mut App, m: event::MouseEvent) {
-    if !app.mouse
-        || app.modal.is_some()
-        || m.kind != event::MouseEventKind::Down(event::MouseButton::Left)
-    {
+    if !app.mouse || app.modal.is_some() || m.kind != event::MouseEventKind::Down(event::MouseButton::Left) {
         return;
     }
     let hit = |r: Rect| -> bool {
@@ -549,10 +546,7 @@ fn start_cable(app: &mut App, port: String) {
     let (ptx, prx) = std::sync::mpsc::channel();
     let (rtx, rrx) = std::sync::mpsc::channel();
     pair::spawn(port.clone(), app.gw, app.input.clone(), rrx, ptx);
-    app.cable = Some(CableSession {
-        rx: prx,
-        rpc_tx: rtx,
-    });
+    app.cable = Some(CableSession { rx: prx, rpc_tx: rtx });
     app.modal = Some(Modal::PairRun {
         port,
         lines: Vec::new(),
@@ -596,11 +590,7 @@ fn tick_pairing(app: &mut App) {
     }
     // OTA popup lifecycle: close once the window resolved (join/timeout/cancel
     // publish the idle state), or if it never opened (RPC refused) within 5 s.
-    if let Some(Modal::PairOta {
-        opened_at,
-        seen_open,
-    }) = &mut app.modal
-    {
+    if let Some(Modal::PairOta { opened_at, seen_open }) = &mut app.modal {
         let open = app.pairing.as_ref().is_some_and(|p| p.state == "open");
         if open {
             *seen_open = true;
@@ -617,9 +607,7 @@ fn tick_pairing(app: &mut App) {
         if Instant::now() >= *deadline {
             catch_timeout = true;
         } else if poll_due {
-            catch_found = poll_ports(&app.port)
-                .into_iter()
-                .find(|p| !baseline.contains(p));
+            catch_found = poll_ports(&app.port).into_iter().find(|p| !baseline.contains(p));
         }
     }
     if catch_timeout {
@@ -989,19 +977,11 @@ fn handle_modal_key(app: &mut App, code: KeyCode) {
             KeyCode::Esc | KeyCode::Char('q') => {}
             _ => app.modal = Some(Modal::PairMenu { selected }),
         },
-        Modal::PairOta {
-            opened_at,
-            seen_open,
-        } => match code {
+        Modal::PairOta { opened_at, seen_open } => match code {
             // Esc = cancel NOW: the engine cancels the device window and
             // publishes the idle pairing state; the modal just closes.
             KeyCode::Esc => app.rpc("pairing_cancel", serde_json::Value::Null),
-            _ => {
-                app.modal = Some(Modal::PairOta {
-                    opened_at,
-                    seen_open,
-                })
-            }
+            _ => app.modal = Some(Modal::PairOta { opened_at, seen_open }),
         },
         Modal::PairCatch { baseline, deadline } => match code {
             KeyCode::Esc => {}
@@ -1025,19 +1005,11 @@ fn handle_modal_key(app: &mut App, code: KeyCode) {
             KeyCode::Esc | KeyCode::Char('q') => {}
             _ => app.modal = Some(Modal::PairPorts { ports, selected }),
         },
-        Modal::PairRun {
-            port,
-            lines,
-            failed,
-        } => {
+        Modal::PairRun { port, lines, failed } => {
             // A failure waits for any key; while running, Esc hides the modal
             // (the worker finishes on its own and the outcome lands in the log).
             if failed.is_none() && code != KeyCode::Esc {
-                app.modal = Some(Modal::PairRun {
-                    port,
-                    lines,
-                    failed,
-                });
+                app.modal = Some(Modal::PairRun { port, lines, failed });
             }
         }
         Modal::Info { .. } => {} // any key closes
@@ -1086,12 +1058,8 @@ fn handle_modal_key(app: &mut App, code: KeyCode) {
 // ---- rendering -------------------------------------------------------------------
 
 fn ui(f: &mut Frame, app: &mut App) {
-    let [header, body, footer] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(1),
-    ])
-    .areas(f.area());
+    let [header, body, footer] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
     render_header(f, app, header);
     if app.zoom {
         // F3 zoom: the focused pane owns the whole body, borderless (the
@@ -1122,17 +1090,12 @@ fn ui(f: &mut Frame, app: &mut App) {
     } else {
         // Three rows: Nodes|Radio on top, Shell|MQTT in the middle, and the gateway
         // log as a full-width strip at the bottom (always visible, never dominant).
-        let [top, middle, log_area] = Layout::vertical([
-            Constraint::Fill(5),
-            Constraint::Fill(6),
-            Constraint::Length(8),
-        ])
-        .areas(body);
+        let [top, middle, log_area] =
+            Layout::vertical([Constraint::Fill(5), Constraint::Fill(6), Constraint::Length(8)]).areas(body);
         let [nodes_area, chart_area] =
             Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).areas(top);
         let [shell_area, mqtt_area] =
-            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-                .areas(middle);
+            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(middle);
         // Remember where the panes are for click-to-focus.
         app.zones = PaneZones {
             nodes: nodes_area,
@@ -1164,10 +1127,7 @@ fn dot(up: bool) -> Span<'static> {
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
     let bar = Style::new().bg(Color::Gray).fg(Color::Black);
     let mut spans = vec![
-        Span::styled(
-            " HARDWARIO TOWER Gateway ",
-            bar.add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(" HARDWARIO TOWER Gateway ", bar.add_modifier(Modifier::BOLD)),
         Span::styled(format!("{} ", app.port), bar),
         dot(app.serial_up),
         Span::styled(" serial  ", bar),
@@ -1241,11 +1201,7 @@ fn render_footer(f: &mut Frame, app: &mut App, area: Rect) {
 fn pane_block(title: String, focused: bool) -> Block<'static> {
     let mut b = Block::bordered().title(title);
     if focused {
-        b = b.border_style(
-            Style::new()
-                .fg(Color::LightRed)
-                .add_modifier(Modifier::BOLD),
-        );
+        b = b.border_style(Style::new().fg(Color::LightRed).add_modifier(Modifier::BOLD));
     }
     b
 }
@@ -1259,9 +1215,7 @@ fn render_nodes(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
         .enumerate()
         .map(|(i, n)| {
             let style = if i == app.selected {
-                Style::new()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
+                Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
             } else {
                 Style::new()
             };
@@ -1286,11 +1240,7 @@ fn render_nodes(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
                 } else {
                     format!("⌛{}", n.pending.len())
                 },
-                if n.sleeping {
-                    "●".into()
-                } else {
-                    "○".into()
-                },
+                if n.sleeping { "●".into() } else { "○".into() },
             ])
             .style(style)
         })
@@ -1442,15 +1392,11 @@ fn render_chart(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
     };
     let mut chart = Chart::new(datasets)
         .legend_position(Some(LegendPosition::TopLeft))
-        .x_axis(
-            Axis::default()
-                .bounds([-((slots - 1) as f64), 0.0])
-                .labels([
-                    dim(ago(window_s)),
-                    dim(ago(window_s / 2.0)),
-                    dim("now".into()),
-                ]),
-        )
+        .x_axis(Axis::default().bounds([-((slots - 1) as f64), 0.0]).labels([
+            dim(ago(window_s)),
+            dim(ago(window_s / 2.0)),
+            dim("now".into()),
+        ]))
         .y_axis(
             Axis::default()
                 .bounds([CHART_MIN_DBM, CHART_MAX_DBM])
@@ -1497,10 +1443,9 @@ fn render_shell(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
                         Line::from(Span::styled(format!("✖ {e}"), Style::new().fg(Color::Red)))
                     }
                     DialogLine::Done(0) => Line::from("✓".fg(Color::Green)),
-                    DialogLine::Done(r) => Line::from(Span::styled(
-                        format!("✖ result {r}"),
-                        Style::new().fg(Color::Red),
-                    )),
+                    DialogLine::Done(r) => {
+                        Line::from(Span::styled(format!("✖ result {r}"), Style::new().fg(Color::Red)))
+                    }
                 });
             }
         }
@@ -1537,16 +1482,10 @@ fn mqtt_line<'a>(prefix: &str, m: &'a MqttMsg) -> Line<'a> {
     let mut spans: Vec<Span<'a>> = Vec::with_capacity(8);
     spans.push(match m.dir {
         MqttDir::Out => Span::styled("▲ ", Style::new().fg(Color::Cyan)),
-        MqttDir::In => Span::styled(
-            "▼ ",
-            Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-        ),
+        MqttDir::In => Span::styled("▼ ", Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
     });
     let topic = m.topic.strip_prefix(prefix).unwrap_or(&m.topic);
-    spans.push(Span::styled(
-        topic,
-        Style::new().add_modifier(Modifier::BOLD),
-    ));
+    spans.push(Span::styled(topic, Style::new().add_modifier(Modifier::BOLD)));
     if m.retain {
         spans.push(Span::styled(" ®", Style::new().fg(Color::DarkGray)));
     }
@@ -1570,17 +1509,13 @@ fn json_spans(payload: &[u8]) -> Vec<Span<'_>> {
         // An empty MQTT publish clears a retained topic (node removed).
         return vec![Span::styled(
             "(cleared)",
-            Style::new()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
+            Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
         )];
     }
     let Ok(raw) = std::str::from_utf8(payload) else {
         return vec![Span::styled(
             format!("({} B binary)", payload.len()),
-            Style::new()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
+            Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
         )];
     };
     let b = raw.as_bytes();
@@ -1607,16 +1542,11 @@ fn json_spans(payload: &[u8]) -> Vec<Span<'_>> {
                 while j < b.len() && b[j].is_ascii_whitespace() {
                     j += 1;
                 }
-                let color = if j < b.len() && b[j] == b':' {
-                    KEY
-                } else {
-                    STR
-                };
+                let color = if j < b.len() && b[j] == b':' { KEY } else { STR };
                 out.push(Span::styled(&raw[start..i], Style::new().fg(color)));
             }
             b'0'..=b'9' | b'-' => {
-                while i < b.len() && matches!(b[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
-                {
+                while i < b.len() && matches!(b[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
                     i += 1;
                 }
                 out.push(Span::styled(&raw[start..i], Style::new().fg(NUM)));
@@ -1822,17 +1752,11 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
             let mut lines = Vec::new();
             for (i, (label, hint)) in items.iter().enumerate() {
                 let (marker, style) = if i == *selected {
-                    (
-                        "▸ ",
-                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    )
+                    ("▸ ", Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD))
                 } else {
                     ("  ", Style::new())
                 };
-                lines.push(Line::from(vec![
-                    Span::raw(marker),
-                    Span::styled(*label, style),
-                ]));
+                lines.push(Line::from(vec![Span::raw(marker), Span::styled(*label, style)]));
                 lines.push(Line::from(Span::styled(
                     format!("    {hint}"),
                     Style::new().fg(Color::DarkGray),
@@ -1894,10 +1818,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
             }
             for (i, p) in ports.iter().enumerate() {
                 let (marker, style) = if i == *selected {
-                    (
-                        "▸ ",
-                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    )
+                    ("▸ ", Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD))
                 } else {
                     ("  ", Style::new())
                 };
@@ -1930,10 +1851,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
                 }
                 None => {
                     lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        "…",
-                        Style::new().fg(Color::DarkGray),
-                    )));
+                    lines.push(Line::from(Span::styled("…", Style::new().fg(Color::DarkGray))));
                 }
             }
             (" Cable pairing ".into(), lines)
@@ -1959,9 +1877,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
             }
             for (i, p) in pend.iter().enumerate() {
                 let style = if i == *selected {
-                    Style::new()
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD)
+                    Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
                 } else {
                     Style::new()
                 };
@@ -2193,10 +2109,7 @@ mod tests {
         assert!(grid.contains("nodes/0x0000ab12"));
         assert!(!grid.contains("nodes/0x0000bb34"), "other node hidden");
         assert!(!grid.contains("gateway/stats"), "gateway topics hidden");
-        assert!(
-            grid.contains("MQTT ▶ 0x0000ab12"),
-            "filter shown in the title"
-        );
+        assert!(grid.contains("MQTT ▶ 0x0000ab12"), "filter shown in the title");
         // …but the deque still holds every message (filtering loses nothing)…
         assert_eq!(app.mqtt.len(), 3);
         // …and `f` again flips straight back to all.
@@ -2216,10 +2129,7 @@ mod tests {
     fn radio_bars_fill_bottom_up() {
         let (mut app, _etx, _irx) = test_app();
         for _ in 0..4 {
-            app.on_event(Event::Radio(RadioSample::Ambient {
-                dbm: -60,
-                channel: 5,
-            }));
+            app.on_event(Event::Radio(RadioSample::Ambient { dbm: -60, channel: 5 }));
         }
         let grid = render(&mut app);
         // A -60 dBm reading spans most of the -110..-30 range: the filled column
@@ -2232,19 +2142,13 @@ mod tests {
     fn radio_bars_are_evenly_spaced() {
         let (mut app, _etx, _irx) = test_app();
         for _ in 0..40 {
-            app.on_event(Event::Radio(RadioSample::Ambient {
-                dbm: -60,
-                channel: 5,
-            }));
+            app.on_event(Event::Radio(RadioSample::Ambient { dbm: -60, channel: 5 }));
         }
         let grid = render(&mut app);
         // Uniform readings ⇒ every bar is a full "██" column pair. The 2:1 rhythm must
         // be exact across the whole plot: a lone "█", a "███" run, or a double gap
         // means the x→column mapping aliased (slots ≠ the chart's true graph width).
-        let row = grid
-            .lines()
-            .find(|l| l.contains('█'))
-            .expect("a bar row renders");
+        let row = grid.lines().find(|l| l.contains('█')).expect("a bar row renders");
         let start = row.find('█').unwrap();
         let end = row.rfind('█').unwrap() + '█'.len_utf8();
         let bars: Vec<&str> = row[start..end].split(' ').collect();
@@ -2259,17 +2163,11 @@ mod tests {
     #[test]
     fn pause_freezes_the_radio_chart() {
         let (mut app, _etx, _irx) = test_app();
-        app.on_event(Event::Radio(RadioSample::Ambient {
-            dbm: -60,
-            channel: 5,
-        }));
+        app.on_event(Event::Radio(RadioSample::Ambient { dbm: -60, channel: 5 }));
         assert_eq!(app.ambient.len(), 1);
         // F5: samples and marks stop ingesting (the deques ARE the chart), title readout freezes.
         handle_key(&mut app, KeyCode::F(5), KeyModifiers::NONE);
-        app.on_event(Event::Radio(RadioSample::Ambient {
-            dbm: -50,
-            channel: 5,
-        }));
+        app.on_event(Event::Radio(RadioSample::Ambient { dbm: -50, channel: 5 }));
         app.on_event(Event::Radio(RadioSample::Rx { src: 1, rssi: -60 }));
         assert_eq!(app.ambient.len(), 1, "paused: no ambient ingest");
         assert!(app.rx_marks.is_empty(), "paused: no mark ingest");
@@ -2277,10 +2175,7 @@ mod tests {
         assert!(render(&mut app).contains("Radio · -60 dBm · ch 5 (paused)"));
         // Unpause: ingest resumes.
         handle_key(&mut app, KeyCode::F(5), KeyModifiers::NONE);
-        app.on_event(Event::Radio(RadioSample::Ambient {
-            dbm: -50,
-            channel: 5,
-        }));
+        app.on_event(Event::Radio(RadioSample::Ambient { dbm: -50, channel: 5 }));
         assert_eq!(app.ambient.len(), 2);
     }
 
@@ -2308,10 +2203,7 @@ mod tests {
         // F6 Rename is global too, matching its footer chip.
         app.focus = Pane::Mqtt;
         handle_key(&mut app, KeyCode::F(6), KeyModifiers::NONE);
-        assert!(matches!(
-            app.modal,
-            Some(Modal::Rename { node: 0xAB12, .. })
-        ));
+        assert!(matches!(app.modal, Some(Modal::Rename { node: 0xAB12, .. })));
     }
 
     #[test]
@@ -2411,10 +2303,7 @@ mod tests {
         });
         let grid = render(&mut app);
         assert!(grid.contains("therm-period = 60"));
-        assert!(
-            grid.contains("therm-delta = 50"),
-            "straddling line reassembled"
-        );
+        assert!(grid.contains("therm-delta = 50"), "straddling line reassembled");
         assert!(grid.contains("accel = medium"));
     }
 

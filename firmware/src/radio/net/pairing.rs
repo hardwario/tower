@@ -22,9 +22,9 @@
 
 use embassy_time::{Duration, Instant, Timer};
 // The admission rules (who may be answered / which response is ours) and the confirm
-// freshness rule (addr ‖ challenge echo) live in the host-testable `tower_net_core::pairing`
+// freshness rule (addr ‖ challenge echo) live in the host-testable `tower_net::pairing`
 // kernel; the challenge minting (Net's PRNG), the windows and the JOIN frame exchange stay here.
-use tower_net_core::pairing::{confirm_matches, join_request_admissible, join_response_for};
+use tower_net::pairing::{confirm_matches, join_request_admissible, join_response_for};
 
 use super::{ACK_TURNAROUND, Net, TX_TIMEOUT, is_reserved_addr};
 use crate::radio::duty;

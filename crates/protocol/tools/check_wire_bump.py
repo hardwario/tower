@@ -4,7 +4,7 @@
 postcard is not self-describing, so the golden vectors are the byte-level definition
 of a wire format. The `test` CI job guarantees the goldens match the code; this script
 closes the other half of the loop: if a golden changed relative to the baseline (by
-default the latest release tag), the corresponding version constant must have been
+default the latest `protocol-v*` release tag), the corresponding version constant must have been
 bumped too. Together the two checks make "wire change => version bump" mechanical
 instead of a comment-enforced convention.
 
@@ -45,10 +45,19 @@ The set of surfaces checked is this script's SURFACES *united with the baseline'
 (parsed from the baseline copy of this file), so dropping an entry from SURFACES cannot
 silence the guard for a golden file that existed at the baseline.
 
-Usage (from the repo root):
-  python3 tools/check_wire_bump.py              # baseline = latest v* tag (CI; needs tags)
-  python3 tools/check_wire_bump.py --base REF   # baseline = any commit-ish (HEAD, origin/main, v1.5.0)
-  python3 tools/check_wire_bump.py --self-test  # run the guard against synthetic repos
+Where it looks
+--------------
+The crate is `crates/protocol` of the hardwario/tower monorepo, and its releases are the
+`protocol-vX.Y.Z` tags (the monorepo also carries `cli-v*` and the historical `jolt-v*` tags,
+which are ignored). All paths above are relative to the CRATE directory, located from this
+script's own path, and baseline files are read with `git show REF:./PATH` from there, so the
+guard works from any working directory and against any baseline whose tree has the crate at
+the same place (every imported `protocol-v*` tag does).
+
+Usage (from anywhere in the repo):
+  python3 crates/protocol/tools/check_wire_bump.py                # baseline = latest protocol-v* tag (CI; needs tags)
+  python3 crates/protocol/tools/check_wire_bump.py --base REF     # baseline = any commit-ish (HEAD, origin/main, protocol-v1.5.0)
+  python3 crates/protocol/tools/check_wire_bump.py --self-test    # run the guard against synthetic repos
 Exit codes: 0 ok, 1 violation, 2 cannot determine baseline.
 """
 
@@ -68,8 +77,15 @@ SURFACES = [
     ("tests/radio_golden.rs", "RADIO_SCHEMA_VERSION", "src/radio.rs"),
 ]
 
-# Where this script lives in the repo; the baseline's copy is parsed for its SURFACES.
+# Where this script lives in the crate; the baseline's copy is parsed for its SURFACES.
 GUARD_PATH = "tools/check_wire_bump.py"
+
+# The crate directory (the parent of tools/). Every SURFACES / GUARD_PATH path is relative to it.
+CRATE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Release tags of this crate in the monorepo: `protocol-vX.Y.Z` (never a bare `v*`, which is
+# what the crate's standalone repo used before the import renamed its tags).
+TAG_PREFIX = "protocol-v"
 
 
 # --- git / file access -----------------------------------------------------------------
@@ -80,8 +96,10 @@ def git(repo: str, *args: str) -> str:
 
 
 def at_ref(repo: str, ref: str, path: str) -> str | None:
-    """`path` as of `ref`, or None if it does not exist there."""
-    r = subprocess.run(("git", "show", f"{ref}:{path}"), cwd=repo, capture_output=True, text=True)
+    """`path` (relative to the crate directory `repo`) as of `ref`, or None if it does not exist
+    there. `REF:./PATH` resolves against git's working directory, i.e. the crate directory, so this
+    works whether the crate is the repository root (the self-test) or a subdirectory of it."""
+    r = subprocess.run(("git", "show", f"{ref}:./{path}"), cwd=repo, capture_output=True, text=True)
     return r.stdout if r.returncode == 0 else None
 
 
@@ -320,7 +338,7 @@ def check_surface(repo: str, base: str, golden: str, const: str, decl: str, list
     if bumped:
         print(
             f"wire-bump guard: {golden}: {len(changes)} golden(s) changed since {base} and {const} "
-            f"bumped {old_ver} -> {new_ver}: ok (remember: re-pin the consumers)"
+            f"bumped {old_ver} -> {new_ver}: ok (remember: tag {TAG_PREFIX}X.Y.Z, rebuild the `tower` CLI)"
         )
         return 0
     listing = "\n".join(f"  - {c}" for c in changes)
@@ -328,7 +346,7 @@ def check_surface(repo: str, base: str, golden: str, const: str, decl: str, list
         f"wire-bump guard FAILED: golden vectors in {golden} changed relative to {base}, "
         f"but {const} is still {new_ver}:\n{listing}\n"
         f"A golden change means the bytes on the wire changed. Bump {const} in "
-        f"{decl} (and the crate version + tag), or revert the wire change.\n"
+        f"{decl} (and the crate version + the {TAG_PREFIX}X.Y.Z tag), or revert the wire change.\n"
         "Do NOT 'just fix the bytes'; see AGENTS.md, 'Releasing a change'. (Adding coverage? "
         "Add a NEW golden fn instead of editing an existing one.)",
         file=sys.stderr,
@@ -348,7 +366,7 @@ def check(repo: str, base: str, surfaces: list[tuple[str, str, str]]) -> int:
 
 def resolve_base(repo: str, base: str | None) -> str | None:
     if base is None:
-        tags = git(repo, "tag", "--list", "v*", "--sort=-v:refname").split()
+        tags = git(repo, "tag", "--list", f"{TAG_PREFIX}*", "--sort=-v:refname").split()
         return tags[0] if tags else None
     r = subprocess.run(
         ("git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"), cwd=repo, capture_output=True, text=True
@@ -474,22 +492,29 @@ def self_test() -> int:
         os.environ.pop(var, None)
     quiet = ("-c", "user.name=guard", "-c", "user.email=guard@localhost", "-c", "commit.gpgsign=false")
     failures = 0
-    with tempfile.TemporaryDirectory(prefix="wire-bump-guard-") as repo:
+    with tempfile.TemporaryDirectory(prefix="wire-bump-guard-") as root:
+        # Monorepo shape: the crate is a subdirectory, so every `REF:./PATH` lookup is exercised.
+        repo = os.path.join(root, "crates", "protocol")
         for path, text in _FIXTURE.items():
             os.makedirs(os.path.dirname(os.path.join(repo, path)), exist_ok=True)
             with open(os.path.join(repo, path), "w", encoding="utf-8") as f:
                 f.write(text)
         os.makedirs(os.path.join(repo, "tools"), exist_ok=True)
         shutil.copy(os.path.abspath(__file__), os.path.join(repo, GUARD_PATH))  # baseline SURFACES
-        git(repo, "init", "-q")
-        git(repo, "add", "-A")
-        git(repo, *quiet, "commit", "-q", "--no-verify", "-m", "fixture")
-        git(repo, "tag", "v1.0.0")
+        git(root, "init", "-q")
+        git(root, "add", "-A")
+        git(root, *quiet, "commit", "-q", "--no-verify", "-m", "fixture")
+        git(root, "tag", f"{TAG_PREFIX}0.9.0")
+        git(root, "tag", f"{TAG_PREFIX}1.0.0")
+        # Other components' tags (and a bare v*) must never be taken as the protocol baseline.
+        git(root, *quiet, "commit", "-q", "--no-verify", "--allow-empty", "-m", "later")
+        for decoy in ("cli-v9.9.9", "jolt-v9.9.9", "v9.9.9"):
+            git(root, "tag", decoy)
         base = resolve_base(repo, None)
-        assert base == "v1.0.0", base
+        assert base == f"{TAG_PREFIX}1.0.0", base
         for name, want, mutate in _SCENARIOS:
-            git(repo, "checkout", "-q", "--", ".")
-            git(repo, "clean", "-qfd")
+            git(root, "checkout", "-q", "--", ".")
+            git(root, "clean", "-qfd")
             surfaces = mutate(repo)
             surfaces = surfaces if isinstance(surfaces, list) else SURFACES
             out = io.StringIO()
@@ -507,17 +532,17 @@ def self_test() -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("--base", help="baseline commit-ish (default: the latest v* tag)")
+    ap.add_argument("--base", help=f"baseline commit-ish (default: the latest {TAG_PREFIX}* tag)")
     ap.add_argument("--self-test", action="store_true", help="exercise the guard on synthetic repos")
     args = ap.parse_args()
     if args.self_test:
         return self_test()
-    base = resolve_base(".", args.base)
+    base = resolve_base(CRATE_DIR, args.base)
     if base is None:
-        what = f"ref {args.base!r} not found" if args.base else "no v* tags found"
+        what = f"ref {args.base!r} not found" if args.base else f"no {TAG_PREFIX}* tags found"
         print(f"wire-bump guard: {what}; cannot establish a baseline", file=sys.stderr)
         return 2
-    return check(".", base, SURFACES)
+    return check(CRATE_DIR, base, SURFACES)
 
 
 if __name__ == "__main__":

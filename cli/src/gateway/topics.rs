@@ -206,10 +206,7 @@ mod tests {
     fn node_of_extracts_the_node_topics_only() {
         let p = "tower/";
         assert_eq!(node_of(p, "tower/nodes/0x0000ab12"), Some(0xAB12));
-        assert_eq!(
-            node_of(p, "tower/nodes/0x0000ab12/event/button"),
-            Some(0xAB12)
-        );
+        assert_eq!(node_of(p, "tower/nodes/0x0000ab12/event/button"), Some(0xAB12));
         assert_eq!(node_of(p, "tower/nodes/0x0000ab12/shell/req"), Some(0xAB12));
         assert_eq!(node_of(p, "tower/gateway/status"), None);
         assert_eq!(node_of(p, "tower/radio/rssi"), None);
@@ -246,10 +243,7 @@ mod tests {
             classify(p, "tower/nodes/0x0000ab12/shell/req"),
             Inbound::ShellReq(0xAB12)
         );
-        assert_eq!(
-            classify(p, "tower/nodes/0x0000ab12/shell/rsp"),
-            Inbound::Other
-        );
+        assert_eq!(classify(p, "tower/nodes/0x0000ab12/shell/rsp"), Inbound::Other);
         assert_eq!(classify(p, "other/gateway/cmd"), Inbound::Other);
         assert_eq!(classify(p, "tower/nodes/garbage/shell/req"), Inbound::Other);
     }

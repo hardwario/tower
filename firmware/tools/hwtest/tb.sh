@@ -8,6 +8,6 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 nb="$1"; np="$2"; gb="$3"; gp="$4"; secs="$5"; no="$6"; go="$7"
 tower -d "$np" flash "$nb" >"${no}.flash" 2>&1
 tower -d "$gp" flash "$gb" >"${go}.flash" 2>&1
-python3 "$HERE/cap.py" "$secs" tower -d "$np" logs --no-colors >"$no" 2>&1 &
-python3 "$HERE/cap.py" "$secs" tower -d "$gp" logs --no-colors >"$go" 2>&1 &
+python3 "$HERE/cap.py" "$secs" tower -d "$np" logs --color never >"$no" 2>&1 &
+python3 "$HERE/cap.py" "$secs" tower -d "$gp" logs --color never >"$go" 2>&1 &
 wait

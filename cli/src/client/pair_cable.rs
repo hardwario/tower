@@ -157,9 +157,7 @@ fn gw_params(gw: &serde_json::Value) -> Result<(u32, u8, u8)> {
             .and_then(|v| v.as_u64())
             .and_then(|v| u8::try_from(v).ok())
             .with_context(|| {
-                format!(
-                    "gateway describe: no radio {k} in the answer; update the `tower gateway` host"
-                )
+                format!("gateway describe: no radio {k} in the answer; update the `tower gateway` host")
             })
     };
     Ok((addr, field("band")?, field("channel")?))
@@ -177,12 +175,7 @@ mod tests {
         let old = serde_json::json!({ "gateway": "0x0000ab12" });
         assert!(gw_params(&old).unwrap_err().to_string().contains("band"));
         let no_ch = serde_json::json!({ "gateway": "0x0000ab12", "band": 0 });
-        assert!(
-            gw_params(&no_ch)
-                .unwrap_err()
-                .to_string()
-                .contains("channel")
-        );
+        assert!(gw_params(&no_ch).unwrap_err().to_string().contains("channel"));
         let bad = serde_json::json!({ "gateway": "0x0000ab12", "band": 300, "channel": 0 });
         assert!(gw_params(&bad).is_err(), "out-of-range band");
     }

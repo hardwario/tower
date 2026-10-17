@@ -200,16 +200,16 @@ impl Header {
     }
 }
 
-// The nonce construction lives in the host-testable `tower_net_core` leaf crate, where the
+// The nonce construction lives in the host-testable `tower_net` leaf crate, where the
 // exact byte layout is pinned by a golden test and uniqueness across (src, counter, bulk_index)
 // is proven by round-trip/property tests. Re-exported so call sites keep saying
 // `frame::nonce_for`; it remains the single audited nonce source for the whole stack, and no
 // behavioural change (the construction is byte-identical).
-pub use tower_net_core::nonce::nonce_for;
+pub use tower_net::nonce::nonce_for;
 
-// `tower-net-core` is dependency-free, so it states the 13-byte CCM nonce length itself; it
+// `tower-net` is dependency-free, so it states the 13-byte CCM nonce length itself; it
 // must agree with the CCM core's, or `nonce_for`'s return type wouldn't fit the `Ccm` API.
-const _: () = assert!(tower_net_core::nonce::NONCE_LEN == NONCE_LEN);
+const _: () = assert!(tower_net::nonce::NONCE_LEN == NONCE_LEN);
 
 /// Build a full on-air frame: clear header ‖ CCM(payload) ‖ tag. Returns the
 /// total length. `out` must be at least [`MAX_FRAME`] bytes.

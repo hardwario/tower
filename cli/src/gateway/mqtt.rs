@@ -63,10 +63,7 @@ pub(crate) struct Credentials {
 /// a user. A password that only came from the *environment* is ambient configuration and is
 /// ignored without a user: exporting `TOWER_MQTT_PASSWORD` must not break a bare
 /// `tower gateway` / `tower nodes list` against an anonymous loopback broker.
-pub(crate) fn credentials(
-    user: Option<&str>,
-    password: Option<&str>,
-) -> Result<Option<Credentials>> {
+pub(crate) fn credentials(user: Option<&str>, password: Option<&str>) -> Result<Option<Credentials>> {
     let from_env = password.is_some() && std::env::var(PASSWORD_ENV).ok().as_deref() == password;
     pair_credentials(user, password, from_env).map_err(anyhow::Error::msg)
 }
@@ -88,9 +85,7 @@ fn pair_credentials(
              (preferred; argv is visible in `ps`) or pass --mqtt-password"
         )),
         (None, Some(_)) if password_from_env => Ok(None),
-        (None, Some(_)) => {
-            Err("--mqtt-password needs an MQTT user (--mqtt-user / TOWER_MQTT_USER)".into())
-        }
+        (None, Some(_)) => Err("--mqtt-password needs an MQTT user (--mqtt-user / TOWER_MQTT_USER)".into()),
         (None, None) => Ok(None),
     }
 }
@@ -122,9 +117,7 @@ pub(crate) fn broker_auth(
     creds: Option<&Credentials>,
 ) -> std::result::Result<Option<HashMap<String, String>>, String> {
     match creds {
-        Some(c) => Ok(Some(
-            [(c.user.clone(), c.password.clone())].into_iter().collect(),
-        )),
+        Some(c) => Ok(Some([(c.user.clone(), c.password.clone())].into_iter().collect())),
         None if listen.ip().to_canonical().is_loopback() => Ok(None),
         None => Err(format!(
             "refusing to host the embedded MQTT broker on {listen} without authentication: a \
@@ -297,9 +290,7 @@ impl<S: Sink> Publisher<S> {
     pub(crate) fn subscribe(&mut self, filter: String) {
         self.flush();
         // Once anything is held, later subscribes queue behind it (order is preserved).
-        if (!self.subs.is_empty() || !self.sink.try_subscribe(&filter))
-            && !self.subs.contains(&filter)
-        {
+        if (!self.subs.is_empty() || !self.sink.try_subscribe(&filter)) && !self.subs.contains(&filter) {
             self.subs.push(filter);
         }
     }
@@ -389,10 +380,7 @@ impl<S: Sink> Publisher<S> {
 /// clients sharing one response filter (`topics::gateway_rsp_filter`) the filter count
 /// stays bounded too. `max_payload_size` = [`MAX_PAYLOAD`], matching every client's send cap.
 #[cfg(feature = "embedded-broker")]
-pub(crate) fn broker_config(
-    listen: SocketAddr,
-    auth: Option<HashMap<String, String>>,
-) -> rumqttd::Config {
+pub(crate) fn broker_config(listen: SocketAddr, auth: Option<HashMap<String, String>>) -> rumqttd::Config {
     use rumqttd::{Config, ConnectionSettings, RouterConfig, ServerSettings};
 
     let router = RouterConfig {
@@ -508,9 +496,7 @@ mod tests {
     #[test]
     fn credential_pairing_rules() {
         assert!(pair_credentials(None, None, false).unwrap().is_none());
-        let c = pair_credentials(Some("u"), Some("p"), true)
-            .unwrap()
-            .unwrap();
+        let c = pair_credentials(Some("u"), Some("p"), true).unwrap().unwrap();
         assert_eq!((c.user.as_str(), c.password.as_str()), ("u", "p"));
         // A user without a password used to be dropped silently → now an error.
         let e = pair_credentials(Some("u"), None, false).err().unwrap();
@@ -544,12 +530,7 @@ mod tests {
             assert_eq!(broker_auth(a(l), None), Ok(None), "{l}");
         }
         // Any non-loopback bind (incl. the wildcards) without credentials: refused.
-        for l in [
-            "0.0.0.0:1883",
-            "[::]:1883",
-            "192.168.1.5:1883",
-            "10.0.0.1:2000",
-        ] {
+        for l in ["0.0.0.0:1883", "[::]:1883", "192.168.1.5:1883", "10.0.0.1:2000"] {
             let e = broker_auth(a(l), None).unwrap_err();
             assert!(e.contains("--mqtt-user") && e.contains(PASSWORD_ENV), "{e}");
             assert!(!e.contains("s3cret"));
@@ -654,10 +635,7 @@ mod tests {
         p.flush();
         assert_eq!(sink.subs.borrow().as_slice(), ["tower/gateway/cmd"]);
         let sent = sink.sent.borrow();
-        assert_eq!(
-            sent[0],
-            ("tower/gateway/status".into(), true, b"new".to_vec())
-        );
+        assert_eq!(sent[0], ("tower/gateway/status".into(), true, b"new".to_vec()));
         assert_eq!(sent.len(), 1 + BACKLOG_CAP);
         assert_eq!(sent[1].2, b"3");
         drop(sent);
@@ -703,16 +681,9 @@ mod tests {
             match connection.recv_timeout(Duration::from_millis(500)) {
                 Ok(Ok(MqttEvent::Incoming(Incoming::ConnAck(_)))) => {
                     connected = true;
+                    client.subscribe("tower/test", rumqttc::QoS::AtLeastOnce).unwrap();
                     client
-                        .subscribe("tower/test", rumqttc::QoS::AtLeastOnce)
-                        .unwrap();
-                    client
-                        .publish(
-                            "tower/test",
-                            rumqttc::QoS::AtLeastOnce,
-                            true,
-                            b"hi".as_slice(),
-                        )
+                        .publish("tower/test", rumqttc::QoS::AtLeastOnce, true, b"hi".as_slice())
                         .unwrap();
                 }
                 Ok(Ok(MqttEvent::Incoming(Incoming::Publish(p)))) if p.topic == "tower/test" => {
@@ -750,8 +721,7 @@ mod tests {
         embedded_broker(addr, Some(&creds())).expect("broker up");
 
         let connack = |c: Option<&Credentials>, id: &str| -> bool {
-            let (_client, mut conn) =
-                Client::new(options(id.into(), "127.0.0.1".into(), port, c), 10);
+            let (_client, mut conn) = Client::new(options(id.into(), "127.0.0.1".into(), port, c), 10);
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while std::time::Instant::now() < deadline {
                 match conn.recv_timeout(Duration::from_millis(500)) {
@@ -762,18 +732,12 @@ mod tests {
             }
             false
         };
-        assert!(
-            connack(Some(&creds()), "authed"),
-            "the configured login connects"
-        );
+        assert!(connack(Some(&creds()), "authed"), "the configured login connects");
         assert!(!connack(None, "anon"), "anonymous is refused");
         let wrong = Credentials {
             user: "ops".into(),
             password: "nope".into(),
         };
-        assert!(
-            !connack(Some(&wrong), "wrong"),
-            "a wrong password is refused"
-        );
+        assert!(!connack(Some(&wrong), "wrong"), "a wrong password is refused");
     }
 }

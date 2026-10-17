@@ -4,7 +4,7 @@
 > apps, `apps/radio_push_button.rs` (a sleeping sensor node) and
 > `apps/radio_dongle_gateway.rs` (the network coordinator), are complete firmwares, not
 > skeletons. The host side (`tower gateway`, `tower nodes`, `tower net`, MQTT) lives in the
-> `tower-cli` repo; this guide is the **device** side and the wire contract between them.
+> `tower` CLI (`cli/`); this guide is the **device** side and the wire contract between them.
 
 This is the standalone reference for the TOWER gateway product: a wireless push-button node
 that reports button/temperature/accelerometer events and sleeps between them, a Radio Dongle
@@ -19,7 +19,7 @@ the radio stack itself (framing, CCM, pairing handshake, FHSS, duty cycle) see
 
 ```
    push-button node  ──radio (CCM, NodeMsg schema)──▶  gateway dongle  ──serial v3──▶  tower gateway  ──▶ MQTT
-   apps/radio_push_button        transparent bridge       apps/radio_dongle_gateway       (tower-cli)     tower nodes / net
+   apps/radio_push_button        transparent bridge       apps/radio_dongle_gateway       (cli/)          tower nodes / net
    (STM32L083, sleeps)           forwards Uplink verbatim  registry + queue + pairing      TUI | --service
 ```
 
@@ -31,7 +31,8 @@ the radio stack itself (framing, CCM, pairing handshake, FHSS, duty cycle) see
    *verbatim* to the host; it never decodes the node's app schema. What it owns is
    *coordination*: the node registry, the downlink queue, pairing, and radio diagnostics.
 3. **Host** (`tower gateway`): decodes the radio application schema, bridges to MQTT, and
-   drives the gateway via the management channel. See the `tower-cli` README (Gateway & MQTT).
+   drives the gateway via the management channel. See the [CLI README](../../cli/README.md)
+   (Gateway & MQTT).
 
 The transparent-bridge split is the design's backbone: **a new node app type needs no gateway
 firmware change**, because the gateway never interprets `NodeMsg`/`NodeCmd`; only the node
@@ -184,7 +185,7 @@ secret**; with the default lane on, anyone could seal "uplinks" under it from an
 (e.g. a removed node's). Re-transmits of a node's last confirmed frame are re-ACKed at most 9
 times per counter, so a replayed capture can't drain the EU duty budget through ACKs.
 
-### Node registry (`tower-gw-core::registry`, EEPROM)
+### Node registry (`tower_gateway::registry`, EEPROM)
 
 Paired `(id, key, flags, name)` records, persisted in `NS_APP` postcard **buckets**, never
 RAM-resident (bucket locals are ~270 B of transient stack), mirrored into the net peer table at
@@ -193,7 +194,7 @@ layer's `MAX_PEERS`), `MAX_NAME = 16`. Written only on add/remove/rename/pairing
 per-uplink (that would burn the part). Keys: `KEY_FORMAT = 0x00`, buckets from
 `KEY_BUCKET_BASE = 0x10`.
 
-### Downlink queue (`tower-gw-core::queue`, RAM-only)
+### Downlink queue (`tower_gateway::queue`, RAM-only)
 
 Opaque host-built `NodeCmd` envelopes awaiting a sleeping node's next uplink. Global pool
 `QUEUE_CAP = 4`, per-node FIFO `PER_NODE_CAP = 2`, `MAX_ITEM = 74` B. Stable monotonic `u16` ids
@@ -290,7 +291,7 @@ must be physical; it erases the pairing key) and `settings set` of an address se
 addressing a live node over the air orphans it). `/system reboot` still works remotely. Anyone
 who can reach the gateway's MQTT broker can queue remote shell lines, so this is the backstop
 that keeps a broker-level intruder from unpairing the fleet (see the access policy in the
-tower-cli README). App commands opt in with `Entry::cmd_console_only`; see
+[CLI README](../../cli/README.md)). App commands opt in with `Entry::cmd_console_only`; see
 [console.md](console.md).
 
 ---
@@ -305,8 +306,9 @@ just size  app radio_dongle_gateway   # on-chip footprint (watch the RAM budget)
 
 The end-to-end product path is covered by the HIL bench group `hil/tests/gateway.rs` (two boards,
 `#[ignore]`d): cable-provision the node, bridge a simulated `/button simulate 100` click, run a
-remote shell command through the downlink queue, and assert the `RadioStat` stream. The group is driven from
-the `tower-hil` repo with `just hil`.
+remote shell command through the downlink queue, and assert the `RadioStat` stream. The group is
+driven from the HIL harness (`hil/`) with `just hil` there (or `just hil hil` from the repo root);
+it flashes real hardware.
 
 ## See also
 
@@ -314,5 +316,5 @@ the `tower-hil` repo with `just hil`.
   FHSS, duty cycle) this product rides on.
 - [`console.md`](console.md): the console framing, the full MsgType table, and the settings
   framework (`Kind`, base settings, result codes).
-- `tower-cli` README (*Gateway & MQTT bridge*): the host commands (`tower gateway`, `tower nodes`,
+- The [CLI README](../../cli/README.md) (*Gateway & MQTT bridge*): the host commands (`tower gateway`, `tower nodes`,
   `tower net`) and the MQTT topic tree (the gateway's public API, in `src/gateway/topics.rs`).

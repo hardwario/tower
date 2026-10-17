@@ -1,0 +1,16 @@
+[package]
+name = "tower-gateway"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "no_std, hardware-free decision core of the HARDWARIO TOWER Radio Dongle gateway firmware (firmware/apps/radio_dongle_gateway.rs): the EEPROM node-registry bucket codec (paired ids + AES keys + names, packed into tower-kv-sized buckets because MAX_KEYS is a global budget) and the RAM downlink-queue policy (per-node FIFO, global pool, TTL expiry, dequeue ids). Not the host-side `tower gateway` MQTT bridge (that lives in tower-cli); split out so the registry/queue arithmetic is unit-tested on the host."
+
+# Same shape as crates/kv: serde/postcard/heapless only, no_std, host-testable
+# with plain `cargo test`. The firmware keeps all EEPROM I/O and radio flow and
+# delegates the registry/queue *decisions* here.
+[dependencies]
+serde.workspace = true
+postcard.workspace = true
+heapless.workspace = true

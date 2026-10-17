@@ -1,11 +1,11 @@
 [package]
 name = "tower-cli"
 version = "2.0.0"
-edition = "2024"
-rust-version = "1.99.1"
-description = "HARDWARIO TOWER console host CLI (`tower`): renders the framed serial link from the tower firmware."
-license = "MIT"
-repository = "https://github.com/hardwario/tower-cli"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HARDWARIO TOWER host CLI (`tower`): decodes the framed serial console of the TOWER firmware, flashes over the UART bootloader, and bridges the radio network to MQTT."
 
 [[bin]]
 name = "tower"
@@ -20,17 +20,17 @@ embedded-broker = ["dep:rumqttd"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-serialport = "4"
+serialport.workspace = true
 rustyline = "19"
 ratatui = "0.30"
 anyhow = "1"
-# Flash/erase progress bars (same version the standalone `jolt` CLI renders with).
+# Flash/erase progress bars (tower-boot is UI-free and reports `Progress` events).
 indicatif = "0.18"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # `use-std`: the gateway engine builds owned frames/records with `to_stdvec` (this is
 # a host binary; the no-alloc discipline is the firmware's constraint, not ours).
-postcard = { version = "1", default-features = false, features = ["use-std"] }
-serde = { version = "1", features = ["derive"] }
+postcard = { workspace = true, features = ["use-std"] }
+serde = { workspace = true, features = ["std"] }
 # The gateway's MQTT side (`tower gateway` + the `nodes`/`net` client commands). rumqttc's
 # synchronous Client/Connection API keeps the crate's no-async idiom: tokio appears only as
 # an internal dependency of these two crates, never in our code. Default features OFF: both
@@ -45,24 +45,18 @@ uuid = { version = "1", features = ["v4"] }
 # CSPRNG for minting per-node AES keys (the device PRNGs are explicitly
 # non-cryptographic, so the host is the only place keys may be generated).
 getrandom = { version = "0.4", features = ["std"] }
-# Single source of truth for the wire format, shared with the firmware (which depends on the
-# same crate + tag). postcard isn't self-describing, so both ends MUST be the same version,
-# pinned to a tag so a standalone clone builds reproducibly. Bump in lockstep with any wire
-# change. For side-by-side development against a local checkout, see `.cargo/config.toml`
-# (gitignored `paths` override); it doesn't touch Cargo.lock or affect other clones.
-tower-protocol = { git = "https://github.com/hardwario/tower-protocol", tag = "v1.5.1" }
-# STM32L0 UART-bootloader engine (flash / erase / reset), shared with the standalone
-# `jolt` CLI. Pinned to a tag so a standalone clone builds reproducibly, like
-# tower-protocol above. For side-by-side dev against a local checkout, see the
-# `.cargo/config.toml` `paths` override.
-jolt = { git = "https://github.com/hardwario/jolt", tag = "v1.5.0", default-features = false }
+# Single source of truth for the wire format, shared with the firmware and the HIL harness:
+# all three build this one source tree by path (crates/protocol), so they cannot drift.
+tower-protocol.workspace = true
+# STM32 ROM UART-bootloader control (flash / erase / chip info / reset pulses), crates/boot.
+tower-boot.workspace = true
 
 [dev-dependencies]
 # Tests build wire frames with the protocol's own message types; `ShellCompletions`/`Event`
 # carry `heapless::Vec` fields, so the tests need heapless to construct them. `assert_cmd`
 # drives the compiled `tower` binary end-to-end (help/usage/exit-code contract) with no
-# hardware. Pinned to the same heapless major that tower-protocol resolves.
-heapless = "0.9"
+# hardware. The workspace's heapless, i.e. the one tower-protocol builds with.
+heapless.workspace = true
 assert_cmd = "2"
 predicates = "3"
 

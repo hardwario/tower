@@ -36,12 +36,7 @@ pub(crate) struct MqttOpts {
     #[arg(long, env = "TOWER_MQTT_USER", global = true)]
     pub mqtt_user: Option<String>,
     /// Broker password (prefer the TOWER_MQTT_PASSWORD env var).
-    #[arg(
-        long,
-        env = "TOWER_MQTT_PASSWORD",
-        hide_env_values = true,
-        global = true
-    )]
+    #[arg(long, env = "TOWER_MQTT_PASSWORD", hide_env_values = true, global = true)]
     pub mqtt_password: Option<String>,
     /// MQTT topic prefix (must match the gateway's).
     #[arg(long, default_value = "tower/", global = true)]
@@ -100,10 +95,7 @@ pub(crate) fn connect(opts: &MqttOpts) -> Result<Session> {
         match connection.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Ok(MqttEvent::Incoming(Incoming::ConnAck(_)))) => break,
             Ok(Ok(_)) => continue,
-            Ok(Err(e)) => bail!(
-                "broker {host}:{port}: {e}{}",
-                connect_hint(&e, creds.is_some())
-            ),
+            Ok(Err(e)) => bail!("broker {host}:{port}: {e}{}", connect_hint(&e, creds.is_some())),
             Err(_) => bail!("broker {host}:{port}: connect timeout"),
         }
     }
@@ -184,11 +176,7 @@ impl Session {
     }
 
     /// An RPC that must succeed: `ok:false` becomes an `Err` with the gateway's message.
-    pub(crate) fn rpc_ok(
-        &mut self,
-        op: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
+    pub(crate) fn rpc_ok(&mut self, op: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let rsp = self.rpc(op, params)?;
         if rsp.ok {
             Ok(rsp.data)
@@ -198,11 +186,7 @@ impl Session {
     }
 
     /// Read one retained message from `topic` (None = nothing retained there).
-    pub(crate) fn read_retained(
-        &mut self,
-        topic: &str,
-        window: Duration,
-    ) -> Result<Option<Vec<u8>>> {
+    pub(crate) fn read_retained(&mut self, topic: &str, window: Duration) -> Result<Option<Vec<u8>>> {
         self.client
             .subscribe(topic, QoS::AtLeastOnce)
             .context("subscribing")?;
@@ -245,10 +229,7 @@ impl Session {
             sanitize_line(arg),
             nodes
                 .iter()
-                .map(
-                    |n| sanitize_line(if n.name.is_empty() { &n.addr } else { &n.name })
-                        .into_owned()
-                )
+                .map(|n| sanitize_line(if n.name.is_empty() { &n.addr } else { &n.name }).into_owned())
                 .collect::<Vec<_>>()
                 .join(", ")
         )

@@ -4,8 +4,9 @@
 //! through the gateway; only node firmware + the host CLI must agree on it).
 //!
 //! ⚠️ If a change makes these vectors need updating, the radio schema changed: you
-//! MUST bump `RADIO_SCHEMA_VERSION` in `src/radio.rs` (and the crate version + tag)
-//! and re-pin node firmware + tower-cli. `tools/check_wire_bump.py` enforces this
+//! MUST bump `RADIO_SCHEMA_VERSION` in `src/radio.rs` (and the crate version + the
+//! `protocol-vX.Y.Z` tag) and rebuild node firmware + the `tower` CLI. `tools/check_wire_bump.py`
+//! enforces this
 //! mechanically. Do not "just fix the bytes".
 
 use tower_protocol::radio::*;
@@ -34,16 +35,18 @@ fn golden_node_info() {
     assert_eq!(
         got,
         [
-            0x02, 0x00, 0x11, 0x72, 0x61, 0x64, 0x69, 0x6f, 0x5f, 0x70, 0x75, 0x73, 0x68, 0x5f,
-            0x62, 0x75, 0x74, 0x74, 0x6f, 0x6e, 0x06, 0x76, 0x30, 0x2e, 0x31, 0x2e, 0x30, 0x03,
-            0x01, 0x00
+            0x02, 0x00, 0x11, 0x72, 0x61, 0x64, 0x69, 0x6f, 0x5f, 0x70, 0x75, 0x73, 0x68, 0x5f, 0x62, 0x75,
+            0x74, 0x74, 0x6f, 0x6e, 0x06, 0x76, 0x30, 0x2e, 0x31, 0x2e, 0x30, 0x03, 0x01, 0x00
         ]
     );
 }
 
 #[test]
 fn golden_node_button() {
-    let got = enc_msg(&NodeMsg::Button { kind: ButtonKind::Click, count: 42 });
+    let got = enc_msg(&NodeMsg::Button {
+        kind: ButtonKind::Click,
+        count: 42,
+    });
     assert_eq!(got, [0x02, 0x01, 0x02, 0x2a]);
 }
 
@@ -55,7 +58,10 @@ fn golden_node_temperature() {
 
 #[test]
 fn golden_node_accel() {
-    let got = enc_msg(&NodeMsg::Accel { kind: AccelKind::Orientation, face: 3 });
+    let got = enc_msg(&NodeMsg::Accel {
+        kind: AccelKind::Orientation,
+        face: 3,
+    });
     assert_eq!(got, [0x02, 0x03, 0x01, 0x03]);
 }
 
@@ -73,12 +79,16 @@ fn golden_node_shell() {
 
 #[test]
 fn golden_node_cmd_shell() {
-    let got = enc_cmd(&NodeCmd::Shell { epoch: 7, cmd_id: 9, line: "/system reboot" });
+    let got = enc_cmd(&NodeCmd::Shell {
+        epoch: 7,
+        cmd_id: 9,
+        line: "/system reboot",
+    });
     assert_eq!(
         got,
         [
-            0x02, 0x00, 0x07, 0x09, 0x0e, 0x2f, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x20, 0x72,
-            0x65, 0x62, 0x6f, 0x6f, 0x74
+            0x02, 0x00, 0x07, 0x09, 0x0e, 0x2f, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x20, 0x72, 0x65, 0x62,
+            0x6f, 0x6f, 0x74
         ]
     );
 }
@@ -116,8 +126,8 @@ fn golden_node_info_with_battery() {
     assert_eq!(
         got,
         [
-            0x02, 0x00, 0x0d, 0x72, 0x61, 0x64, 0x69, 0x6f, 0x5f, 0x63, 0x6c, 0x69, 0x6d, 0x61,
-            0x74, 0x65, 0x06, 0x76, 0x31, 0x2e, 0x32, 0x2e, 0x33, 0x4d, 0x00, 0x01, 0xc2, 0x17
+            0x02, 0x00, 0x0d, 0x72, 0x61, 0x64, 0x69, 0x6f, 0x5f, 0x63, 0x6c, 0x69, 0x6d, 0x61, 0x74, 0x65,
+            0x06, 0x76, 0x31, 0x2e, 0x32, 0x2e, 0x33, 0x4d, 0x00, 0x01, 0xc2, 0x17
         ]
     );
 }
@@ -168,17 +178,50 @@ fn node_msg_variant_order_is_stable() {
             }),
             0x00,
         ),
-        (NodeMsg::Button { kind: ButtonKind::Press, count: 1 }, 0x01),
+        (
+            NodeMsg::Button {
+                kind: ButtonKind::Press,
+                count: 1,
+            },
+            0x01,
+        ),
         (NodeMsg::Temperature { millic: 0 }, 0x02),
-        (NodeMsg::Accel { kind: AccelKind::Motion, face: 0 }, 0x03),
-        (NodeMsg::Shell(NodeShellChunk { cmd_id: 0, result: 0, chunk: 0, last: true, text: "" }), 0x04),
+        (
+            NodeMsg::Accel {
+                kind: AccelKind::Motion,
+                face: 0,
+            },
+            0x03,
+        ),
+        (
+            NodeMsg::Shell(NodeShellChunk {
+                cmd_id: 0,
+                result: 0,
+                chunk: 0,
+                last: true,
+                text: "",
+            }),
+            0x04,
+        ),
     ];
     for (m, byte) in &pins {
         let bytes = enc_msg(m);
-        assert_eq!(bytes[..2], [RADIO_SCHEMA_VERSION, *byte], "NodeMsg variant order changed: schema break");
+        assert_eq!(
+            bytes[..2],
+            [RADIO_SCHEMA_VERSION, *byte],
+            "NodeMsg variant order changed: schema break"
+        );
     }
-    let cmd = enc_cmd(&NodeCmd::Shell { epoch: 0, cmd_id: 0, line: "" });
-    assert_eq!(cmd[..2], [RADIO_SCHEMA_VERSION, 0x00], "NodeCmd variant order changed: schema break");
+    let cmd = enc_cmd(&NodeCmd::Shell {
+        epoch: 0,
+        cmd_id: 0,
+        line: "",
+    });
+    assert_eq!(
+        cmd[..2],
+        [RADIO_SCHEMA_VERSION, 0x00],
+        "NodeCmd variant order changed: schema break"
+    );
 }
 
 // --- capacity: everything fits the radio MTU -------------------------------------
@@ -202,7 +245,11 @@ fn max_shell_chunk_fits_the_mtu() {
 #[test]
 fn max_shell_line_fits_the_mtu() {
     let line: String = "y".repeat(RADIO_SHELL_CHUNK);
-    let c = NodeCmd::Shell { epoch: u32::MAX, cmd_id: u16::MAX, line: &line };
+    let c = NodeCmd::Shell {
+        epoch: u32::MAX,
+        cmd_id: u16::MAX,
+        line: &line,
+    };
     let mut buf = [0u8; MAX_RADIO_PAYLOAD];
     encode_node_cmd(&c, &mut buf).expect("max shell line must fit the radio MTU");
 }
@@ -232,7 +279,9 @@ fn wrong_schema_version_is_rejected() {
     bytes[0] = RADIO_SCHEMA_VERSION + 1;
     assert_eq!(
         decode_node_msg(&bytes),
-        Err(tower_protocol::Error::BadVersion { got: RADIO_SCHEMA_VERSION + 1 })
+        Err(tower_protocol::Error::BadVersion {
+            got: RADIO_SCHEMA_VERSION + 1
+        })
     );
     assert_eq!(decode_node_msg(&[]), Err(tower_protocol::Error::TooShort));
 }
@@ -243,12 +292,19 @@ fn wrong_schema_version_is_rejected() {
 /// a legitimate envelope never has a tail.
 #[test]
 fn trailing_bytes_are_malformed() {
-    let mut msg = enc_msg(&NodeMsg::Button { kind: ButtonKind::Hold, count: 7 });
+    let mut msg = enc_msg(&NodeMsg::Button {
+        kind: ButtonKind::Hold,
+        count: 7,
+    });
     assert!(decode_node_msg(&msg).is_ok());
     msg.push(0);
     assert_eq!(decode_node_msg(&msg), Err(tower_protocol::Error::Malformed));
 
-    let mut cmd = enc_cmd(&NodeCmd::Shell { epoch: 42, cmd_id: 3, line: "/led on" });
+    let mut cmd = enc_cmd(&NodeCmd::Shell {
+        epoch: 42,
+        cmd_id: 3,
+        line: "/led on",
+    });
     assert!(decode_node_cmd(&cmd).is_ok());
     cmd.push(0);
     assert_eq!(decode_node_cmd(&cmd), Err(tower_protocol::Error::Malformed));
@@ -258,7 +314,13 @@ fn trailing_bytes_are_malformed() {
 #[test]
 fn over_mtu_encode_is_rejected() {
     let text: String = "z".repeat(MAX_RADIO_PAYLOAD); // envelope overhead pushes it past
-    let m = NodeMsg::Shell(NodeShellChunk { cmd_id: 0, result: 0, chunk: 0, last: true, text: &text });
+    let m = NodeMsg::Shell(NodeShellChunk {
+        cmd_id: 0,
+        result: 0,
+        chunk: 0,
+        last: true,
+        text: &text,
+    });
     let mut big = [0u8; 256];
     assert_eq!(encode_node_msg(&m, &mut big), Err(tower_protocol::Error::Encode));
 }
@@ -268,16 +330,26 @@ fn over_mtu_encode_is_rejected() {
 #[test]
 fn node_msgs_roundtrip() {
     let msgs = [
-        NodeMsg::Button { kind: ButtonKind::Hold, count: 7 },
+        NodeMsg::Button {
+            kind: ButtonKind::Hold,
+            count: 7,
+        },
         NodeMsg::Temperature { millic: -12_345 },
-        NodeMsg::Accel { kind: AccelKind::Motion, face: 0 },
+        NodeMsg::Accel {
+            kind: AccelKind::Motion,
+            face: 0,
+        },
     ];
     for m in &msgs {
         let mut buf = [0u8; MAX_RADIO_PAYLOAD];
         let n = encode_node_msg(m, &mut buf).unwrap();
         assert_eq!(&decode_node_msg(&buf[..n]).unwrap(), m);
     }
-    let c = NodeCmd::Shell { epoch: 42, cmd_id: 3, line: "/led on" };
+    let c = NodeCmd::Shell {
+        epoch: 42,
+        cmd_id: 3,
+        line: "/led on",
+    };
     let mut buf = [0u8; MAX_RADIO_PAYLOAD];
     let n = encode_node_cmd(&c, &mut buf).unwrap();
     assert_eq!(decode_node_cmd(&buf[..n]).unwrap(), c);

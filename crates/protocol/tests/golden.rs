@@ -8,8 +8,8 @@
 //! `PROTOCOL_VERSION`.
 //!
 //! ⚠️ If a change makes these vectors need updating, the wire format changed: you MUST bump
-//! `PROTOCOL_VERSION` (and the crate version + tag) in the same change-set, and re-pin both
-//! consumers. Do not "just fix the bytes".
+//! `PROTOCOL_VERSION` (and the crate version + the `protocol-vX.Y.Z` tag) in the same commit,
+//! and rebuild both ends. Do not "just fix the bytes".
 
 use tower_protocol::msg::*;
 use tower_protocol::*;
@@ -25,11 +25,19 @@ fn golden_hello() {
     let got = frame(
         MsgType::Hello,
         1,
-        &Hello { protocol_version: PROTOCOL_VERSION, firmware_name: "app", firmware_version: "fw", session_id: 1 },
+        &Hello {
+            protocol_version: PROTOCOL_VERSION,
+            firmware_name: "app",
+            firmware_version: "fw",
+            session_id: 1,
+        },
     );
     assert_eq!(
         got,
-        [0x03, 0x60, 0x01, 0x0e, 0x03, 0x03, 0x61, 0x70, 0x70, 0x02, 0x66, 0x77, 0x01, 0x60, 0x44, 0x10, 0x0b, 0x00]
+        [
+            0x03, 0x60, 0x01, 0x0e, 0x03, 0x03, 0x61, 0x70, 0x70, 0x02, 0x66, 0x77, 0x01, 0x60, 0x44, 0x10,
+            0x0b, 0x00
+        ]
     );
 }
 
@@ -38,13 +46,18 @@ fn golden_log() {
     let got = frame(
         MsgType::Log,
         7,
-        &Log { level: Level::Warn, uptime_us: 0x0102_0304, module: "m", message: "hi" },
+        &Log {
+            level: Level::Warn,
+            uptime_us: 0x0102_0304,
+            module: "m",
+            message: "hi",
+        },
     );
     assert_eq!(
         got,
         [
-            0x03, 0x61, 0x07, 0x0f, 0x01, 0x84, 0x86, 0x88, 0x08, 0x01, 0x6d, 0x02, 0x68, 0x69,
-            0x5d, 0xd6, 0xee, 0xd0, 0x00
+            0x03, 0x61, 0x07, 0x0f, 0x01, 0x84, 0x86, 0x88, 0x08, 0x01, 0x6d, 0x02, 0x68, 0x69, 0x5d, 0xd6,
+            0xee, 0xd0, 0x00
         ]
     );
 }
@@ -52,7 +65,10 @@ fn golden_log() {
 #[test]
 fn golden_dropped() {
     let got = frame(MsgType::Dropped, 2, &Dropped { count: 300 });
-    assert_eq!(got, [0x03, 0x66, 0x02, 0x07, 0xac, 0x02, 0xb2, 0x2f, 0xe5, 0x96, 0x00]);
+    assert_eq!(
+        got,
+        [0x03, 0x66, 0x02, 0x07, 0xac, 0x02, 0xb2, 0x2f, 0xe5, 0x96, 0x00]
+    );
 }
 
 #[test]
@@ -60,13 +76,18 @@ fn golden_shell_response() {
     let got = frame(
         MsgType::ShellResponse,
         9,
-        &ShellResponse { cmd_id: 5, result: 0, chunk: 0, last: true, text: "ok" },
+        &ShellResponse {
+            cmd_id: 5,
+            result: 0,
+            chunk: 0,
+            last: true,
+            text: "ok",
+        },
     );
     assert_eq!(
         got,
         [
-            0x03, 0x64, 0x09, 0x02, 0x05, 0x01, 0x09, 0x01, 0x02, 0x6f, 0x6b, 0x33, 0x29, 0x20,
-            0x46, 0x00
+            0x03, 0x64, 0x09, 0x02, 0x05, 0x01, 0x09, 0x01, 0x02, 0x6f, 0x6b, 0x33, 0x29, 0x20, 0x46, 0x00
         ]
     );
 }
@@ -81,7 +102,12 @@ fn golden_shell_response() {
 #[test]
 fn golden_print() {
     let got = frame(MsgType::Print, 10, &Print { text: "hey" });
-    assert_eq!(got, [0x03, 0x62, 0x0a, 0x09, 0x03, 0x68, 0x65, 0x79, 0xd8, 0xc2, 0xfc, 0x45, 0x00]);
+    assert_eq!(
+        got,
+        [
+            0x03, 0x62, 0x0a, 0x09, 0x03, 0x68, 0x65, 0x79, 0xd8, 0xc2, 0xfc, 0x45, 0x00
+        ]
+    );
 }
 
 #[test]
@@ -92,20 +118,27 @@ fn golden_event() {
     assert_eq!(
         got,
         [
-            0x03, 0x63, 0x0b, 0x15, 0x03, 0x65, 0x6e, 0x76, 0x02, 0x01, 0x74, 0x02, 0x32, 0x31,
-            0x02, 0x72, 0x68, 0x02, 0x34, 0x30, 0x5e, 0xfc, 0x01, 0x71, 0x00
+            0x03, 0x63, 0x0b, 0x15, 0x03, 0x65, 0x6e, 0x76, 0x02, 0x01, 0x74, 0x02, 0x32, 0x31, 0x02, 0x72,
+            0x68, 0x02, 0x34, 0x30, 0x5e, 0xfc, 0x01, 0x71, 0x00
         ]
     );
 }
 
 #[test]
 fn golden_shell_command() {
-    let got = frame(MsgType::ShellCommand, 12, &ShellCommand { cmd_id: 300, line: "/led on" });
+    let got = frame(
+        MsgType::ShellCommand,
+        12,
+        &ShellCommand {
+            cmd_id: 300,
+            line: "/led on",
+        },
+    );
     assert_eq!(
         got,
         [
-            0x03, 0x70, 0x0c, 0x0f, 0xac, 0x02, 0x07, 0x2f, 0x6c, 0x65, 0x64, 0x20, 0x6f, 0x6e,
-            0xad, 0xdf, 0xaa, 0xf4, 0x00
+            0x03, 0x70, 0x0c, 0x0f, 0xac, 0x02, 0x07, 0x2f, 0x6c, 0x65, 0x64, 0x20, 0x6f, 0x6e, 0xad, 0xdf,
+            0xaa, 0xf4, 0x00
         ]
     );
 }
@@ -113,10 +146,20 @@ fn golden_shell_command() {
 #[test]
 fn golden_shell_complete() {
     // req_id ≠ cursor, so swapping the two u16s is caught.
-    let got = frame(MsgType::ShellComplete, 14, &ShellComplete { req_id: 13, line: "/sy", cursor: 2 });
+    let got = frame(
+        MsgType::ShellComplete,
+        14,
+        &ShellComplete {
+            req_id: 13,
+            line: "/sy",
+            cursor: 2,
+        },
+    );
     assert_eq!(
         got,
-        [0x03, 0x71, 0x0e, 0x0b, 0x0d, 0x03, 0x2f, 0x73, 0x79, 0x02, 0xf6, 0x72, 0x70, 0x51, 0x00]
+        [
+            0x03, 0x71, 0x0e, 0x0b, 0x0d, 0x03, 0x2f, 0x73, 0x79, 0x02, 0xf6, 0x72, 0x70, 0x51, 0x00
+        ]
     );
 }
 
@@ -125,16 +168,28 @@ fn golden_shell_completions() {
     // Two candidates of different (non-zero) kinds pin `Candidate { text, kind }` in context;
     // req_id ≠ token_start, and `more: true` is the bool's non-default value.
     let candidates = heapless::Vec::from_iter([
-        Candidate { text: "set", kind: CandidateKind::Command },
-        Candidate { text: "sel", kind: CandidateKind::Value },
+        Candidate {
+            text: "set",
+            kind: CandidateKind::Command,
+        },
+        Candidate {
+            text: "sel",
+            kind: CandidateKind::Value,
+        },
     ]);
-    let c = ShellCompletions { req_id: 21, token_start: 4, common_prefix: "se", candidates, more: true };
+    let c = ShellCompletions {
+        req_id: 21,
+        token_start: 4,
+        common_prefix: "se",
+        candidates,
+        more: true,
+    };
     let got = frame(MsgType::ShellCompletions, 15, &c);
     assert_eq!(
         got,
         [
-            0x03, 0x65, 0x0f, 0x16, 0x15, 0x04, 0x02, 0x73, 0x65, 0x02, 0x03, 0x73, 0x65, 0x74,
-            0x01, 0x03, 0x73, 0x65, 0x6c, 0x03, 0x01, 0xd4, 0x72, 0x99, 0x8b, 0x00
+            0x03, 0x65, 0x0f, 0x16, 0x15, 0x04, 0x02, 0x73, 0x65, 0x02, 0x03, 0x73, 0x65, 0x74, 0x01, 0x03,
+            0x73, 0x65, 0x6c, 0x03, 0x01, 0xd4, 0x72, 0x99, 0x8b, 0x00
         ]
     );
 }
@@ -146,13 +201,19 @@ fn golden_shell_response_distinct_fields() {
     let got = frame(
         MsgType::ShellResponse,
         16,
-        &ShellResponse { cmd_id: 300, result: 3, chunk: 5, last: false, text: "err" },
+        &ShellResponse {
+            cmd_id: 300,
+            result: 3,
+            chunk: 5,
+            last: false,
+            text: "err",
+        },
     );
     assert_eq!(
         got,
         [
-            0x03, 0x64, 0x10, 0x05, 0xac, 0x02, 0x03, 0x05, 0x09, 0x03, 0x65, 0x72, 0x72, 0x39,
-            0x05, 0x4c, 0x20, 0x00
+            0x03, 0x64, 0x10, 0x05, 0xac, 0x02, 0x03, 0x05, 0x09, 0x03, 0x65, 0x72, 0x72, 0x39, 0x05, 0x4c,
+            0x20, 0x00
         ]
     );
 }
@@ -164,13 +225,19 @@ fn golden_uplink() {
     let got = frame(
         MsgType::Uplink,
         4,
-        &Uplink { src: 0x1122_3344, counter: 7, rssi: -67, lqi: 40, data: &[0xAA, 0xBB] },
+        &Uplink {
+            src: 0x1122_3344,
+            counter: 7,
+            rssi: -67,
+            lqi: 40,
+            data: &[0xAA, 0xBB],
+        },
     );
     assert_eq!(
         got,
         [
-            0x03, 0x68, 0x04, 0x11, 0xc4, 0xe6, 0x88, 0x89, 0x01, 0x07, 0x85, 0x01, 0x28, 0x02,
-            0xaa, 0xbb, 0xe1, 0x8f, 0x87, 0xf4, 0x00
+            0x03, 0x68, 0x04, 0x11, 0xc4, 0xe6, 0x88, 0x89, 0x01, 0x07, 0x85, 0x01, 0x28, 0x02, 0xaa, 0xbb,
+            0xe1, 0x8f, 0x87, 0xf4, 0x00
         ]
     );
 }
@@ -185,8 +252,8 @@ fn golden_mgmt_request_node_add() {
             op: tower_protocol::mgmt::MgmtOp::NodeAdd {
                 addr: 0x0000_AB12,
                 key: [
-                    0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac,
-                    0xad, 0xae, 0xaf,
+                    0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae,
+                    0xaf,
                 ],
                 name: "kitchen",
                 flags: 1,
@@ -196,9 +263,9 @@ fn golden_mgmt_request_node_add() {
     assert_eq!(
         got,
         [
-            0x03, 0x72, 0x05, 0x23, 0x03, 0x02, 0x92, 0xd6, 0x02, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4,
-            0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0x07, 0x6b, 0x69,
-            0x74, 0x63, 0x68, 0x65, 0x6e, 0x01, 0xf2, 0xd6, 0x02, 0xc2, 0x00
+            0x03, 0x72, 0x05, 0x23, 0x03, 0x02, 0x92, 0xd6, 0x02, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6,
+            0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0x07, 0x6b, 0x69, 0x74, 0x63, 0x68, 0x65,
+            0x6e, 0x01, 0xf2, 0xd6, 0x02, 0xc2, 0x00
         ]
     );
 }
@@ -208,13 +275,19 @@ fn golden_mgmt_response() {
     let got = frame(
         MsgType::MgmtResponse,
         6,
-        &MgmtResponse { req_id: 3, result: 0, chunk: 0, last: true, data: &[0x01, 0x02, 0x03] },
+        &MgmtResponse {
+            req_id: 3,
+            result: 0,
+            chunk: 0,
+            last: true,
+            data: &[0x01, 0x02, 0x03],
+        },
     );
     assert_eq!(
         got,
         [
-            0x03, 0x67, 0x06, 0x02, 0x03, 0x01, 0x0a, 0x01, 0x03, 0x01, 0x02, 0x03, 0xa2, 0x9a,
-            0xd1, 0x14, 0x00
+            0x03, 0x67, 0x06, 0x02, 0x03, 0x01, 0x0a, 0x01, 0x03, 0x01, 0x02, 0x03, 0xa2, 0x9a, 0xd1, 0x14,
+            0x00
         ]
     );
 }
@@ -234,8 +307,8 @@ fn golden_radio_stat_tx() {
     assert_eq!(
         got,
         [
-            0x03, 0x69, 0x08, 0x06, 0x01, 0x92, 0xd6, 0x02, 0x02, 0x07, 0x01, 0xba, 0x24, 0x31,
-            0x35, 0xc1, 0x00
+            0x03, 0x69, 0x08, 0x06, 0x01, 0x92, 0xd6, 0x02, 0x02, 0x07, 0x01, 0xba, 0x24, 0x31, 0x35, 0xc1,
+            0x00
         ]
     );
 }
@@ -256,14 +329,29 @@ fn golden_mgmt_response_distinct_fields() {
     );
     assert_eq!(
         got,
-        [0x03, 0x67, 0x13, 0x05, 0x90, 0x03, 0x04, 0x06, 0x08, 0x02, 0xd0, 0xd1, 0x55, 0xe2, 0x20, 0xa7, 0x00]
+        [
+            0x03, 0x67, 0x13, 0x05, 0x90, 0x03, 0x04, 0x06, 0x08, 0x02, 0xd0, 0xd1, 0x55, 0xe2, 0x20, 0xa7,
+            0x00
+        ]
     );
 }
 
 #[test]
 fn golden_radio_stat_channel() {
-    let got = frame(MsgType::RadioStat, 17, &RadioStat::Channel { channel: 5, rssi: -90 });
-    assert_eq!(got, [0x03, 0x69, 0x11, 0x01, 0x08, 0x05, 0xb3, 0x01, 0x70, 0x08, 0xec, 0xf5, 0x00]);
+    let got = frame(
+        MsgType::RadioStat,
+        17,
+        &RadioStat::Channel {
+            channel: 5,
+            rssi: -90,
+        },
+    );
+    assert_eq!(
+        got,
+        [
+            0x03, 0x69, 0x11, 0x01, 0x08, 0x05, 0xb3, 0x01, 0x70, 0x08, 0xec, 0xf5, 0x00
+        ]
+    );
 }
 
 /// The `Tx` arm again with the `None` ack and a non-zero outcome (`golden_radio_stat_tx`
@@ -282,7 +370,10 @@ fn golden_radio_stat_tx_no_ack() {
     );
     assert_eq!(
         got,
-        [0x03, 0x69, 0x12, 0x08, 0x01, 0x84, 0x86, 0x88, 0x08, 0x09, 0x03, 0x05, 0xce, 0xca, 0x81, 0x7b, 0x00]
+        [
+            0x03, 0x69, 0x12, 0x08, 0x01, 0x84, 0x86, 0x88, 0x08, 0x09, 0x03, 0x05, 0xce, 0xca, 0x81, 0x7b,
+            0x00
+        ]
     );
 }
 
@@ -321,13 +412,19 @@ fn golden_mgmt_device_info() {
     assert_eq!(
         bytes,
         [
-            0x00, 0x01, 0xc4, 0xe6, 0x88, 0x89, 0x01, 0x01, 0x02, 0x10, 0x03, 0x01, 0x88, 0xef,
-            0x99, 0xab, 0x05, 0x02, 0x67, 0x77
+            0x00, 0x01, 0xc4, 0xe6, 0x88, 0x89, 0x01, 0x01, 0x02, 0x10, 0x03, 0x01, 0x88, 0xef, 0x99, 0xab,
+            0x05, 0x02, 0x67, 0x77
         ]
     );
     let back: DeviceInfo = postcard::from_bytes(&bytes).unwrap();
-    assert_eq!((back.role, back.addr, back.gw_addr), (DeviceRole::Gateway, 0x1122_3344, 0x5566_7788));
-    assert_eq!((back.node_capacity, back.node_count, back.provisioned), (16, 3, true));
+    assert_eq!(
+        (back.role, back.addr, back.gw_addr),
+        (DeviceRole::Gateway, 0x1122_3344, 0x5566_7788)
+    );
+    assert_eq!(
+        (back.node_capacity, back.node_count, back.provisioned),
+        (16, 3, true)
+    );
     assert_eq!(back.firmware_name, "gw");
 }
 
@@ -353,8 +450,8 @@ fn golden_mgmt_device_info_distinct_fields() {
     assert_eq!(
         bytes,
         [
-            0x02, 0x03, 0x8d, 0x98, 0xac, 0x50, 0x01, 0x05, 0x10, 0x07, 0x00, 0x88, 0xef, 0x99,
-            0xab, 0x05, 0x04, 0x6e, 0x6f, 0x64, 0x65
+            0x02, 0x03, 0x8d, 0x98, 0xac, 0x50, 0x01, 0x05, 0x10, 0x07, 0x00, 0x88, 0xef, 0x99, 0xab, 0x05,
+            0x04, 0x6e, 0x6f, 0x64, 0x65
         ]
     );
     let back: DeviceInfo = postcard::from_bytes(&bytes).unwrap();
@@ -364,15 +461,28 @@ fn golden_mgmt_device_info_distinct_fields() {
 #[test]
 fn golden_mgmt_node_entry() {
     use tower_protocol::mgmt::*;
-    let e = NodeEntry { addr: 0x0000_AB12, name: "kitchen", flags: 0x03, last_seen: 42, rssi: -70, uplinks: 7, queued: 2 };
+    let e = NodeEntry {
+        addr: 0x0000_AB12,
+        name: "kitchen",
+        flags: 0x03,
+        last_seen: 42,
+        rssi: -70,
+        uplinks: 7,
+        queued: 2,
+    };
     let bytes = rec(&e);
     assert_eq!(
         bytes,
-        [0x92, 0xd6, 0x02, 0x07, 0x6b, 0x69, 0x74, 0x63, 0x68, 0x65, 0x6e, 0x03, 0x2a, 0xba, 0x07, 0x02]
+        [
+            0x92, 0xd6, 0x02, 0x07, 0x6b, 0x69, 0x74, 0x63, 0x68, 0x65, 0x6e, 0x03, 0x2a, 0xba, 0x07, 0x02
+        ]
     );
     let back: NodeEntry = postcard::from_bytes(&bytes).unwrap();
     assert_eq!((back.addr, back.name, back.flags), (0x0000_AB12, "kitchen", 0x03));
-    assert_eq!((back.last_seen, back.rssi, back.uplinks, back.queued), (42, -70, 7, 2));
+    assert_eq!(
+        (back.last_seen, back.rssi, back.uplinks, back.queued),
+        (42, -70, 7, 2)
+    );
 }
 
 #[test]
@@ -380,14 +490,16 @@ fn golden_mgmt_node_key() {
     use tower_protocol::mgmt::*;
     let k = NodeKey {
         addr: 0x0000_AB12,
-        key: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf],
+        key: [
+            0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+        ],
     };
     let bytes = rec(&k);
     assert_eq!(
         bytes,
         [
-            0x92, 0xd6, 0x02, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa,
-            0xab, 0xac, 0xad, 0xae, 0xaf
+            0x92, 0xd6, 0x02, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac,
+            0xad, 0xae, 0xaf
         ]
     );
     let back: NodeKey = postcard::from_bytes(&bytes).unwrap();
@@ -400,8 +512,14 @@ fn golden_mgmt_small_records() {
     use tower_protocol::mgmt::*;
     assert_eq!(rec(&Paired { addr: 0x0000_AB12 }), [0x92, 0xd6, 0x02]);
     assert_eq!(rec(&QueueId { item: 5 }), [0x05]);
-    assert_eq!(rec(&ProvisionAck { addr: 0x88a4_e90d }), [0x8d, 0xd2, 0x93, 0xc5, 0x08]);
-    assert_eq!(rec(&Joined { gw_addr: 0x1122_3344 }), [0xc4, 0xe6, 0x88, 0x89, 0x01]);
+    assert_eq!(
+        rec(&ProvisionAck { addr: 0x88a4_e90d }),
+        [0x8d, 0xd2, 0x93, 0xc5, 0x08]
+    );
+    assert_eq!(
+        rec(&Joined { gw_addr: 0x1122_3344 }),
+        [0xc4, 0xe6, 0x88, 0x89, 0x01]
+    );
     // Decode back (these are the delayed-pairing / provisioning acks the host waits on).
     let p: Paired = postcard::from_bytes(&rec(&Paired { addr: 0x0000_AB12 })).unwrap();
     assert_eq!(p.addr, 0x0000_AB12);
@@ -414,11 +532,23 @@ fn golden_mgmt_small_records() {
 #[test]
 fn golden_mgmt_queue_entry() {
     use tower_protocol::mgmt::*;
-    let q = QueueEntry { node_addr: 0x0000_AB12, item: 5, age: 10, ttl: 3600, data: &[0x01, 0x02] };
+    let q = QueueEntry {
+        node_addr: 0x0000_AB12,
+        item: 5,
+        age: 10,
+        ttl: 3600,
+        data: &[0x01, 0x02],
+    };
     let bytes = rec(&q);
-    assert_eq!(bytes, [0x92, 0xd6, 0x02, 0x05, 0x0a, 0x90, 0x1c, 0x02, 0x01, 0x02]);
+    assert_eq!(
+        bytes,
+        [0x92, 0xd6, 0x02, 0x05, 0x0a, 0x90, 0x1c, 0x02, 0x01, 0x02]
+    );
     let back: QueueEntry = postcard::from_bytes(&bytes).unwrap();
-    assert_eq!((back.node_addr, back.item, back.age, back.ttl), (0x0000_AB12, 5, 10, 3600));
+    assert_eq!(
+        (back.node_addr, back.item, back.age, back.ttl),
+        (0x0000_AB12, 5, 10, 3600)
+    );
     assert_eq!(back.data, &[0x01, 0x02]);
 }
 
@@ -447,8 +577,14 @@ fn golden_mgmt_op_unit_variants() {
 #[test]
 fn golden_mgmt_op_node_remove_and_reveal_key() {
     use tower_protocol::mgmt::MgmtOp;
-    assert_eq!(op_bytes(&MgmtOp::NodeRemove { addr: 0x0000_AB12 }), [0x03, 0x92, 0xd6, 0x02]);
-    assert_eq!(op_bytes(&MgmtOp::NodeRevealKey { addr: 0x0000_CD34 }), [0x05, 0xb4, 0x9a, 0x03]);
+    assert_eq!(
+        op_bytes(&MgmtOp::NodeRemove { addr: 0x0000_AB12 }),
+        [0x03, 0x92, 0xd6, 0x02]
+    );
+    assert_eq!(
+        op_bytes(&MgmtOp::NodeRevealKey { addr: 0x0000_CD34 }),
+        [0x05, 0xb4, 0x9a, 0x03]
+    );
 }
 
 #[test]
@@ -456,15 +592,29 @@ fn golden_mgmt_op_node_update() {
     use tower_protocol::mgmt::MgmtOp;
     // Both / only-flags / only-name: pins the two Options' order and their None/Some tags.
     assert_eq!(
-        op_bytes(&MgmtOp::NodeUpdate { addr: 0x0000_AB12, name: Some("porch"), flags: Some(2) }),
-        [0x04, 0x92, 0xd6, 0x02, 0x01, 0x05, 0x70, 0x6f, 0x72, 0x63, 0x68, 0x01, 0x02]
+        op_bytes(&MgmtOp::NodeUpdate {
+            addr: 0x0000_AB12,
+            name: Some("porch"),
+            flags: Some(2)
+        }),
+        [
+            0x04, 0x92, 0xd6, 0x02, 0x01, 0x05, 0x70, 0x6f, 0x72, 0x63, 0x68, 0x01, 0x02
+        ]
     );
     assert_eq!(
-        op_bytes(&MgmtOp::NodeUpdate { addr: 0x0000_AB12, name: None, flags: Some(3) }),
+        op_bytes(&MgmtOp::NodeUpdate {
+            addr: 0x0000_AB12,
+            name: None,
+            flags: Some(3)
+        }),
         [0x04, 0x92, 0xd6, 0x02, 0x00, 0x01, 0x03]
     );
     assert_eq!(
-        op_bytes(&MgmtOp::NodeUpdate { addr: 0x0000_AB12, name: Some("shed"), flags: None }),
+        op_bytes(&MgmtOp::NodeUpdate {
+            addr: 0x0000_AB12,
+            name: Some("shed"),
+            flags: None
+        }),
         [0x04, 0x92, 0xd6, 0x02, 0x01, 0x04, 0x73, 0x68, 0x65, 0x64, 0x00]
     );
 }
@@ -472,12 +622,14 @@ fn golden_mgmt_op_node_update() {
 #[test]
 fn golden_mgmt_op_pairing_open() {
     use tower_protocol::mgmt::MgmtOp;
-    let key = [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf];
+    let key = [
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+    ];
     assert_eq!(
         op_bytes(&MgmtOp::PairingOpen { window: 120, key }),
         [
-            0x06, 0x78, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb,
-            0xbc, 0xbd, 0xbe, 0xbf
+            0x06, 0x78, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd,
+            0xbe, 0xbf
         ]
     );
 }
@@ -486,7 +638,11 @@ fn golden_mgmt_op_pairing_open() {
 fn golden_mgmt_op_queue_push() {
     use tower_protocol::mgmt::MgmtOp;
     assert_eq!(
-        op_bytes(&MgmtOp::QueuePush { node_addr: 0x0000_AB12, ttl: 600, data: &[0xde, 0xad, 0xbe] }),
+        op_bytes(&MgmtOp::QueuePush {
+            node_addr: 0x0000_AB12,
+            ttl: 600,
+            data: &[0xde, 0xad, 0xbe]
+        }),
         [0x08, 0x92, 0xd6, 0x02, 0xd8, 0x04, 0x03, 0xde, 0xad, 0xbe]
     );
 }
@@ -494,14 +650,25 @@ fn golden_mgmt_op_queue_push() {
 #[test]
 fn golden_mgmt_op_queue_list_and_drop() {
     use tower_protocol::mgmt::MgmtOp;
-    assert_eq!(op_bytes(&MgmtOp::QueueList { node_addr: 0x0000_AB12 }), [0x09, 0x92, 0xd6, 0x02]);
+    assert_eq!(
+        op_bytes(&MgmtOp::QueueList {
+            node_addr: 0x0000_AB12
+        }),
+        [0x09, 0x92, 0xd6, 0x02]
+    );
     assert_eq!(op_bytes(&MgmtOp::QueueList { node_addr: 0 }), [0x09, 0x00]); // 0 = all nodes
     assert_eq!(
-        op_bytes(&MgmtOp::QueueDrop { node_addr: 0x0000_AB12, item: Some(4) }),
+        op_bytes(&MgmtOp::QueueDrop {
+            node_addr: 0x0000_AB12,
+            item: Some(4)
+        }),
         [0x0a, 0x92, 0xd6, 0x02, 0x01, 0x04]
     );
     assert_eq!(
-        op_bytes(&MgmtOp::QueueDrop { node_addr: 0x0000_AB12, item: None }),
+        op_bytes(&MgmtOp::QueueDrop {
+            node_addr: 0x0000_AB12,
+            item: None
+        }),
         [0x0a, 0x92, 0xd6, 0x02, 0x00]
     );
 }
@@ -509,7 +676,12 @@ fn golden_mgmt_op_queue_list_and_drop() {
 #[test]
 fn golden_mgmt_op_stats_config_and_join_open() {
     use tower_protocol::mgmt::MgmtOp;
-    assert_eq!(op_bytes(&MgmtOp::StatsConfig { channel_period_ms: 5000 }), [0x0b, 0x88, 0x27]);
+    assert_eq!(
+        op_bytes(&MgmtOp::StatsConfig {
+            channel_period_ms: 5000
+        }),
+        [0x0b, 0x88, 0x27]
+    );
     assert_eq!(op_bytes(&MgmtOp::JoinOpen { window: 45 }), [0x0d, 0x2d]);
 }
 
@@ -518,21 +690,35 @@ fn golden_mgmt_op_stats_config_and_join_open() {
 #[test]
 fn golden_mgmt_op_provision() {
     use tower_protocol::mgmt::*;
-    let key = [0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf];
-    let own = Provision { addr: Some(0x0000_AB12), gw_addr: 0x1122_3344, key, band: BAND_US915, channel: 6 };
+    let key = [
+        0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+    ];
+    let own = Provision {
+        addr: Some(0x0000_AB12),
+        gw_addr: 0x1122_3344,
+        key,
+        band: BAND_US915,
+        channel: 6,
+    };
     assert_eq!(
         op_bytes(&MgmtOp::Provision(own)),
         [
-            0x0c, 0x01, 0x92, 0xd6, 0x02, 0xc4, 0xe6, 0x88, 0x89, 0x01, 0xc0, 0xc1, 0xc2, 0xc3,
-            0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0x01, 0x06
+            0x0c, 0x01, 0x92, 0xd6, 0x02, 0xc4, 0xe6, 0x88, 0x89, 0x01, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5,
+            0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0x01, 0x06
         ]
     );
-    let uid = Provision { addr: None, gw_addr: 0x1122_3344, key, band: BAND_EU868, channel: 9 };
+    let uid = Provision {
+        addr: None,
+        gw_addr: 0x1122_3344,
+        key,
+        band: BAND_EU868,
+        channel: 9,
+    };
     assert_eq!(
         op_bytes(&MgmtOp::Provision(uid)),
         [
-            0x0c, 0x00, 0xc4, 0xe6, 0x88, 0x89, 0x01, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6,
-            0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0x00, 0x09
+            0x0c, 0x00, 0xc4, 0xe6, 0x88, 0x89, 0x01, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8,
+            0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0x00, 0x09
         ]
     );
 }
@@ -544,9 +730,33 @@ fn golden_mgmt_op_provision() {
 fn mgmt_response_record_stream_reassembles() {
     use tower_protocol::mgmt::{LAST_SEEN_NEVER, NodeEntry};
     let entries = [
-        NodeEntry { addr: 1, name: "a", flags: 0, last_seen: 0, rssi: -50, uplinks: 1, queued: 0 },
-        NodeEntry { addr: 2, name: "bb", flags: 1, last_seen: LAST_SEEN_NEVER, rssi: -70, uplinks: 9, queued: 2 },
-        NodeEntry { addr: 3, name: "ccc", flags: 3, last_seen: 5, rssi: -90, uplinks: 0, queued: 1 },
+        NodeEntry {
+            addr: 1,
+            name: "a",
+            flags: 0,
+            last_seen: 0,
+            rssi: -50,
+            uplinks: 1,
+            queued: 0,
+        },
+        NodeEntry {
+            addr: 2,
+            name: "bb",
+            flags: 1,
+            last_seen: LAST_SEEN_NEVER,
+            rssi: -70,
+            uplinks: 9,
+            queued: 2,
+        },
+        NodeEntry {
+            addr: 3,
+            name: "ccc",
+            flags: 3,
+            last_seen: 5,
+            rssi: -90,
+            uplinks: 0,
+            queued: 1,
+        },
     ];
     let mut stream = Vec::new();
     for e in &entries {
@@ -557,7 +767,13 @@ fn mgmt_response_record_stream_reassembles() {
     let mid = stream.len() / 2;
     let mut reassembled = Vec::new();
     for (i, part) in [&stream[..mid], &stream[mid..]].into_iter().enumerate() {
-        let r = MgmtResponse { req_id: 9, result: 0, chunk: i as u16, last: i == 1, data: part };
+        let r = MgmtResponse {
+            req_id: 9,
+            result: 0,
+            chunk: i as u16,
+            last: i == 1,
+            data: part,
+        };
         let (_, _, payload) = redecode(MsgType::MgmtResponse, i as u16, &r);
         let back: MgmtResponse = postcard::from_bytes(&payload).unwrap();
         reassembled.extend_from_slice(back.data);
@@ -594,10 +810,19 @@ fn shell_completions_full_16_candidates_roundtrips() {
     let mut candidates: heapless::Vec<Candidate, 16> = heapless::Vec::new();
     for _ in 0..16 {
         candidates
-            .push(Candidate { text: "settings", kind: CandidateKind::Menu })
+            .push(Candidate {
+                text: "settings",
+                kind: CandidateKind::Menu,
+            })
             .unwrap();
     }
-    let c = ShellCompletions { req_id: 42, token_start: 3, common_prefix: "se", candidates, more: false };
+    let c = ShellCompletions {
+        req_id: 42,
+        token_start: 3,
+        common_prefix: "se",
+        candidates,
+        more: false,
+    };
     let (mt, seq, payload) = redecode(MsgType::ShellCompletions, 1, &c);
     assert_eq!((mt, seq), (MsgType::ShellCompletions, 1));
     let back: ShellCompletions = postcard::from_bytes(&payload).unwrap();
@@ -613,7 +838,10 @@ fn event_at_full_capacity_roundtrips() {
     for _ in 0..8 {
         fields.push(("k", "v")).unwrap();
     }
-    let e = Event { name: "measurement", fields };
+    let e = Event {
+        name: "measurement",
+        fields,
+    };
     let (_, _, payload) = redecode(MsgType::Event, 3, &e);
     let back: Event = postcard::from_bytes(&payload).unwrap();
     assert_eq!(back.name, "measurement");
@@ -622,7 +850,11 @@ fn event_at_full_capacity_roundtrips() {
 
 #[test]
 fn shell_complete_roundtrips() {
-    let sc = ShellComplete { req_id: 11, line: "/sys", cursor: 4 };
+    let sc = ShellComplete {
+        req_id: 11,
+        line: "/sys",
+        cursor: 4,
+    };
     let (_, _, payload) = redecode(MsgType::ShellComplete, 5, &sc);
     let back: ShellComplete = postcard::from_bytes(&payload).unwrap();
     assert_eq!((back.req_id, back.line, back.cursor), (11, "/sys", 4));
@@ -662,7 +894,11 @@ fn candidate_kind_variant_order_is_stable() {
         (CandidateKind::Value, 0x03),
     ];
     for (kind, byte) in pins {
-        assert_eq!(rec(&kind), [byte], "CandidateKind variant order changed: wire break");
+        assert_eq!(
+            rec(&kind),
+            [byte],
+            "CandidateKind variant order changed: wire break"
+        );
     }
 }
 
@@ -676,17 +912,59 @@ fn mgmt_op_variant_order_is_stable() {
     let pins: [(MgmtOp, u8); 14] = [
         (MgmtOp::Describe, 0x00),
         (MgmtOp::NodeList, 0x01),
-        (MgmtOp::NodeAdd { addr: 1, key, name: "n", flags: 0 }, 0x02),
+        (
+            MgmtOp::NodeAdd {
+                addr: 1,
+                key,
+                name: "n",
+                flags: 0,
+            },
+            0x02,
+        ),
         (MgmtOp::NodeRemove { addr: 1 }, 0x03),
-        (MgmtOp::NodeUpdate { addr: 1, name: None, flags: None }, 0x04),
+        (
+            MgmtOp::NodeUpdate {
+                addr: 1,
+                name: None,
+                flags: None,
+            },
+            0x04,
+        ),
         (MgmtOp::NodeRevealKey { addr: 1 }, 0x05),
         (MgmtOp::PairingOpen { window: 60, key }, 0x06),
         (MgmtOp::PairingCancel, 0x07),
-        (MgmtOp::QueuePush { node_addr: 1, ttl: 60, data: &[0] }, 0x08),
+        (
+            MgmtOp::QueuePush {
+                node_addr: 1,
+                ttl: 60,
+                data: &[0],
+            },
+            0x08,
+        ),
         (MgmtOp::QueueList { node_addr: 0 }, 0x09),
-        (MgmtOp::QueueDrop { node_addr: 1, item: None }, 0x0a),
-        (MgmtOp::StatsConfig { channel_period_ms: 1000 }, 0x0b),
-        (MgmtOp::Provision(Provision { addr: None, gw_addr: 1, key, band: BAND_EU868, channel: 0 }), 0x0c),
+        (
+            MgmtOp::QueueDrop {
+                node_addr: 1,
+                item: None,
+            },
+            0x0a,
+        ),
+        (
+            MgmtOp::StatsConfig {
+                channel_period_ms: 1000,
+            },
+            0x0b,
+        ),
+        (
+            MgmtOp::Provision(Provision {
+                addr: None,
+                gw_addr: 1,
+                key,
+                band: BAND_EU868,
+                channel: 0,
+            }),
+            0x0c,
+        ),
         (MgmtOp::JoinOpen { window: 60 }, 0x0d),
     ];
     for (op, byte) in &pins {
@@ -710,8 +988,22 @@ fn device_role_variant_order_is_stable() {
 #[test]
 fn radio_stat_variant_order_is_stable() {
     let pins: [(RadioStat, u8); 2] = [
-        (RadioStat::Channel { channel: 0, rssi: -100 }, 0x00),
-        (RadioStat::Tx { dest: 1, item: 0, outcome: 0, ack_rssi: None }, 0x01),
+        (
+            RadioStat::Channel {
+                channel: 0,
+                rssi: -100,
+            },
+            0x00,
+        ),
+        (
+            RadioStat::Tx {
+                dest: 1,
+                item: 0,
+                outcome: 0,
+                ack_rssi: None,
+            },
+            0x01,
+        ),
     ];
     for (stat, byte) in pins {
         assert_eq!(rec(&stat)[0], byte, "RadioStat variant order changed: wire break");
@@ -726,7 +1018,14 @@ fn radio_stat_variant_order_is_stable() {
 fn max_queue_push_fits_one_frame() {
     use tower_protocol::mgmt::MgmtOp;
     let data = [0xEEu8; 74];
-    let req = MgmtRequest { req_id: u16::MAX, op: MgmtOp::QueuePush { node_addr: u32::MAX, ttl: u16::MAX, data: &data } };
+    let req = MgmtRequest {
+        req_id: u16::MAX,
+        op: MgmtOp::QueuePush {
+            node_addr: u32::MAX,
+            ttl: u16::MAX,
+            data: &data,
+        },
+    };
     let mut out = [0u8; MAX_WIRE];
     encode_frame(MsgType::MgmtRequest, 0, &req, &mut out).expect("max QueuePush must fit");
 }
@@ -735,7 +1034,13 @@ fn max_queue_push_fits_one_frame() {
 #[test]
 fn max_uplink_fits_one_frame() {
     let data = [0xEEu8; 74];
-    let up = Uplink { src: u32::MAX, counter: u32::MAX, rssi: i16::MIN, lqi: u8::MAX, data: &data };
+    let up = Uplink {
+        src: u32::MAX,
+        counter: u32::MAX,
+        rssi: i16::MIN,
+        lqi: u8::MAX,
+        data: &data,
+    };
     let mut out = [0u8; MAX_WIRE];
     encode_frame(MsgType::Uplink, u16::MAX, &up, &mut out).expect("max Uplink must fit");
 }
@@ -745,9 +1050,15 @@ fn max_uplink_fits_one_frame() {
 /// makes progress (≥ 4 records per chunk keeps a 32-node list under 8 frames).
 #[test]
 fn mgmt_chunking_budget_holds() {
-    use tower_protocol::mgmt::{NodeEntry, LAST_SEEN_NEVER};
+    use tower_protocol::mgmt::{LAST_SEEN_NEVER, NodeEntry};
     let chunk = [0xEEu8; 192];
-    let rsp = MgmtResponse { req_id: u16::MAX, result: 0, chunk: u16::MAX, last: false, data: &chunk };
+    let rsp = MgmtResponse {
+        req_id: u16::MAX,
+        result: 0,
+        chunk: u16::MAX,
+        last: false,
+        data: &chunk,
+    };
     let mut out = [0u8; MAX_WIRE];
     encode_frame(MsgType::MgmtResponse, 0, &rsp, &mut out).expect("192-byte chunk must fit");
 
@@ -762,7 +1073,10 @@ fn mgmt_chunking_budget_holds() {
     };
     let mut buf = [0u8; 64];
     let used = postcard::to_slice(&entry, &mut buf).unwrap().len();
-    assert!(used <= 48, "worst-case NodeEntry grew past the chunking assumption: {used}");
+    assert!(
+        used <= 48,
+        "worst-case NodeEntry grew past the chunking assumption: {used}"
+    );
 }
 
 #[test]

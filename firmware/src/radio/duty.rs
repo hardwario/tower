@@ -9,7 +9,7 @@
 //!
 //! The **pure integer** math (refill/consume with the sub-ms residue carry, the frame
 //! time-on-air, and the EU/US/FHSS constants) lives in the host-testable
-//! [`tower_radio_core`] leaf crate; this module keeps only the thin `embassy_time::Instant`
+//! [`tower_radio`] leaf crate; this module keeps only the thin `embassy_time::Instant`
 //! real-time wrapper ([`DutyGovernor::try_tx`]) on top of it. Splitting the arithmetic out
 //! lets `just test` unit-test the regulatory budget on the host (the firmware itself is
 //! no_std and can't `cargo test`), with **zero** behavioural change on the target.
@@ -18,15 +18,15 @@ use embassy_time::Instant;
 
 // Re-export the pure core so the rest of the firmware keeps saying `duty::frame_toa_ms`,
 // `duty::BITRATE`, etc.; no external API change from the extraction.
-pub use tower_radio_core::{
+pub use tower_radio::{
     BITRATE, EU_CAP_MS, EU_PERMIL, FHSS_DWELL_BURST_MS, FHSS_PERMIL, FHSS_WINDOW_MS, frame_toa_ms,
 };
 
-/// Token-bucket duty governor: the host-testable [`tower_radio_core::DutyGovernor`] core plus a
+/// Token-bucket duty governor: the host-testable [`tower_radio::DutyGovernor`] core plus a
 /// `last`-[`Instant`] so [`try_tx`](Self::try_tx) can refill from real elapsed time. All the
 /// integer accounting (cap, permil, residue carry) is in the core; this only measures wall-clock.
 pub struct DutyGovernor {
-    core: tower_radio_core::DutyGovernor,
+    core: tower_radio::DutyGovernor,
     last: Instant,
 }
 
@@ -34,7 +34,7 @@ impl DutyGovernor {
     /// New governor, bucket full, with the given cap and duty (parts-per-thousand).
     pub fn new(cap_ms: u32, permil: u32) -> Self {
         Self {
-            core: tower_radio_core::DutyGovernor::new(cap_ms, permil),
+            core: tower_radio::DutyGovernor::new(cap_ms, permil),
             last: Instant::now(),
         }
     }

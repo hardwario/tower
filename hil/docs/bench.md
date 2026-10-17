@@ -2,8 +2,9 @@
 
 This is the in-repo source of truth for physically assembling and configuring the bench that
 `just hil` / `just hil-power` / `just hil-full` drive. The *test catalogue* (what each firmware
-example asserts, the full example×role matrix) lives in tower-firmware's `docs/test-plan.md`;
-this file is what that plan assumes you already have on the desk.
+example asserts, the full example×role matrix) lives in the firmware's
+[`docs/test-plan.md`](../../firmware/docs/test-plan.md); this file is what that plan assumes you
+already have on the desk.
 
 ## Inventory
 
@@ -43,11 +44,11 @@ USB: the supported setup is a **data-only** FTDI adapter (no VBUS line), which m
 - USART1 on PA9 (TX) / PA10 (RX), 115200 8N1. The link is COBS+CRC framed, so a raw serial
   monitor shows binary; that is expected.
 - NRST and BOOT0 hang off the FTDI's **RTS / DTR** modem lines through the board's transistor
-  pair (jolt / tower-cli wiring: RTS→NRST, DTR→BOOT0, a 1 µF cap on NRST makes the line *order*
-  matter). Only RTS-asserted + DTR-released holds RESET; both asserted (what the OS drives on
+  pair (tower-boot / tower-cli wiring: RTS→NRST, DTR→BOOT0, a 1 µF cap on NRST makes the line
+  *order* matter). Only RTS-asserted + DTR-released holds RESET; both asserted (what the OS drives on
   open, and what the harness re-drives explicitly) is the run state, so merely opening the port
   does **not** reset the board. `tower flash` / `tower reset` / `Console::reset_into_app` pulse
-  them with jolt's tuned sequence.
+  them with tower-boot's tuned sequence.
 
 **J-Link ↔ Core (SWD, power group)**
 - Standard 10-pin Cortex debug header: SWDIO, SWCLK, GND, VTref. **nRESET is not wired** on
@@ -76,12 +77,11 @@ USB: the supported setup is a **data-only** FTDI adapter (no VBUS line), which m
 ## Software setup (fresh machine)
 
 ```sh
-# Rust + the harness
-rustup toolchain install stable
-cargo test --manifest-path hil/Cargo.toml --no-run   # compile-check, no hardware
+# Rust + the harness (rustup installs the toolchain pinned by the repo-root rust-toolchain.toml)
+just hil check        # at the repo root: compile-check every group incl. power, no hardware
 
 # Host tools on PATH
-#  - tower  (tower-cli release archive, or: cargo build --release in cli/)
+#  - tower  (just install-cli at the repo root, or a cli-v* release archive)
 #  - just   (https://just.systems)
 #  - probe-rs (power group only): cargo install probe-rs-tools
 #  - python3 (power group only; runs the ppk2d.py sidecar)
@@ -90,8 +90,8 @@ cargo test --manifest-path hil/Cargo.toml --no-run   # compile-check, no hardwar
 sudo apt-get install -y libudev-dev pkg-config
 ```
 
-The firmware images are built from a `tower-firmware` checkout: default `../firmware`
-(the control-plane layout), override with `TOWER_FIRMWARE_DIR`.
+The firmware images are built from the firmware workspace: default `../firmware` (the sibling
+directory in this repository), override with `TOWER_FIRMWARE_DIR`.
 
 > **PPK2 sidecar status:** `ppk2d.py` speaks line-JSON to the harness and encodes the
 > measurement *policy* (power-cycle before every sample window, supply ceiling, reject >50 mA
@@ -176,7 +176,7 @@ VBUS-poll wake spikes) under 100 µA.
 | Roster resolve fails at startup | Ports re-enumerated; update `hil.toml` to the names the message lists (or pin `usb_serial`) |
 | Roster says "cables or hil.toml slots swapped?" | The `[core]` path holds a Radio Dongle (or vice versa); swap the paths in `hil.toml` |
 | Roster says "not a TOWER Core Module/Radio Dongle" | Some other FTDI sits at that path; fix the path, or pin `usb_serial` if it really is the board on a third-party adapter |
-| Console read fails: "speaks tower-protocol wire version N" | Lockstep break: firmware and harness pin different `tower-protocol` tags; re-pin (control plane `/lockstep`) and rebuild |
+| Console read fails: "speaks tower-protocol wire version N" | The board runs firmware built from a different `tower-protocol` than the harness (an older flash, or another checkout); rebuild and reflash from this tree (the harness's own `just build` does) |
 | `tower flash` Write-Memory timeouts, ports renaming mid-run | Concurrent FTDI flashing on one USB bus; the harness flashes sequentially by design; don't parallelize it |
 | Power test: median < 1 µA, "probably USB/VBUS-powered" | A VBUS-carrying USB back-feeds VDD (PPK2 reads ~0.3 µA); unplug it, or use a data-only FTDI adapter |
 | Power test: "ppk2d … no PPK2 initialised" | Read the reason it gives (unplugged PPK2, missing `ppk2-api`, dangling `.venv` python after a Python upgrade → recreate the venv) |

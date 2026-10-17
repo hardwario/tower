@@ -8,7 +8,7 @@
 //! [`frame`](super::frame)); the AAD is the whole cleartext header.
 //!
 //! The CCM **construction** (CBC-MAC + CTR) lives in the host-testable
-//! [`tower_radio_core::ccm`] leaf crate, generic over an
+//! [`tower_radio::ccm`] leaf crate, generic over an
 //! [`AesBlock`] single-block cipher; it is verified there
 //! against RFC 3610 Packet Vector #1. This module is the thin device binding: it plugs the L0
 //! hardware AES ([`HwAes`]) in as that block cipher and re-exposes the same `Ccm` API the radio
@@ -17,10 +17,10 @@
 //! the exact same register sequence as the original set-key-once code.
 
 use super::aes::Aes;
-use tower_radio_core::ccm::{AesBlock, Ccm as CoreCcm};
+use tower_radio::ccm::{AesBlock, Ccm as CoreCcm};
 
 // Re-export the fixed CCM parameters from the core so callers keep saying `ccm::NONCE_LEN` etc.
-pub use tower_radio_core::ccm::{MAX_AAD, NONCE_LEN, TAG_LEN};
+pub use tower_radio::ccm::{MAX_AAD, NONCE_LEN, TAG_LEN};
 
 /// The L0 hardware AES engine as an [`AesBlock`], with a **key cache**: the hardware `set_key`
 /// runs only when the key actually changes. Across a single seal/open the key is constant, so
@@ -51,7 +51,7 @@ impl AesBlock for HwAes {
 }
 
 /// AES-128-CCM context holding the L0 hardware AES engine. A thin newtype over
-/// [`tower_radio_core::ccm::Ccm`] so the radio stack's `Ccm` type/API is unchanged.
+/// [`tower_radio::ccm::Ccm`] so the radio stack's `Ccm` type/API is unchanged.
 pub struct Ccm {
     core: CoreCcm<HwAes>,
 }
@@ -91,7 +91,7 @@ impl Ccm {
     }
 
     /// Key-check value of `key` (first 4 bytes of `AES_K(0¹²⁸)`, little-endian); see
-    /// [`tower_radio_core::ccm::Ccm::key_check`]. Goes through the same cached hardware engine,
+    /// [`tower_radio::ccm::Ccm::key_check`]. Goes through the same cached hardware engine,
     /// so it never desynchronises the key cache.
     #[must_use]
     pub fn key_check(&mut self, key: &[u8; 16]) -> u32 {

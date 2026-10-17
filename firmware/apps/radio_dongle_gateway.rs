@@ -7,12 +7,12 @@
 //! is coordination:
 //!
 //! * the **node registry**: paired ids + AES keys + names, persisted in `NS_APP`
-//!   EEPROM buckets (`tower-gw-core::registry`), accessed bucket-at-a-time (never
+//!   EEPROM buckets (`tower-gateway::registry`), accessed bucket-at-a-time (never
 //!   RAM-resident; see the RAM budget note below) and mirrored into the net layer's
 //!   peer table at boot;
 //! * **pairing**: an OTA window opened on host request (`MgmtOp::PairingOpen`; the
 //!   host mints the key) and cable-paired installs (`MgmtOp::NodeAdd`);
-//! * the **downlink queue**: opaque host-built payloads (`tower-gw-core::queue`,
+//! * the **downlink queue**: opaque host-built payloads (`tower-gateway::queue`,
 //!   RAM-only; a reboot drops it and the host re-queues on the `Hello` session bump)
 //!   delivered on a sleeping node's next uplink, advertised via the ACK pending flag;
 //! * **radio diagnostics**: ambient channel RSSI at a settable cadence plus per-TX
@@ -47,8 +47,8 @@ use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig, SendResult, peer_addr_valid};
 use tower::storage::{NS_APP, NS_SHELL, Nv, Scoped};
 use tower::{app, board::Board, console, shell, watchdog};
-use tower_gw_core::queue::{PushError, Queue};
-use tower_gw_core::registry::{self, BucketIo, IoError, NodeRecord, RegistryError};
+use tower_gateway::queue::{PushError, Queue};
+use tower_gateway::registry::{self, BucketIo, IoError, NodeRecord, RegistryError};
 use tower_protocol::mgmt::{self, DeviceInfo, DeviceRole, MgmtOp, NodeEntry, NodeKey, Paired, QueueId};
 use tower_protocol::msg::{MgmtRequest, RadioStat};
 use tower_protocol::radio::RADIO_SCHEMA_VERSION;
@@ -56,9 +56,9 @@ use tower_protocol::{MsgType, decode_frame};
 
 // --- persistence (NS_APP) --------------------------------------------------------
 
-/// Registry format version marker (`tower_gw_core::registry::FORMAT_VERSION`).
+/// Registry format version marker (`tower_gateway::registry::FORMAT_VERSION`).
 const KEY_FORMAT: u8 = 0x00;
-/// Registry buckets, locals `0x10..=0x12` (one `tower-gw-core` bucket per KV value;
+/// Registry buckets, locals `0x10..=0x12` (one `tower-gateway` bucket per KV value;
 /// `registry::BUCKETS` = 3). `0x13..=0x15` stay reserved for bucket growth. The gateway's
 /// own radio address is the `addr` base setting (`shell::radio_addr`).
 const KEY_BUCKET_BASE: u8 = 0x10;
@@ -539,7 +539,7 @@ async fn run(b: Board) {
         }
 
         // 4. Housekeeping: TTL expiry (reported as TX_EXPIRED) + the ambient-RSSI tick.
-        let mut expired: heapless::Vec<(u16, u32), { tower_gw_core::queue::QUEUE_CAP }> =
+        let mut expired: heapless::Vec<(u16, u32), { tower_gateway::queue::QUEUE_CAP }> =
             heapless::Vec::new();
         queue.expire(now_ms, |id, node| {
             let _ = expired.push((id, node));

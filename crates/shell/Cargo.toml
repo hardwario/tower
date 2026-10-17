@@ -1,0 +1,11 @@
+[package]
+name = "tower-shell"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "no_std, hardware-free kernels behind the HARDWARIO TOWER SDK's device shell: the `addr` setting-value parser (`auto` / strict hex) and the non-cryptographic xorshift that mints `addr random`, the response-pagination window, and the TAB-completion helpers (char-safe common prefix, one-frame byte budget). Not the shell itself (that is the SDK's `tower::shell`); split out like tower-kv / tower-net so the logic is unit-tested on the host."
+
+# Pure functions only: no dependencies, no_std, host-testable with plain `cargo test`.
+[dependencies]

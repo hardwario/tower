@@ -302,13 +302,7 @@ mod tests {
         }
     }
 
-    fn mgmt_response_frame(
-        req_id: u16,
-        result: u8,
-        chunk: u16,
-        last: bool,
-        data: &[u8],
-    ) -> Vec<u8> {
+    fn mgmt_response_frame(req_id: u16, result: u8, chunk: u16, last: bool, data: &[u8]) -> Vec<u8> {
         let mut buf = [0u8; MAX_WIRE];
         let n = encode_frame(
             MsgType::MgmtResponse,
@@ -334,13 +328,7 @@ mod tests {
         // A foreign req_id in between is ignored.
         m.feed(&mgmt_response_frame(9, 1, 0, true, b"zzz"));
         let mut dec = FrameDecoder::new();
-        match mgmt_roundtrip(
-            &mut m,
-            &mut dec,
-            7,
-            &MgmtOp::NodeList,
-            Duration::from_millis(300),
-        ) {
+        match mgmt_roundtrip(&mut m, &mut dec, 7, &MgmtOp::NodeList, Duration::from_millis(300)) {
             MgmtOutcome::Reply(r) => {
                 assert_eq!(r.result, MGMT_OK);
                 assert_eq!(r.data, b"abcdef");
@@ -365,13 +353,7 @@ mod tests {
         m.feed(&mgmt_response_frame(3, 0, 0, false, b"a"));
         m.feed(&mgmt_response_frame(3, MGMT_OK, 2, true, b"c")); // chunk 1 lost
         let mut dec = FrameDecoder::new();
-        match mgmt_roundtrip(
-            &mut m,
-            &mut dec,
-            3,
-            &MgmtOp::NodeList,
-            Duration::from_millis(300),
-        ) {
+        match mgmt_roundtrip(&mut m, &mut dec, 3, &MgmtOp::NodeList, Duration::from_millis(300)) {
             MgmtOutcome::Reply(r) => assert!(r.truncated),
             _ => panic!("expected a reply"),
         }
@@ -381,13 +363,7 @@ mod tests {
     fn timeout_when_mute() {
         let mut m = Mock::new();
         let mut dec = FrameDecoder::new();
-        match mgmt_roundtrip(
-            &mut m,
-            &mut dec,
-            1,
-            &MgmtOp::Describe,
-            Duration::from_millis(50),
-        ) {
+        match mgmt_roundtrip(&mut m, &mut dec, 1, &MgmtOp::Describe, Duration::from_millis(50)) {
             MgmtOutcome::Timeout { bad_version: None } => {}
             _ => panic!("expected a clean timeout"),
         }

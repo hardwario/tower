@@ -1,9 +1,27 @@
 # Changelog: tower-protocol
 
 All notable changes to the wire format and the crate API. The wire format is postcard
-(not self-describing): every entry that says **wire change** implies a `PROTOCOL_VERSION`
-bump and a coordinated re-pin of all three consumers (`tower-firmware`, `tower-cli`,
-`tower-hil`).
+(not self-describing): every entry that says **wire change** implies a `PROTOCOL_VERSION` (or,
+for the radio schema, `RADIO_SCHEMA_VERSION`) bump. Since the monorepo, the firmware, the
+`tower` CLI and the HIL harness build this crate by path, so they move in the same commit;
+the entries from v1.5.1 down describe the earlier multi-repo era, when each consumer re-pinned a
+git tag.
+
+## Unreleased
+
+**Moved into the [hardwario/tower](https://github.com/hardwario/tower) monorepo** as
+`crates/protocol`. No wire change and no API change (`PROTOCOL_VERSION` stays 3,
+`RADIO_SCHEMA_VERSION` stays 2, every golden vector is byte-identical).
+
+- Consumed **by path**: the firmware SDK (`firmware/`), the `tower` CLI (`cli/`), the HIL
+  harness (`hil/`) and `tower-kv` (`crates/kv`) all build this source tree, so the
+  wire-format lockstep is a compile-time fact; the tag pins and their checkers are gone.
+- Release tags are renamed `protocol-vX.Y.Z` (the imported `v1.0.0` ... `v1.5.1` are now
+  `protocol-v1.0.0` ... `protocol-v1.5.1`); `tools/check_wire_bump.py` takes its baseline from
+  the latest `protocol-v*` tag. No GitHub Release or auto-tag job any more: the crate is an
+  internal path dependency.
+- The crate joins the repo-wide rustfmt gate (one root `rustfmt.toml`, max_width 110); the
+  reformat is whitespace-only, which the guard's per-golden fingerprints ignore.
 
 ## v1.5.1 (2026-10-17)
 

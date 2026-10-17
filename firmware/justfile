@@ -1,4 +1,5 @@
-# HARDWARIO TOWER Firmware SDK: task runner (https://just.systems)
+# HARDWARIO TOWER firmware SDK (package `tower-sdk`, crate `tower`): task runner
+# (https://just.systems). Run from this directory, or from the repo root as `just fw <recipe>`.
 #
 # The crate is a library; flashable programs come in two kinds: `example` (educational,
 # examples/) and `app` (a ready-made TOWER IoT Kit product, apps/). build/flash/run/size take
@@ -11,19 +12,20 @@
 # Override the serial device: TOWER_DEVICE=/dev/cu.usbserial-XXXX just flash example blinky
 # Pass cargo features:        TOWER_FEATURES=role-gateway just flash example net_confirmed
 #
-# Flashing + console use the `tower` CLI (https://github.com/hardwario/tower-cli): it programs
-# the STM32L0 over the UART bootloader (the jolt engine, as a library) AND decodes the firmware's
-# framed console (`tower logs`, not a raw serial terminal). Install it on your PATH (e.g.
-# `cargo install --locked --path ../cli` from the TOWER control plane, or grab a release binary).
+# Flashing + console use the `tower` CLI (../cli): it programs the STM32L0 over the UART
+# bootloader (the tower-boot engine, ../crates/boot) AND decodes the firmware's framed console
+# (`tower logs`, not a raw serial terminal). Install it on your PATH (`cargo install --locked
+# --path cli` from the repo root, or grab a `cli-v*` release binary).
 # Device control on its own (logs, console, reset, erase, devices) is `tower`'s job. Call the
 # CLI directly; the justfile only wraps the steps that need the kind/name/features build context.
 #
 # `build`/`size` run `cargo objcopy`/`cargo size` (cargo-binutils: `cargo install --locked
 # cargo-binutils`); the llvm-tools component they drive comes with rust-toolchain.toml.
 #
-# The HIL bench harness lives in its own repo (github.com/hardwario/tower-hil) and builds its
-# images from this checkout; the tower-protocol pin check lives in CI here
-# (tools/protocol_pin_check.py) and, developer-facing, in the TOWER control plane (/lockstep).
+# This directory is its own Cargo workspace (thumbv6m + flip-link via .cargo/config.toml), apart
+# from the repo's host workspace; the shared `crates/*` (protocol, kv, net, radio, gateway, shell)
+# are path dependencies, so there is no version pin to keep in step. The HIL bench harness (../hil)
+# builds its images from this directory with `just build`.
 #
 # CROSS-PLATFORM: every recipe is a single program invocation (no bash, no sed/awk/ls pipelines),
 # so the same `just` recipes run on Linux, macOS, and Windows. Windows uses cmd.exe (below) so
@@ -37,7 +39,7 @@ set windows-shell := ["cmd.exe", "/c"]
 bin := "target/firmware.bin"
 
 # Optional serial device; empty => let `tower` auto-detect the only USB serial device present.
-# Read from TOWER_DEVICE; passed to `tower`/`jolt` as `-d`.
+# Read from TOWER_DEVICE; passed to `tower` as `-d`.
 device := env_var_or_default("TOWER_DEVICE", "")
 _device_flag := if device == "" { "" } else { "-d " + device }
 
@@ -46,7 +48,7 @@ _device_flag := if device == "" { "" } else { "-d " + device }
 features := env_var_or_default("TOWER_FEATURES", "")
 _feat_flag := if features == "" { "" } else { "--features " + features }
 
-# Host triple, needed by `test` ONLY: the committed .cargo/config.toml pins the repo's DEFAULT
+# Host triple, needed by `test` ONLY: the committed .cargo/config.toml pins this directory's DEFAULT
 # cargo target to thumbv6m (so bare `cargo build`/`cargo run` cross-compile for the L0), which
 # also applies to `cargo test`, and thumbv6m has no libtest / panic handler. The explicit host
 # --target undoes that one default; it cannot be dropped without dropping the config default.
@@ -71,8 +73,8 @@ default:
 # `just examples` / `just apps` list the names of each kind.
 
 # Hand-maintained (keeps the recipe OS-independent: no ls/sed vs PowerShell split): add an
-# `@echo <name>` line, kept sorted, when you add examples/<name>.rs. CI (host-test job) fails
-# when this list and examples/*.rs disagree.
+# `@echo <name>` line, kept sorted, when you add examples/<name>.rs. `just lists` (run by CI)
+# fails when this list and examples/*.rs disagree.
 # List the example apps (examples/*.rs); build/flash/run them as kind `example`.
 examples:
     @echo accelerometer
@@ -172,20 +174,19 @@ run kind name: (flash kind name)
 check *args:
     cargo build --locked --release --lib --bins --examples {{args}}
 
-# Builds for the host triple (the firmware itself is no_std): `tower-kv` (the EEPROM key-value
-# codec), `tower-net-core` (the network-layer security decision kernels: replay rule, TX-counter
-# watermark/fail-closed nonce safety, ACK resolution, FHSS beacon-epoch acceptance, pairing
-# confirm freshness, CCM nonce construction), `tower-radio-core` (the EU/US/FHSS duty token-bucket
-# math + the fixed FHSS hop permutation, i.e. the regulatory arithmetic), `tower-gw-core` (the gateway
-# node-registry bucket codec + downlink-queue policy) and `tower-shell-core` (the `addr` setting
-# value parser + its xorshift). The shared wire-protocol tests live in the tower-protocol repo.
-# Run the firmware's host-side unit tests.
+# The firmware itself is no_std (thumbv6m, no libtest), so its logic is tested through the shared
+# crates it builds on, in the repo's HOST workspace: `tower-protocol` (the console wire format),
+# `tower-kv` (the EEPROM key-value codec), `tower-net` (the network-layer security decision
+# kernels: replay rule, TX-counter watermark/fail-closed nonce safety, ACK resolution, FHSS
+# beacon-epoch acceptance, pairing confirm freshness, CCM nonce construction), `tower-radio` (the
+# EU/US/FHSS duty token-bucket math + the fixed FHSS hop permutation, i.e. the regulatory
+# arithmetic), `tower-gateway` (the gateway node-registry bucket codec + downlink-queue policy) and
+# `tower-shell` (the `addr` setting value parser + its xorshift). The explicit host --target undoes
+# this directory's thumbv6m default (see `host` above). `just test` at the repo root runs the
+# whole host workspace instead.
+# Run the host-side unit tests of the shared crates the firmware builds on.
 test *args:
-    cargo test -p tower-kv --target {{host}} {{args}}
-    cargo test -p tower-net-core --target {{host}} {{args}}
-    cargo test -p tower-radio-core --target {{host}} {{args}}
-    cargo test -p tower-gw-core --target {{host}} {{args}}
-    cargo test -p tower-shell-core --target {{host}} {{args}}
+    cargo test --locked --manifest-path ../Cargo.toml --target {{host}} -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell {{args}}
 
 
 # flip-link puts the stack BELOW the statics on the 20 KB part, so each product bin must
@@ -193,8 +194,73 @@ test *args:
 # docs/gateway.md "RAM budget"). Builds the bins, then checks the ELF layout. Run in CI.
 # Guard the RAM budget: fail if any product bin's statics leave too little stack.
 ram-budget:
-    cargo build --release --bins
+    cargo build --locked --release --bins
     python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor
+
+# rustfmt house style: the repo-root rustfmt.toml (110 cols) covers this workspace too.
+# Apply rustfmt to this workspace.
+fmt:
+    cargo fmt --all
+
+# Check formatting without changing anything (`just fmt` applies it).
+fmt-check:
+    cargo fmt --all -- --check
+
+# clippy can't run `--all-targets` on thumbv6m (tests need host libtest), so this lints the
+# buildable targets, then each role-gated example variant: without those, a warning inside a
+# #[cfg(feature = "role-...")] branch never fails (only the default feature set is linted).
+# Lint the library, apps and examples (default features + every role variant), -D warnings.
+clippy:
+    cargo clippy --locked --lib --examples --bins -- -D warnings
+    cargo clippy --locked --examples --features role-gateway -- -D warnings
+    cargo clippy --locked --examples --features role-node -- -D warnings
+    cargo clippy --locked --examples --features role-node,node-2 -- -D warnings
+    cargo clippy --locked --examples --features role-peer-a -- -D warnings
+    cargo clippy --locked --examples --features role-peer-b -- -D warnings
+
+# The two-board examples gate their sender/node/peer halves behind role features, so a
+# default-feature build leaves that half of the matrix compile-unchecked. Building each role means
+# an API change that only a role-gated branch uses can't merge green (and then fail mid-bench or in
+# the HIL harness's build_and_flash).
+# Release-build every role-gated example variant.
+roles:
+    cargo build --locked --release --examples --features role-gateway
+    cargo build --locked --release --examples --features role-node
+    cargo build --locked --release --examples --features role-node,node-2
+    cargo build --locked --release --examples --features role-peer-a
+    cargo build --locked --release --examples --features role-peer-b
+
+# --document-private-items: the module docs deliberately narrate the internals (writer_loop,
+# TX_CHANNEL, ...) with intra-doc links; building the private items keeps those links live, and the
+# -A silences the corresponding lint (everything else, i.e. broken links, bare URLs, malformed
+# HTML, still fails).
+# Build the SDK's rustdoc, failing on any warning.
+[env("RUSTDOCFLAGS", "-D warnings -A rustdoc::private-intra-doc-links")]
+doc:
+    cargo doc --locked --no-deps --lib --document-private-items
+
+# `examples` / `apps` are hand-maintained (OS-independent recipes, no ls/sed); this fails when
+# they drift from the files on disk so the lists can't silently go stale.
+# Check that `just examples` / `just apps` match examples/*.rs / apps/*.rs.
+[script("python3")]
+lists:
+    import pathlib, subprocess, sys
+    drift = False
+    for kind in ("examples", "apps"):
+        on_disk = sorted(p.stem for p in pathlib.Path(kind).glob("*.rs"))
+        out = subprocess.run([r"{{just_executable()}}", kind], capture_output=True, text=True, check=True)
+        listed = sorted(out.stdout.split())
+        if on_disk != listed:
+            drift = True
+            print(f"`just {kind}` drifted from {kind}/*.rs:")
+            print("  file but not listed:", sorted(set(on_disk) - set(listed)))
+            print("  listed but no file: ", sorted(set(listed) - set(on_disk)))
+    sys.exit(1 if drift else 0)
+
+# Every hardware-free firmware gate, the same set CI's `firmware` job runs (needs flip-link on
+# PATH; no cargo-binutils, no hardware). The repo-root `just check` runs this too.
+# Run all firmware gates: fmt, MCU build, RAM budget, clippy, role variants, rustdoc, list drift.
+ci: fmt-check check ram-budget clippy roles doc lists
 
 
 # === Maintenance ==================================================================================

@@ -23,8 +23,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use tower_protocol::msg::{
-    Dropped, Event as EvMsg, Hello, Level, Log, Print, ShellCommand, ShellComplete,
-    ShellCompletions, ShellResponse,
+    Dropped, Event as EvMsg, Hello, Level, Log, Print, ShellCommand, ShellComplete, ShellCompletions,
+    ShellResponse,
 };
 use tower_protocol::{FrameDecoder, MsgType, decode_frame, encode_frame};
 
@@ -104,7 +104,7 @@ struct App {
     last_open_attempt: Instant,
     /// Set when the session opened with `--reset`: the moment the pulse released. Cleared by
     /// the first `Hello`; while set, the header animates "booting…" so a slow boot (a fallback
-    /// EEPROM compaction can hold the chip ~5 s; docs/storage.md in tower-firmware) reads as
+    /// EEPROM compaction can hold the chip ~5 s; firmware/docs/storage.md) reads as
     /// progress, not a dead UI. Past the CLI's 8 s Hello ceiling it escalates to a warning.
     boot_wait: Option<Instant>,
     /// High-water mark of hint rows ever rendered under the prompt: once TAB completion
@@ -226,10 +226,7 @@ fn abandon_front(app: &mut App, why: &str) {
     } else {
         "incomplete response to"
     };
-    push_cap(
-        &mut app.responses,
-        format!("[tower] {what} `{}`{why}", p.line),
-    );
+    push_cap(&mut app.responses, format!("[tower] {what} `{}`{why}", p.line));
 }
 
 /// Close every in-flight command (see [`abandon_front`]).
@@ -386,8 +383,8 @@ fn handle_frame(app: &mut App, inner: &[u8]) {
                             format!(
                                 "✖ PROTOCOL MISMATCH: device frames are tagged v{got}, but this \
                                  `tower` was built for v{}; every frame will mis-decode. Rebuild \
-                                 the firmware and `tower` against the SAME tower-protocol tag \
-                                 (the lockstep rule).",
+                                 the firmware and `tower` from the SAME checkout of \
+                                 crates/protocol (the lockstep rule).",
                                 tower_protocol::PROTOCOL_VERSION
                             ),
                             String::new(),
@@ -440,8 +437,8 @@ fn handle_frame(app: &mut App, inner: &[u8]) {
                         (
                             format!(
                                 "⚠ PROTOCOL MISMATCH: device v{}, tower built for v{}: frames \
-                                 will mis-decode; rebuild both against the same tower-protocol \
-                                 tag.",
+                                 will mis-decode; rebuild both from the same checkout of \
+                                 crates/protocol.",
                                 h.protocol_version,
                                 tower_protocol::PROTOCOL_VERSION
                             ),
@@ -473,10 +470,7 @@ fn handle_frame(app: &mut App, inner: &[u8]) {
             Err(_) => app.payload_errors += 1,
         },
         MsgType::Print => match postcard::from_bytes::<Print>(payload) {
-            Ok(p) => push_log(
-                app,
-                (String::new(), p.text.trim_end().to_string(), Color::Reset),
-            ),
+            Ok(p) => push_log(app, (String::new(), p.text.trim_end().to_string(), Color::Reset)),
             Err(_) => app.payload_errors += 1,
         },
         MsgType::Event => match postcard::from_bytes::<EvMsg>(payload) {
@@ -799,11 +793,7 @@ fn kill_word(app: &mut App) {
 }
 
 fn prev_char(s: &str, cur: usize) -> usize {
-    s[..cur]
-        .chars()
-        .next_back()
-        .map(|c| c.len_utf8())
-        .unwrap_or(0)
+    s[..cur].chars().next_back().map(|c| c.len_utf8()).unwrap_or(0)
 }
 fn next_char(s: &str, cur: usize) -> usize {
     s[cur..].chars().next().map(|c| c.len_utf8()).unwrap_or(0)
@@ -866,19 +856,9 @@ fn send_command(app: &mut App) {
     // if the frame actually went out. A too-long line fails to encode and a dropped link fails
     // to write; in either case keep the typed line so the user can edit/retry, don't arm a
     // reassembly for a command that never left, and explain why in the hint.
-    if !send_frame(
-        app,
-        MsgType::ShellCommand,
-        &ShellCommand {
-            cmd_id,
-            line: &line,
-        },
-    ) {
+    if !send_frame(app, MsgType::ShellCommand, &ShellCommand { cmd_id, line: &line }) {
         app.hint = if app.connected() {
-            format!(
-                "line too long (max ~{} bytes)",
-                tower_protocol::MAX_FRAME - 12
-            )
+            format!("line too long (max ~{} bytes)", tower_protocol::MAX_FRAME - 12)
         } else {
             "send failed: link lost; reconnecting…".to_string()
         };
@@ -933,11 +913,7 @@ fn header_diagnostics(app: &App) -> Option<String> {
     let plural = |n: u64| if n == 1 { "" } else { "s" };
     let mut parts: Vec<String> = Vec::new();
     if app.decode_failures > 0 {
-        let mut d = format!(
-            "{} bad frame{}",
-            app.decode_failures,
-            plural(app.decode_failures)
-        );
+        let mut d = format!("{} bad frame{}", app.decode_failures, plural(app.decode_failures));
         if let Some(v) = app.mismatch_got {
             d.push_str(&format!(" (v{v}?)"));
         }
@@ -960,12 +936,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let area = f.area();
     let bar = Style::new().bg(Color::Gray).fg(Color::Black);
 
-    let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    let rows =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).split(area);
 
     // Header. Built as spans so the connection dot, a reconnect error, and the decode/seq
     // diagnostics can each carry their own color over the gray bar.
@@ -992,7 +964,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     }
     // Post-reset boot wait: animated while the device is (possibly slowly) booting, loud once
     // it exceeds the 8 s worst case the CLI tolerates (a fallback EEPROM compaction can
-    // legitimately hold the chip ~5 s; see tower-firmware docs/storage.md).
+    // legitimately hold the chip ~5 s; see firmware/docs/storage.md).
     if let Some(t0) = app.boot_wait {
         let el = t0.elapsed();
         if el < Duration::from_secs(8) {
@@ -1059,19 +1031,13 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let clock = now_date();
     let cw = clock.len() as u16;
     if footer_area.width > cw + 1 {
-        let clock_rect = Rect::new(
-            footer_area.x + footer_area.width - cw - 1,
-            footer_area.y,
-            cw,
-            1,
-        );
+        let clock_rect = Rect::new(footer_area.x + footer_area.width - cw - 1, footer_area.y, cw, 1);
         f.render_widget(Paragraph::new(clock).style(bar), clock_rect);
     }
 }
 
 fn render_split(f: &mut ratatui::Frame, app: &mut App, body: Rect) {
-    let cols =
-        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(body);
+    let cols = Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(body);
     let left = Layout::vertical([Constraint::Percentage(25), Constraint::Min(0)]).split(cols[0]);
 
     let plain = |s: &String| Line::raw(s.clone());
@@ -1099,9 +1065,7 @@ fn render_split(f: &mut ratatui::Frame, app: &mut App, body: Rect) {
 fn render_zoom(f: &mut ratatui::Frame, app: &mut App, body: Rect) {
     let plain = |s: &String| Line::raw(s.clone());
     match app.focus {
-        Pane::Logs => {
-            render_text_pane(f, body, "", false, &app.logs, app.scroll[0], log_line_spans)
-        }
+        Pane::Logs => render_text_pane(f, body, "", false, &app.logs, app.scroll[0], log_line_spans),
         Pane::Events => render_text_pane(f, body, "", false, &app.events, app.scroll[1], plain),
         Pane::Shell => render_shell(f, body, app),
     }
@@ -1118,11 +1082,7 @@ fn log_line_spans((prefix, rest, c): &(String, String, Color)) -> Line<'static> 
 /// How many terminal rows a line of display width `w` occupies once wrapped to `width`
 /// columns (matching `Wrap { trim: false }`): `ceil(w / width)`, at least one row.
 fn wrapped_rows(w: usize, width: usize) -> usize {
-    if width == 0 {
-        1
-    } else {
-        w.div_ceil(width).max(1)
-    }
+    if width == 0 { 1 } else { w.div_ceil(width).max(1) }
 }
 
 /// Render a bottom-anchored scrollback pane.
@@ -1147,9 +1107,7 @@ fn render_text_pane<T>(
         Block::default()
     } else {
         let style = if focused {
-            Style::new()
-                .fg(Color::LightRed)
-                .add_modifier(Modifier::BOLD)
+            Style::new().fg(Color::LightRed).add_modifier(Modifier::BOLD)
         } else {
             Style::new()
         };
@@ -1199,15 +1157,11 @@ fn render_text_pane<T>(
 fn render_shell(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Pane::Shell;
     let style = if focused {
-        Style::new()
-            .fg(Color::LightRed)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Color::LightRed).add_modifier(Modifier::BOLD)
     } else {
         Style::new()
     };
-    let block = Block::bordered()
-        .title("Interactive Shell")
-        .border_style(style);
+    let block = Block::bordered().title("Interactive Shell").border_style(style);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 {
@@ -1276,10 +1230,7 @@ fn render_shell(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
     if focused {
         let cx = rows[1].x + 2 + app.input[..app.cursor].chars().count() as u16;
-        f.set_cursor_position((
-            cx.min(rows[1].x + rows[1].width.saturating_sub(1)),
-            rows[1].y,
-        ));
+        f.set_cursor_position((cx.min(rows[1].x + rows[1].width.saturating_sub(1)), rows[1].y));
     }
 }
 
@@ -1469,11 +1420,7 @@ mod tests {
         app.paused = true;
         let before = app.logs.len();
         handle_frame(&mut app, &log_inner(1));
-        assert_eq!(
-            app.logs.len(),
-            before + 1,
-            "capture must continue while paused"
-        );
+        assert_eq!(app.logs.len(), before + 1, "capture must continue while paused");
         assert_eq!(app.scroll[0], 1, "view must stay anchored while paused");
         handle_key(&mut app, KeyCode::F(5), KeyModifiers::NONE);
         assert!(!app.paused);
@@ -1751,10 +1698,7 @@ mod tests {
         app.pending.push_back(pending(1));
         app.pending.push_back(pending(2));
         handle_frame(&mut app, &resp_frame(2, 0, true, "answer B"));
-        assert_eq!(
-            scrollback(&app),
-            vec!["[tower] no response to `/c1`", "answer B"]
-        );
+        assert_eq!(scrollback(&app), vec!["[tower] no response to `/c1`", "answer B"]);
         assert!(app.pending.is_empty());
         // And the shell keeps working afterwards.
         app.pending.push_back(pending(3));
@@ -1785,10 +1729,7 @@ mod tests {
         assert_eq!(app.pending.len(), 1, "still within its idle budget");
         expire_pending(&mut app, sent + PENDING_IDLE);
         assert!(app.pending.is_empty());
-        assert_eq!(
-            scrollback(&app),
-            vec!["[tower] no response to `/c1` (timed out)"]
-        );
+        assert_eq!(scrollback(&app), vec!["[tower] no response to `/c1` (timed out)"]);
     }
 
     #[test]
@@ -1802,11 +1743,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         handle_frame(&mut app, &resp_frame(1, 0, false, "still working\n"));
         expire_pending(&mut app, sent + PENDING_IDLE);
-        assert_eq!(
-            app.pending.len(),
-            2,
-            "streaming activity keeps the queue alive"
-        );
+        assert_eq!(app.pending.len(), 2, "streaming activity keeps the queue alive");
     }
 
     #[test]
@@ -1837,10 +1774,7 @@ mod tests {
         app.pending_req = Some(4);
         drop_link(&mut app);
         assert!(app.pending.is_empty() && app.pending_req.is_none());
-        assert_eq!(
-            scrollback(&app),
-            vec!["[tower] no response to `/c1` (link lost)"]
-        );
+        assert_eq!(scrollback(&app), vec!["[tower] no response to `/c1` (link lost)"]);
     }
 
     #[test]

@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use tower_hil::{bench_or_fail_power, firmware_dir, Ppk2};
+use tower_hil::{Ppk2, bench_or_fail_power, firmware_dir};
 
 /// Upper bound on the STOP floor (median).
 const FLOOR_MAX_UA: f64 = 50.0;
@@ -71,7 +71,14 @@ fn probe_rs_download(elf: &PathBuf) -> Result<(), String> {
     // in the test: a fresh PPK2 power-cycle immediately before this call, so probe-rs connects
     // inside the post-power-on RUN window (clock/LSE start-up, before the app first sleeps).
     let out = Command::new("probe-rs")
-        .args(["download", "--chip", "STM32L083CZTx", "--connect-under-reset", "--binary-format", "elf"])
+        .args([
+            "download",
+            "--chip",
+            "STM32L083CZTx",
+            "--connect-under-reset",
+            "--binary-format",
+            "elf",
+        ])
         .arg(elf)
         .output()
         .map_err(|e| format!("HIL: spawn probe-rs download: {e}"))?;

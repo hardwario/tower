@@ -1,5 +1,5 @@
 //! `tower`, the HARDWARIO TOWER host CLI: devices, logs/events, shell/exec, the console TUI,
-//! and flash/erase/reset (via the jolt engine).
+//! and flash/erase/reset/chip (via the tower-boot engine, crates/boot).
 //!
 //! The firmware's UART is always framed (`tower-protocol`: COBS + CRC + postcard),
 //! so a plain terminal shows binary; this tool decodes it. The same `FrameDecoder`
@@ -41,8 +41,8 @@ use render::{
 #[cfg(test)]
 use session::await_ready;
 use session::{
-    CompletionOutcome, ReadOutcome, Readiness, await_ready_with, completion_start, read_response,
-    read_some, request_completions, result_tag,
+    CompletionOutcome, ReadOutcome, Readiness, await_ready_with, completion_start, read_response, read_some,
+    request_completions, result_tag,
 };
 use term::sanitize_line;
 
@@ -80,7 +80,7 @@ const EXIT_PROTOCOL_MISMATCH: u8 = 125;
 /// Default per-command response timeout (`--timeout`), in milliseconds.
 ///
 /// Sized above the firmware's worst-case EEPROM compaction stall (~5.2 s with the whole
-/// chip frozen; see tower-firmware docs/storage.md): any command that writes EEPROM
+/// chip frozen; see firmware/docs/storage.md): any command that writes EEPROM
 /// (`settings set`, …) can land on the append that fills the KV half and pay for the whole
 /// compaction before it can respond. With the old 1.5 s default such a command *executed*
 /// but the CLI reported "no response (timeout)": a phantom failure (2026-07-05). It is an
@@ -246,7 +246,7 @@ enum Cmd {
         #[arg(long)]
         reset: bool,
     },
-    /// Flash a raw firmware `.bin` over the STM32 UART bootloader (via jolt).
+    /// Flash a raw firmware `.bin` over the STM32 UART bootloader.
     Flash {
         /// Path to the raw firmware `.bin`.
         file: PathBuf,
@@ -266,8 +266,15 @@ enum Cmd {
         #[arg(short, long)]
         verbose: bool,
     },
-    /// Erase the entire device flash over the STM32 UART bootloader (via jolt).
+    /// Erase the entire device flash over the STM32 UART bootloader.
     Erase {
+        /// Print bootloader connect diagnostics.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Read the chip id, bootloader version and supported commands (read-only; the app is
+    /// restored afterwards).
+    Chip {
         /// Print bootloader connect diagnostics.
         #[arg(short, long)]
         verbose: bool,
@@ -374,10 +381,9 @@ fn run(cli: Cli) -> Result<u8> {
             no_run,
             go,
             verbose,
-        } => {
-            flash_cmd(cli.port, file, !no_erase, !no_verify, !no_run, go, verbose).map(|()| EXIT_OK)
-        }
+        } => flash_cmd(cli.port, file, !no_erase, !no_verify, !no_run, go, verbose).map(|()| EXIT_OK),
         Cmd::Erase { verbose } => erase_cmd(cli.port, verbose).map(|()| EXIT_OK),
+        Cmd::Chip { verbose } => chip_cmd(cli.port, verbose).map(|()| EXIT_OK),
         Cmd::Reset { bootloader } => reset_cmd(cli.port, bootloader).map(|()| EXIT_OK),
         Cmd::Gateway(opts) => gateway::run(cli.port, opts),
         Cmd::Nodes { cmd, mqtt } => client::nodes::run(cmd, mqtt),
@@ -562,9 +568,7 @@ impl Completer for ShellHelper {
             // Timeout (mismatch or not) or a failed link: offer no candidates. The
             // per-command path reports a lockstep mismatch / dead port loudly; TAB
             // shouldn't spam mid-edit.
-            CompletionOutcome::Timeout { .. } | CompletionOutcome::Failed(_) => {
-                Ok((pos, Vec::new()))
-            }
+            CompletionOutcome::Timeout { .. } | CompletionOutcome::Failed(_) => Ok((pos, Vec::new())),
         }
     }
 }
@@ -598,7 +602,7 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
         if let Some(v) = mismatch {
             warn_protocol_mismatch(v);
             eprintln!(
-                "[tower] protocol version mismatch (device v{v}, tower v{}); refusing to open the shell; rebuild/repin against the same tower-protocol tag",
+                "[tower] protocol version mismatch (device v{v}, tower v{}); refusing to open the shell; rebuild the firmware and `tower` from the same checkout",
                 tower_protocol::PROTOCOL_VERSION
             );
             return Ok(EXIT_PROTOCOL_MISMATCH);
@@ -668,9 +672,7 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
                     // The device answered, with frames from a different tower-protocol
                     // tag. Without this, the interactive shell was the one consumer that
                     // stayed mute on the mismatch the ecosystem got burned by.
-                    ReadOutcome::Timeout {
-                        bad_version: Some(v),
-                    } => {
+                    ReadOutcome::Timeout { bad_version: Some(v) } => {
                         if !warned_mismatch {
                             warn_protocol_mismatch(v);
                             warned_mismatch = true;
@@ -738,7 +740,7 @@ fn exec_cmd(
         if let Some(v) = mismatch {
             warn_protocol_mismatch(v);
             eprintln!(
-                "[tower] protocol version mismatch (device v{v}, tower v{}); refusing to exec; rebuild/repin against the same tower-protocol tag",
+                "[tower] protocol version mismatch (device v{v}, tower v{}); refusing to exec; rebuild the firmware and `tower` from the same checkout",
                 tower_protocol::PROTOCOL_VERSION
             );
             return Ok(EXIT_PROTOCOL_MISMATCH);
@@ -761,13 +763,8 @@ fn exec_line(
 ) -> Result<u8> {
     let cmd_id = exec_cmd_id();
     let mut buf = [0u8; tower_protocol::MAX_WIRE];
-    let n = encode_frame(
-        MsgType::ShellCommand,
-        0,
-        &ShellCommand { cmd_id, line },
-        &mut buf,
-    )
-    .map_err(|e| anyhow::anyhow!("encode: {e:?}"))?;
+    let n = encode_frame(MsgType::ShellCommand, 0, &ShellCommand { cmd_id, line }, &mut buf)
+        .map_err(|e| anyhow::anyhow!("encode: {e:?}"))?;
     sp.write_all(&buf[..n])?;
     sp.flush()?;
     match read_response(&mut *sp, dec, cmd_id, timeout) {
@@ -794,9 +791,7 @@ fn exec_line(
         // Frames arrived but every one was version-rejected: that's the lockstep failure
         // (125), not a mute device (124), even without --reset, where the Hello-based
         // check above never ran.
-        ReadOutcome::Timeout {
-            bad_version: Some(v),
-        } => {
+        ReadOutcome::Timeout { bad_version: Some(v) } => {
             warn_protocol_mismatch(v);
             eprintln!(
                 "[tower] no response: device speaks protocol v{v}, tower speaks v{} (lockstep mismatch)",
@@ -852,9 +847,7 @@ fn complete_line(
             Ok(EXIT_OK)
         }
         // Same 125 rule as exec: version-rejected frames mean lockstep, not a dead link.
-        CompletionOutcome::Timeout {
-            bad_version: Some(v),
-        } => {
+        CompletionOutcome::Timeout { bad_version: Some(v) } => {
             warn_protocol_mismatch(v);
             eprintln!(
                 "[tower] no completions: device speaks protocol v{v}, tower speaks v{} (lockstep mismatch)",
@@ -868,9 +861,7 @@ fn complete_line(
             eprintln!("[tower] no completions (timeout)");
             Ok(EXIT_DEVICE_TIMEOUT)
         }
-        CompletionOutcome::Failed(e) => {
-            Err(anyhow::Error::new(e).context("requesting completions"))
-        }
+        CompletionOutcome::Failed(e) => Err(anyhow::Error::new(e).context("requesting completions")),
     }
 }
 
@@ -912,11 +903,11 @@ fn monitor(port: Option<String>, hex: bool, reset: bool) -> Result<()> {
     }
 }
 
-// ---- firmware: flash / erase / reset (STM32 UART bootloader, via jolt) -----
+// ---- firmware: flash / erase / reset / chip (STM32 UART bootloader, via tower-boot) ----
 //
 // The console protocol above runs over the firmware's framed UART link; these
 // commands instead drive the STM32 system bootloader (toggling NRST/BOOT0 over
-// the bridge's RTS/DTR). The whole bootloader engine is the `jolt` crate; we
+// the bridge's RTS/DTR). The whole bootloader engine is the `tower-boot` crate; we
 // only pick the port (reusing the same auto-detect as the other commands) and
 // hand off to it.
 
@@ -930,12 +921,12 @@ fn flash_cmd(
     verbose: bool,
 ) -> Result<()> {
     let port = pick_port(port)?;
-    let fw = jolt::firmware::load(&file)?;
-    if fw.len() as u32 > jolt::target::MAX_FLASH_SIZE {
+    let fw = tower_boot::firmware::load(&file)?;
+    if fw.len() as u32 > tower_boot::target::MAX_FLASH_SIZE {
         bail!(
             "firmware is {} bytes, exceeding the {} KiB maximum for any STM32L0 device",
             fw.len(),
-            jolt::target::MAX_FLASH_SIZE / 1024
+            tower_boot::target::MAX_FLASH_SIZE / 1024
         );
     }
     eprintln!(
@@ -943,17 +934,17 @@ fn flash_cmd(
         file.display(),
         fw.len()
     );
-    let mut sp = jolt::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
-    // jolt's FlashOptions is #[non_exhaustive] (a new option won't break us): start from Default
-    // and override. `verbose` moved out of the options into the progress sink below.
-    let mut opts = jolt::flash::FlashOptions::default();
+    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    // tower-boot's FlashOptions is #[non_exhaustive] (a new option won't break us): start from
+    // Default and override. `verbose` moved out of the options into the progress sink below.
+    let mut opts = tower_boot::flash::FlashOptions::default();
     opts.erase = erase;
     opts.verify = verify;
     opts.run = run;
     opts.go = go;
     let mut report = flash_progress(verbose);
     let start = Instant::now();
-    jolt::flash::flash(&mut sp, &fw, &opts, &mut report).context("flashing firmware")?;
+    tower_boot::flash::flash(&mut sp, &fw, &opts, &mut report).context("flashing firmware")?;
     // A ~45 s flash prints only live progress above; without a terminal line the caller
     // can't tell success from a hang, so always confirm completion.
     eprintln!(
@@ -967,30 +958,72 @@ fn flash_cmd(
 fn erase_cmd(port: Option<String>, verbose: bool) -> Result<()> {
     let port = pick_port(port)?;
     eprintln!("[tower] erasing {port}");
-    let mut sp = jolt::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
     let mut report = flash_progress(verbose);
-    let pages = jolt::flash::erase(&mut sp, &mut report).context("erasing flash")?;
+    let pages = tower_boot::flash::erase(&mut sp, &mut report).context("erasing flash")?;
     eprintln!("[tower] erased {pages} page(s), reset into application");
     Ok(())
 }
 
-/// A jolt flash/erase progress sink. jolt's library is UI-free (it emits `Progress` events);
-/// we render them with `indicatif` progress bars (the same crate the standalone `jolt` CLI
-/// uses), so a ~45 s flash shows live erase/write/verify progress instead of looking hung.
-/// `indicatif` auto-detects the terminal, so a redirected stderr (a log, a pipe) stays clean.
-/// `--verbose` dumps the raw events instead.
-fn flash_progress(verbose: bool) -> impl FnMut(jolt::flash::Progress) {
+/// `tower chip`: what the STM32 ROM bootloader reports about the attached part (the content of
+/// the former `jolt info`). Read-only: [`tower_boot::chip::info`] enters the bootloader, reads
+/// `Get ID` + `Get`, and resets back into the application on every path. The data goes to
+/// stdout (one `Label   : value` line each, script-friendly); status lines go to stderr.
+fn chip_cmd(port: Option<String>, verbose: bool) -> Result<()> {
+    let port = pick_port(port)?;
+    eprintln!("[tower] reading chip info on {port} (enters the bootloader, then restores the app)");
+    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    // Connect diagnostics only with --verbose; the id is printed from the result below.
+    let mut report = |p: tower_boot::flash::Progress| {
+        if verbose {
+            eprintln!("[tower] {p:?}");
+        }
+    };
+    let info = tower_boot::chip::info(&mut sp, &mut report).context("reading chip info")?;
+    print!("{}", chip_report(&port, &info));
+    if !info.is_known() {
+        eprintln!(
+            "[tower] warning: 0x{:03X} is not a recognized STM32L0 family id",
+            info.id
+        );
+    }
+    eprintln!("[tower] {port} reset into application");
+    Ok(())
+}
+
+/// The `tower chip` stdout block. The bootloader lines are omitted when `Get` did not answer
+/// (the id is the essential part, as in the former `jolt info`).
+fn chip_report(port: &str, info: &tower_boot::chip::ChipInfo) -> String {
+    let mut out = format!(
+        "Device  : {port} @ {} baud, 8E1\nChip id : 0x{:03X} ({})\n",
+        tower_boot::target::BAUD,
+        info.id,
+        info.family
+    );
+    if let Some((major, minor)) = info.bootloader_version_parts() {
+        let cmds: Vec<String> = info.commands.iter().map(|c| format!("0x{c:02X}")).collect();
+        out.push_str(&format!(
+            "BL ver  : {major}.{minor}\nCommands: {}\n",
+            cmds.join(" ")
+        ));
+    }
+    out
+}
+
+/// A tower-boot flash/erase progress sink. tower-boot is UI-free (it emits `Progress` events);
+/// we render them with `indicatif` progress bars, so a ~45 s flash shows live
+/// erase/write/verify progress instead of looking hung. `indicatif` auto-detects the terminal,
+/// so a redirected stderr (a log, a pipe) stays clean. `--verbose` dumps the raw events instead.
+fn flash_progress(verbose: bool) -> impl FnMut(tower_boot::flash::Progress) {
     use indicatif::{ProgressBar, ProgressStyle};
-    use jolt::flash::Progress;
+    use tower_boot::flash::Progress;
 
     fn pages_bar(total: usize, msg: &'static str) -> ProgressBar {
         let bar = ProgressBar::new(total as u64);
         bar.set_style(
-            ProgressStyle::with_template(
-                "[tower] {msg:>9} [{bar:28.cyan/blue}] {pos:>4}/{len} pages",
-            )
-            .unwrap()
-            .progress_chars("=>-"),
+            ProgressStyle::with_template("[tower] {msg:>9} [{bar:28.cyan/blue}] {pos:>4}/{len} pages")
+                .unwrap()
+                .progress_chars("=>-"),
         );
         bar.set_message(msg);
         bar
@@ -1068,10 +1101,9 @@ fn flash_progress(verbose: bool) -> impl FnMut(jolt::flash::Progress) {
 
 fn reset_cmd(port: Option<String>, bootloader: bool) -> Result<()> {
     let port = pick_port(port)?;
-    let mut sp = jolt::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    let mut sp = tower_boot::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
     if bootloader {
-        sp.reset_into_bootloader()
-            .context("resetting into bootloader")?;
+        sp.reset_into_bootloader().context("resetting into bootloader")?;
         eprintln!("[tower] {port} reset into bootloader");
     } else {
         sp.reset_into_app().context("resetting into application")?;
@@ -1404,10 +1436,7 @@ mod tests {
         assert_ne!(1, tower_protocol::PROTOCOL_VERSION);
         let mut sp = MockPort::new(hello_wire_bad_version(1));
         let mut dec = FrameDecoder::new();
-        assert_eq!(
-            wait_for_hello(&mut sp, &mut dec, SHORT),
-            Readiness::BadVersion(1)
-        );
+        assert_eq!(wait_for_hello(&mut sp, &mut dec, SHORT), Readiness::BadVersion(1));
     }
 
     #[test]
@@ -1416,10 +1445,7 @@ mod tests {
         // with a distinct exit code instead of a generic timeout.
         let mut sp = MockPort::new(hello_wire_bad_version(1));
         let mut dec = FrameDecoder::new();
-        assert_eq!(
-            await_ready(&mut sp, &mut dec, None),
-            Readiness::BadVersion(1)
-        );
+        assert_eq!(await_ready(&mut sp, &mut dec, None), Readiness::BadVersion(1));
     }
 
     #[test]
@@ -1497,10 +1523,7 @@ mod tests {
         bytes.extend(shell_resp(cmd_id, 0, 2, true, "c"));
         let mut sp = MockPort::new(bytes);
         let mut dec = FrameDecoder::new();
-        assert_eq!(
-            exec_line(&mut sp, &mut dec, "/x", SHORT).unwrap(),
-            EXIT_ERROR
-        );
+        assert_eq!(exec_line(&mut sp, &mut dec, "/x", SHORT).unwrap(), EXIT_ERROR);
     }
 
     #[test]
@@ -1706,13 +1729,7 @@ mod tests {
         assert!(r.incomplete);
         assert!(r.text.len() <= crate::session::MAX_RESPONSE_BYTES);
         assert_eq!(
-            exec_line(
-                &mut MockPort::new(bytes),
-                &mut FrameDecoder::new(),
-                "/x",
-                SHORT
-            )
-            .unwrap(),
+            exec_line(&mut MockPort::new(bytes), &mut FrameDecoder::new(), "/x", SHORT).unwrap(),
             EXIT_ERROR
         );
     }
@@ -1811,5 +1828,35 @@ mod tests {
         let mut dec = FrameDecoder::new();
         // We asked for req_id 2, device answered 1 → no match, times out.
         assert!(request_completions(&mut sp, &mut dec, "", 0, 2, SHORT).is_none());
+    }
+
+    /// `tower chip` prints the same content the former `jolt info` did: the device line, the
+    /// chip id with its family, and (when `Get` answered) the bootloader version and commands.
+    #[test]
+    fn chip_report_lines() {
+        let info = tower_boot::chip::ChipInfo {
+            id: 0x447,
+            family: tower_boot::target::chip_name(0x447),
+            bootloader_version: Some(0x31),
+            commands: vec![0x00, 0x02, 0x31],
+        };
+        assert_eq!(
+            chip_report("/dev/ttyUSB0", &info),
+            "Device  : /dev/ttyUSB0 @ 115200 baud, 8E1\n\
+             Chip id : 0x447 (STM32L07x/L08x (e.g. STM32L083CZ))\n\
+             BL ver  : 3.1\n\
+             Commands: 0x00 0x02 0x31\n"
+        );
+        // `Get` unanswered: the bootloader lines are omitted, the id is still reported.
+        let bare = tower_boot::chip::ChipInfo {
+            bootloader_version: None,
+            commands: Vec::new(),
+            ..info
+        };
+        assert_eq!(
+            chip_report("/dev/ttyUSB0", &bare),
+            "Device  : /dev/ttyUSB0 @ 115200 baud, 8E1\n\
+             Chip id : 0x447 (STM32L07x/L08x (e.g. STM32L083CZ))\n"
+        );
     }
 }
