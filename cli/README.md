@@ -106,27 +106,113 @@ hosts an embedded MQTT broker unless pointed at an external one:
 tower gateway                       # TUI + embedded broker on 127.0.0.1:1883 (anonymous)
 tower gateway --service             # headless: MQTT is the only interface, logs to stderr
                                     #   (exits 1 if the bridge dies, for Restart=on-failure)
-tower gateway --broker 0.0.0.0:1883 # embedded broker on every interface; needs a login:
-                                    #   --mqtt-user (or TOWER_MQTT_USER) + TOWER_MQTT_PASSWORD
+tower gateway --broker 0.0.0.0:8883 --broker-tls-identity broker.p12
+                                    # embedded broker on every interface, over TLS; needs a
+                                    #   login: --mqtt-user (or TOWER_MQTT_USER) +
+                                    #   TOWER_MQTT_PASSWORD, and TOWER_BROKER_TLS_PASSWORD
 tower gateway --mqtt host:1883      # use an existing broker instead of hosting one
                                     #   (--mqtt-user + TOWER_MQTT_PASSWORD for auth)
+tower gateway --mqtt mqtts://host   # the same over TLS (port 8883; --mqtt-ca for a private CA)
 tower gateway --prefix tower/       # MQTT topic prefix (default tower/)
 tower gateway --reset               # NRST-pulse the dongle on attach (clears its RAM queue)
 ```
 
-**Broker access.** The embedded broker on a **loopback** address (the default
-`127.0.0.1:1883`) is **anonymous by design**: any local user or process on the machine can
-control the gateway: list/rename/remove nodes, read node AES keys (`nodes show --keys`), run
-remote shell commands, just as anyone who can open the dongle's serial port could. A
-**non-loopback** bind (any other address, including `0.0.0.0` / `::`) is refused unless a
-login is configured (`--mqtt-user` or `TOWER_MQTT_USER`, plus the password; prefer
-`TOWER_MQTT_PASSWORD`, argv is visible in `ps`); every client then needs the same login. A
-configured login is enforced on loopback too. There is **no TLS**: the login and all traffic,
-node keys included, cross the network in clear text; for remote access use an SSH tunnel or
-VPN to a loopback broker, or bridge to a properly secured external broker with `--mqtt`. An
+**Broker access.** The embedded broker's access policy depends on where it listens
+(`--broker ADDR:PORT`; default `127.0.0.1:1883`, or `127.0.0.1:8883` with TLS):
+
+| Bind address | Login | TLS | Result |
+|--------------|-------|-----|--------|
+| loopback (`127.0.0.0/8`, `::1`) | none | either | **anonymous**, by design |
+| loopback | set | either | login enforced |
+| anything else (incl. `0.0.0.0` / `::`) | none | either | refused |
+| anything else | set | on | login enforced, over TLS |
+| anything else | set | off | refused; with `--broker-allow-plaintext`: served, with a warning |
+
+*Login* is `--mqtt-user` (or `TOWER_MQTT_USER`) plus the password, preferably from
+`TOWER_MQTT_PASSWORD` (argv is visible in `ps`); every client then needs the same login. *TLS*
+is `--broker-tls-identity` (below). On **loopback** any local user or process on the machine
+can control the gateway: list/rename/remove nodes, read node AES keys (`nodes show --keys`),
+run remote shell commands, just as anyone who can open the dongle's serial port could; TLS
+does not change that (it protects the network path, and loopback has none). Off loopback,
+the login and all traffic, node keys included, would otherwise cross the network in clear
+text, so TLS is required too; `--broker-allow-plaintext` accepts clear text explicitly (for a
+segment you trust) and says so at startup. Alternatively keep the broker on loopback and
+reach it through an SSH tunnel or VPN, or bridge to an external broker with `--mqtt`. An
 MQTT user without a password is an error; an exported `TOWER_MQTT_PASSWORD` without a user is
 ignored. If the broker port is already taken, `tower gateway` fails instead of silently
 talking to whatever owns it; with a wildcard bind its own client connects via loopback.
+
+#### MQTT over TLS
+
+**Clients** (`tower gateway --mqtt`, `tower nodes`, `tower net`) use TLS with
+`--mqtt mqtts://HOST[:PORT]` (default port 8883), or `--mqtt-tls` with a plain `HOST[:PORT]`:
+
+| Flag / env | Meaning |
+|------------|---------|
+| `--mqtt mqtts://HOST[:PORT]`, `--mqtt-tls` | MQTT over TLS (default port 8883); `mqtt://` or no scheme is plain MQTT (1883) |
+| `--mqtt-ca <PEM>` | trust this CA (a PEM file; may hold several certificates) on top of the OS roots |
+| `--mqtt-client-identity <P12>` | client certificate + key for mutual TLS (PKCS#12) |
+| `TOWER_MQTT_CLIENT_IDENTITY_PASSWORD` | its password (environment only, never a flag) |
+
+The OS root store is always trusted, so a broker with a public certificate needs no flags.
+The broker's certificate must name the host given to `--mqtt` (a DNS name or an IP address in
+its subject alternative names): the check is always on, and there is no switch to turn it
+off; for a self-signed broker, pass its CA with `--mqtt-ca`. A TLS failure is reported with
+what to check (untrusted certificate, name mismatch, a plain port, a missing client
+certificate), also while `tower gateway` is still waiting for its first connect. A login
+sent over plain MQTT to a host other than `localhost` / a loopback address gets a one-line
+warning (not a refusal: the broker may sit on a segment you trust).
+
+**The embedded broker** serves TLS with `--broker-tls-identity <P12>`: a PKCS#12 file holding
+the server certificate (with its chain) and private key, its password in
+`TOWER_BROKER_TLS_PASSWORD`. The file is checked at startup, and the broker reads it again
+for every connection it accepts: keep it in place while the gateway runs (replacing it, with
+the same password, rotates the certificate for new connections). The listener then speaks
+TLS only. The bridge's own MQTT client does not use it: it connects to a second, plain
+listener on `127.0.0.1` at a free port (announced at startup, same login), so the
+certificate does not have to cover `localhost` and the bridge keeps its link even when the
+TLS listener is busy (see below). Two limits of the embedded broker's TLS (rumqttd's
+native-tls backend): it does not request client certificates (authentication is the login;
+for mutual TLS use an external broker), and it runs each TLS handshake inside its accept
+loop, so a peer that opens the port and never completes a handshake holds off new
+connections until it disconnects (sessions already open, and the bridge itself, keep
+working). On a network you don't control, firewall the port to the clients you expect, or
+put a hardened broker in front (`--mqtt`).
+
+A self-signed setup with OpenSSL 3 (a private CA, and a broker certificate for every name
+and address clients will dial; keep it at 825 days or less, macOS refuses longer-lived TLS
+server certificates even from a private CA):
+
+```sh
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 \
+  -keyout ca.key -out ca.pem -subj "/CN=TOWER gateway CA" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout broker.key -out broker.csr -subj "/CN=gateway.local"
+cat > broker.ext <<'EXT'
+subjectAltName = DNS:gateway.local, IP:192.168.1.5
+extendedKeyUsage = serverAuth
+keyUsage = critical, digitalSignature
+basicConstraints = critical, CA:FALSE
+EXT
+openssl x509 -req -in broker.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 825 \
+  -extfile broker.ext -out broker.pem
+openssl pkcs12 -export -inkey broker.key -in broker.pem -certfile ca.pem -out broker.p12
+                                        # asks for the export password
+```
+
+Then, on the gateway host and on a client machine:
+
+```sh
+export TOWER_MQTT_USER=ops TOWER_MQTT_PASSWORD='...'    # the login the broker enforces
+export TOWER_BROKER_TLS_PASSWORD='...'                  # the broker.p12 export password
+tower gateway --service --broker 0.0.0.0:8883 --broker-tls-identity broker.p12
+
+tower net status --mqtt mqtts://gateway.local --mqtt-ca ca.pem   # with the same login exported
+```
+
+Keep `ca.key` and `broker.key` private (`broker.p12` contains the key too); clients only need
+`ca.pem`.
 
 The MQTT topic tree (under `--prefix`) is the gateway's public API; the full table lives
 in [`src/gateway/topics.rs`](src/gateway/topics.rs). Rules for clients writing to it:
@@ -137,8 +223,8 @@ subscribe once to `gateway/rsp/+` and match the id. Only nodes in the gateway's 
 are ever published; at startup the gateway drops downlinks a previous `tower gateway` left
 queued on the dongle (their replies could not be matched).
 
-The **client** commands drive a running gateway over MQTT (they share `--mqtt`/`--prefix`;
-`<node>` is a `0xHHHHHHHH` address or a friendly name):
+The **client** commands drive a running gateway over MQTT (they share `--mqtt`, the login,
+the TLS flags and `--prefix`; `<node>` is a `0xHHHHHHHH` address or a friendly name):
 
 ```sh
 tower nodes list                                   # the gateway's registered nodes
@@ -298,10 +384,12 @@ power-cycle it as well.
 
 The crate is a member of the repository's host workspace; the toolchain is pinned by the
 repo-root `rust-toolchain.toml` (rustup installs it). On Linux the `serialport` dependency
-needs libudev:
+needs libudev, and OpenSSL (the TLS stack of the MQTT links there) is built from source and
+linked statically, which needs perl, make and a C compiler (macOS and Windows use the OS TLS
+stack):
 
 ```sh
-sudo apt-get install -y libudev-dev pkg-config   # Debian/Ubuntu
+sudo apt-get install -y libudev-dev pkg-config perl make gcc   # Debian/Ubuntu
 cargo build --release -p tower-cli               # at the repo root; binary at target/release/tower
 cargo test -p tower-cli                          # no hardware needed
 ```

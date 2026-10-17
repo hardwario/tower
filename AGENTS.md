@@ -109,7 +109,8 @@ firmware builds on). HIL: `just hil check` compiles the harness; `just hil hil`,
 
 Plain cargo works for the host workspace from the root: `cargo test -p tower-protocol`,
 `cargo build --release -p tower-cli` (binary `target/release/tower`). Linux needs
-`libudev-dev` + `pkg-config` (serialport).
+`libudev-dev` + `pkg-config` (serialport), and `perl` + `make` + a C compiler: the CLI links
+OpenSSL statically from source (`openssl/vendored`), the TLS stack of its MQTT links there.
 
 ## Skills
 

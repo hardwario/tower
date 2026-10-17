@@ -8,7 +8,12 @@ clears the opt-in production readout protection (`tower protect` / `unprotect`: 
 only, both confirmed interactively or by `--yes`; `unprotect` mass-erases flash + data EEPROM).
 It is also the gateway/MQTT host: `tower gateway` bridges a Radio Dongle's network to MQTT
 (embedded `rumqttd` broker or external, TUI + `--service`), and `tower nodes` / `tower net` are
-the MQTT client commands (`src/gateway/`, `src/client/`).
+the MQTT client commands (`src/gateway/`, `src/client/`). MQTT over TLS (`src/gateway/tls.rs`)
+uses the platform's TLS stack through native-tls (rumqttc/rumqttd `use-native-tls`); never
+enable their rustls features, whose rustls versions fail `cargo audit`. The embedded broker's
+access policy is the pure `mqtt::broker_access` (loopback anonymous, anything else login + TLS
+unless `--broker-allow-plaintext`); change it together with its test matrix, `README.md` and
+`docs/security-model.md`.
 
 ## Shared crates (path dependencies)
 
@@ -35,7 +40,9 @@ cargo clippy -p tower-cli --all-targets -- -D warnings
 cargo test -p tower-cli          # unit tests + the assert_cmd tests in tests/cli.rs; no hardware
 ```
 
-Linux needs `libudev-dev` + `pkg-config`. The tests never open a real serial port; don't flash
+Linux needs `libudev-dev` + `pkg-config`, plus `perl` + `make` + a C compiler for the vendored
+OpenSSL. The TLS tests mint a throwaway CA and identities at test time and talk only to
+localhost. The tests never open a real serial port; don't flash
 or attach to a board unless the user asks.
 
 ## Releasing

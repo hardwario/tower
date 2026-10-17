@@ -55,7 +55,8 @@ tower/
 Prerequisites: [rustup](https://rustup.rs) (`rustup toolchain install` in the checkout installs
 the toolchain pinned in `rust-toolchain.toml`), [`just`](https://just.systems), `python3` >= 3.11,
 and for the firmware `cargo install --locked flip-link cargo-binutils`. On Linux also
-`libudev-dev` + `pkg-config`.
+`libudev-dev` + `pkg-config`, and `perl` + `make` + a C compiler (the `tower` CLI builds OpenSSL
+from source for MQTT over TLS).
 
 ```bash
 git clone git@github.com:hardwario/tower.git

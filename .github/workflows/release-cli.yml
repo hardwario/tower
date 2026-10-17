@@ -152,7 +152,9 @@ jobs:
           targets: ${{ matrix.target }}, thumbv6m-none-eabi
           components: rustfmt, clippy, llvm-tools
 
-      # Native Linux build needs host libudev; cross builds get it from the root Cross.toml.
+      # Native Linux build needs host libudev; cross builds get it from the root Cross.toml. The
+      # vendored OpenSSL (the CLI's MQTT TLS stack on Linux) builds with the runner's perl, make
+      # and gcc natively, and inside the cross images (Cross.toml installs perl + make there).
       - name: Install libudev (native Linux)
         if: matrix.os == 'ubuntu-latest' && !matrix.cross
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config

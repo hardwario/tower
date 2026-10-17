@@ -224,6 +224,7 @@ fn nodes_help_lists_subcommands() {
         .stdout(predicates::str::contains("dequeue"));
 }
 
+#[cfg(feature = "embedded-broker")]
 #[test]
 fn gateway_broker_conflicts_with_mqtt() {
     // Usage errors are clap's: exit 2.
@@ -254,6 +255,7 @@ fn net_status_fails_fast_without_broker() {
         .code(1);
 }
 
+#[cfg(feature = "embedded-broker")]
 #[test]
 fn gateway_refuses_an_unauthenticated_non_loopback_broker() {
     // The access policy: a loopback broker is anonymous, any other bind needs a login. The
@@ -273,4 +275,130 @@ fn gateway_refuses_an_unauthenticated_non_loopback_broker() {
         .assert()
         .code(1)
         .stderr(predicate::str::contains("without authentication"));
+}
+
+// ---- MQTT over TLS: configuration errors, all caught before any port or socket is touched ----
+
+#[cfg(feature = "embedded-broker")]
+#[test]
+fn gateway_refuses_a_plaintext_non_loopback_broker_even_with_a_login() {
+    // A login alone is not enough off loopback: the password and the node keys would cross the
+    // network in clear text. The refusal names both ways out and never echoes the password.
+    tower()
+        .args([
+            "gateway",
+            "--service",
+            "--broker",
+            "0.0.0.0:18839",
+            "-d",
+            "/dev/null-tower-test",
+        ])
+        .env("TOWER_MQTT_USER", "ops")
+        .env("TOWER_MQTT_PASSWORD", "s3cret-test")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("without TLS"))
+        .stderr(predicate::str::contains("--broker-tls-identity"))
+        .stderr(predicate::str::contains("--broker-allow-plaintext"))
+        .stderr(predicate::str::contains("s3cret-test").not());
+}
+
+#[cfg(feature = "embedded-broker")]
+#[test]
+fn gateway_checks_the_broker_tls_identity_before_the_port() {
+    tower()
+        .args([
+            "gateway",
+            "--service",
+            "--broker-tls-identity",
+            "/nonexistent-tower-test/broker.p12",
+            "-d",
+            "/dev/null-tower-test",
+        ])
+        .env("TOWER_BROKER_TLS_PASSWORD", "p12-secret-test")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("--broker-tls-identity"))
+        .stderr(predicate::str::contains("broker.p12"))
+        .stderr(predicate::str::contains("p12-secret-test").not());
+}
+
+#[cfg(feature = "embedded-broker")]
+#[test]
+fn gateway_tls_flag_conflicts_are_usage_errors() {
+    for args in [
+        // The embedded broker's TLS and an external broker exclude each other.
+        &["gateway", "--broker-tls-identity", "x.p12", "--mqtt", "mqtts://h"][..],
+        // Waiving TLS while serving it is contradictory.
+        &[
+            "gateway",
+            "--broker-tls-identity",
+            "x.p12",
+            "--broker-allow-plaintext",
+        ][..],
+    ] {
+        tower().args(args).assert().code(2);
+    }
+}
+
+#[test]
+fn gateway_client_tls_flags_need_an_external_broker() {
+    // --mqtt-tls / --mqtt-ca / --mqtt-client-identity configure the link to --mqtt; without it
+    // they would silently do nothing.
+    for flag in [
+        &["--mqtt-tls"][..],
+        &["--mqtt-ca", "ca.pem"],
+        &["--mqtt-client-identity", "id.p12"],
+    ] {
+        tower().arg("gateway").args(flag).assert().code(2);
+    }
+}
+
+#[test]
+fn client_tls_files_need_a_tls_link() {
+    // A CA on a plain link is a mistake worth saying, not a flag to ignore.
+    tower()
+        .args([
+            "nodes",
+            "list",
+            "--mqtt",
+            "broker.invalid:1883",
+            "--mqtt-ca",
+            "ca.pem",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("mqtts://"));
+}
+
+#[test]
+fn client_tls_unreadable_ca_is_named() {
+    tower()
+        .args([
+            "net",
+            "status",
+            "--mqtt",
+            "mqtts://broker.invalid",
+            "--mqtt-ca",
+            "/nonexistent-tower-test/ca.pem",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("--mqtt-ca"))
+        .stderr(predicate::str::contains("ca.pem"));
+}
+
+#[test]
+fn mqtt_address_with_a_login_is_refused_without_echoing_it() {
+    tower()
+        .args([
+            "nodes",
+            "list",
+            "--mqtt",
+            "mqtts://ops:s3cret-test@broker.invalid",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("--mqtt-user"))
+        .stderr(predicate::str::contains("s3cret-test").not());
 }

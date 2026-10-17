@@ -59,7 +59,8 @@ for both workspaces, and CI installs exactly that channel. Then:
   `rustup target add --toolchain <channel> <triple>` /
   `rustup component add --toolchain <channel> <name>` for any that are missing.
 - Linux only: `serialport` (tower-boot, cli, hil) needs the `libudev` dev headers; if a build
-  fails there, the hint is `libudev-dev` + `pkg-config`.
+  fails there, the hint is `libudev-dev` + `pkg-config`. The CLI also builds OpenSSL from source
+  (`openssl/vendored`, its MQTT TLS stack on Linux): that needs `perl`, `make` and a C compiler.
 
 ## 3. Tools
 

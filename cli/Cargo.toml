@@ -34,11 +34,16 @@ serde = { workspace = true, features = ["std"] }
 # The gateway's MQTT side (`tower gateway` + the `nodes`/`net` client commands). rumqttc's
 # synchronous Client/Connection API keeps the crate's no-async idiom: tokio appears only as
 # an internal dependency of these two crates, never in our code. Default features OFF: both
-# default to `use-rustls` (+ rumqttd `websocket`), but every link here is plain TCP (the
-# broker runs with `tls: None`), so the TLS stack was dead weight that only carried
-# advisories (rustls 0.22/0.23, rustls-webpki 0.102, unmaintained rustls-pemfile).
-rumqttc = { version = "0.25", default-features = false }
-rumqttd = { version = "0.20", optional = true, default-features = false }
+# default to `use-rustls` (+ rumqttd `websocket`), and the rustls they build against (rustls
+# 0.22/0.23, rustls-webpki 0.102, unmaintained rustls-pemfile) carries RustSec advisories
+# that fail `cargo audit`. MQTT over TLS uses their `use-native-tls` backends instead: the
+# platform's own TLS stack (Security.framework on macOS, SChannel on Windows, OpenSSL on
+# Linux, see below). Never enable a rustls feature here.
+rumqttc = { version = "0.25", default-features = false, features = ["use-native-tls"] }
+rumqttd = { version = "0.20", optional = true, default-features = false, features = ["use-native-tls"] }
+# Built directly for the client connector (extra root CAs, a client identity) and to validate
+# the PKCS#12 identities at startup; the same crate rumqttc/rumqttd use underneath.
+native-tls = "0.2"
 serde_json = "1"
 # RPC correlation ids for the MQTT request/response topics.
 uuid = { version = "1", features = ["v4"] }
@@ -59,6 +64,21 @@ tower-boot.workspace = true
 heapless.workspace = true
 assert_cmd = "2"
 predicates = "3"
+# The TLS tests mint a throwaway CA + server/client identities at test time (short validity, so
+# nothing can expire in the tree, and within the 825-day limit macOS applies to every TLS
+# server certificate): rcgen for the certificates (ring backend), p12-keystore to wrap them as
+# the PKCS#12 files the CLI takes. Test-only: neither reaches the `tower` binary.
+rcgen = "0.14"
+p12-keystore = "0.4"
+
+# native-tls is OpenSSL on Linux. `vendored` builds OpenSSL from source and links it
+# statically, so a release binary keeps running on any glibc distribution regardless of its
+# libssl version (needs perl + make + a C compiler at build time: the CI runners and the
+# `cross` images have them, Cross.toml makes sure). The system's root CAs are still found at
+# run time (native-tls probes the usual certificate locations). macOS and Windows use the OS
+# stack and never build OpenSSL.
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [target.'cfg(unix)'.dependencies]
 # Only used to restore the default SIGPIPE disposition at startup (see main()). Rust's

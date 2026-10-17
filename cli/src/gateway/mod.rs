@@ -11,8 +11,10 @@
 //! Startup is synchronous and fail-fast, *before* any thread or alt-screen: open the
 //! port, `Describe` the device (the role probe; see `crate::mgmt`), and refuse
 //! non-gateways with the documented exit codes (124 mute / 125 protocol mismatch /
-//! 126 wrong firmware role). The embedded broker is likewise confirmed listening (and its
-//! access policy checked; see `mqtt`) before anything is announced.
+//! 126 wrong firmware role). Before even that, the configuration is checked: the broker
+//! address, the access policy (see `mqtt`) and every TLS file (see `tls`), so a typo fails
+//! without touching the port. The embedded broker is likewise confirmed listening before
+//! anything is announced.
 
 pub(crate) mod engine;
 pub(crate) mod mqtt;
@@ -20,9 +22,11 @@ pub(crate) mod pair;
 pub(crate) mod payload;
 pub(crate) mod serial;
 pub(crate) mod service;
+pub(crate) mod tls;
 pub(crate) mod topics;
 pub(crate) mod tui;
 
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -42,16 +46,39 @@ use engine::{Engine, Event, Input, MqttDir, MqttMsg, Output};
 /// `tower gateway` arguments.
 #[derive(Args, Debug)]
 pub(crate) struct GatewayOpts {
-    /// Host the embedded MQTT broker on ADDR:PORT (default 127.0.0.1:1883 unless
-    /// --mqtt picks an external broker instead). A loopback bind is anonymous (any local
-    /// user/process can drive the gateway); any other bind requires --mqtt-user and
-    /// TOWER_MQTT_PASSWORD. No TLS.
+    /// Host the embedded MQTT broker on ADDR:PORT (default 127.0.0.1:1883, or :8883 with
+    /// --broker-tls-identity; unless --mqtt picks an external broker instead). A loopback bind
+    /// is anonymous (any local user/process can drive the gateway); any other bind requires
+    /// --mqtt-user + TOWER_MQTT_PASSWORD and TLS (--broker-tls-identity, or
+    /// --broker-allow-plaintext).
     #[cfg(feature = "embedded-broker")]
     #[arg(long, value_name = "ADDR:PORT", conflicts_with = "mqtt")]
     pub broker: Option<Option<std::net::SocketAddr>>,
-    /// Connect to an existing MQTT broker at HOST or HOST:PORT instead of hosting one.
-    #[arg(long, value_name = "HOST[:PORT]")]
+    /// Serve the embedded broker over TLS with this server identity: a PKCS#12 file with the
+    /// certificate (chain) and its private key, password in TOWER_BROKER_TLS_PASSWORD.
+    #[cfg(feature = "embedded-broker")]
+    #[arg(long, value_name = "P12", conflicts_with = "mqtt")]
+    pub broker_tls_identity: Option<PathBuf>,
+    /// Let a non-loopback embedded broker serve plain MQTT (the login and node keys then cross
+    /// the network in clear text).
+    #[cfg(feature = "embedded-broker")]
+    #[arg(long, conflicts_with_all = ["mqtt", "broker_tls_identity"])]
+    pub broker_allow_plaintext: bool,
+    /// Connect to an existing MQTT broker instead of hosting one: HOST[:PORT] (plain, port
+    /// 1883) or mqtts://HOST[:PORT] (TLS, port 8883).
+    #[arg(long, value_name = "[mqtts://]HOST[:PORT]")]
     pub mqtt: Option<String>,
+    /// Connect to the --mqtt broker over TLS (same as mqtts://; default port 8883).
+    #[arg(long, requires = "mqtt")]
+    pub mqtt_tls: bool,
+    /// Also trust this CA (PEM) for the --mqtt broker's certificate, on top of the OS roots
+    /// (for a private or self-signed broker). The host name is always verified.
+    #[arg(long, value_name = "PEM", requires = "mqtt")]
+    pub mqtt_ca: Option<PathBuf>,
+    /// Present this client certificate to the --mqtt broker (mutual TLS): a PKCS#12 file,
+    /// password in TOWER_MQTT_CLIENT_IDENTITY_PASSWORD.
+    #[arg(long, value_name = "P12", requires = "mqtt")]
+    pub mqtt_client_identity: Option<PathBuf>,
     /// MQTT username: the external broker's login, or the one account the embedded
     /// broker accepts (required for a non-loopback --broker).
     // No `requires = "mqtt"`: the login applies to the embedded broker too. And clap
@@ -71,26 +98,6 @@ pub(crate) struct GatewayOpts {
     /// Reboot the dongle on attach (NRST pulse). Clears its RAM downlink queue.
     #[arg(long)]
     pub reset: bool,
-}
-
-/// Split a `HOST[:PORT]` argument (default port 1883). Shared with the client commands.
-/// IPv6 literals take the bracketed form (`[::1]:1883`); a bare one (`::1`) is all host.
-pub(crate) fn split_host_port(s: &str) -> (String, u16) {
-    if let Some(rest) = s.strip_prefix('[')
-        && let Some((h, tail)) = rest.split_once(']')
-    {
-        let port = tail
-            .strip_prefix(':')
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(1883);
-        return (h.to_string(), port);
-    }
-    match s.rsplit_once(':') {
-        Some((h, p)) if !h.contains(':') && p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
-            (h.to_string(), p.parse().unwrap_or(1883))
-        }
-        _ => (s.to_string(), 1883),
-    }
 }
 
 /// A verified, open gateway attach, or the exit code refusing it.
@@ -175,19 +182,59 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
     topics::check_prefix(&opts.prefix).map_err(anyhow::Error::msg)?;
     let prefix = topics::normalize_prefix(&opts.prefix);
     let creds = mqtt::credentials(opts.mqtt_user.as_deref(), opts.mqtt_password.as_deref())?;
-    // Refuse a non-loopback embedded broker without credentials BEFORE touching the port.
+    // An external broker: its address and TLS files are resolved (and read) now.
+    let external = match &opts.mqtt {
+        Some(spec) => {
+            let flags = tls::ClientTlsFlags {
+                tls: opts.mqtt_tls,
+                ca: opts.mqtt_ca.as_deref(),
+                identity: opts.mqtt_client_identity.as_deref(),
+            };
+            let target = tls::resolve_target(spec, &flags)?;
+            if let Some(w) = tls::cleartext_login_warning(&target, creds.is_some()) {
+                eprintln!("[tower] warning: {w}");
+            }
+            Some(target)
+        }
+        None => None,
+    };
+    // The embedded broker: its TLS identity is validated and its access policy checked BEFORE
+    // touching the port (a non-loopback bind without a login, or without TLS, is refused).
     #[cfg(feature = "embedded-broker")]
-    let listen = match &opts.mqtt {
+    let embedded = match &opts.mqtt {
         Some(_) => None,
         None => {
+            let identity = opts
+                .broker_tls_identity
+                .as_deref()
+                .map(tls::broker_identity)
+                .transpose()?;
+            let default_port = if identity.is_some() {
+                tls::MQTTS_PORT
+            } else {
+                tls::MQTT_PORT
+            };
             let listen = opts
                 .broker
                 .flatten()
-                .unwrap_or_else(|| "127.0.0.1:1883".parse().unwrap());
-            mqtt::broker_auth(listen, creds.as_ref()).map_err(anyhow::Error::msg)?;
-            Some(listen)
+                .unwrap_or_else(|| (std::net::Ipv4Addr::LOCALHOST, default_port).into());
+            let access = mqtt::broker_access(
+                listen,
+                creds.as_ref(),
+                identity.is_some(),
+                opts.broker_allow_plaintext,
+            )
+            .map_err(anyhow::Error::msg)?;
+            if let Some(w) = access.warning {
+                eprintln!("[tower] warning: {w}");
+            }
+            Some((listen, identity))
         }
     };
+    #[cfg(not(feature = "embedded-broker"))]
+    if external.is_none() {
+        anyhow::bail!("built without the embedded broker; pass --mqtt [mqtts://]HOST[:PORT]");
+    }
     let port = pick_port(port)?;
 
     // ---- fail-fast verification (before threads, before any TUI) ----
@@ -203,36 +250,51 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
     );
 
     // ---- broker resolution ----
-    let (mqtt_host, mqtt_port) = match &opts.mqtt {
-        Some(hp) => split_host_port(hp),
+    let target = match external {
+        Some(target) => target,
         None => {
             #[cfg(feature = "embedded-broker")]
             {
-                let listen = listen.expect("resolved above when --mqtt is absent");
-                mqtt::embedded_broker(listen, creds.as_ref())?;
+                let (listen, identity) = embedded.expect("resolved above when --mqtt is absent");
+                // A wildcard bind is not a destination, and a TLS listener is not where the
+                // gateway's own client goes: `embedded_broker` says where it connects (plain
+                // MQTT on loopback either way; see its docs).
+                let own = mqtt::embedded_broker(
+                    listen,
+                    creds.as_ref(),
+                    identity.as_ref(),
+                    opts.broker_allow_plaintext,
+                )?;
                 eprintln!(
-                    "[tower] embedded MQTT broker on {listen} ({})",
+                    "[tower] embedded MQTT broker on {listen} ({}, {}){}",
+                    if identity.is_some() { "TLS" } else { "plain MQTT" },
                     if creds.is_some() {
                         "login required"
                     } else {
                         "anonymous, loopback only"
+                    },
+                    // Say where the extra listener is, so it is no surprise in `ss -ltn`.
+                    match identity {
+                        Some(_) => format!("; the bridge's own client on {own}"),
+                        None => String::new(),
                     }
                 );
-                // A wildcard bind is not a destination: the gateway's own client dials
-                // the matching loopback instead.
-                let to = mqtt::connect_addr(listen);
-                (to.ip().to_string(), to.port())
+                tls::Target {
+                    host: own.ip().to_string(),
+                    port: own.port(),
+                    tls: None,
+                }
             }
             #[cfg(not(feature = "embedded-broker"))]
             {
-                anyhow::bail!("built without the embedded broker; pass --mqtt HOST[:PORT]");
+                unreachable!("refused above without --mqtt")
             }
         }
     };
 
+    let hint_host = target.host.clone();
     let params = mqtt::MqttParams {
-        host: mqtt_host,
-        port: mqtt_port,
+        target,
         credentials: creds,
         client_id: format!("tower-gateway-{}", topics::node_hex(info.addr)),
     };
@@ -255,7 +317,7 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
         let input = input_tx.clone();
         std::thread::Builder::new()
             .name("mqtt".into())
-            .spawn(move || mqtt::run(connection, input))
+            .spawn(move || mqtt::run(connection, input, &hint_host))
             .context("spawning the mqtt thread")?;
     }
     {
@@ -593,19 +655,6 @@ mod tests {
             GateDecision::Reject(code) => assert_eq!(code, EXIT_PROTOCOL_MISMATCH),
             _ => panic!("a gateway from another checkout must be refused as 125"),
         }
-    }
-
-    #[test]
-    fn split_host_port_handles_ipv6_and_defaults() {
-        assert_eq!(split_host_port("host:1884"), ("host".into(), 1884));
-        assert_eq!(split_host_port("host"), ("host".into(), 1883));
-        assert_eq!(split_host_port("[::1]:1884"), ("::1".into(), 1884));
-        assert_eq!(split_host_port("[::1]"), ("::1".into(), 1883));
-        assert_eq!(
-            split_host_port("::1"),
-            ("::1".into(), 1883),
-            "bare v6 is all host"
-        );
     }
 
     #[test]

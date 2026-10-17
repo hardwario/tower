@@ -1,15 +1,21 @@
 # Used by `cross` for ARM-Linux release builds. The serialport crate links against
 # libudev, so the target-arch dev package has to be present inside the cross build
 # container. $CROSS_DEB_ARCH is set by cross (arm64, armhf, ...).
+#
+# tower-cli also builds OpenSSL from source (`openssl/vendored`, its MQTT TLS stack on Linux):
+# OpenSSL's Configure runs on the build host and needs a full perl (IPC::Cmd and friends, not
+# just perl-base) and make; the target C compiler comes with the image. Installing them here
+# (host arch, a no-op when the image already has them) keeps the release build from depending
+# on what a cross image happens to include.
 
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get install --assume-yes libudev-dev:$CROSS_DEB_ARCH pkg-config",
+    "apt-get update && apt-get install --assume-yes libudev-dev:$CROSS_DEB_ARCH pkg-config perl make",
 ]
 
 [target.armv7-unknown-linux-gnueabihf]
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get install --assume-yes libudev-dev:$CROSS_DEB_ARCH pkg-config",
+    "apt-get update && apt-get install --assume-yes libudev-dev:$CROSS_DEB_ARCH pkg-config perl make",
 ]

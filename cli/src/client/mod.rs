@@ -10,28 +10,40 @@ pub(crate) mod net;
 pub(crate) mod nodes;
 pub(crate) mod pair_cable;
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use rumqttc::{Client, Connection, Event as MqttEvent, Incoming, QoS};
 
-use crate::gateway::mqtt;
 use crate::gateway::payload::{RpcRequest, RpcResponse};
-use crate::gateway::topics;
+use crate::gateway::{mqtt, tls, topics};
 use crate::term::sanitize_line;
 
 /// Shared broker flags for every client command.
 #[derive(Args, Debug, Clone)]
 pub(crate) struct MqttOpts {
-    /// MQTT broker (where a `tower gateway` is bridging).
+    /// MQTT broker (where a `tower gateway` is bridging): HOST[:PORT] (plain, port 1883) or
+    /// mqtts://HOST[:PORT] (TLS, port 8883).
     #[arg(
         long,
-        value_name = "HOST[:PORT]",
-        default_value = "localhost:1883",
+        value_name = "[mqtts://]HOST[:PORT]",
+        default_value = "localhost",
         global = true
     )]
     pub mqtt: String,
+    /// Connect over TLS (same as mqtts://; default port 8883).
+    #[arg(long, global = true)]
+    pub mqtt_tls: bool,
+    /// Also trust this CA (PEM) for the broker's certificate, on top of the OS roots (for a
+    /// private or self-signed broker). The host name is always verified.
+    #[arg(long, value_name = "PEM", global = true)]
+    pub mqtt_ca: Option<PathBuf>,
+    /// Present this client certificate to the broker (mutual TLS): a PKCS#12 file, password in
+    /// TOWER_MQTT_CLIENT_IDENTITY_PASSWORD.
+    #[arg(long, value_name = "P12", global = true)]
+    pub mqtt_client_identity: Option<PathBuf>,
     /// Broker username (required by an embedded broker bound off-loopback).
     #[arg(long, env = "TOWER_MQTT_USER", global = true)]
     pub mqtt_user: Option<String>,
@@ -81,22 +93,39 @@ impl std::error::Error for RpcTimeout {}
 pub(crate) fn connect(opts: &MqttOpts) -> Result<Session> {
     topics::check_prefix(&opts.prefix).map_err(anyhow::Error::msg)?;
     let creds = mqtt::credentials(opts.mqtt_user.as_deref(), opts.mqtt_password.as_deref())?;
-    let (host, port) = crate::gateway::split_host_port(&opts.mqtt);
+    let flags = tls::ClientTlsFlags {
+        tls: opts.mqtt_tls,
+        ca: opts.mqtt_ca.as_deref(),
+        identity: opts.mqtt_client_identity.as_deref(),
+    };
+    let target = tls::resolve_target(&opts.mqtt, &flags)?;
+    if let Some(w) = tls::cleartext_login_warning(&target, creds.is_some()) {
+        eprintln!("[tower] warning: {w}");
+    }
     let mo = mqtt::options(
         format!("tower-cli-{}", std::process::id()),
-        host.clone(),
-        port,
+        &target,
         creds.as_ref(),
     );
     let (client, mut connection) = Client::new(mo, 32);
-    // Wait for the ConnAck so a refused/unreachable broker fails fast and clean.
+    // Wait for the ConnAck so a refused/unreachable broker (or a refused certificate) fails
+    // fast and clean.
+    let url = target.url();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match connection.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Ok(MqttEvent::Incoming(Incoming::ConnAck(_)))) => break,
             Ok(Ok(_)) => continue,
-            Ok(Err(e)) => bail!("broker {host}:{port}: {e}{}", connect_hint(&e, creds.is_some())),
-            Err(_) => bail!("broker {host}:{port}: connect timeout"),
+            Ok(Err(e)) => bail!("broker {url}: {e}{}", connect_hint(&e, &target, creds.is_some())),
+            // A TLS port can keep a plain client waiting (some TLS stacks wait for a whole
+            // record instead of refusing the first byte): say so.
+            Err(_) if target.tls.is_none() => {
+                bail!(
+                    "broker {url}: connect timeout (no MQTT answer: check that the broker is reachable; {})",
+                    tls::PLAIN_TO_TLS_HINT
+                )
+            }
+            Err(_) => bail!("broker {url}: connect timeout"),
         }
     }
     Ok(Session {
@@ -110,20 +139,31 @@ pub(crate) fn connect(opts: &MqttOpts) -> Result<Session> {
 
 /// What to check after a failed broker connect. rumqttd drops a refused login without a
 /// CONNACK reason (the client only sees the connection close), so anything past the TCP
-/// connect may be an authentication failure; say so.
-fn connect_hint(e: &rumqttc::ConnectionError, have_login: bool) -> &'static str {
+/// connect may be an authentication failure; say so. Over plain MQTT, the same symptom is what
+/// a TLS-only port gives (it closes on the first non-TLS byte), so name that too. A failed TLS
+/// handshake gets the certificate checklist ([`tls::handshake_hint`]).
+fn connect_hint(e: &rumqttc::ConnectionError, target: &tls::Target, have_login: bool) -> String {
     use rumqttc::ConnectionError as E;
+    let tls_port = match target.tls {
+        None => format!("; {}", tls::PLAIN_TO_TLS_HINT),
+        Some(_) => String::new(),
+    };
     match e {
         E::Io(io) if io.kind() == std::io::ErrorKind::ConnectionRefused => {
-            "; is a broker (or `tower gateway`) running there?"
+            "; is a broker (or `tower gateway`) running there?".into()
         }
-        E::ConnectionRefused(_) | E::Io(_) | E::MqttState(_) if have_login => {
-            " (check the --mqtt-user / TOWER_MQTT_PASSWORD login)"
+        E::Tls(_) => tls::handshake_hint(&target.host),
+        E::NetworkTimeout if target.tls.is_none() => format!(
+            " (no MQTT answer: check that the broker is reachable; {})",
+            tls::PLAIN_TO_TLS_HINT
+        ),
+        E::ConnectionRefused(_) | E::Io(_) | E::MqttState(_) | E::NotConnAck(_) if have_login => {
+            format!(" (check the --mqtt-user / TOWER_MQTT_PASSWORD login{tls_port})")
         }
-        E::ConnectionRefused(_) | E::Io(_) | E::MqttState(_) => {
-            " (if the broker requires a login: --mqtt-user + TOWER_MQTT_PASSWORD)"
+        E::ConnectionRefused(_) | E::Io(_) | E::MqttState(_) | E::NotConnAck(_) => {
+            format!(" (if the broker requires a login: --mqtt-user + TOWER_MQTT_PASSWORD{tls_port})")
         }
-        _ => "",
+        _ => String::new(),
     }
 }
 
