@@ -17,12 +17,6 @@ pub mod ack_flags {
     /// The ACKer (a gateway) holds a queued downlink for the ACKed sender, who
     /// should keep its radio in RX for a short window instead of going to sleep.
     pub const PENDING: u8 = 1 << 0;
-    /// **Reserved** for the HARDWARIO STICKER P2P profile, which runs this frame
-    /// layer over LoRa: a control TLV tail (`id(1) ‖ len(1) ‖ value`) follows the
-    /// flags byte up to the end of the ACK payload. TOWER firmware never sets it and
-    /// ignores it; bytes past [`ACK_LEN`](super::ACK_LEN) are never read. Do not assign
-    /// bit 1 to anything else.
-    pub const CTRL: u8 = 1 << 1;
 }
 
 /// Metadata parsed out of an ACK payload: the receiver-side RSSI report and the
@@ -237,38 +231,21 @@ mod tests {
         }
     }
 
-    /// A STICKER-style ACK with the reserved CTRL bit and a TLV tail after the flags
-    /// byte still parses (RSSI + PENDING) and still resolves the wait.
+    /// A full `ACK_LEN` (6-byte) ACK resolves the wait, and bytes past the flags byte are
+    /// ignored: a longer payload with an arbitrary tail parses the same and resolves too.
     #[test]
-    fn ctrl_tail_is_ignored() {
-        let mut p = [0u8; 13];
-        p[..4].copy_from_slice(&42u32.to_le_bytes());
-        p[4] = -67i8 as u8;
-        p[5] = ack_flags::PENDING | ack_flags::CTRL;
-        // Two well-formed TLVs: id 0x10 (2 B value) and id 0x14 (1 B value).
-        p[6..].copy_from_slice(&[0x10, 0x02, 0xbd, 0x0c, 0x14, 0x01, 0x15]);
-        // The fixture itself must be a complete `id ‖ len ‖ value` sequence ending exactly at
-        // the payload end, so the test exercises the STICKER layout, not a truncated one.
-        let mut tail = &p[6..];
-        let mut ids = [0u8; 2];
-        let mut n = 0;
-        while let [id, len, rest @ ..] = tail {
-            assert!(rest.len() >= *len as usize, "TLV {id:#04x} overruns the payload");
-            ids[n] = *id;
-            n += 1;
-            tail = &rest[*len as usize..];
-        }
-        assert!(tail.is_empty(), "trailing byte(s) after the last TLV");
-        assert_eq!(&ids[..n], &[0x10, 0x14]);
-        assert_eq!(
-            ack_meta(&p),
-            Some(AckMeta {
-                rssi: -67,
-                pending: true
-            })
-        );
+    fn full_ack_resolves_and_tail_is_ignored() {
+        let mut p6 = [0u8; 6];
+        p6[..4].copy_from_slice(&42u32.to_le_bytes());
+        p6[5] = ack_flags::PENDING;
         let mut w = AckWait::new(ME, PEER, 42);
-        assert_eq!(w.offer(true, PEER, ME, &p), AckVerdict::Resolved);
+        assert_eq!(w.offer(true, PEER, ME, &p6), AckVerdict::Resolved);
+        let mut p9 = [0u8; 9];
+        p9[..6].copy_from_slice(&p6);
+        p9[6..].copy_from_slice(&[0xA5, 0x5A, 0xFF]);
+        assert_eq!(ack_meta(&p9), ack_meta(&p6));
+        let mut w = AckWait::new(ME, PEER, 42);
+        assert_eq!(w.offer(true, PEER, ME, &p9), AckVerdict::Resolved);
     }
 
     /// Counter matching is exact over the full u32 range (LE decode of the payload).

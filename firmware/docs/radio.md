@@ -121,16 +121,11 @@ Little-endian frame, fits the 96-byte FIFO:
   `nonce_for(src, counter, bulk_index)` = `src ‖ counter ‖ bulk_index ‖ 0x0000`.
   `bulk_index` is 0 for non-bulk frames, so each (key, frame) nonce is unique.
 - MTU: ≤ 74 B payload (non-bulk), ≤ 64 B per bulk chunk.
-- **ACK payload** (`tower_net::ack`): `acked(4 LE) ‖ rssi(1, i8) ‖ flags(1) ‖ [tail]`,
-  `ACK_LEN` = 6 B. Every ACK carries all three fields; a shorter payload never resolves a wait,
-  and bytes past the flags byte are ignored (`len >= ACK_LEN`). ACK flag bits (`ack_flags`):
+- **ACK payload** (`tower_net::ack`): `acked(4 LE) ‖ rssi(1, i8) ‖ flags(1)`, `ACK_LEN` = 6 B.
+  Every ACK carries all three fields; a shorter payload never resolves a wait, and bytes past
+  the flags byte are ignored (`len >= ACK_LEN`). ACK flag bits (`ack_flags`):
   - bit 0 `PENDING`: the ACKer (a gateway) holds a queued downlink for the ACKed sender.
-  - bit 1 `CTRL`: **reserved** for the HARDWARIO STICKER P2P profile, which runs this frame
-    layer over LoRa. When set, a control TLV tail `{ id(1) ‖ len(1) ‖ value }…` follows the
-    flags byte up to the end of the payload (LinkCheckReq/TimeReq answers, Backoff,
-    PendingInfo). TOWER firmware never sets it and ignores both the bit and the tail. Never
-    assign bit 1 to anything else, or TOWER and STICKER devices stop interoperating.
-  - bits 2-7: unassigned; a receiver ignores unknown bits.
+  - bits 1-7: unassigned; a receiver ignores unknown bits.
 
 Build / open a secured frame:
 
