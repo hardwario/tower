@@ -317,9 +317,26 @@ host  JOIN_RESP flags KEYED, src = host, dest = node, payload req counter(4 LE) 
   and installs it with `add_peer(gw_addr, key)`.
 - Two frames, not three: the host's freshness proof is the echo and the joiner's is the
   lane, so a confirm would add nothing.
-- It is additive. A stock host drops the request (dest 0 is not its address, and the frame
-  does not open under `PAIRING_KEY` inside a pairing window), and a stock joiner never sets
-  `KEYED`.
+- Counters: both frames take their TX counter from the one allocator and are sealed before
+  the first await (duty gate first, so a refused attempt burns no counter), so cancelling
+  `recv` or `join_keyed` mid-flight can never leave a counter for the next frame to reuse.
+  Both frames are metered by the duty governor like any other TX.
+- **Duty mode only.** The exchange is a fixed-channel request/response, with no
+  listen-before-talk and no hop schedule: under LBT+AFA or FHSS `join_keyed` returns
+  `JoinError::WrongMode` without transmitting, and the host leaves the request unanswered.
+- **Re-keying composes with the lane rule.** A node re-provisioned under a **new** key (cable
+  `NodeAdd`) gets a fresh replay lane on the host (the lane record's key-check value no
+  longer matches), so it can keyed-join even with a restarted counter. A node whose counter
+  restarted under the **same** key is refused (`stale counter`): re-add it under a new key.
+- **Operator switch.** `net.set_keyed_join(false)` makes the host refuse every keyed join
+  before any CCM work (the gateway's `keyed-join` setting; on by default, since the exchange
+  is mutually authenticated). Every refusal is logged on the `net` target, rate-limited to
+  one line per 10 s with a count: `keyed join from XXXXXXXX refused: <reason> (N refusal(s)
+  since last report)`, the reason being one of switched off, not Duty mode, not a registered
+  node, does not open under its registered key, malformed, stale counter, TX locked,
+  duty-cycle limited, response TX failed.
+- The request goes to `dest = 0`, so a device that is not a key holder drops it: an
+  unregistered `src` is refused before CCM, and a frame under another key fails CCM.
 - In a P2P mesh any peer holding the joiner's key answers; the joiner then talks to that
   peer. In a star the joiner's only key holder is its gateway.
 
@@ -328,8 +345,9 @@ host  JOIN_RESP flags KEYED, src = host, dest = node, payload req counter(4 LE) 
 let _ = net.add_peer(node_addr, &node_key);
 if let Some(node) = net.take_keyed_join() { /* log */ }
 // joiner: same key, own address; returns the host's address
-if let Some(gw_addr) = net.join_keyed(addr, &node_key, Duration::from_secs(10)).await {
-    let _ = net.add_peer(gw_addr, &node_key);
+match net.join_keyed(addr, &node_key, Duration::from_secs(10)).await {
+    Ok(gw_addr) => { let _ = net.add_peer(gw_addr, &node_key); }
+    Err(e) => { /* JoinError: Timeout, WrongMode (AFA/FHSS), NonceLocked, BadAddr */ }
 }
 ```
 

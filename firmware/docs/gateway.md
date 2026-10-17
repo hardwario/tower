@@ -214,6 +214,7 @@ uplink cycle.
 | `stats-period` | uint ms | `500` | 0..60000 | ambient channel-RSSI cadence; `0` = off. `StatsConfig` overrides at runtime. The sample is the RSSI latched by the latest idle receive-slice timeout (no separate deaf measuring window); a tick with no fresh idle sample (every slice caught a frame) is skipped |
 | `band` | enum | `eu868` | eu868 / us915 | radio band (**boot-applied**) |
 | `channel` | uint | `0` | 0..2 | radio channel (**boot-applied**) |
+| `keyed-join` | bool | `on` | on/off | answer keyed joins (E4) from registered nodes; off = refuse them (logged). Re-read every 2 s, no reboot needed |
 | `addr` | addr | `auto` | hex / auto / random | SDK base: the coordinator's radio address |
 | `identity` | str | *(empty)* | ≤ 32 chars | SDK base: friendly name |
 
@@ -238,7 +239,12 @@ uplink cycle.
 - **Keyed join (E4)**: a node registered with `NodeAdd` may also join on air under its own
   key (docs/radio.md "Keyed join"): the gateway answers it inside the normal receive slice, with
   no window and nothing to commit, and logs `node … joined (keyed)`. The node learns the
-  gateway's address that way. No management message changes.
+  gateway's address that way. No management message changes. The `keyed-join` setting (default
+  `on`) is the operator's switch; a refused keyed join (switched off, unregistered address,
+  wrong key, stale counter, ...) is logged as `net: keyed join from XXXXXXXX refused: <reason>`,
+  at most one line per 10 s. A node re-provisioned with a new key (and a restarted counter)
+  joins fine after its `NodeAdd`; one that restarted its counter under the unchanged key is
+  refused as stale until it is re-added under a new key.
 
 ### RAM budget
 

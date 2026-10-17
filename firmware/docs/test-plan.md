@@ -263,7 +263,7 @@ B=tower logs --reset, H=host, X=interactive, S=shell-exec).
 | ID | Example | Pass | Edge |
 |---|---|---|---|
 | J1 | net_pairing | host `PAIRED *** node id=… key[..4]=…`; joiner `JOINED *** … (expect …)` matching key | joiner picks own ID; PAIRING_KEY public (sniffable, by design); 60 s window |
-| J1b | net_keyed_join | host `JOINED *** node 000000BB (keyed …)`; joiner `JOINED *** gw=22222222` then `uplink: Delivered` | no window; key never on air; a stock host or a node with another key never answers |
+| J1b | net_keyed_join | host `JOINED *** node 000000BB (keyed …)`; joiner `JOINED *** gw=22222222` then `uplink: Delivered` (repeats every ~5 s, each join on a fresh counter) | no window; key never on air; a node under another key: host logs `keyed join from … refused: does not open under its registered key`, joiner `keyed join failed: no host answered`; reboot the joiner mid-run: it re-joins (fresh counter across the reboot); a captured JOIN_REQ replayed: host logs `refused: stale counter` and sends nothing; on a gateway app `keyed-join=off`: `refused: keyed joins are switched off` |
 | J2 | net_star | GW `2 peers registered`; `rx node A … "hello_a"`, `rx node B … "hello_b"` each under its own key | per-peer key + replay lane; B undecodable under A's key |
 | J3 | net_p2p | both `PING/PONG … Delivered`; bidirectional | shared LINK_KEY; RX-window timing |
 

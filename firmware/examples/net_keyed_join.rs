@@ -8,6 +8,13 @@
 //! NodeAdd, a factory step, NFC…), so no key travels on air and no pairing window is
 //! needed: the host answers a KEYED JOIN_REQ from a registered peer at any time, inside
 //! its normal `recv()`. The joiner learns the host's address; both log it.
+//!
+//! The joiner repeats the join every 5 s, each time on a fresh TX counter (the echo the host
+//! returns is that counter, so it proves the response is fresh), then sends one confirmed
+//! uplink. Duty mode only: under LBT+AFA or FHSS `join_keyed` returns `WrongMode`. A refused
+//! request (wrong key, stale counter, switched off) leaves the host's `net` log with a
+//! rate-limited `keyed join from … refused: <reason>` line and the joiner with `no host
+//! answered` (docs/test-plan.md J1b).
 
 #![no_std]
 #![no_main]
