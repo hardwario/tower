@@ -15,6 +15,12 @@ pub mod ack_flags {
     /// The ACKer (a gateway) holds a queued downlink for the ACKed sender, who
     /// should keep its radio in RX for a short window instead of going to sleep.
     pub const PENDING: u8 = 1 << 0;
+    /// **Reserved** for the HARDWARIO STICKER P2P profile, which runs this frame
+    /// layer over LoRa: a control TLV tail (`id(1) ‖ len(1) ‖ value`) follows the
+    /// flags byte up to the end of the ACK payload. TOWER firmware never sets it and
+    /// ignores it; the tail is skipped by the `len >= 4` rule. Do not assign bit 1 to
+    /// anything else.
+    pub const CTRL: u8 = 1 << 1;
 }
 
 /// Metadata parsed out of an ACK payload: the receiver-side RSSI report and the
@@ -247,6 +253,26 @@ mod tests {
         // Unknown future flag bits don't read as pending.
         p6[5] = 0xFE;
         assert!(!ack_meta(&p6).pending);
+    }
+
+    /// A STICKER-style ACK with the reserved CTRL bit and a TLV tail after the flags
+    /// byte still parses (RSSI + PENDING) and still resolves the wait.
+    #[test]
+    fn ctrl_tail_is_ignored() {
+        let mut p = [0u8; 13];
+        p[..4].copy_from_slice(&42u32.to_le_bytes());
+        p[4] = -67i8 as u8;
+        p[5] = ack_flags::PENDING | ack_flags::CTRL;
+        p[6..].copy_from_slice(&[0x10, 0x04, 0xbd, 0x0c, 0x14, 0x01, 0x15]);
+        assert_eq!(
+            ack_meta(&p),
+            AckMeta {
+                rssi: Some(-67),
+                pending: true
+            }
+        );
+        let mut w = AckWait::new(ME, PEER, 42);
+        assert_eq!(w.offer(true, PEER, ME, &p), AckVerdict::Resolved);
     }
 
     /// A 6-byte (flags-bearing) ACK still resolves the wait: the `len >= 4` rule.
