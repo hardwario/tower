@@ -66,3 +66,32 @@ print`).
 **Done when.** A provisioned board keyed-joins with a verified attestation and an unprovisioned
 or cloned one is refused (logged), the link keys survive a reboot without being readable from
 the EEPROM, and the manufacturing procedure (provision, lock, record) is documented.
+
+## STOP-mode regulator bits after every wake (power)
+
+**Why.** `board::apply_stop_tuning` sets `PWR_CR.LPSDSR` (low-power regulator in deep sleep) and
+`ULP` (VREFINT off) for the measured ~5 µA STOP floor. embassy's L0 `exit_stop` re-inits the
+RCC on every wake from STOP, and `rcc/l.rs` writes the whole `PWR_CR` (`write`, not `modify`),
+which clears both bits. Only the console manager's 500 ms VBUS poll re-applies them, so after
+any other wake (watchdog feeder, temperature read, LED pattern, the 5 ms button poll, a radio
+IRQ) the next STOP runs on the main regulator until the next poll: about 2 % of the idle time on
+a quiet node, nearly all of it while an LED pattern runs. (Review of 2026-10-17; the share is
+arithmetic, not a measurement.)
+
+**Why it is not a one-line fix.** A hook that re-applies the bits before every sleep (embassy-
+executor's `trace` feature calls `_embassy_trace_executor_idle` right before the low-power
+executor sleeps) would also set LPSDSR when embassy decides on plain Sleep instead of STOP (a
+peripheral holds STOP off, e.g. the console UART with USB attached). LPSDSR also puts the
+regulator in low-power mode in Sleep (RM0367 PWR_CR), which at the 16 MHz HSI16 clock is out of
+spec. The same applies, rarely, to the current poll-based scheme: after a poll wake, an idle
+pass that cannot STOP sleeps with LPSDSR set. ULP without FWU also lengthens the wake by the
+VREFINT start-up; ST's low-power examples pair ULP with FWU.
+
+**What's needed.** Set the bits on the STOP path only: upstream in embassy (L0 `enter_stop` sets
+LPSDSR + ULP + FWU and `exit_stop` clears LPSDSR; `rcc/l.rs` modifies `PWR_CR` instead of
+writing it), carried here with a `[patch.crates-io]` until it is released; then drop the console
+manager's re-apply.
+
+**Done when.** PPK2: a node with an LED background pattern and a 1 s timer task idles at the
+same floor as `lowpower`; with USB attached the board runs with LPSDSR clear; the radio KATs and
+a two-board confirmed uplink with a downlink still pass.
