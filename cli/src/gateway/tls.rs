@@ -401,7 +401,10 @@ pub(crate) mod test_pki {
         params.not_after = day(Utc::now() + Duration::days(30));
     }
 
-    fn p12(chain: &[&rcgen::Certificate], key: &KeyPair, with_key: bool) -> Vec<u8> {
+    /// `name` is the alias and the localKeyId, unique per file: Windows persists every imported
+    /// key under the user's key store, and tests running in parallel with the same name replace
+    /// each other's key, so the certificate no longer matches it ("No identity found").
+    fn p12(name: &str, chain: &[&rcgen::Certificate], key: &KeyPair, with_key: bool) -> Vec<u8> {
         let certs: Vec<_> = chain
             .iter()
             .map(|c| p12_keystore::Certificate::from_der(c.der()).unwrap())
@@ -409,10 +412,10 @@ pub(crate) mod test_pki {
         let mut store = KeyStore::new();
         if with_key {
             let key = p12_keystore::PrivateKey::from_der(&key.serialize_der()).unwrap();
-            let entry = PrivateKeyChain::new(b"tower-test".as_slice(), key, certs);
-            store.add_entry("tower-test", KeyStoreEntry::PrivateKeyChain(entry));
+            let entry = PrivateKeyChain::new(name.as_bytes(), key, certs);
+            store.add_entry(name, KeyStoreEntry::PrivateKeyChain(entry));
         } else {
-            store.add_entry("tower-test", KeyStoreEntry::Certificate(certs[0].clone()));
+            store.add_entry(name, KeyStoreEntry::Certificate(certs[0].clone()));
         }
         store.writer(PASSWORD).write().unwrap()
     }
@@ -460,10 +463,28 @@ pub(crate) mod test_pki {
         };
         let ca_cert: &rcgen::Certificate = ca.as_ref();
         std::fs::write(&pki.ca_pem, ca.pem()).unwrap();
-        std::fs::write(&pki.server_p12, p12(&[&server, ca_cert], &server_key, true)).unwrap();
-        std::fs::write(&pki.other_p12, p12(&[&other, ca_cert], &other_key, true)).unwrap();
-        std::fs::write(&pki.client_p12, p12(&[&client, ca_cert], &client_key, true)).unwrap();
-        std::fs::write(&pki.cert_only_p12, p12(&[&server], &server_key, false)).unwrap();
+        let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let name = |file: &str| format!("{id}-{file}");
+        std::fs::write(
+            &pki.server_p12,
+            p12(&name("server"), &[&server, ca_cert], &server_key, true),
+        )
+        .unwrap();
+        std::fs::write(
+            &pki.other_p12,
+            p12(&name("other"), &[&other, ca_cert], &other_key, true),
+        )
+        .unwrap();
+        std::fs::write(
+            &pki.client_p12,
+            p12(&name("client"), &[&client, ca_cert], &client_key, true),
+        )
+        .unwrap();
+        std::fs::write(
+            &pki.cert_only_p12,
+            p12(&name("cert-only"), &[&server], &server_key, false),
+        )
+        .unwrap();
         pki
     }
 }
