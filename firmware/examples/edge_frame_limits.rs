@@ -5,7 +5,7 @@
 //!   just flash example edge_frame_limits
 //!
 //! Covers: payload MTU (1 B / 74 B accept, 75 B reject; bulk 64 B accept, 65 B
-//! reject), and the receive-side drops (bad version, unknown type, truncated,
+//! reject), and the receive-side drops (other format marker, unknown type, truncated,
 //! tampered ciphertext, tampered tag, wrong key): each must yield the right error.
 
 #![no_std]
@@ -96,13 +96,13 @@ async fn run(_b: Board) {
         let ok = matches!(&r, Ok((h, range)) if h.counter == 42 && b[range.clone()] == payload[..]);
         check("valid frame opens + round-trips", ok);
     }
-    // Bad version: flip a version bit (bits[7:5]).
+    // Another format marker: flip a marker bit (bits[7:5]).
     {
         let mut b = buf;
         b[0] ^= 0x20;
         check(
-            "bad version → BadVersion",
-            frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadVersion),
+            "other format marker → BadFormat",
+            frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadFormat),
         );
     }
     // Unknown type: set type field (bits[4:0]) to 10. JoinReveal=9 is the max valid type,

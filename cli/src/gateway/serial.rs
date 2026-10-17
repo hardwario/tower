@@ -21,28 +21,22 @@ use crate::session::Mismatch;
 pub(crate) fn to_serial_msg(inner: &[u8]) -> Option<SerialMsg> {
     let (mt, _seq, payload) = match decode_frame(inner) {
         Ok(t) => t,
-        // Should be impossible after startup verification, but a mid-session reflash
-        // to an older firmware would surface exactly here.
-        Err(Error::BadVersion { got }) => {
-            return Some(SerialMsg::Log {
-                line: format!("PROTOCOL MISMATCH: device now speaks v{got}; reflash or rebuild"),
-            });
+        // Should be impossible after startup verification, but a mid-session reflash to a
+        // firmware built from another checkout surfaces exactly here: every one of its frames
+        // carries another schema tag and is refused before its payload is read. Reported as
+        // `Foreign` (rate-limited by [`schema_gate`]); its Hello names the firmware.
+        Err(Error::SchemaMismatch { got }) => {
+            return Some(SerialMsg::Foreign(Mismatch::from_frame(got, inner)));
         }
         Err(_) => return None,
     };
     match mt {
-        // A Hello announcing another version or wire fingerprint (a mid-session reflash to a
-        // firmware built from a different tower-protocol source tree): surfaced as `Foreign`, which
-        // also closes the [`schema_gate`] until a matching Hello.
         MsgType::Hello => postcard::from_bytes::<Hello>(payload)
             .ok()
-            .map(|h| match Mismatch::of_hello(&h) {
-                Some(m) => SerialMsg::Foreign(m),
-                None => SerialMsg::Hello {
-                    firmware_name: h.firmware_name.to_string(),
-                    firmware_version: h.firmware_version.to_string(),
-                    session_id: h.session_id,
-                },
+            .map(|h| SerialMsg::Hello {
+                firmware_name: h.firmware_name.to_string(),
+                firmware_version: h.firmware_version.to_string(),
+                session_id: h.session_id,
             }),
         MsgType::Log => postcard::from_bytes::<Log>(payload).ok().map(|l| SerialMsg::Log {
             line: format!(
@@ -91,22 +85,23 @@ pub(crate) fn to_serial_msg(inner: &[u8]) -> Option<SerialMsg> {
     }
 }
 
-/// The mid-session lockstep gate in front of the engine: after a [`SerialMsg::Foreign`] (a
-/// `Hello` announcing a foreign schema), every frame decodes against the wrong definitions, so
-/// nothing but the next `Hello` is forwarded (exactly like header-level `BadVersion` frames,
-/// which never decode at all); a matching `Hello` re-opens it. `foreign` is the serial loop's
-/// state, kept across reconnects (a replug of a still-foreign dongle re-announces itself).
+/// The mid-session lockstep gate in front of the engine. A device built from another checkout
+/// sends nothing but [`SerialMsg::Foreign`]s (each of its frames is refused for its tag, never
+/// decoded): forward the first one, and later only those that name the firmware (its `Hello`,
+/// e.g. after a reboot), so the engine reports the mismatch instead of a line per frame. A
+/// matching `Hello` (reflashed from this checkout) re-arms it. `foreign` is the serial loop's
+/// state, kept across reconnects.
 pub(crate) fn schema_gate(foreign: &mut bool, msg: SerialMsg) -> Option<SerialMsg> {
     match msg {
-        SerialMsg::Foreign(_) => {
+        SerialMsg::Foreign(ref m) => {
+            let first = !*foreign;
             *foreign = true;
-            Some(msg)
+            (first || m.device.is_some()).then_some(msg)
         }
         SerialMsg::Hello { .. } => {
             *foreign = false;
             Some(msg)
         }
-        _ if *foreign => None,
         _ => Some(msg),
     }
 }
@@ -341,11 +336,9 @@ mod tests {
         let inner = inner_of(
             MsgType::Hello,
             &Hello {
-                protocol_version: tower_protocol::PROTOCOL_VERSION,
                 firmware_name: "radio_dongle_gateway",
                 firmware_version: "v0.1.0",
                 session_id: 9,
-                wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
             },
         );
         match to_serial_msg(&inner).expect("engine-relevant") {
@@ -366,64 +359,64 @@ mod tests {
         }
     }
 
-    #[test]
-    fn foreign_fingerprint_hello_closes_the_gate_until_a_matching_one() {
-        // A mid-session reflash to a firmware from another tower-protocol source tree (same
-        // PROTOCOL_VERSION): its Hello maps to `Foreign`, and the gate then drops every frame
-        // (they would mis-decode) until a matching Hello re-opens it.
-        let hello = |wire_fingerprint| {
-            inner_of(
-                MsgType::Hello,
-                &Hello {
-                    protocol_version: tower_protocol::PROTOCOL_VERSION,
-                    firmware_name: "radio_dongle_gateway",
-                    firmware_version: "v0.1.0",
-                    session_id: 10,
-                    wire_fingerprint,
-                },
-            )
-        };
-        let foreign_fp = tower_protocol::WIRE_FINGERPRINT ^ 0x0001_0000;
-        let foreign = to_serial_msg(&hello(foreign_fp)).expect("engine-relevant");
-        assert!(matches!(
-            foreign,
-            SerialMsg::Foreign(Mismatch::Fingerprint(fp)) if fp == foreign_fp
-        ));
-        let log = || to_serial_msg(&inner_of(MsgType::Dropped, &Dropped { count: 1 })).unwrap();
-        let mut gate = false;
-        assert!(schema_gate(&mut gate, log()).is_some(), "open by default");
-        assert!(
-            schema_gate(&mut gate, foreign).is_some(),
-            "the mismatch itself is reported"
-        );
-        assert!(schema_gate(&mut gate, log()).is_none(), "then frames are dropped");
-        let matching = to_serial_msg(&hello(tower_protocol::WIRE_FINGERPRINT)).unwrap();
-        assert!(matches!(matching, SerialMsg::Hello { .. }));
-        assert!(schema_gate(&mut gate, matching).is_some());
-        assert!(
-            schema_gate(&mut gate, log()).is_some(),
-            "a matching Hello re-opens it"
-        );
+    /// A frame carrying schema `tag` instead of ours, deframed.
+    fn tagged_inner_of<T: serde::Serialize>(tag: u16, mt: MsgType, payload: &T) -> Vec<u8> {
+        let mut buf = [0u8; MAX_WIRE];
+        let n = tower_protocol::encode_frame_with_tag(tag, mt, 0, payload, &mut buf).unwrap();
+        let mut dec = FrameDecoder::new();
+        buf[..n]
+            .iter()
+            .find_map(|&b| dec.push(b).map(|s| s.to_vec()))
+            .expect("one complete frame")
     }
 
     #[test]
-    fn bad_version_frame_becomes_protocol_mismatch_log() {
-        // An intact deframed inner whose header advertises v1 (not the current v3): the CRC
-        // passes, `decode_frame` rejects the version, and `to_serial_msg` surfaces the
-        // mismatch as a Log line rather than silently dropping it: the mid-session reflash
-        // to older firmware the doc comment calls out. Build the inner directly (the host's
-        // own encoder always stamps the current version). The CRC must be valid: since
-        // tower-protocol 1.5.1 a corrupt frame is `BadCrc`, never `BadVersion`.
-        let mut inner = vec![(1u8 << 5) | (MsgType::Hello as u8 & 0x1F), 0, 0];
-        let crc = tower_protocol::crc::crc32_ieee(&inner);
-        inner.extend_from_slice(&crc.to_le_bytes());
-        match to_serial_msg(&inner).expect("a mismatch surfaces as a Log") {
-            SerialMsg::Log { line } => {
-                assert!(line.contains("PROTOCOL MISMATCH"), "{line}");
-                assert!(line.contains("v1"), "{line}");
+    fn a_dongle_from_another_checkout_is_reported_once_per_identity() {
+        // A mid-session reflash to a firmware built from another checkout: every frame of it
+        // maps to `Foreign` (never decoded). The gate forwards the first one and those that name
+        // the firmware (its Hello), not one per frame; a Hello with our tag re-arms it.
+        let foreign_tag = tower_protocol::CONSOLE_TAG ^ 0x0100;
+        let hello = Hello {
+            firmware_name: "radio_dongle_gateway",
+            firmware_version: "v0.1.0",
+            session_id: 10,
+        };
+        let foreign_hello = to_serial_msg(&tagged_inner_of(foreign_tag, MsgType::Hello, &hello)).unwrap();
+        match &foreign_hello {
+            SerialMsg::Foreign(m) => {
+                assert_eq!(m.tag, foreign_tag);
+                assert_eq!(m.device.as_deref(), Some("radio_dongle_gateway v0.1.0"));
             }
-            other => panic!("expected Log, got {other:?}"),
+            other => panic!("expected Foreign, got {other:?}"),
         }
+        let foreign_log = || {
+            to_serial_msg(&tagged_inner_of(
+                foreign_tag,
+                MsgType::Dropped,
+                &Dropped { count: 1 },
+            ))
+            .unwrap()
+        };
+        assert!(matches!(foreign_log(), SerialMsg::Foreign(ref m) if m.device.is_none()));
+
+        let mut gate = false;
+        assert!(
+            schema_gate(&mut gate, foreign_log()).is_some(),
+            "the first one is reported"
+        );
+        assert!(
+            schema_gate(&mut gate, foreign_log()).is_none(),
+            "then not per frame"
+        );
+        assert!(
+            schema_gate(&mut gate, foreign_hello).is_some(),
+            "a Hello names the firmware"
+        );
+        let matching = to_serial_msg(&inner_of(MsgType::Hello, &hello)).unwrap();
+        assert!(matches!(matching, SerialMsg::Hello { .. }));
+        assert!(schema_gate(&mut gate, matching).is_some());
+        assert!(!gate, "a matching Hello re-arms the gate");
+        assert!(schema_gate(&mut gate, foreign_log()).is_some());
     }
 
     #[test]
@@ -450,7 +443,7 @@ mod tests {
                 message: "x",
             },
         );
-        inner[3] ^= 0xFF; // flip a payload byte → CRC mismatch
+        inner[5] ^= 0xFF; // flip a payload byte → CRC mismatch
         assert!(to_serial_msg(&inner).is_none());
     }
 }

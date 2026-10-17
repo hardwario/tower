@@ -17,11 +17,13 @@ bootloader engine) come from the root workspace (`tower-protocol.workspace = tru
 `tower-boot.workspace = true`). The firmware and the HIL harness build the same
 `crates/protocol` source, so the wire format cannot drift at build time; there is no tag to
 bump and nothing to keep in step by hand. A protocol change is made together with its callers
-here in the same commit (see `crates/protocol/AGENTS.md`, "Releasing a change").
+here in the same commit (see `crates/protocol/AGENTS.md`, "Changing the wire").
 
 What a build cannot fix is an installed binary: after a wire change, reinstall `tower`
 (`just install-cli` at the repo root, = `cargo install --locked --path cli`), or it reports a
-protocol-version mismatch (`BadVersion`, exit 125) against freshly flashed firmware.
+schema mismatch (`SchemaMismatch`: the device's frames carry another schema tag; a banner naming
+the device's firmware, exit 125) against freshly flashed firmware. A stream in which every frame
+fails its CRC (a framing difference the tags can't see) is reported once as such.
 
 ## Checks
 

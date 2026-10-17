@@ -75,9 +75,9 @@ pub(crate) enum SerialMsg {
     },
     Stat(RadioStat),
     Dropped(u32),
-    /// A `Hello` announcing another protocol version or wire fingerprint: the dongle now runs
-    /// a firmware built from a different tower-protocol source tree (a mid-session reflash). The
-    /// serial thread drops every later frame until a matching `Hello` (`serial::schema_gate`).
+    /// Frames carrying another schema tag: the dongle now runs a firmware built from another
+    /// checkout (a mid-session reflash). None of them is decoded; the serial thread forwards the
+    /// first one and those naming the firmware (`serial::schema_gate`).
     Foreign(Mismatch),
 }
 
@@ -594,8 +594,8 @@ impl Engine {
             }
             SerialMsg::Foreign(m) => {
                 out.push(Output::Event(Event::Log(format!(
-                    "PROTOCOL MISMATCH (dongle reflashed?): {}; {}; its frames are ignored \
-                     until a matching firmware is back",
+                    "SCHEMA MISMATCH (dongle reflashed?): {}; {}; its frames are ignored \
+                     until a firmware from this checkout is back",
                     m.what(),
                     m.remedy()
                 ))));
@@ -742,11 +742,12 @@ impl Engine {
             }
             Ok(NodeMsg::Info(info)) => self.on_node_info(src, &info, out),
             Ok(NodeMsg::Shell(chunk)) => self.on_shell_chunk(src, &chunk, out),
-            Err(tower_protocol::Error::BadVersion { got }) => {
+            Err(tower_protocol::Error::SchemaMismatch { got }) => {
                 out.push(Output::Event(Event::Log(format!(
-                    "node {} speaks radio schema v{got}, this build v{}; update tower-cli or the node",
+                    "node {} speaks radio schema {got:#06x}, this `tower` {:#06x}; rebuild both \
+                     from the same checkout",
                     topics::node_hex(src),
-                    radio::RADIO_SCHEMA_VERSION
+                    radio::RADIO_TAG
                 ))));
             }
             Err(_) => {
@@ -955,21 +956,10 @@ impl Engine {
             // ---- happy paths ----
             (OpKind::Describe, None) => {
                 if let Ok(info) = postcard::from_bytes::<tower_protocol::mgmt::DeviceInfo>(&p.data) {
-                    let info = DeviceInfoOwned::from(info);
-                    if let Some(m) = info.mismatch() {
-                        // Startup verification refused a foreign gateway, so this is a
-                        // mid-session reflash: keep the verified identity, say why.
-                        out.push(Output::Event(Event::Log(format!(
-                            "PROTOCOL MISMATCH in the Describe reply: {}; {}",
-                            m.what(),
-                            m.remedy()
-                        ))));
-                        self.rpc_err(out, &p, "protocol mismatch (wire fingerprint)");
-                        return;
-                    }
-                    // Carries `firmware_version` too (wire v4), so the status no longer
-                    // depends on having seen a boot Hello.
-                    self.describe = info;
+                    // A reply that decoded carried our schema tag (a foreign one is never
+                    // decoded). Carries `firmware_version` too, so the status no longer depends
+                    // on having seen a boot Hello.
+                    self.describe = DeviceInfoOwned::from(info);
                     self.publish_status(out);
                 }
                 // Band + channel are what a cable-provisioned node must be told
@@ -1471,18 +1461,14 @@ impl Engine {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(60)
                     .clamp(1, 600) as u16;
-                // The host mints the AES key: the only CSPRNG in the system.
-                let mut key = [0u8; 16];
-                if getrandom::fill(&mut key).is_err() {
-                    return self.rpc_err_direct(out, &me, "no entropy source for the node key");
-                }
+                // No key to mint: OTA pairing derives the link key on both ends (X25519).
                 self.pairing_rpc = Some(req.id.clone());
                 self.pairing_until = Some(self.tick + window as u64);
                 self.publish_pairing(out, None);
                 self.issue_delayed(
                     out,
                     OpKind::PairingOpen,
-                    MgmtOp::PairingOpen { window, key },
+                    MgmtOp::PairingOpen { window },
                     rpc,
                     window as u64 + 5,
                 );
@@ -2000,11 +1986,11 @@ impl Engine {
                 schema: payload::SCHEMA,
                 gateway: topics::node_hex(self.describe.addr),
                 firmware: self.describe.firmware_name.clone(),
-                // From the startup `Describe` (wire v4 `DeviceInfo.firmware_version`), then
-                // refreshed by every Hello / Describe: known even if no boot Hello was seen.
+                // From the startup `Describe` (`DeviceInfo.firmware_version`), then refreshed by
+                // every Hello / Describe: known even if no boot Hello was seen.
                 firmware_version: self.describe.firmware_version.clone(),
                 session_id: self.hello_session.unwrap_or(0),
-                protocol: tower_protocol::PROTOCOL_VERSION,
+                wire: payload::wire_tags(),
                 serial_port: self.port_name.clone(),
                 serial_up: self.serial_up,
             }),
@@ -2075,7 +2061,6 @@ mod tests {
             "/dev/ttyTEST".into(),
             crate::mgmt::DeviceInfoOwned {
                 role: DeviceRole::Gateway,
-                radio_schema_version: radio::RADIO_SCHEMA_VERSION,
                 addr: 0x0000_0001,
                 band: 0,
                 channel: 0,
@@ -2084,7 +2069,6 @@ mod tests {
                 provisioned: true,
                 gw_addr: 0x0000_0001,
                 firmware_name: "radio_dongle_gateway".into(),
-                wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
                 firmware_version: "v0.1.0".into(),
             },
         )
@@ -2151,7 +2135,7 @@ mod tests {
 
     #[test]
     fn status_carries_the_firmware_version_from_describe() {
-        // Wire v4: the startup Describe (`DeviceInfo.firmware_version`) seeds the version, so
+        // The startup Describe (`DeviceInfo.firmware_version`) seeds the version, so
         // the retained status (what `tower net status` prints) has it before, and without,
         // any boot Hello; the startup probe usually consumes that Hello anyway.
         let mut e = engine();
@@ -2163,16 +2147,20 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_dongle_hello_is_logged_as_a_protocol_mismatch() {
-        // A mid-session reflash to a firmware from another tower-protocol source tree: the serial
-        // thread maps its Hello to `Foreign` (and stops forwarding frames); the engine says so.
+    fn a_dongle_from_another_checkout_is_logged_as_a_schema_mismatch() {
+        // A mid-session reflash to a firmware from another checkout: the serial thread maps its
+        // frames to `Foreign` (never decoded); the engine says so, naming the firmware.
         let mut e = engine();
-        let out = e.handle(Input::SerialFrame(SerialMsg::Foreign(Mismatch::Fingerprint(
-            0xDEAD_BEEF,
-        ))));
+        let out = e.handle(Input::SerialFrame(SerialMsg::Foreign(Mismatch {
+            tag: 0xBEEF,
+            device: Some("radio_dongle_gateway v0.0.9".into()),
+        })));
         assert!(out.iter().any(|o| matches!(
             o,
-            Output::Event(Event::Log(l)) if l.contains("PROTOCOL MISMATCH") && l.contains("0xdeadbeef")
+            Output::Event(Event::Log(l)) if l.contains("SCHEMA MISMATCH")
+                && l.contains("0xbeef")
+                && l.contains("radio_dongle_gateway v0.0.9")
+                && l.contains("same checkout")
         )));
     }
 

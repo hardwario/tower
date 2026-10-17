@@ -52,7 +52,6 @@ use tower_gateway::queue::{PushError, Queue};
 use tower_gateway::registry::{self, BucketIo, IoError, NodeRecord, RegistryError};
 use tower_protocol::mgmt::{self, DeviceInfo, DeviceRole, MgmtOp, NodeEntry, NodeKey, Paired, QueueId};
 use tower_protocol::msg::{MgmtRequest, RadioStat};
-use tower_protocol::radio::RADIO_SCHEMA_VERSION;
 use tower_protocol::{MsgType, decode_frame};
 
 // --- persistence (NS_APP) --------------------------------------------------------
@@ -316,8 +315,7 @@ async fn respond_empty(req_id: u16, result: u8) {
 }
 
 /// Reply `MGMT_OK` with a single postcard record (largest single record is a
-/// max-name `DeviceInfo` at ~62 B since wire v4 added `wire_fingerprint` + `firmware_version`;
-/// 96 covers every one-record reply).
+/// max-name `DeviceInfo` with its `firmware_version`, ~57 B; 96 covers every one-record reply).
 async fn respond_record<T: serde::Serialize>(req_id: u16, record: &T) {
     let mut buf = [0u8; 96];
     match postcard::to_slice(record, &mut buf) {
@@ -673,7 +671,6 @@ async fn handle_mgmt(
                 req_id,
                 &DeviceInfo {
                     role: DeviceRole::Gateway,
-                    radio_schema_version: RADIO_SCHEMA_VERSION,
                     addr,
                     band: match band {
                         Band::Eu868 => mgmt::BAND_EU868,
@@ -685,9 +682,8 @@ async fn handle_mgmt(
                     provisioned: true,
                     gw_addr: addr,
                     firmware_name: name.as_str(),
-                    // Wire v4: the same lockstep fingerprint + version the boot `Hello` carries, so
-                    // a host that attached after boot (missed the Hello) still checks and shows them.
-                    wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
+                    // The same version the boot `Hello` carries, so a host that attached after
+                    // boot (missed the Hello) still shows it.
                     firmware_version: console::firmware_version(),
                 },
             )
@@ -790,8 +786,8 @@ async fn handle_mgmt(
             Some(rec) => respond_record(req_id, &NodeKey { addr, key: rec.key }).await,
             None => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
         },
-        // `key` is unused: the link key comes from the X25519 key agreement (docs/radio.md).
-        MgmtOp::PairingOpen { window, key: _ } => {
+        // No key in the request: the link key comes from the X25519 key agreement (docs/radio.md).
+        MgmtOp::PairingOpen { window } => {
             if pairing.is_some() {
                 respond_empty(req_id, mgmt::MGMT_BUSY).await;
                 return;

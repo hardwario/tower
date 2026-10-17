@@ -2,7 +2,7 @@
 //!
 //! Wire layout (little-endian, fits the 96-byte SPIRIT1 FIFO):
 //!
-//! | ver_type | flags | src(4) | dest(4) | counter(4) | [bulk_idx(3)] | payload | tag(8) |
+//! | fmt_type | flags | src(4) | dest(4) | counter(4) | [bulk_idx(3)] | payload | tag(8) |
 //!
 //! The whole cleartext header is the CCM **AAD**; the payload is encrypted; the
 //! 8-byte CCM tag authenticates both. The 13-byte nonce is *derived* from the
@@ -13,15 +13,13 @@
 
 use super::ccm::{Ccm, NONCE_LEN, TAG_LEN};
 
-/// Protocol version (`bits[7:5]` of `ver_type`). Caps at 7, and value 7 is reserved
-/// as the extension escape ("real version elsewhere"), never a normal bump, so fielded
-/// firmwares that hard-reject unknown versions can still be reasoned about at v8+.
-pub const VERSION: u8 = 1;
-const _: () = assert!(
-    VERSION < 7,
-    "radio frame version field is 3 bits; 7 is the reserved escape"
-);
-/// Header size without a bulk index (ver_type+flags+src+dest+counter).
+/// Frame format marker (`bits[7:5]` of the first header byte), fixed. A frame with another
+/// value is not a TOWER network frame of this layout and is dropped before any CCM work
+/// ([`FrameError::BadFormat`]). Not a version: nothing negotiates it and nothing is kept for an
+/// older layout; a layout change rebuilds both ends from the same checkout.
+pub const FORMAT: u8 = 1;
+const _: () = assert!(FORMAT < 8, "the frame format marker is 3 bits");
+/// Header size without a bulk index (fmt_type+flags+src+dest+counter).
 pub const HDR_LEN: usize = 14;
 /// Header size with the 3-byte bulk index.
 pub const HDR_LEN_BULK: usize = 17;
@@ -113,8 +111,8 @@ pub struct Header {
 pub enum FrameError {
     /// Buffer too short for the declared header/tag.
     TooShort,
-    /// Protocol version not understood (drop).
-    BadVersion,
+    /// Not this frame format (the `bits[7:5]` marker differs): drop.
+    BadFormat,
     /// Unknown frame type (drop).
     BadType,
     /// Payload exceeds the per-frame limit.
@@ -127,7 +125,7 @@ impl core::fmt::Display for FrameError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             FrameError::TooShort => "frame too short",
-            FrameError::BadVersion => "unsupported protocol version",
+            FrameError::BadFormat => "not this frame format",
             FrameError::BadType => "unknown frame type",
             FrameError::PayloadTooLong => "payload too long",
             FrameError::AuthFail => "authentication failed",
@@ -159,7 +157,7 @@ impl Header {
     /// Serialize the clear header (AAD) into `out`; returns its length.
     pub fn encode(&self, out: &mut [u8]) -> usize {
         let n = self.wire_len();
-        out[0] = (VERSION << 5) | (self.frame_type as u8 & 0x1F);
+        out[0] = (FORMAT << 5) | (self.frame_type as u8 & 0x1F);
         out[1] = self.flags;
         out[2..6].copy_from_slice(&self.src.to_le_bytes());
         out[6..10].copy_from_slice(&self.dest.to_le_bytes());
@@ -172,14 +170,13 @@ impl Header {
     }
 
     /// Parse a clear header from the start of `buf`; returns it + its length.
-    /// Rejects unknown versions/types (caller drops the frame).
+    /// Rejects another format marker or an unknown type (caller drops the frame).
     pub fn parse(buf: &[u8]) -> Result<(Header, usize), FrameError> {
         if buf.len() < HDR_LEN {
             return Err(FrameError::TooShort);
         }
-        let ver = buf[0] >> 5;
-        if ver != VERSION {
-            return Err(FrameError::BadVersion);
+        if buf[0] >> 5 != FORMAT {
+            return Err(FrameError::BadFormat);
         }
         let frame_type = FrameType::from_u8(buf[0] & 0x1F).ok_or(FrameError::BadType)?;
         let flags = buf[1];

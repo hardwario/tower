@@ -4,8 +4,9 @@
 # workspace in firmware/ (thumbv6m-none-eabi + the flip-link linker, via firmware/.cargo/
 # config.toml, which only applies when cargo runs inside firmware/). The firmware, the `tower`
 # CLI and the HIL harness all build crates/protocol by path, so the wire-format lockstep is a
-# compile-time fact; what is left to guard is the wire itself (the `wire-guard` job). There is no
-# hardware in CI: the HIL bench tests are #[ignore]d and only compiled.
+# compile-time fact; an installed artifact from another checkout is caught at run time by the
+# schema tags every frame carries (crates/protocol). There is no hardware in CI: the HIL bench
+# tests are #[ignore]d and only compiled.
 #
 # `just check` runs the same gates locally.
 #
@@ -176,23 +177,7 @@ jobs:
       - name: just examples / apps match examples/*.rs / apps/*.rs
         run: just lists
 
-  # 3. The wire itself: golden vectors that changed since the latest `protocol-v*` tag need a
-  #    PROTOCOL_VERSION / RADIO_SCHEMA_VERSION bump (postcard is not self-describing).
-  wire-guard:
-    name: wire-bump guard (goldens vs version constants)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0 # full history + tags: the guard diffs against the latest protocol-v* tag
-          persist-credentials: false
-      - name: Golden vectors changed => version bumped
-        run: python3 crates/protocol/tools/check_wire_bump.py
-      # The guard guards the wire; this guards the guard (synthetic repos, expected verdicts).
-      - name: Wire-bump guard self-test
-        run: python3 crates/protocol/tools/check_wire_bump.py --self-test
-
-  # 4. RustSec advisories for both lockfiles. Vulnerabilities fail the job; informational
+  # 3. RustSec advisories for both lockfiles. Vulnerabilities fail the job; informational
   #    warnings (unmaintained / unsound / yanked) are printed but do not, notably `bare-metal`
   #    (unmaintained, RUSTSEC-2026-0110), pulled in by cortex-m 0.7 with no maintained
   #    replacement upstream yet.

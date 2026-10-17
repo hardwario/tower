@@ -1,6 +1,6 @@
 //! Host-side rendering of the decoded frame stream for the non-TUI commands (`logs`,
 //! `events`, `monitor`). Owns the streaming read loop, sequence/decode-error accounting,
-//! the protocol-version mismatch banner, and the line formatting, which is deliberately
+//! the schema mismatch banner, and the line formatting, which is deliberately
 //! shared with the TUI (`log_line` / `event_fields` / `level_label`) so the two frontends
 //! render a Log or Event identically.
 //!
@@ -20,7 +20,7 @@ use clap::ValueEnum;
 use tower_protocol::msg::{Dropped, Event, Level, Log, Print};
 use tower_protocol::{FrameDecoder, Msg, decode_msg};
 
-use crate::session::{Mismatch, Transport, read_some};
+use crate::session::{FramingWatch, Mismatch, Transport, read_some};
 use crate::term::{sanitize, sanitize_line};
 
 /// Which entity stream to render.
@@ -182,54 +182,42 @@ fn json_str(s: &str) -> String {
 #[derive(Default)]
 pub(crate) struct RenderState {
     pub(crate) last_seq: Option<u16>,
-    /// Frames the codec refused to decode (`BadVersion`/`BadType`/`BadCrc`/…). A burst of
-    /// these on an otherwise-live link is the classic symptom of a protocol tag mismatch.
+    /// Frames the codec refused to decode (`SchemaMismatch`/`BadType`/`BadCrc`/…). A burst of
+    /// these on an otherwise-live link is the classic symptom of a stale peer.
     pub(crate) decode_failures: u64,
+    /// The mismatch seen so far, if any (the device's identity once its `Hello` was seen).
+    mismatch: Option<Mismatch>,
     /// Whether we've already shouted about a lockstep mismatch (warn once per stream).
     warned_mismatch: bool,
-    /// The last `Hello` announced another protocol version or wire fingerprint: the stream is
-    /// on a foreign schema, so its frames are dropped (not mis-rendered) until a matching
-    /// `Hello` (the device reflashed back).
-    foreign_schema: bool,
+    /// Every frame failing its CRC: a framing difference the tags cannot see (warn once).
+    framing: FramingWatch,
     /// The `session_id` from the last `Hello`. The console re-emits `Hello` on every USB
     /// plug-in with the SAME id within a boot, so a *changed* id means the device rebooted.
     last_session: Option<u32>,
 }
 
-/// Emit the loud, persistent lockstep-mismatch banner (stderr): the device speaks another
-/// `PROTOCOL_VERSION` (frame header or `Hello`), or the same version with a different
-/// `WIRE_FINGERPRINT` (its `Hello` / `DeviceInfo`). Either way postcard will silently
-/// mis-decode; see the lockstep rule.
-pub(crate) fn warn_mismatch(m: Mismatch) {
-    eprintln!("[tower] ============================================================");
-    match m {
-        Mismatch::Version(device) => {
-            eprintln!(
-                "[tower] PROTOCOL VERSION MISMATCH: device speaks v{device}, this `tower` was built for v{}.",
-                tower_protocol::PROTOCOL_VERSION
-            );
-            eprintln!("[tower] postcard is NOT self-describing: frames will silently mis-decode. Rebuild");
-            eprintln!(
-                "[tower] `tower` and the firmware from the SAME checkout of crates/protocol (the lockstep rule)."
-            );
-        }
-        Mismatch::Fingerprint(device) => {
-            eprintln!(
-                "[tower] PROTOCOL MISMATCH (wire fingerprint): device {device:#010x}, this `tower` {:#010x}.",
-                tower_protocol::WIRE_FINGERPRINT
-            );
-            eprintln!(
-                "[tower] Same PROTOCOL_VERSION (v{}) but a different wire schema: the tower-protocol",
-                tower_protocol::PROTOCOL_VERSION
-            );
-            eprintln!(
-                "[tower] trees differ. postcard is NOT self-describing: frames will silently mis-decode."
-            );
-            eprintln!(
-                "[tower] Rebuild both `tower` and the firmware from the SAME checkout (the lockstep rule)."
-            );
-        }
+#[cfg(test)]
+impl RenderState {
+    /// Whether the framing diagnosis was printed (tests).
+    fn framing_reported(&self) -> bool {
+        self.framing.reported()
     }
+}
+
+/// Emit the loud, persistent lockstep-mismatch banner (stderr): the device's frames carry
+/// another console schema tag, so it was built from another checkout and postcard would
+/// silently mis-decode it. The tag can't say which side is older: the remedy is to rebuild both.
+pub(crate) fn warn_mismatch(m: &Mismatch) {
+    eprintln!("[tower] ============================================================");
+    eprintln!(
+        "[tower] SCHEMA MISMATCH: {} speaks console schema {:#06x}, this `tower` {:#06x}.",
+        m.device_label(),
+        m.tag,
+        tower_protocol::CONSOLE_TAG
+    );
+    eprintln!("[tower] The two were built from different checkouts. postcard is NOT self-describing,");
+    eprintln!("[tower] so none of its frames are interpreted. Rebuild both `tower` and the firmware");
+    eprintln!("[tower] from the SAME checkout (`just install-cli`, then reflash the board).");
     eprintln!("[tower] ============================================================");
 }
 
@@ -278,27 +266,34 @@ pub(crate) fn read_loop(sp: &mut (impl Transport + ?Sized), r: &mut Renderer) ->
 /// Decode one frame and render it per `view`/`mode`, updating sequence + error accounting.
 /// (Kept `pub(crate)` so unit tests can drive it directly with synthesized frames.)
 pub(crate) fn render(inner: &[u8], mode: OutputMode, view: View, st: &mut RenderState) {
-    // `decode_msg` does the version + CRC check (like `decode_frame`) AND deserializes the
-    // payload into the typed `Msg` in one step: the consumer no longer hand-writes a
-    // `MsgType` match + `from_bytes` per arm. A CRC-valid body that fails to deserialize
-    // surfaces as `Error::Malformed` here, same drop path as a version/CRC failure.
-    let (seq, msg) = match decode_msg(inner) {
+    // `decode_msg` does the CRC + tag check (like `decode_frame`) AND deserializes the payload
+    // into the typed `Msg` in one step: the consumer no longer hand-writes a `MsgType` match +
+    // `from_bytes` per arm. A CRC-valid body that fails to deserialize surfaces as
+    // `Error::Malformed` here, same drop path as a tag/CRC failure.
+    let decoded = decode_msg(inner);
+    if st.framing.observe(&decoded) {
+        eprintln!("[tower] {}", FramingWatch::MESSAGE);
+    }
+    let (seq, msg) = match decoded {
         Ok(t) => t,
         Err(e) => {
             st.decode_failures += 1;
-            // A header-level BadVersion IS the lockstep mismatch (it's rejected before any
-            // Hello payload could parse, so the Hello-based banner below would never fire):
-            // escalate to the full remediation banner, once.
-            if let tower_protocol::Error::BadVersion { got } = e
-                && !st.warned_mismatch
-            {
-                warn_mismatch(Mismatch::Version(got));
-                st.warned_mismatch = true;
+            // A CRC-valid frame with another schema tag IS the lockstep mismatch: escalate to the
+            // full remediation banner once, as soon as the device is known (its Hello names it)
+            // or at the first such frame. Every later one of its frames is dropped here too.
+            if let tower_protocol::Error::SchemaMismatch { got } = e {
+                Mismatch::note(&mut st.mismatch, Mismatch::from_frame(got, inner));
+                if !st.warned_mismatch
+                    && let Some(m) = &st.mismatch
+                {
+                    warn_mismatch(m);
+                    st.warned_mismatch = true;
+                }
             }
-            // A version-tagged codec error is the smoking gun for a tag mismatch; surface the
-            // running count so a wall of them reads as one diagnosable cause, not noise. In
-            // JSON mode make it a first-class NDJSON record (like device-side `Dropped`) so
-            // `| jq` consumers see it on stdout, not just humans on stderr.
+            // A tagged codec error is the smoking gun for a stale peer; surface the running count
+            // so a wall of them reads as one diagnosable cause, not noise. In JSON mode make it a
+            // first-class NDJSON record (like device-side `Dropped`) so `| jq` consumers see it on
+            // stdout, not just humans on stderr.
             match mode {
                 OutputMode::Json => println!(
                     "{{\"type\":\"decode_error\",\"error\":{},\"count\":{}}}",
@@ -306,31 +301,13 @@ pub(crate) fn render(inner: &[u8], mode: OutputMode, view: View, st: &mut Render
                     st.decode_failures
                 ),
                 OutputMode::Text { .. } => eprintln!(
-                    "[tower] dropped a corrupt frame: {e:?} ({} undecodable frame(s); version mismatch?)",
+                    "[tower] dropped a frame: {e} ({} undecodable frame(s))",
                     st.decode_failures
                 ),
             }
             return;
         }
     };
-    // After a `Hello` that announced a foreign schema (another version or wire fingerprint),
-    // every frame decodes against the WRONG struct definitions: drop it like a header-level
-    // `BadVersion` (counted, diagnosed) instead of rendering mis-decoded fields. The next
-    // `Hello` re-evaluates (a device reflashed to a matching build is rendered again).
-    if st.foreign_schema && !matches!(msg, Msg::Hello(_)) {
-        st.decode_failures += 1;
-        match mode {
-            OutputMode::Json => println!(
-                "{{\"type\":\"decode_error\",\"error\":\"ForeignWireSchema\",\"count\":{}}}",
-                st.decode_failures
-            ),
-            OutputMode::Text { .. } => eprintln!(
-                "[tower] dropped a frame from a foreign wire schema ({} undecodable frame(s); lockstep mismatch)",
-                st.decode_failures
-            ),
-        }
-        return;
-    }
     // A `Hello` marks a new device session: the firmware resets its per-session `seq`
     // (the dynamic console re-emits `Hello` on every USB plug-in), so re-baseline our
     // tracking on it rather than reporting a spurious gap across the reconnect.
@@ -358,26 +335,18 @@ pub(crate) fn render(inner: &[u8], mode: OutputMode, view: View, st: &mut Render
             // re-emits Hello with the SAME id on a mere USB re-plug within one boot).
             let rebooted = st.last_session.is_some_and(|s| s != h.session_id);
             st.last_session = Some(h.session_id);
+            // A Hello with our tag: the device (re)flashed from this checkout; a later mismatch
+            // is a new event worth its own banner.
+            st.mismatch = None;
+            st.warned_mismatch = false;
             eprintln!(
-                "[tower] hello: {} {} (protocol v{} fp {:#010x}, session {}){}",
+                "[tower] hello: {} {} (schema {:#06x}, session {}){}",
                 sanitize_line(h.firmware_name),
                 sanitize_line(h.firmware_version),
-                h.protocol_version,
-                h.wire_fingerprint,
+                tower_protocol::CONSOLE_TAG,
                 h.session_id,
                 if rebooted { "; device rebooted" } else { "" }
             );
-            // The lockstep check: the payload version (a secondary guard; a real version
-            // mismatch is rejected at the frame header above) and the wire fingerprint (the
-            // only way to see a same-version peer built from a different tower-protocol source tree).
-            let verdict = Mismatch::of_hello(&h);
-            if let Some(m) = verdict
-                && !st.warned_mismatch
-            {
-                warn_mismatch(m);
-                st.warned_mismatch = true;
-            }
-            st.foreign_schema = verdict.is_some();
         }
         Msg::Log(l) if view == View::Logs => emit_log(&l, mode),
         Msg::Print(p) if view == View::Logs => emit_print(&p, mode),
@@ -480,33 +449,26 @@ mod tests {
         buf[..n].to_vec()
     }
 
-    fn hello_frame(protocol_version: u8) -> Vec<u8> {
+    fn hello_frame() -> Vec<u8> {
         frame(
             MsgType::Hello,
             0,
             &Hello {
-                protocol_version,
                 firmware_name: "app",
                 firmware_version: "test",
                 session_id: 1,
-                wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
             },
         )
     }
 
-    /// A current-version `Hello` announcing wire fingerprint `fp`.
-    fn hello_frame_fp(fp: u32) -> Vec<u8> {
-        frame(
-            MsgType::Hello,
-            0,
-            &Hello {
-                protocol_version: tower_protocol::PROTOCOL_VERSION,
-                firmware_name: "app",
-                firmware_version: "test",
-                session_id: 1,
-                wire_fingerprint: fp,
-            },
-        )
+    /// The tag of a device built from another checkout.
+    const FOREIGN: u16 = tower_protocol::CONSOLE_TAG ^ 0x00FF;
+
+    /// A frame from a device built from another checkout (another schema tag).
+    fn foreign<T: serde::Serialize>(mt: MsgType, seq: u16, payload: &T) -> Vec<u8> {
+        let mut buf = [0u8; tower_protocol::MAX_WIRE];
+        let n = tower_protocol::encode_frame_with_tag(FOREIGN, mt, seq, payload, &mut buf).unwrap();
+        buf[..n].to_vec()
     }
 
     fn log_frame(seq: u16, msg: &str) -> Vec<u8> {
@@ -539,38 +501,55 @@ mod tests {
         let mut st = RenderState::default();
         feed_render(&mut st, &log_frame(100, "a"));
         assert_eq!(st.last_seq, Some(100));
-        feed_render(&mut st, &hello_frame(tower_protocol::PROTOCOL_VERSION));
+        feed_render(&mut st, &hello_frame());
         // Hello re-baselined: last_seq is the Hello's own seq (0), no spurious gap.
         assert_eq!(st.last_seq, Some(0));
         assert_eq!(st.decode_failures, 0);
     }
 
     #[test]
-    fn render_drops_frames_after_a_foreign_fingerprint_hello() {
-        // Same PROTOCOL_VERSION, different wire schema: the banner fires once and every frame
-        // after the Hello is counted as a decode failure instead of being rendered (it would
-        // decode against the wrong definitions), exactly like header-level BadVersion frames.
-        // A matching Hello (device reflashed back) re-opens the stream.
-        let foreign = tower_protocol::WIRE_FINGERPRINT ^ 0x00FF_0000;
+    fn render_drops_frames_from_another_schema() {
+        // A device built from another checkout: its Hello names it, the banner fires once, and
+        // every one of its frames is counted as a decode failure instead of being rendered (it
+        // would decode against the wrong definitions). A device reflashed from this checkout
+        // (a Hello with our tag) is rendered again.
         let mut st = RenderState::default();
-        feed_render(&mut st, &hello_frame_fp(foreign));
-        assert!(st.warned_mismatch && st.foreign_schema);
-        feed_render(&mut st, &log_frame(1, "mis-decoded"));
-        feed_render(&mut st, &log_frame(2, "mis-decoded"));
-        assert_eq!(st.decode_failures, 2);
-        assert_eq!(st.last_seq, Some(0), "dropped frames don't advance seq tracking");
-        feed_render(&mut st, &hello_frame(tower_protocol::PROTOCOL_VERSION));
-        assert!(!st.foreign_schema);
+        let h = Hello {
+            firmware_name: "radio_push_button",
+            firmware_version: "v0.1.0",
+            session_id: 9,
+        };
+        feed_render(&mut st, &foreign(MsgType::Hello, 0, &h));
+        assert!(st.warned_mismatch);
+        let m = st.mismatch.clone().expect("a mismatch");
+        assert_eq!(m.tag, FOREIGN);
+        assert_eq!(m.device.as_deref(), Some("radio_push_button v0.1.0"));
+        let l = Log {
+            level: Level::Info,
+            uptime_us: 0,
+            module: "t",
+            message: "mis-decoded",
+        };
+        feed_render(&mut st, &foreign(MsgType::Log, 1, &l));
+        feed_render(&mut st, &foreign(MsgType::Log, 2, &l));
+        assert_eq!(st.decode_failures, 3);
+        assert_eq!(st.last_seq, None, "refused frames don't advance seq tracking");
+        // A later non-Hello frame keeps the identity the Hello gave.
+        assert_eq!(
+            st.mismatch.as_ref().unwrap().device.as_deref(),
+            Some("radio_push_button v0.1.0")
+        );
+        feed_render(&mut st, &hello_frame());
+        assert!(st.mismatch.is_none() && !st.warned_mismatch);
         feed_render(&mut st, &log_frame(1, "fine"));
-        assert_eq!(st.decode_failures, 2);
+        assert_eq!(st.decode_failures, 3);
         assert_eq!(st.last_seq, Some(1));
     }
 
     #[test]
     fn render_counts_decode_failures() {
-        // A frame that COBS-decodes but fails CRC must be counted as a decode failure (the
-        // symptom we surface as "N undecodable frames; version mismatch?"). Flip the CRC
-        // byte just before the trailing 0x00: it stays a data byte in the COBS stream, so
+        // A frame that COBS-decodes but fails CRC must be counted as a decode failure. Flip the
+        // CRC byte just before the trailing 0x00: it stays a data byte in the COBS stream, so
         // COBS still decodes, but the CRC check then fails. XOR 0x80 avoids making a 0x00.
         let mut st = RenderState::default();
         let mut bytes = log_frame(0, "ok");
@@ -578,6 +557,28 @@ mod tests {
         bytes[last] ^= 0x80;
         feed_render(&mut st, &bytes);
         assert_eq!(st.decode_failures, 1);
+        assert!(!st.warned_mismatch, "a corrupt frame is never a mismatch");
+    }
+
+    #[test]
+    fn render_reports_a_framing_difference_once() {
+        // Every frame failing its CRC (here: frames whose CRC is computed differently) is the
+        // framing heuristic's pattern: reported once at the threshold, not per frame, and a
+        // frame that passes its CRC resets the run.
+        let corrupt = |seq| {
+            let mut b = log_frame(seq, "x");
+            let last = b.len() - 2;
+            b[last] ^= 0x80;
+            b
+        };
+        let mut st = RenderState::default();
+        for seq in 0..(FramingWatch::THRESHOLD as u16 - 1) {
+            feed_render(&mut st, &corrupt(seq));
+        }
+        assert!(!st.framing_reported());
+        feed_render(&mut st, &corrupt(100));
+        assert!(st.framing_reported());
+        assert_eq!(st.decode_failures, u64::from(FramingWatch::THRESHOLD));
     }
 
     /// Like [`feed_render`] but in an explicit [`OutputMode`], for the JSON-diagnostics paths.
@@ -696,7 +697,7 @@ mod tests {
     fn renderer_carries_a_frame_across_feeds() {
         // The boot transcript and the live port are fed separately; a frame straddling the two
         // must still decode (no seam, no spurious decode failure).
-        let mut bytes = hello_frame(tower_protocol::PROTOCOL_VERSION);
+        let mut bytes = hello_frame();
         bytes.extend(log_frame(1, "boot"));
         let cut = bytes.len() - 4;
         let mut r = Renderer::new(TEXT, View::Logs);

@@ -1,5 +1,4 @@
-//! Management schema: the typed op/reply contract of the gateway link (wire v3; the
-//! [`DeviceInfo`] record grew two trailing fields in v4).
+//! Management schema: the typed op/reply contract of the gateway link.
 //!
 //! A host drives a device with [`MgmtRequest`](crate::msg::MgmtRequest) frames
 //! (`{ req_id, op: MgmtOp }`; requests always fit a single frame). The device answers
@@ -27,27 +26,27 @@
 //! | [`MgmtOp::JoinOpen`]      | node      | one [`Joined`] (delayed) |
 //!
 //! **Role probing.** `Describe` doubles as the authoritative "is this a gateway?"
-//! check: a v3 device answers with its [`DeviceRole`]; an op a device does not serve
-//! gets [`MGMT_UNSUPPORTED`]; pre-v3 firmware never answers at all (the host times
-//! out). This is stronger than matching `Hello.firmware_name`, which is display-only.
-//! Since v4 the [`DeviceInfo`] reply also carries the device's
-//! [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT) and firmware version, so a host that attaches
-//! to an already-running device (and so never sees its boot `Hello`) can still run the
-//! lockstep check and report the version.
+//! check: a device answers with its [`DeviceRole`]; an op a device does not serve gets
+//! [`MGMT_UNSUPPORTED`]. This is stronger than matching `Hello.firmware_name`, which is
+//! display-only. The [`DeviceInfo`] reply also carries the firmware name and version, so a host
+//! that attaches to an already-running device (and so never sees its boot `Hello`) can still
+//! report them; the reply's own frame header carries the schema tag, so the lockstep check
+//! needs nothing from the record.
 //!
 //! **Delayed responses.** `PairingOpen` / `JoinOpen` reply when their radio window
 //! *resolves*: a join commits, the window expires ([`MGMT_TIMEOUT`]), or it is
 //! cancelled. That may be up to `window` seconds after the request. The `req_id`
 //! correlation makes this safe; a second open while one runs answers [`MGMT_BUSY`].
 //!
-//! **Who mints AES keys: the host.** Device PRNGs here are deterministic and
-//! explicitly non-cryptographic, so the key travels host→device in `PairingOpen`
-//! (OTA) and `NodeAdd`/`Provision` (over-the-cable), never the other way, except
-//! for the deliberate, explicit [`MgmtOp::NodeRevealKey`].
+//! **Who makes AES keys.** OTA pairing derives the link key on both ends by an X25519 key
+//! agreement (no key travels, in either direction). Over the cable the host mints it: device
+//! PRNGs here are deterministic and explicitly non-cryptographic, so the key travels
+//! host→device in `NodeAdd`/`Provision`, never the other way, except for the deliberate,
+//! explicit [`MgmtOp::NodeRevealKey`].
 //!
-//! This enum set is **exhaustive and part of wire v3**: postcard encodes variants
-//! by index, so appending an op later is a wire change (bump
-//! [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION)). It is designed complete now.
+//! This enum set is **exhaustive**: postcard encodes variants by index, so appending an op is
+//! a schema change (it moves [`CONSOLE_TAG`](crate::CONSOLE_TAG); every end rebuilds from the
+//! same checkout).
 
 use postcard_schema::Schema;
 use serde::{Deserialize, Serialize};
@@ -112,7 +111,7 @@ pub const MAX_NODE_NAME: usize = 16;
 /// variant index). Never reorder; appending is a wire change.
 #[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub enum MgmtOp<'a> {
-    /// Identify the device: role, radio schema, network parameters. Both roles.
+    /// Identify the device: role, network parameters, firmware. Both roles.
     Describe,
     /// Stream the registry as [`NodeEntry`] records. Gateway.
     NodeList,
@@ -136,9 +135,10 @@ pub enum MgmtOp<'a> {
     /// Return the node's AES key as a [`NodeKey`] record (the only path that ever
     /// discloses a stored key). Gateway.
     NodeRevealKey { addr: u32 },
-    /// Open the OTA pairing window for `window` seconds with the host-minted key
-    /// to hand out. Replies (delayed) [`Paired`] or [`MGMT_TIMEOUT`]. Gateway.
-    PairingOpen { window: u16, key: [u8; 16] },
+    /// Open the OTA pairing window for `window` seconds (the link key is derived by the
+    /// pairing's X25519 key agreement). Replies (delayed) [`Paired`] or [`MGMT_TIMEOUT`].
+    /// Gateway.
+    PairingOpen { window: u16 },
     /// Close an open pairing window; its pending response resolves [`MGMT_TIMEOUT`].
     PairingCancel,
     /// Enqueue an opaque downlink (a `radio::NodeCmd` envelope built by the host)
@@ -187,8 +187,6 @@ pub enum DeviceRole {
 #[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub struct DeviceInfo<'a> {
     pub role: DeviceRole,
-    /// The `radio` module schema version this firmware encodes/decodes.
-    pub radio_schema_version: u8,
     /// The device's own radio address (a gateway's coordinator address; a node's own address).
     pub addr: u32,
     pub band: u8,
@@ -201,12 +199,8 @@ pub struct DeviceInfo<'a> {
     /// Node: the gateway it is paired to (`0` = none); gateway: equals `addr`.
     pub gw_addr: u32,
     pub firmware_name: &'a str,
-    /// The device's [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT) (since v4), the same value
-    /// its boot `Hello` carries, so a host that missed the `Hello` (e.g. a gateway bridge
-    /// attaching to a running dongle) still runs the lockstep check.
-    pub wire_fingerprint: u32,
-    /// The firmware version string (the same as `Hello.firmware_version`, e.g. `"v0.1.0"`;
-    /// since v4), so a host that missed the boot `Hello` can still report it.
+    /// The firmware version string (the same as `Hello.firmware_version`, e.g. `"v0.1.0"`),
+    /// so a host that missed the boot `Hello` can still report it.
     pub firmware_version: &'a str,
 }
 

@@ -45,7 +45,7 @@ use embassy_executor::Spawner;
 use embassy_time::Instant;
 use heapless::{String, Vec};
 use tower_protocol::msg::{Candidate, CandidateKind, ShellCommand, ShellComplete, ShellCompletions};
-use tower_protocol::{MsgType, PROTOCOL_VERSION, WIRE_FINGERPRINT, decode_frame};
+use tower_protocol::{CONSOLE_TAG, MsgType, decode_frame};
 use tower_shell::{CompletionBudget, Window};
 
 use crate::console;
@@ -739,31 +739,31 @@ fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     // "firmware:" reports the app/example NAME + version and the per-boot session id: the exact
     // fields the boot `Hello` carries and `tower` prints on connect (they must agree). The name
     // is per-app; the version is the SDK crate version; the session bumps once per boot. "wire:"
-    // is the tower-protocol `PROTOCOL_VERSION` plus the `WIRE_FINGERPRINT` the Hello carries (the
-    // schema hash a host checks for lockstep). Multi-line summary (spans more than one wire frame,
-    // which exercises chunking).
+    // is the schema tags this image was built with (the console tag every frame header carries,
+    // the radio tag every radio envelope leads with): a host or node built from another checkout
+    // shows other values. Multi-line summary (spans more than one wire frame, which exercises
+    // chunking).
     // Lines kept terse so the whole summary fits the shell response buffer (`RESP_CAP` = 256 B)
-    // even at worst case: a 32-char firmware name + 10-digit session + a 3-digit wire version + a
-    // 9-digit uptime in seconds (31 years) + the longest `rng:` label (~252 B; the constant
-    // console line made room for `uid:`, the MCU's 96-bit factory ID, `board::UniqueId`). `rng:`
-    // names the source behind `addr=random` and the pairing ephemerals: the hardware TRNG, or the
+    // even at worst case: a 32-char firmware name + 10-digit session + the 35-byte wire line + a
+    // 9-digit uptime in seconds (31 years) + the one-line MCU summary + `uid:`, the MCU's 96-bit
+    // factory ID (`board::UniqueId`) + the longest `rng:` label = 251 B. `rng:` names the source
+    // behind `addr=random` and the pairing ephemerals: the hardware TRNG, or the
     // non-cryptographic fallback if the TRNG failed to come up (`board::rand_source`; probes once
     // if nothing has drawn yet, then stays cached).
     let _ = write!(
         ctx,
         "firmware: {} {}\r\n\
          session: {}\r\n\
-         wire: v{} fp {:#010x}\r\n\
+         wire: console {:#06x} radio {:#06x}\r\n\
          uptime: {}.{:03} s\r\n\
-         cpu: STM32L083CZ @ 16 MHz, LSE RTC\r\n\
-         memory: 192K flash / 20K RAM / 6K EEPROM\r\n\
+         mcu: STM32L083CZ @ 16 MHz, LSE RTC, 192K flash, 20K RAM, 6K EEPROM\r\n\
          uid: {}\r\n\
          rng: {}\r\n",
         console::firmware_name(),
         console::firmware_version(),
         console::session_id(),
-        PROTOCOL_VERSION,
-        WIRE_FINGERPRINT,
+        CONSOLE_TAG,
+        tower_protocol::radio::RADIO_TAG,
         us / 1_000_000,
         (us % 1_000_000) / 1000,
         crate::board::UniqueId::read(),

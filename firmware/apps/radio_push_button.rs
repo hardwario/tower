@@ -64,8 +64,8 @@ use tower::{app, board::Board, button, console, led, shell, watchdog};
 use tower_protocol::mgmt::{self, DeviceInfo, DeviceRole, Joined, MgmtOp, ProvisionAck};
 use tower_protocol::msg::MgmtRequest;
 use tower_protocol::radio::{
-    AccelKind, ButtonKind, MAX_RADIO_PAYLOAD, NodeCmd, NodeInfo, NodeMsg, NodeShellChunk,
-    RADIO_SCHEMA_VERSION, RADIO_SHELL_CHUNK, decode_node_cmd, encode_node_msg,
+    AccelKind, ButtonKind, MAX_RADIO_PAYLOAD, NodeCmd, NodeInfo, NodeMsg, NodeShellChunk, RADIO_SHELL_CHUNK,
+    RADIO_TAG, decode_node_cmd, encode_node_msg,
 };
 use tower_protocol::{MsgType, decode_frame};
 
@@ -723,10 +723,12 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
                 }
                 return true;
             }
-            Err(tower_protocol::Error::BadVersion { got }) => {
+            Err(tower_protocol::Error::SchemaMismatch { got }) => {
                 warn!(
                     target: "button",
-                    "downlink schema v{} unsupported (this build: v{})", got, RADIO_SCHEMA_VERSION
+                    "downlink radio schema {:#06x}, this build {:#06x}: the host was built from another checkout; rebuild both",
+                    got,
+                    RADIO_TAG
                 );
                 // Nothing exchanged that would clear the pending flag; stop chaining
                 // rather than burn another full RX window on the same bad item.
@@ -855,7 +857,6 @@ async fn handle_mgmt(
                 req_id,
                 &DeviceInfo {
                     role: DeviceRole::Node,
-                    radio_schema_version: RADIO_SCHEMA_VERSION,
                     addr,
                     band: match band {
                         Band::Eu868 => mgmt::BAND_EU868,
@@ -867,9 +868,8 @@ async fn handle_mgmt(
                     provisioned: provision.is_some(),
                     gw_addr: provision.map(|p| p.gw_addr).unwrap_or(0),
                     firmware_name: name.as_str(),
-                    // Wire v4: the same lockstep fingerprint + version the boot `Hello` carries, so
-                    // a host that attached after boot (missed the Hello) still checks and shows them.
-                    wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
+                    // The same version the boot `Hello` carries, so a host that attached after
+                    // boot (missed the Hello) still shows it.
                     firmware_version: console::firmware_version(),
                 },
             )

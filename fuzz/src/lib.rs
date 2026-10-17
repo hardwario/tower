@@ -3,7 +3,7 @@
 //! Every check here is a property the crate documents (or a consumer relies on), asserted with a
 //! panic so libFuzzer records the input:
 //!
-//! * [`check_inner`]: `decode_frame`'s load-bearing check order (length, CRC, version, type),
+//! * [`check_inner`]: `decode_frame`'s load-bearing check order (length, CRC, schema tag, type),
 //!   `decode_msg` agreeing with it, and a decode / re-encode / decode round trip through the real
 //!   COBS framing ([`tower_protocol::encode_frame`] + [`FrameDecoder`]).
 //! * [`check_node_msg`] / [`check_node_cmd`]: the radio envelope decoders, plus re-encoding within
@@ -17,14 +17,14 @@
 use tower_protocol::mgmt::{
     DeviceInfo, Joined, MgmtOp, NodeEntry, NodeKey, Paired, Provision, ProvisionAck, QueueEntry, QueueId,
 };
-use tower_protocol::radio::{self, MAX_RADIO_PAYLOAD, NodeCmd, NodeMsg, RADIO_SCHEMA_VERSION};
+use tower_protocol::radio::{self, ENVELOPE_HDR, MAX_RADIO_PAYLOAD, NodeCmd, NodeMsg, RADIO_TAG};
 use tower_protocol::{
-    Error, FrameDecoder, MAX_FRAME, MAX_PAYLOAD, MAX_WIRE, Msg, MsgType, PROTOCOL_VERSION, crc, decode_frame,
+    CONSOLE_TAG, Error, FrameDecoder, MAX_FRAME, MAX_PAYLOAD, MAX_WIRE, Msg, MsgType, crc, decode_frame,
     decode_msg, encode_frame,
 };
 
-/// Header (`ver_type` + `seq`) and CRC trailer sizes of an inner frame (see the crate docs).
-const HDR: usize = 3;
+/// Header (`type` + `tag` + `seq`) and CRC trailer sizes of an inner frame (see the crate docs).
+const HDR: usize = 5;
 const CRC_LEN: usize = 4;
 
 /// The [`MsgType`] a decoded [`Msg`] variant belongs to.
@@ -88,7 +88,7 @@ pub fn deframe_one(wire: &[u8]) -> Vec<u8> {
 }
 
 /// The documented outcome of [`decode_frame`] for `inner`, computed independently of it:
-/// length first, then the CRC, then version, then type (`Ok` carries `(type, seq)`).
+/// length first, then the CRC, then the schema tag, then type (`Ok` carries `(type, seq)`).
 fn expected_frame(inner: &[u8]) -> Result<(MsgType, u16), Error> {
     if inner.len() < HDR + CRC_LEN {
         return Err(Error::TooShort);
@@ -101,12 +101,12 @@ fn expected_frame(inner: &[u8]) -> Result<(MsgType, u16), Error> {
     if crc::crc32_ieee(&inner[..body]) != stored {
         return Err(Error::BadCrc);
     }
-    let ver = inner[0] >> 5;
-    if ver != PROTOCOL_VERSION {
-        return Err(Error::BadVersion { got: ver });
+    let tag = u16::from_le_bytes([inner[1], inner[2]]);
+    if tag != CONSOLE_TAG {
+        return Err(Error::SchemaMismatch { got: tag });
     }
-    let t = MsgType::from_u8(inner[0] & 0x1F).ok_or(Error::BadType)?;
-    Ok((t, u16::from_le_bytes([inner[1], inner[2]])))
+    let t = MsgType::from_u8(inner[0]).ok_or(Error::BadType)?;
+    Ok((t, u16::from_le_bytes([inner[3], inner[4]])))
 }
 
 /// Check one deframed inner buffer (whatever a [`FrameDecoder`] yielded, or a frame the harness
@@ -189,16 +189,17 @@ fn chain(msg: &Msg<'_>) {
     }
 }
 
-/// The documented failure of a radio envelope decode: empty input is `TooShort`, a foreign
-/// leading byte is `BadVersion { got }`, anything else that fails is `Malformed`.
+/// The documented failure of a radio envelope decode: input shorter than the tag is `TooShort`,
+/// a foreign tag is `SchemaMismatch { got }`, anything else that fails is `Malformed`.
 fn check_envelope_error(data: &[u8], e: Error) {
+    let tag = |d: &[u8]| u16::from_le_bytes([d[0], d[1]]);
     match e {
-        Error::TooShort => assert!(data.is_empty()),
-        Error::BadVersion { got } => {
-            assert_eq!(Some(&got), data.first());
-            assert_ne!(got, RADIO_SCHEMA_VERSION);
+        Error::TooShort => assert!(data.len() < ENVELOPE_HDR),
+        Error::SchemaMismatch { got } => {
+            assert_eq!(got, tag(data));
+            assert_ne!(got, RADIO_TAG);
         }
-        Error::Malformed => assert_eq!(data.first(), Some(&RADIO_SCHEMA_VERSION)),
+        Error::Malformed => assert_eq!(tag(data), RADIO_TAG),
         other => panic!("unexpected radio envelope error {other:?}"),
     }
 }

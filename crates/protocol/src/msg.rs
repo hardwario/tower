@@ -18,28 +18,17 @@ pub enum Level {
     Trace,
 }
 
-/// Target → host: one-time announcement on boot / VBUS-present edge. The per-frame
-/// `ver_type` is the real version guard; these fields carry the firmware identity for
-/// display. `firmware_name` is the baked-in app/example name; `firmware_version` its
-/// version string (e.g. `"v0.1.0"`). `session_id` is a per-boot id (a persisted boot
-/// counter) so the host can tell a device **reboot** from a continuous link.
-///
-/// `wire_fingerprint` (v4) is the producer's [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT):
-/// a host compares it with its own and treats a difference exactly like a
-/// `PROTOCOL_VERSION` mismatch. It catches what the 3-bit version cannot: two builds that
-/// speak the same `PROTOCOL_VERSION` but a different wire schema (a forgotten bump, or
-/// two consumers pinning different tower-protocol source trees).
-///
-/// Field order is load-bearing (postcard encodes positionally); changing it is a wire
-/// break, so bump [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION).
+/// Target → host: one-time announcement on boot / VBUS-present edge. The schema tag in every
+/// frame header is the real lockstep guard; these fields carry the firmware identity for
+/// display (and for the mismatch message when a later frame carries another tag).
+/// `firmware_name` is the baked-in app/example name; `firmware_version` its version string
+/// (e.g. `"v0.1.0"`). `session_id` is a per-boot id (a persisted boot counter) so the host can
+/// tell a device **reboot** from a continuous link.
 #[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct Hello<'a> {
-    pub protocol_version: u8,
     pub firmware_name: &'a str,
     pub firmware_version: &'a str,
     pub session_id: u32,
-    /// The producer's [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT) (since v4).
-    pub wire_fingerprint: u32,
 }
 
 /// Target → host: a structured log record. The host prepends local time + colorizes.

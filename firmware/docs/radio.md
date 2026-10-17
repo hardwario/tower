@@ -111,10 +111,11 @@ Verified against FIPS-197 (AES ECB) and RFC 3610 Packet Vector #1 (CCM); see
 Little-endian frame, fits the 96-byte FIFO:
 
 ```
-| ver_type | flags | src(4) | dest(4) | counter(4) | [bulk_idx(3)] | payload | tag(8) |
+| fmt_type | flags | src(4) | dest(4) | counter(4) | [bulk_idx(3)] | payload | tag(8) |
 ```
 
-- `ver_type`: bits[7:5] protocol version (=1), bits[4:0] frame type
+- first byte: bits[7:5] the frame format marker (`frame::FORMAT` = 1, fixed; another value is
+  `FrameError::BadFormat`, dropped), bits[4:0] the frame type
   (`Data`, `Ack`, `BulkReq`, `BulkData`, `JoinReq`, `JoinResp`, `JoinConfirm`, `Beacon`,
   `JoinNonce`, `JoinReveal`).
 - `flags`: `CONFIRMED`, `KEYED` (JOIN frames only), `LAST_CHUNK`, `BULK_ANNOUNCE`.
@@ -564,7 +565,7 @@ separate ~20 ms deaf window.
 | Bulk idle timeout | 30 s |
 | Star nodes / P2P peers | ≤ 16 / ≤ 8 |
 | Reserved IDs | `0x00000000`, `0xFFFFFFFF` (never a node/gateway/peer address; a peer at our own address is refused too) |
-| Protocol version | 1 |
+| Frame format marker | 1 (`bits[7:5]` of the first byte; fixed, not a version) |
 | FHSS (US) | 80 channels · 300 ms slot · 24 s cycle |
 | EU duty cycle | ≤ 1 % per sub-band per device (governed; all TX counted) |
 

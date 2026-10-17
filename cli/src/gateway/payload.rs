@@ -2,8 +2,8 @@
 //! public MQTT API. Golden-string tests pin the serialized shapes (the MQTT analog of
 //! tower-protocol's golden vectors): renaming or reordering a field here breaks
 //! external subscribers, so it must be a conscious change. `Status.schema` versions
-//! the whole tree: clients refuse a mismatch like the serial side refuses a
-//! `PROTOCOL_VERSION` mismatch.
+//! the whole tree: clients refuse a mismatch, like the serial side refuses a frame
+//! carrying another schema tag.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 /// `ttl_s`→`ttl`, `age_s`→`age`, `window_s`→`window`, `rssi_dbm`→`rssi`,
 /// `ack_rssi_dbm`→`ack_rssi`); units live in the field docs, not the names.
 /// One bump: schema 2 never shipped in a tagged release between the renames.
-pub(crate) const SCHEMA: u32 = 2;
+/// Bumped 2→3 when `Status.protocol` (the console's hand-bumped version number) became
+/// `Status.wire` (the schema tags, `console 0x…  radio 0x…`).
+pub(crate) const SCHEMA: u32 = 3;
 
 /// `gateway/status` (retained). The LWT publishes only `{state:"offline", schema}`
 /// (the broker can't know the rest once we're gone), so every other field is
@@ -30,9 +32,21 @@ pub(crate) struct Status {
     pub firmware: String,
     pub firmware_version: String,
     pub session_id: u32,
-    pub protocol: u8,
+    /// The bridge's schema tags, `console 0xXXXX radio 0xXXXX` (the console tag is the
+    /// dongle's too: startup refuses any other).
+    pub wire: String,
     pub serial_port: String,
     pub serial_up: bool,
+}
+
+/// This build's schema tags as `Status.wire` shows them (and `/system resource print` on a
+/// device): `console 0xXXXX radio 0xXXXX`.
+pub(crate) fn wire_tags() -> String {
+    format!(
+        "console {:#06x} radio {:#06x}",
+        tower_protocol::CONSOLE_TAG,
+        tower_protocol::radio::RADIO_TAG
+    )
 }
 
 impl Status {
@@ -394,13 +408,13 @@ mod tests {
             firmware: "radio_dongle_gateway".into(),
             firmware_version: "v0.1.0".into(),
             session_id: 7,
-            protocol: 3,
+            wire: "console 0x1234 radio 0xabcd".into(),
             serial_port: "/dev/ttyACM0".into(),
             serial_up: true,
         };
         assert_eq!(
             serde_json::to_string(&s).unwrap(),
-            r#"{"state":"online","schema":2,"gateway":"0x0000ab12","firmware":"radio_dongle_gateway","firmware_version":"v0.1.0","session_id":7,"protocol":3,"serial_port":"/dev/ttyACM0","serial_up":true}"#
+            r#"{"state":"online","schema":3,"gateway":"0x0000ab12","firmware":"radio_dongle_gateway","firmware_version":"v0.1.0","session_id":7,"wire":"console 0x1234 radio 0xabcd","serial_port":"/dev/ttyACM0","serial_up":true}"#
         );
     }
 

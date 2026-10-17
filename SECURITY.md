@@ -15,7 +15,7 @@ you and the maintainers until an advisory is published.
 
 Helpful details:
 
-- the affected version (a `cli-vX.Y.Z` release, a `protocol-vX.Y.Z` tag, or a commit SHA) and
+- the affected version (a `cli-vX.Y.Z` release or a commit SHA) and
   component (directory);
 - what the issue is and its impact as you understand it;
 - steps to reproduce or a proof of concept (hardware setup, if any).

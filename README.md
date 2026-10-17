@@ -82,8 +82,10 @@ Open it here and run `/bootstrap`; `AGENTS.md` gives it the whole-stack context.
 - `cli-vX.Y.Z` tags release the `tower` binary: cross-platform archives
   (`tower-cli-vX.Y.Z-<target>`) with checksums and signed build-provenance attestations
   (`gh attestation verify <archive> --repo hardwario/tower`).
-- `protocol-vX.Y.Z` tags mark wire-format releases of `crates/protocol`.
-- The other crates are internal path dependencies and are not released on their own.
+- The other crates are internal path dependencies (version `0.0.0`, never published) and are not
+  released on their own. The wire has no version: every frame and radio envelope carries a schema
+  tag derived from `crates/protocol`'s types, so a board or a `tower` binary built from another
+  checkout is refused. The older `protocol-vX.Y.Z` tags are history; no new ones are made.
 
 ## Contributing
 

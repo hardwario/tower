@@ -4,30 +4,30 @@
 //!
 //! The gateway is a *transparent bridge*: it authenticates/decrypts the radio frame
 //! (net layer) and forwards the payload verbatim; it never decodes this schema. Only
-//! the **node firmware** and the **host CLI** must agree on it, which is why it is
-//! versioned independently of the console framing: [`RADIO_SCHEMA_VERSION`] is the
-//! leading byte of every envelope, and a schema change needs no console
-//! `PROTOCOL_VERSION` bump. (It is still part of the
-//! [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT) every device, the gateway included,
-//! announces, so the gateway is rebuilt from the same tree too: a host flags a gateway whose
-//! fingerprint differs from its own.)
+//! the **node firmware** and the **host CLI** must agree on it, which is why it carries a
+//! schema tag of its own: [`RADIO_TAG`] (the radio schema's structural hash folded to 16 bits,
+//! [`fingerprint::RADIO_HASH`](crate::fingerprint::RADIO_HASH)) leads every envelope, apart from
+//! the console's [`CONSOLE_TAG`](crate::CONSOLE_TAG).
 //!
-//! Envelope: `[RADIO_SCHEMA_VERSION] ‖ postcard(NodeMsg | NodeCmd)`, always ≤
+//! Envelope: `RADIO_TAG (2, LE) ‖ postcard(NodeMsg | NodeCmd)`, always ≤
 //! [`MAX_RADIO_PAYLOAD`] bytes (the radio MTU; the firmware static-asserts equality
 //! with its net-layer `MAX_PAYLOAD`).
 //!
-//! Evolution rules are the crate's usual: never reorder fields/variants; appending
-//! is still a schema change; any change bumps [`RADIO_SCHEMA_VERSION`] and regenerates
-//! `tests/radio_golden.rs` (guarded by `tools/check_wire_bump.py`, independently of
-//! `PROTOCOL_VERSION`).
+//! Evolution: change the types and rebuild every end from the same checkout; the tag follows.
+//! A node or host built from another checkout is refused per envelope
+//! ([`Error::SchemaMismatch`]), never half-understood.
 
 use postcard_schema::Schema;
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, from_bytes_exact};
 
-/// Leading byte of every radio application envelope.
-pub const RADIO_SCHEMA_VERSION: u8 = 2;
+/// The radio schema tag leading every envelope (little-endian):
+/// [`fingerprint::RADIO_HASH`](crate::fingerprint::RADIO_HASH) folded to 16 bits.
+pub const RADIO_TAG: u16 = crate::fingerprint::fold16(crate::fingerprint::RADIO_HASH);
+
+/// Envelope header: the 2-byte [`RADIO_TAG`].
+pub const ENVELOPE_HDR: usize = 2;
 
 /// Max envelope size = the radio MTU (net-layer `MAX_PAYLOAD`). One `NodeMsg` /
 /// `NodeCmd` always fits a single radio frame: there is no radio-level chunking;
@@ -115,14 +115,14 @@ pub enum NodeCmd<'a> {
 }
 
 fn encode_envelope<T: Serialize>(payload: &T, out: &mut [u8]) -> Result<usize, Error> {
-    if out.is_empty() {
+    if out.len() < ENVELOPE_HDR {
         return Err(Error::Overflow);
     }
-    out[0] = RADIO_SCHEMA_VERSION;
-    let used = postcard::to_slice(payload, &mut out[1..])
+    out[..ENVELOPE_HDR].copy_from_slice(&RADIO_TAG.to_le_bytes());
+    let used = postcard::to_slice(payload, &mut out[ENVELOPE_HDR..])
         .map_err(|_| Error::Encode)?
         .len();
-    let total = 1 + used;
+    let total = ENVELOPE_HDR + used;
     if total > MAX_RADIO_PAYLOAD {
         // Reject rather than hand the net layer an over-MTU payload it would refuse
         // anyway; the error should point at the message, not the radio.
@@ -132,16 +132,18 @@ fn encode_envelope<T: Serialize>(payload: &T, out: &mut [u8]) -> Result<usize, E
 }
 
 fn split_envelope(data: &[u8]) -> Result<&[u8], Error> {
-    let (&ver, body) = data.split_first().ok_or(Error::TooShort)?;
-    // No integrity check to order this against (unlike the console's CRC-before-version in
+    if data.len() < ENVELOPE_HDR {
+        return Err(Error::TooShort);
+    }
+    let (tag, body) = data.split_at(ENVELOPE_HDR);
+    // No integrity check to order this against (unlike the console's CRC-before-tag in
     // `decode_frame`): the envelope carries no CRC of its own because it is carved out of a
-    // net-layer payload that AES-CCM already authenticated, so this byte is never line noise,
-    // and a mismatch here is always a real schema mismatch.
-    if ver != RADIO_SCHEMA_VERSION {
-        // Same shape as the console framing's version guard: the host can report
-        // "node speaks radio schema vN, this build speaks vRADIO_SCHEMA_VERSION"
-        // instead of silently mis-decoding.
-        return Err(Error::BadVersion { got: ver });
+    // net-layer payload that AES-CCM already authenticated, so the tag is never line noise,
+    // and a mismatch here is always a real schema mismatch (a node or host built from another
+    // checkout), reported instead of silently mis-decoded.
+    let got = u16::from_le_bytes([tag[0], tag[1]]);
+    if got != RADIO_TAG {
+        return Err(Error::SchemaMismatch { got });
     }
     Ok(body)
 }
@@ -154,7 +156,7 @@ pub fn encode_node_msg(msg: &NodeMsg<'_>, out: &mut [u8]) -> Result<usize, Error
 
 /// Decode a [`NodeMsg`] envelope (e.g. the `data` of a forwarded `Uplink`). A body that
 /// fails to parse **or carries trailing bytes** is [`Error::Malformed`] (the net layer hands
-/// over the exact payload length, so a tail means a schema the node grew without a bump).
+/// over the exact payload length, so a tail means a node built from another schema).
 pub fn decode_node_msg(data: &[u8]) -> Result<NodeMsg<'_>, Error> {
     from_bytes_exact(split_envelope(data)?)
 }

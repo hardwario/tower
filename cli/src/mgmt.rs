@@ -1,4 +1,4 @@
-//! Host-side management-channel session helpers (wire v3): issue one `MgmtRequest`
+//! Host-side management-channel session helpers: issue one `MgmtRequest`
 //! over a [`Transport`] and reassemble its chunked `MgmtResponse`. Same
 //! transport-generic design as `session.rs` (testable over `MockPort`); shared by the
 //! `tower gateway` startup verification, the gateway engine's synchronous paths, and
@@ -20,7 +20,6 @@ use crate::session::{LockstepGate, Mismatch, Transport, read_some};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceInfoOwned {
     pub role: DeviceRole,
-    pub radio_schema_version: u8,
     pub addr: u32,
     pub band: u8,
     pub channel: u8,
@@ -29,26 +28,14 @@ pub(crate) struct DeviceInfoOwned {
     pub provisioned: bool,
     pub gw_addr: u32,
     pub firmware_name: String,
-    /// The device's `WIRE_FINGERPRINT` (wire v4): checked against ours by every `Describe`
-    /// caller ([`DeviceInfoOwned::mismatch`]).
-    pub wire_fingerprint: u32,
-    /// The firmware version string (wire v4), the same one `Hello` carries.
+    /// The firmware version string, the same one `Hello` carries.
     pub firmware_version: String,
-}
-
-impl DeviceInfoOwned {
-    /// The lockstep verdict on this `Describe` reply. It decoded under our `PROTOCOL_VERSION`
-    /// (the frame header passed), so only the fingerprint can still differ.
-    pub(crate) fn mismatch(&self) -> Option<Mismatch> {
-        Mismatch::check(tower_protocol::PROTOCOL_VERSION, self.wire_fingerprint)
-    }
 }
 
 impl From<DeviceInfo<'_>> for DeviceInfoOwned {
     fn from(d: DeviceInfo<'_>) -> Self {
         Self {
             role: d.role,
-            radio_schema_version: d.radio_schema_version,
             addr: d.addr,
             band: d.band,
             channel: d.channel,
@@ -57,7 +44,6 @@ impl From<DeviceInfo<'_>> for DeviceInfoOwned {
             provisioned: d.provisioned,
             gw_addr: d.gw_addr,
             firmware_name: d.firmware_name.to_string(),
-            wire_fingerprint: d.wire_fingerprint,
             firmware_version: d.firmware_version.to_string(),
         }
     }
@@ -235,16 +221,17 @@ pub(crate) fn mgmt_roundtrip(
 
 /// The role probe: `Describe`, decoded. This is the authoritative "is this a
 /// gateway / node?" check, stronger than `Hello.firmware_name`, which is display-only
-/// (pre-v3 firmware never answers; a wrong role answers honestly).
+/// (a wrong role answers honestly). Its reply frame carries this build's schema tag, or it is
+/// refused before decoding: a `DeviceInfo` that decodes is from a device built from this
+/// checkout.
 pub(crate) enum DescribeOutcome {
     Info(DeviceInfoOwned),
     /// The device answered but refused (result code): malformed/unsupported.
     Refused(u8),
-    /// A lockstep mismatch: the reply never came but the frames carried another protocol
-    /// version (or a `Hello` announced another wire fingerprint), or the `DeviceInfo` that did
-    /// come announces a wire fingerprint different from ours. Exit 125 territory.
+    /// A lockstep mismatch: the reply never came, but the device's frames carried another
+    /// schema tag (it was built from another checkout). Exit 125 territory.
     Mismatch(Mismatch),
-    /// No reply and no lockstep evidence: a mute device (or pre-v3 firmware).
+    /// No reply and no lockstep evidence: a mute device.
     Timeout,
     /// The transport failed; see [`MgmtOutcome::Failed`].
     Failed(std::io::Error),
@@ -259,16 +246,7 @@ pub(crate) fn describe(
     match mgmt_roundtrip(sp, dec, req_id, &MgmtOp::Describe, timeout) {
         MgmtOutcome::Reply(r) if r.result == tower_protocol::mgmt::MGMT_OK => {
             match postcard::from_bytes::<DeviceInfo>(&r.data) {
-                Ok(info) => {
-                    let info = DeviceInfoOwned::from(info);
-                    // The reply carries the device's wire fingerprint: a same-version,
-                    // different-schema device is refused here, before any caller acts on
-                    // fields that may have mis-decoded.
-                    match info.mismatch() {
-                        Some(m) => DescribeOutcome::Mismatch(m),
-                        None => DescribeOutcome::Info(info),
-                    }
-                }
+                Ok(info) => DescribeOutcome::Info(DeviceInfoOwned::from(info)),
                 Err(_) => DescribeOutcome::Refused(u8::MAX),
             }
         }
@@ -396,10 +374,9 @@ mod tests {
         }
     }
 
-    fn device_info_record(wire_fingerprint: u32) -> Vec<u8> {
+    fn device_info_record() -> Vec<u8> {
         postcard::to_stdvec(&DeviceInfo {
             role: DeviceRole::Gateway,
-            radio_schema_version: 1,
             addr: 0xAB12,
             band: 0,
             channel: 0,
@@ -408,7 +385,6 @@ mod tests {
             provisioned: true,
             gw_addr: 0xAB12,
             firmware_name: "radio_dongle_gateway",
-            wire_fingerprint,
             firmware_version: "v0.1.0",
         })
         .unwrap()
@@ -416,7 +392,7 @@ mod tests {
 
     #[test]
     fn describe_decodes_device_info() {
-        let rec = device_info_record(tower_protocol::WIRE_FINGERPRINT);
+        let rec = device_info_record();
         let mut m = Mock::new();
         m.feed(&mgmt_response_frame(1, MGMT_OK, 0, true, &rec));
         let mut dec = FrameDecoder::new();
@@ -425,34 +401,40 @@ mod tests {
                 assert_eq!(d.role, DeviceRole::Gateway);
                 assert_eq!(d.addr, 0xAB12);
                 assert_eq!(d.firmware_name, "radio_dongle_gateway");
-                // Wire v4: the version (the bridge's status no longer needs the boot Hello)
-                // and the fingerprint (checked: it matches, so no mismatch).
+                // The version too: the bridge's status no longer needs the boot Hello.
                 assert_eq!(d.firmware_version, "v0.1.0");
-                assert_eq!(d.wire_fingerprint, tower_protocol::WIRE_FINGERPRINT);
-                assert_eq!(d.mismatch(), None);
             }
             _ => panic!("expected device info"),
         }
     }
 
     #[test]
-    fn describe_refuses_a_foreign_wire_fingerprint() {
-        // The device answers under our PROTOCOL_VERSION but announces another wire fingerprint
-        // (built from a different tower-protocol source tree): `describe` reports the lockstep
-        // mismatch instead of handing callers fields that may have mis-decoded.
-        let foreign = tower_protocol::WIRE_FINGERPRINT ^ 0x1;
-        let mut m = Mock::new();
-        m.feed(&mgmt_response_frame(
-            1,
-            MGMT_OK,
+    fn describe_refuses_a_device_from_another_checkout() {
+        // The reply arrives, but in a frame carrying another schema tag (the device was built
+        // from another checkout): it is never decoded, and `describe` reports the lockstep
+        // mismatch instead of a mute device.
+        let foreign = tower_protocol::CONSOLE_TAG ^ 0x0001;
+        let mut buf = [0u8; MAX_WIRE];
+        let n = tower_protocol::encode_frame_with_tag(
+            foreign,
+            MsgType::MgmtResponse,
             0,
-            true,
-            &device_info_record(foreign),
-        ));
+            &MgmtResponse {
+                req_id: 1,
+                result: MGMT_OK,
+                chunk: 0,
+                last: true,
+                data: &device_info_record(),
+            },
+            &mut buf,
+        )
+        .unwrap();
+        let mut m = Mock::new();
+        m.feed(&buf[..n]);
         let mut dec = FrameDecoder::new();
         match describe(&mut m, &mut dec, 1, Duration::from_millis(300)) {
-            DescribeOutcome::Mismatch(Mismatch::Fingerprint(fp)) => assert_eq!(fp, foreign),
-            _ => panic!("expected a fingerprint mismatch"),
+            DescribeOutcome::Mismatch(mm) => assert_eq!(mm.tag, foreign),
+            _ => panic!("expected a schema mismatch"),
         }
     }
 

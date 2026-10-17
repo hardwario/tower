@@ -11,62 +11,116 @@
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-use tower_protocol::msg::{CandidateKind, Hello, ShellComplete, ShellCompletions, ShellResponse};
+use tower_protocol::msg::{CandidateKind, ShellComplete, ShellCompletions, ShellResponse};
 use tower_protocol::{
-    Error, FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, WIRE_FINGERPRINT, decode_frame, encode_frame,
+    CONSOLE_TAG, Error, FrameDecoder, MAX_WIRE, MsgType, decode_foreign_hello, decode_frame, encode_frame,
 };
 
-/// A lockstep mismatch: the device was built against a different `tower-protocol` than this
-/// `tower`. Either kind means postcard would silently mis-decode, so every consumer treats both
-/// the same way (the mismatch banner, exit code 125, no further interpretation of the stream).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Mismatch {
-    /// The device speaks another `PROTOCOL_VERSION`: seen in a CRC-valid frame header
-    /// (`Error::BadVersion`) or, as a secondary guard, in a `Hello` payload.
-    Version(u8),
-    /// Same `PROTOCOL_VERSION`, but the device announced (in `Hello` or the `Describe` reply's
-    /// `DeviceInfo`) a different `WIRE_FINGERPRINT`: a different wire schema, i.e. the two ends
-    /// were built from different tower-protocol source trees.
-    Fingerprint(u32),
+use crate::term::sanitize_line;
+
+/// A lockstep mismatch: the device was built from another checkout than this `tower` (its frames
+/// carry another console schema tag), so postcard would silently mis-decode them. Every consumer
+/// treats it the same way: the mismatch banner, exit code 125, and none of the device's frames
+/// interpreted. The tag is a hash, not a counter: it cannot say which side is older, so the
+/// remedy is always to rebuild both from the same checkout.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Mismatch {
+    /// The console schema tag the device's frames carry.
+    pub(crate) tag: u16,
+    /// The device's firmware `name version`, read best effort from its `Hello` (whose frame
+    /// carries the foreign tag; see [`tower_protocol::decode_foreign_hello`]), when it announced
+    /// one and it reads as one. Already sanitized for a terminal.
+    pub(crate) device: Option<String>,
 }
 
 impl Mismatch {
-    /// The lockstep verdict on a device's announced `(protocol_version, wire_fingerprint)`.
-    pub(crate) fn check(protocol_version: u8, wire_fingerprint: u32) -> Option<Mismatch> {
-        if protocol_version != PROTOCOL_VERSION {
-            Some(Mismatch::Version(protocol_version))
-        } else if wire_fingerprint != WIRE_FINGERPRINT {
-            Some(Mismatch::Fingerprint(wire_fingerprint))
-        } else {
-            None
+    /// The mismatch shown by a CRC-valid frame `inner` that `decode_frame` refused with
+    /// `SchemaMismatch { got }`; a `Hello` names the device.
+    pub(crate) fn from_frame(got: u16, inner: &[u8]) -> Mismatch {
+        Mismatch {
+            tag: got,
+            device: decode_foreign_hello(inner).map(|h| {
+                format!(
+                    "{} {}",
+                    sanitize_line(h.firmware_name),
+                    sanitize_line(h.firmware_version)
+                )
+            }),
         }
     }
 
-    /// [`Mismatch::check`] on a decoded `Hello`.
-    pub(crate) fn of_hello(h: &Hello) -> Option<Mismatch> {
-        Self::check(h.protocol_version, h.wire_fingerprint)
+    /// Fold a newer observation into what is known: the newest tag wins, and a device identity
+    /// once seen is kept (most of a device's frames are not `Hello`s).
+    pub(crate) fn note(known: &mut Option<Mismatch>, seen: Mismatch) {
+        let device = seen
+            .device
+            .or_else(|| known.as_ref().and_then(|k| k.device.clone()));
+        *known = Some(Mismatch {
+            tag: seen.tag,
+            device,
+        });
     }
 
-    /// What differs, naming both sides: `protocol version mismatch (device v3, tower v4)`, or
-    /// for the fingerprint the hex values plus the explanation.
+    /// The device as the messages name it: `the device (radio_push_button v0.1.0)`.
+    pub(crate) fn device_label(&self) -> String {
+        match &self.device {
+            Some(d) => format!("the device ({d})"),
+            None => "the device".to_string(),
+        }
+    }
+
+    /// What differs, naming both sides: the device and its tag vs this `tower`'s.
     pub(crate) fn what(&self) -> String {
-        match self {
-            Mismatch::Version(v) => {
-                format!("protocol version mismatch (device v{v}, tower v{PROTOCOL_VERSION})")
-            }
-            Mismatch::Fingerprint(fp) => format!(
-                "wire fingerprint mismatch (device {fp:#010x}, tower {WIRE_FINGERPRINT:#010x}): same \
-                 PROTOCOL_VERSION but a different wire schema: the tower-protocol sources differ"
-            ),
-        }
+        format!(
+            "schema mismatch: {} speaks console schema {:#06x}, this `tower` {CONSOLE_TAG:#06x}",
+            self.device_label(),
+            self.tag
+        )
     }
 
     /// The remedy clause that ends a one-line refusal.
     pub(crate) fn remedy(&self) -> &'static str {
-        match self {
-            Mismatch::Version(_) => "rebuild `tower` and the firmware from the same checkout",
-            Mismatch::Fingerprint(_) => "rebuild both from the same checkout",
+        "rebuild both from the same checkout"
+    }
+}
+
+/// Watches a stream for a **framing** difference, which the schema tags cannot see: a peer whose
+/// frames are laid out or checksummed differently fails the CRC on every frame, so nothing
+/// decodes and no `SchemaMismatch` is ever reported. After [`FramingWatch::THRESHOLD`] frames in
+/// a row fail their CRC with none passing it, [`FramingWatch::observe`] returns `true`, once per
+/// watch. Any frame that passes its CRC (decoded, or refused for its tag or type) resets the run.
+#[derive(Default)]
+pub(crate) struct FramingWatch {
+    run: u32,
+    reported: bool,
+}
+
+impl FramingWatch {
+    /// Consecutive CRC failures that make the pattern: line noise or a torn frame after a
+    /// re-plug fails one or two, a different framing fails every single one.
+    pub(crate) const THRESHOLD: u32 = 8;
+    /// The one-line diagnosis.
+    pub(crate) const MESSAGE: &'static str =
+        "every frame fails its CRC: likely a different framing (an older or newer checkout); rebuild both";
+
+    /// Whether the pattern was reported (it is reported once per watch).
+    pub(crate) fn reported(&self) -> bool {
+        self.reported
+    }
+
+    /// Feed one decode result; `true` exactly once, when the run of CRC failures reaches the
+    /// threshold.
+    pub(crate) fn observe<T>(&mut self, result: &Result<T, Error>) -> bool {
+        if matches!(result, Err(Error::BadCrc)) {
+            self.run = self.run.saturating_add(1);
+            if self.run >= Self::THRESHOLD && !self.reported {
+                self.reported = true;
+                return true;
+            }
+        } else {
+            self.run = 0;
         }
+        false
     }
 }
 
@@ -148,38 +202,32 @@ const DEFAULT_SETTLE: Duration = Duration::from_millis(250);
 const POST_HELLO_GUARD: Duration = Duration::from_millis(150);
 
 /// The outcome of waiting for a freshly-reset device to announce itself. Tri-state on purpose:
-/// a *real* protocol-version mismatch is rejected by `decode_frame` at the frame **header**
-/// (top 3 bits of `ver_type`): it returns [`Error::BadVersion`] and the `Hello` payload never
-/// parses, so a Hello-payload comparison alone would miss it and the caller would just time
-/// out. Surfacing [`Readiness::BadVersion`] lets `exec` fail fast with a clear diagnostic.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// a device built from another checkout announces a `Hello` too, but in a frame carrying another
+/// schema tag, which `decode_frame` refuses ([`Error::SchemaMismatch`]) before its payload is
+/// read; surfacing [`Readiness::Mismatch`] lets `exec` fail fast with a clear diagnostic instead
+/// of timing out.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Readiness {
-    /// A `Hello` decoded cleanly; carries the `protocol_version` and `wire_fingerprint` it
-    /// announced, which the caller checks against its own ([`Readiness::mismatch`]): the
-    /// version as a secondary guard, the fingerprint as the only way to see a same-version,
-    /// different-schema peer.
-    Hello { version: u8, fingerprint: u32 },
-    /// `decode_frame` rejected a frame's header version: the peer speaks a different
-    /// `tower-protocol` source. Carries the version byte actually seen on the wire.
-    BadVersion(u8),
-    /// No `Hello` (and no version-tagged frame) arrived before the timeout.
+    /// A `Hello` carrying this build's tag decoded cleanly.
+    Hello,
+    /// A CRC-valid frame carried another schema tag: the device was built from another checkout.
+    Mismatch(Mismatch),
+    /// No `Hello` (and no foreign-tagged frame) arrived before the timeout.
     Timeout,
 }
 
 impl Readiness {
-    /// The lockstep mismatch this readiness reveals, if any: a header-level `BadVersion`, or a
-    /// `Hello` announcing another version or wire fingerprint.
-    pub(crate) fn mismatch(self) -> Option<Mismatch> {
+    /// The lockstep mismatch this readiness reveals, if any.
+    pub(crate) fn mismatch(&self) -> Option<Mismatch> {
         match self {
-            Readiness::BadVersion(got) => Some(Mismatch::Version(got)),
-            Readiness::Hello { version, fingerprint } => Mismatch::check(version, fingerprint),
-            Readiness::Timeout => None,
+            Readiness::Mismatch(m) => Some(m.clone()),
+            Readiness::Hello | Readiness::Timeout => None,
         }
     }
 }
 
 /// Block until the device announces itself with a `Hello` frame (so its shell is up before we
-/// send), or a header-level version mismatch is seen, or `timeout`. Bytes seen meanwhile feed
+/// send), or a frame with another schema tag is seen, or `timeout`. Bytes seen meanwhile feed
 /// `dec`. Only meaningful right after a reset.
 /// Tick-less convenience wrapper (production callers all animate; the unit tests don't).
 #[cfg(test)]
@@ -224,17 +272,13 @@ pub(crate) fn wait_for_hello_with(
         for (i, &b) in buf[..n].iter().enumerate() {
             let Some(inner) = dec.push(b) else { continue };
             let found = match decode_frame(inner) {
-                Ok((MsgType::Hello, _, payload)) => {
-                    postcard::from_bytes::<Hello>(payload)
-                        .ok()
-                        .map(|h| Readiness::Hello {
-                            version: h.protocol_version,
-                            fingerprint: h.wire_fingerprint,
-                        })
+                Ok((MsgType::Hello, _, _)) => Some(Readiness::Hello),
+                // The smoking gun of a stale peer: a CRC-valid frame with another schema tag
+                // (every frame of it is refused before its payload is read). Its `Hello`, if this
+                // is one, still names the firmware.
+                Err(Error::SchemaMismatch { got }) => {
+                    Some(Readiness::Mismatch(Mismatch::from_frame(got, inner)))
                 }
-                // The smoking gun for a tag mismatch: the header version didn't match, so
-                // this (and every) frame is rejected before its payload is even read.
-                Err(Error::BadVersion { got }) => Some(Readiness::BadVersion(got)),
                 _ => None,
             };
             if let Some(readiness) = found {
@@ -255,7 +299,7 @@ pub(crate) fn wait_for_hello_with(
 /// `Hello` (self-calibrating to real boot time), then honor an explicit `--delay`
 /// as extra settle. If no `Hello` arrives, fall back to `--delay` (or a default)
 /// so we don't send into a link that isn't up yet. Returns the [`Readiness`] so callers can
-/// enforce the lockstep rule (and, for `BadVersion`, bail immediately without settling).
+/// enforce the lockstep rule (and, on a mismatch, bail immediately without settling).
 /// Tick-less convenience wrapper (production callers all animate; the unit tests don't).
 #[cfg(test)]
 pub(crate) fn await_ready(
@@ -278,15 +322,13 @@ pub(crate) fn await_ready_with(
 ) -> Readiness {
     let readiness = wait_for_hello_with(sp, dec, HELLO_WAIT, on_tick, transcript);
     match readiness {
-        // Mismatch (a foreign header version, or a Hello announcing another version or wire
-        // fingerprint): don't settle; the caller is about to bail.
-        _ if readiness.mismatch().is_some() => {}
+        // Mismatch (frames with another schema tag): don't settle; the caller is about to bail.
+        Readiness::Mismatch(_) => {}
         // A Hello arrived: guard against the boot-burst deaf window (see POST_HELLO_GUARD),
         // extended by an explicit `--delay` if the caller asked for more.
-        Readiness::Hello { .. } => {
+        Readiness::Hello => {
             std::thread::sleep(POST_HELLO_GUARD.max(Duration::from_millis(delay.unwrap_or(0))));
         }
-        Readiness::BadVersion(_) => {}
         // No Hello even at the worst-case ceiling: the device may be wedged, held in reset,
         // or running firmware with no console. Say so: the send that follows is a best-effort
         // shot in the dark, and the old silent fallback made this indistinguishable from a
@@ -305,36 +347,35 @@ pub(crate) fn await_ready_with(
 // ---- lockstep gate for the request/response waits ----------------------------
 
 /// Lockstep bookkeeping for a wait loop (`read_response`, `request_completions`, the mgmt
-/// round trip): remembers a header-level version rejection, and a `Hello` that announces a
-/// foreign version or wire fingerprint. After such a `Hello` the stream is on a foreign schema,
-/// so further frames are not interpreted (postcard would silently mis-decode them) until a
-/// matching `Hello` (the device reflashed back) re-opens it.
+/// round trip): remembers the frames refused for another schema tag (with the device's identity
+/// when one of them was its `Hello`), so a wait that times out can be diagnosed as a mismatch
+/// (125) instead of a mute device (124). Each frame carries its tag, so a foreign frame is never
+/// interpreted; a matching `Hello` (the device reflashed back) clears the evidence. Also watches
+/// for a stream in which every frame fails its CRC ([`FramingWatch`]), reported once on stderr.
 #[derive(Default)]
 pub(crate) struct LockstepGate {
     mismatch: Option<Mismatch>,
-    foreign: bool,
+    framing: FramingWatch,
 }
 
 impl LockstepGate {
     /// Validate one deframed frame and return `(MsgType, payload)` to interpret, or `None` when
-    /// it is corrupt, version-rejected, a `Hello` (consumed here: it only feeds the check) or
-    /// from a foreign schema.
+    /// it is corrupt, from another schema, or a `Hello` (consumed here: it only feeds the check).
     pub(crate) fn admit<'a>(&mut self, inner: &'a [u8]) -> Option<(MsgType, &'a [u8])> {
-        match decode_frame(inner) {
-            Ok((MsgType::Hello, _, payload)) => {
-                if let Ok(h) = postcard::from_bytes::<Hello>(payload) {
-                    // A matching Hello (the device reflashed back) clears earlier evidence.
-                    let verdict = Mismatch::of_hello(&h);
-                    self.foreign = verdict.is_some();
-                    self.mismatch = verdict;
-                }
+        let decoded = decode_frame(inner);
+        if self.framing.observe(&decoded) {
+            eprintln!("[tower] {}", FramingWatch::MESSAGE);
+        }
+        match decoded {
+            Ok((MsgType::Hello, _, _)) => {
+                // A matching Hello (the device reflashed back) clears earlier evidence.
+                self.mismatch = None;
                 None
             }
-            Ok(_) if self.foreign => None,
             Ok((mt, _, payload)) => Some((mt, payload)),
-            // The device IS talking; its frames just carry a different protocol version.
-            Err(Error::BadVersion { got }) => {
-                self.mismatch = Some(Mismatch::Version(got));
+            // The device IS talking; its frames just carry another schema.
+            Err(Error::SchemaMismatch { got }) => {
+                Mismatch::note(&mut self.mismatch, Mismatch::from_frame(got, inner));
                 None
             }
             Err(_) => None,
@@ -343,7 +384,7 @@ impl LockstepGate {
 
     /// The lockstep mismatch seen so far, if any (for the timeout diagnosis).
     pub(crate) fn mismatch(&self) -> Option<Mismatch> {
-        self.mismatch
+        self.mismatch.clone()
     }
 }
 
@@ -361,11 +402,9 @@ pub(crate) struct Response {
 }
 
 /// The result of waiting for a shell response. The timeout variant carries the lockstep
-/// smoking gun: if frames DID arrive but every one was rejected at the header for its
-/// protocol version (or a `Hello` announced a foreign wire fingerprint, after which the
-/// stream is not interpreted), the link isn't dead (the two ends speak different
-/// `tower-protocol` sources) and callers must say so (exit 125) instead of reporting a mute
-/// device (124).
+/// smoking gun: if frames DID arrive but every one was refused for its schema tag, the link
+/// isn't dead (the two ends were built from different checkouts) and callers must say so
+/// (exit 125) instead of reporting a mute device (124).
 pub(crate) enum ReadOutcome {
     Response(Response),
     Timeout {
@@ -403,9 +442,8 @@ impl ReadOutcome {
 /// yield silently-truncated output with result 0, so we flag it `incomplete` instead.
 ///
 /// Times out only if no matching chunk arrives before the idle deadline; a lockstep mismatch
-/// seen while waiting (version-rejected frames, or a `Hello` with a foreign wire fingerprint;
-/// see [`LockstepGate`]) is reported in the [`ReadOutcome::Timeout`] so the caller can
-/// diagnose it. A hard transport error is [`ReadOutcome::Failed`]. A response
+/// seen while waiting (frames refused for another schema tag; see [`LockstepGate`]) is
+/// reported in the [`ReadOutcome::Timeout`] so the caller can diagnose it. A hard transport error is [`ReadOutcome::Failed`]. A response
 /// that outgrows [`MAX_RESPONSE_BYTES`] is returned early, cut off and flagged `incomplete`.
 pub(crate) fn read_response(
     sp: &mut (impl Transport + ?Sized),
@@ -438,8 +476,8 @@ pub(crate) fn read_response_gated(
         };
         for &b in &buf[..nread] {
             let Some(inner) = dec.push(b) else { continue };
-            // Corrupt, version-rejected and foreign-schema frames are skipped; the gate keeps
-            // the lockstep evidence so a "timeout" can be diagnosed as a mismatch.
+            // Corrupt and foreign-schema frames are skipped; the gate keeps the lockstep
+            // evidence so a "timeout" can be diagnosed as a mismatch.
             let Some((mt, payload)) = gate.admit(inner) else {
                 continue;
             };

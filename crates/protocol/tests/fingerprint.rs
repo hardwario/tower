@@ -1,36 +1,38 @@
-//! The wire fingerprint (`WIRE_FINGERPRINT`, `src/fingerprint.rs`): its pinned value and the
-//! properties of the structural hasher behind it.
+//! The schema fingerprint behind the tags (`src/fingerprint.rs`): how the 16-bit tags are
+//! derived, and the properties of the structural hasher.
 //!
-//! The two components are pinned where the wire-bump guard sees them (`CONSOLE_HASH` in
-//! `tests/golden.rs`, `RADIO_HASH` in `tests/radio_golden.rs`); this file pins the combined
-//! 32-bit value the devices actually announce, and proves the hasher's contract on test-only
-//! types: names never matter, structure always does.
+//! The tag values themselves are not pinned (they follow the schema by design: a pin would only
+//! churn); what is pinned is how they are made and what the hasher sees: names never matter,
+//! structure always does.
 
 use postcard_schema::Schema;
-use tower_protocol::fingerprint::{CONSOLE_HASH, RADIO_HASH, combine, fold32, payload_schema, schema_hash};
+use tower_protocol::fingerprint::{CONSOLE_HASH, RADIO_HASH, fold16, payload_schema, schema_hash};
 use tower_protocol::msg::Hello;
-use tower_protocol::{MAX_WIRE, Msg, MsgType, PROTOCOL_VERSION, WIRE_FINGERPRINT, decode_msg, encode_frame};
+use tower_protocol::radio::RADIO_TAG;
+use tower_protocol::{CONSOLE_TAG, MsgType};
 
-/// The value every v1.6.0 build announces in `Hello` / `DeviceInfo`. If this moved, a component
-/// pin moved too (and the guard demanded that component's version bump).
+/// Each tag is its surface hash folded to 16 bits, and the two surfaces hash differently.
 #[test]
-fn wire_fingerprint_is_pinned() {
-    assert_eq!(WIRE_FINGERPRINT, 0x3b04_c858);
-    assert_eq!(WIRE_FINGERPRINT, combine(CONSOLE_HASH, RADIO_HASH));
+fn tags_are_the_folded_surface_hashes() {
+    assert_eq!(CONSOLE_TAG, fold16(CONSOLE_HASH));
+    assert_eq!(RADIO_TAG, fold16(RADIO_HASH));
+    assert_ne!(CONSOLE_HASH, RADIO_HASH);
 }
 
 #[test]
-fn fold32_is_the_documented_xor_fold() {
-    assert_eq!(fold32(0x0000_0001_0000_0000), 0x0000_0001);
-    assert_eq!(fold32(0xFFFF_FFFF_0000_0000), 0xFFFF_FFFF);
-    assert_eq!(fold32(0x1234_5678_1234_5678), 0);
+fn fold16_is_the_documented_xor_fold() {
+    assert_eq!(fold16(0x0000_0000_0000_0001), 0x0001);
+    assert_eq!(fold16(0x0001_0000_0000_0000), 0x0001);
+    assert_eq!(fold16(0xFFFF_0000_0000_0000), 0xFFFF);
+    assert_eq!(fold16(0x1234_1234_0000_0000), 0);
+    assert_eq!(fold16(0x0001_0002_0004_0008), 0x000F);
 }
 
 /// `MsgType::ALL` is what the console hash iterates: it must hold every type `from_u8` knows,
 /// exactly once, in ascending discriminant order.
 #[test]
 fn msg_type_all_is_complete_and_ascending() {
-    for v in 0..=0x1Fu8 {
+    for v in 0..=u8::MAX {
         let known = MsgType::from_u8(v);
         let listed = MsgType::ALL.iter().filter(|&&mt| mt as u8 == v).count();
         assert_eq!(listed, usize::from(known.is_some()), "discriminant {v:#04x}");
@@ -43,29 +45,6 @@ fn msg_type_all_is_complete_and_ascending() {
 #[test]
 fn payload_schema_pairs_hello_with_hello() {
     assert_eq!(payload_schema(MsgType::Hello), <Hello<'static> as Schema>::SCHEMA);
-}
-
-/// The announce path end to end: a `Hello` carrying this build's fingerprint decodes back to it.
-#[test]
-fn hello_carries_the_fingerprint() {
-    let h = Hello {
-        protocol_version: PROTOCOL_VERSION,
-        firmware_name: "app",
-        firmware_version: "v0.1.0",
-        session_id: 9,
-        wire_fingerprint: WIRE_FINGERPRINT,
-    };
-    let mut out = [0u8; MAX_WIRE];
-    let n = encode_frame(MsgType::Hello, 0, &h, &mut out).unwrap();
-    let mut dec = tower_protocol::FrameDecoder::new();
-    let inner: Vec<u8> = out[..n]
-        .iter()
-        .find_map(|&b| dec.push(b).map(|s| s.to_vec()))
-        .unwrap();
-    match decode_msg(&inner).unwrap().1 {
-        Msg::Hello(back) => assert_eq!(back.wire_fingerprint, WIRE_FINGERPRINT),
-        other => panic!("expected Hello, got {other:?}"),
-    }
 }
 
 // --- the hasher's contract, on test-only types ----------------------------------------
@@ -268,7 +247,7 @@ fn string_vs_bytes_and_nesting_change_the_hash() {
 }
 
 /// Documented NON-coverage: a `heapless::Vec` capacity never reaches the wire (sequences are
-/// length-prefixed), so it does not move the fingerprint.
+/// length-prefixed), so it does not move the tags.
 #[test]
 fn heapless_capacity_is_not_covered() {
     assert_eq!(schema_hash::<Cap4>(), schema_hash::<Cap8>());

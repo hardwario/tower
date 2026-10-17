@@ -39,15 +39,15 @@ pub(crate) fn run(s: &mut Session, node_port: &str, name: Option<&str>) -> Resul
             eprintln!("[tower] {node_port}: refused the role probe (code {code})");
             return Ok(EXIT_WRONG_FIRMWARE);
         }
-        // A foreign header version, or a node announcing another wire fingerprint (same
-        // PROTOCOL_VERSION, different tower-protocol source tree): refuse before provisioning anything.
+        // A node built from another checkout (its frames carry another schema tag): refuse
+        // before provisioning anything.
         DescribeOutcome::Mismatch(m) => {
-            warn_mismatch(m);
+            warn_mismatch(&m);
             eprintln!("[tower] {node_port}: {}; {}", m.what(), m.remedy());
             return Ok(EXIT_PROTOCOL_MISMATCH);
         }
         DescribeOutcome::Timeout => {
-            eprintln!("[tower] {node_port}: no answer; is this a v3 TOWER node?");
+            eprintln!("[tower] {node_port}: no answer; is this a TOWER node?");
             return Ok(EXIT_DEVICE_TIMEOUT);
         }
         DescribeOutcome::Failed(e) => {

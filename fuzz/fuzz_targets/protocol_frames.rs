@@ -7,7 +7,7 @@
 //!   [`tower_fuzz::check_inner`] (`decode_frame` check order, `decode_msg`, re-encode round trip,
 //!   nested radio / mgmt payloads).
 //! * **framed** (odd): the rest is a list of `[type][seq lo][seq hi][len][payload; len]` chunks,
-//!   each wrapped by the real producer (`encode_frame`, valid CRC + version) after an optional
+//!   each wrapped by the real producer (`encode_frame`, valid CRC + tag) after an optional
 //!   burst of line noise and a resync `0x00`. That spends the fuzzer's effort on the postcard
 //!   payload decoders instead of on guessing CRCs, and checks that a valid frame decodes to
 //!   exactly what was sent, whatever garbage preceded it.

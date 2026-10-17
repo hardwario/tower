@@ -1,12 +1,11 @@
 ---
 name: build
-description: Run the TOWER monorepo gates (the root `just check`, or one part of it: host, firmware, wire, audit) against the committed lockfiles; stops at the first failure. Hardware-free, never flashes. Use after a change, before committing, or to check that a cross-component change compiles.
-argument-hint: "[host|firmware|wire|audit] [example <name> | app <name>]"
+description: Run the TOWER monorepo gates (the root `just check`, or one part of it: host, firmware, audit) against the committed lockfiles; stops at the first failure. Hardware-free, never flashes. Use after a change, before committing, or to check that a cross-component change compiles.
+argument-hint: "[host|firmware|audit] [example <name> | app <name>]"
 allowed-tools:
   - Bash(just check)
   - Bash(just check-host)
   - Bash(just check-firmware)
-  - Bash(just check-wire)
   - Bash(just audit)
   - Bash(just test)
   - Bash(just doc)
@@ -33,13 +32,12 @@ for the host or links without flip-link's stack-overflow protection.
 Argument `$ARGUMENTS`:
 - nothing: `just check`, every gate, in this order (stop at the first failure):
   1. `just check-host`: fmt, clippy `-D warnings` (workspace + `tower-hil --features power`),
-     `cargo test --workspace`, the HIL harness compile, the no_std build of the shared crates,
-     rustdoc;
+     `cargo test --workspace`, tower-net's tests on the firmware's SHA-256 backend, the HIL
+     harness compile, the no_std build of the shared crates, rustdoc;
   2. `just check-firmware`: `just fw ci` (fmt, MCU build, RAM budget, clippy + the five role
      variants, rustdoc, example/app list drift) and `just fw build example blinky`;
-  3. `just check-wire`: the wire-bump guard + its self-test;
-  4. `just audit`: `cargo audit` on both lockfiles (needs network for the advisory DB);
-- `host`, `firmware`, `wire` or `audit`: only that part (`just check-host`, ...);
+  3. `just audit`: `cargo audit` on both lockfiles (needs network for the advisory DB);
+- `host`, `firmware` or `audit`: only that part (`just check-host`, ...);
 - `example <name>` or `app <name>`: build one flashable firmware artifact,
   `just fw build example <name>` / `just fw build app <name>` (needs cargo-binutils; output
   `firmware/target/firmware.bin`). List names with `just fw examples` / `just fw apps`.

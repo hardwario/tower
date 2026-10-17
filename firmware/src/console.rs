@@ -53,9 +53,7 @@ use tower_protocol::msg::{
     Dropped, Event, Hello, Level, Log, MgmtResponse, Print, RadioStat, ShellCompletions, ShellResponse,
     Uplink,
 };
-use tower_protocol::{
-    FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, WIRE_FINGERPRINT, decode_frame, encode_frame,
-};
+use tower_protocol::{FrameDecoder, MAX_PAYLOAD, MAX_WIRE, MsgType, decode_frame, encode_frame};
 
 use crate::storage::{NS_SYS, Nv};
 
@@ -79,9 +77,12 @@ const MOD_LEN: usize = 24;
 /// its `R_OK`/`R_TRUNCATED` verdict: a "complete" `/export` that isn't.
 const MAX_RESP: usize = 256;
 const _: () = assert!(MAX_RESP == crate::shell::RESP_CAP);
-/// Shell-response text bytes per frame. Kept well under the ~240-byte payload budget
-/// (a [`ShellResponse`] header is ~9 bytes) so a frame never fails to encode.
+/// Shell-response text bytes per frame. Kept well under the 247-byte payload budget
+/// (`tower_protocol::MAX_PAYLOAD`; a [`ShellResponse`] header is ≤ 10 bytes) so a frame never
+/// fails to encode (asserted below).
 const SHELL_CHUNK: usize = 192;
+// cmd_id (≤3) + result (1) + chunk (≤3) + last (1) + the text's length varint (2) + the text.
+const _: () = assert!(3 + 1 + 3 + 1 + 2 + SHELL_CHUNK <= MAX_PAYLOAD);
 /// Max firmware-name string in `Hello` (the baked-in app/example name).
 const FW_LEN: usize = 32;
 /// Firmware version string carried in `Hello`: the SDK crate version with a leading `v`
@@ -107,19 +108,22 @@ const TX_DEPTH: usize = 4;
 pub const RX_COPY: usize = 160;
 /// Event caps: name length, per-field key/value length, and max fields. Sized so the
 /// **worst case fits one frame**: postcard ≈ name(1+24) + count(1) + EV_FIELDS·(2 +
-/// EV_KEY + EV_VAL) = 25 + 1 + 6·34 = 230 ≤ the ~249-byte payload budget. The wire
-/// type allows up to 8 fields (`Vec<(&str,&str), 8>`); the firmware emits ≤ EV_FIELDS.
+/// EV_KEY + EV_VAL) = 25 + 1 + 6·34 = 230 ≤ the 247-byte payload budget (asserted below). The
+/// wire type allows up to 8 fields (`Vec<(&str,&str), 8>`); the firmware emits ≤ EV_FIELDS.
 const EV_NAME: usize = 24;
 const EV_KEY: usize = 12;
 const EV_VAL: usize = 20;
 const EV_FIELDS: usize = 6;
+const _: () = assert!(1 + EV_NAME + 1 + EV_FIELDS * (2 + EV_KEY + EV_VAL) <= MAX_PAYLOAD);
 /// Max forwarded-uplink payload: the radio MTU (`tower_protocol::radio::MAX_RADIO_PAYLOAD`;
 /// equality is static-asserted in `radio::frame`).
 const UPLINK_MAX: usize = tower_protocol::radio::MAX_RADIO_PAYLOAD;
 /// Management-response record bytes per frame. Mirrors [`SHELL_CHUNK`]'s reasoning: a
-/// [`MgmtResponse`] header is ~8 bytes, so 192 stays well under the ~249-byte payload
-/// budget and a frame never fails to encode.
+/// [`MgmtResponse`] header is ≤ 10 bytes, so 192 stays well under the 247-byte payload
+/// budget and a frame never fails to encode (asserted below).
 const MGMT_CHUNK: usize = 192;
+// req_id (≤3) + result (1) + chunk (≤3) + last (1) + the data's length varint (2) + the data.
+const _: () = assert!(3 + 1 + 3 + 1 + 2 + MGMT_CHUNK <= MAX_PAYLOAD);
 
 /// An owned outgoing message. The writer assigns the `seq` and encodes it, so nothing
 /// borrows past the producing call and dropped frames never consume sequence numbers.
@@ -498,15 +502,13 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
             tx,
             &mut seq,
             MsgType::Hello,
+            // The schema tag in this (and every) frame header is the lockstep check: a host built
+            // from another checkout refuses the frame before reading it, and names this firmware
+            // from these fields in its mismatch message.
             &Hello {
-                protocol_version: PROTOCOL_VERSION,
                 firmware_name: &name,
                 firmware_version: FW_VERSION,
                 session_id: session_id(),
-                // The compile-time schema hash of the tower-protocol this image was built with: the
-                // host compares it with its own and refuses a same-version, different-schema pairing
-                // (two builds from different tower-protocol source trees) that postcard would mis-decode.
-                wire_fingerprint: WIRE_FINGERPRINT,
             },
         )
         .await;

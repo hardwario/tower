@@ -31,11 +31,9 @@ fn roundtrip<T: serde::Serialize>(mt: MsgType, seq: u16, payload: &T) -> (Vec<u8
 #[test]
 fn hello_roundtrip() {
     let h = Hello {
-        protocol_version: PROTOCOL_VERSION,
         firmware_name: "demo",
         firmware_version: "tower 0.1.0",
         session_id: 0xABCD,
-        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 7, &h, &mut out).unwrap();
@@ -47,11 +45,9 @@ fn hello_roundtrip() {
             assert_eq!(mt, MsgType::Hello);
             assert_eq!(seq, 7);
             let h2: Hello = postcard::from_bytes(payload).unwrap();
-            assert_eq!(h2.protocol_version, PROTOCOL_VERSION);
             assert_eq!(h2.firmware_name, "demo");
             assert_eq!(h2.firmware_version, "tower 0.1.0");
             assert_eq!(h2.session_id, 0xABCD);
-            assert_eq!(h2.wire_fingerprint, WIRE_FINGERPRINT);
             decoded = true;
         }
     }
@@ -60,13 +56,11 @@ fn hello_roundtrip() {
 
 #[test]
 fn decode_msg_typed_hello() {
-    // decode_msg does version+CRC (decode_frame) then deserializes into the typed Msg.
+    // decode_msg does CRC + tag (decode_frame) then deserializes into the typed Msg.
     let h = Hello {
-        protocol_version: PROTOCOL_VERSION,
         firmware_name: "blinky",
         firmware_version: "v0.1.0",
         session_id: 42,
-        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 3, &h, &mut out).unwrap();
@@ -82,7 +76,6 @@ fn decode_msg_typed_hello() {
             assert_eq!(h.firmware_name, "blinky");
             assert_eq!(h.firmware_version, "v0.1.0");
             assert_eq!(h.session_id, 42);
-            assert_eq!(h.wire_fingerprint, WIRE_FINGERPRINT);
         }
         other => panic!("expected Msg::Hello, got {other:?}"),
     }
@@ -149,11 +142,9 @@ fn host_to_target_shell_command() {
 #[test]
 fn crc_corruption_is_rejected() {
     let h = Hello {
-        protocol_version: PROTOCOL_VERSION,
         firmware_name: "a",
         firmware_version: "x",
         session_id: 1,
-        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
@@ -176,38 +167,25 @@ fn crc_corruption_is_rejected() {
 }
 
 #[test]
-fn version_mismatch_is_rejected() {
-    let h = Hello {
-        protocol_version: PROTOCOL_VERSION,
-        firmware_name: "a",
-        firmware_version: "x",
-        session_id: 1,
-        wire_fingerprint: WIRE_FINGERPRINT,
-    };
-    let mut out = [0u8; MAX_WIRE];
-    let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
-    let mut dec = FrameDecoder::new();
-    let inner: Vec<u8> = (0..n).find_map(|i| dec.push(out[i]).map(|s| s.to_vec())).unwrap();
-    // Forge a wrong version in ver_type, then fix CRC so only the version check fires. Derive the
-    // forged version from PROTOCOL_VERSION (not a hardcoded 2) so this stays a *mismatch* the day
-    // the constant is bumped; otherwise it would become the current version and the test breaks
-    // during exactly the highest-stakes cross-repo operation.
-    let forged = (PROTOCOL_VERSION + 1) & 0x07;
-    assert_ne!(forged, PROTOCOL_VERSION);
+fn foreign_tag_is_rejected() {
+    let inner = hello_inner();
+    // Forge another schema tag, then fix the CRC so only the tag check fires.
+    let forged = CONSOLE_TAG ^ 0x8001;
     let mut bad = inner.clone();
-    bad[0] = (forged << 5) | (bad[0] & 0x1F);
+    bad[1..3].copy_from_slice(&forged.to_le_bytes());
     let body = bad.len() - 4;
     let crc = tower_protocol::crc::crc32_ieee(&bad[..body]);
     bad[body..].copy_from_slice(&crc.to_le_bytes());
-    assert_eq!(decode_frame(&bad), Err(Error::BadVersion { got: forged }));
+    assert_eq!(decode_frame(&bad), Err(Error::SchemaMismatch { got: forged }));
 }
 
-// ---- check order: CRC before version/type (1.5.1) ----------------------------
+// ---- check order: CRC before tag/type ----------------------------------------
 
-/// Build a deframed inner buffer by hand: `ver_type ‖ seq ‖ payload ‖ crc` with a CORRECT CRC,
-/// so a test can forge any header/body and have only the forged field fail.
-fn forge_inner(ver_type: u8, seq: u16, payload: &[u8]) -> Vec<u8> {
-    let mut inner = vec![ver_type];
+/// Build a deframed inner buffer by hand: `type ‖ tag ‖ seq ‖ payload ‖ crc` with a CORRECT
+/// CRC, so a test can forge any header/body and have only the forged field fail.
+fn forge_inner(msg_type: u8, tag: u16, seq: u16, payload: &[u8]) -> Vec<u8> {
+    let mut inner = vec![msg_type];
+    inner.extend_from_slice(&tag.to_le_bytes());
     inner.extend_from_slice(&seq.to_le_bytes());
     inner.extend_from_slice(payload);
     let crc = tower_protocol::crc::crc32_ieee(&inner);
@@ -218,11 +196,9 @@ fn forge_inner(ver_type: u8, seq: u16, payload: &[u8]) -> Vec<u8> {
 /// The deframed inner bytes of a well-formed `Hello` frame.
 fn hello_inner() -> Vec<u8> {
     let h = Hello {
-        protocol_version: PROTOCOL_VERSION,
         firmware_name: "a",
         firmware_version: "x",
         session_id: 1,
-        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
@@ -230,57 +206,82 @@ fn hello_inner() -> Vec<u8> {
     (0..n).find_map(|i| dec.push(out[i]).map(|s| s.to_vec())).unwrap()
 }
 
-/// A corrupt frame is `BadCrc` whatever its header bits claim. Before 1.5.1 the version was
-/// checked first, so line noise / a torn frame whose byte 0 didn't read `PROTOCOL_VERSION`
-/// surfaced as `BadVersion`, and consumers treat ONE `BadVersion` as a lockstep mismatch (the
-/// CLI's banner / exit code). Forge every other version WITHOUT re-stamping the CRC.
+/// A corrupt frame is `BadCrc` whatever its header bytes claim: consumers treat ONE
+/// `SchemaMismatch` as a stale peer (the CLI's banner / exit code), so line noise or a torn
+/// frame must never read as one. Forge other tags WITHOUT re-stamping the CRC.
 #[test]
-fn corrupt_header_is_bad_crc_not_bad_version() {
+fn corrupt_header_is_bad_crc_not_schema_mismatch() {
     let inner = hello_inner();
-    for v in (0..8u8).filter(|&v| v != PROTOCOL_VERSION) {
+    for flip in [0x0001u16, 0x0100, 0x8000, 0xFFFF] {
         let mut bad = inner.clone();
-        bad[0] = (v << 5) | (bad[0] & 0x1F);
+        let forged = CONSOLE_TAG ^ flip;
+        bad[1..3].copy_from_slice(&forged.to_le_bytes());
         assert_eq!(
             decode_frame(&bad),
             Err(Error::BadCrc),
-            "forged v{v} with a stale CRC"
+            "tag {forged:#06x} with a stale CRC"
         );
         assert!(
             matches!(decode_msg(&bad), Err(Error::BadCrc)),
-            "decode_msg, forged v{v}"
+            "decode_msg, tag {forged:#06x}"
         );
     }
-    // One flipped version bit: the realistic line-noise case.
-    let mut bad = inner.clone();
-    bad[0] ^= 1 << 7;
-    assert_eq!(decode_frame(&bad), Err(Error::BadCrc));
     // An unknown type with a stale CRC is BadCrc too (type is also checked after the CRC).
     let mut bad = inner.clone();
-    bad[0] = (PROTOCOL_VERSION << 5) | 15;
+    bad[0] = 15;
     assert_eq!(decode_frame(&bad), Err(Error::BadCrc));
     // A torn / partial frame (tail lost before a resync 0x00).
     assert_eq!(decode_frame(&inner[..inner.len() - 1]), Err(Error::BadCrc));
     assert_eq!(decode_frame(&inner[1..]), Err(Error::BadCrc));
 }
 
-/// The other half of the contract: a CRC-VALID frame from any other version is a genuine
-/// `BadVersion { got }`, the one error a consumer may act on as a lockstep mismatch.
+/// The other half of the contract: a CRC-VALID frame carrying any other tag is a genuine
+/// `SchemaMismatch { got }`, the one error a consumer may act on as a stale peer.
 #[test]
-fn crc_valid_foreign_version_is_bad_version() {
+fn crc_valid_foreign_tag_is_schema_mismatch() {
     let inner = hello_inner();
-    let payload = &inner[3..inner.len() - 4];
-    for v in (0..8u8).filter(|&v| v != PROTOCOL_VERSION) {
-        let bad = forge_inner((v << 5) | MsgType::Hello as u8, 1, payload);
-        assert_eq!(decode_frame(&bad), Err(Error::BadVersion { got: v }));
-        assert!(matches!(decode_msg(&bad), Err(Error::BadVersion { got }) if got == v));
+    let payload = &inner[5..inner.len() - 4];
+    for forged in [
+        0x0000u16,
+        0x0001,
+        CONSOLE_TAG ^ 0x00FF,
+        CONSOLE_TAG.wrapping_add(1),
+        0xFFFF,
+    ] {
+        if forged == CONSOLE_TAG {
+            continue;
+        }
+        let bad = forge_inner(MsgType::Hello as u8, forged, 1, payload);
+        assert_eq!(decode_frame(&bad), Err(Error::SchemaMismatch { got: forged }));
+        assert!(matches!(decode_msg(&bad), Err(Error::SchemaMismatch { got }) if got == forged));
     }
-    // Sanity: the same forge with the CURRENT version decodes, so only the version differed.
-    let good = forge_inner((PROTOCOL_VERSION << 5) | MsgType::Hello as u8, 1, payload);
+    // Sanity: the same forge with OUR tag decodes, so only the tag differed.
+    let good = forge_inner(MsgType::Hello as u8, CONSOLE_TAG, 1, payload);
     assert_eq!(good, inner);
     assert!(decode_msg(&good).is_ok());
 }
 
-// ---- trailing bytes (1.5.1) -----------------------------------------------------
+/// A frame from the last tree that framed with a version byte (`ver_type ‖ seq ‖ payload ‖
+/// crc`, tag protocol-v1.6.0; these are its `Hello` golden wire bytes) is refused, never
+/// decoded: its CRC still covers the whole frame, so it passes, and its seq bytes land where the
+/// tag is read. A board or a `tower` binary from that tree is caught by the same mismatch path.
+#[test]
+fn a_version_byte_frame_from_an_older_tree_is_refused() {
+    let old_wire = [
+        0x03, 0x80, 0x01, 0x13, 0x04, 0x03, 0x61, 0x70, 0x70, 0x02, 0x66, 0x77, 0x01, 0xd4, 0x87, 0xcb, 0x8d,
+        0x0a, 0x05, 0x22, 0xe9, 0xe7, 0x00,
+    ];
+    let mut dec = FrameDecoder::new();
+    let inner: Vec<u8> = old_wire
+        .iter()
+        .find_map(|&b| dec.push(b).map(|s| s.to_vec()))
+        .unwrap();
+    // Its seq was 1, read as the tag 0x0001 (not this build's, or the assertion below says so).
+    assert_ne!(CONSOLE_TAG, 0x0001);
+    assert_eq!(decode_frame(&inner), Err(Error::SchemaMismatch { got: 0x0001 }));
+}
+
+// ---- trailing bytes ---------------------------------------------------------------
 
 /// A CRC-valid body that deserializes but leaves a tail must be `Malformed` from `decode_msg`.
 /// Bare `postcard::from_bytes` accepts it (shown below); that silent half-read of a producer
@@ -288,12 +289,8 @@ fn crc_valid_foreign_version_is_bad_version() {
 #[test]
 fn crc_valid_body_with_trailing_bytes_is_malformed() {
     // Dropped { count: 300 } encodes as [0xac, 0x02]; one stray byte rides behind it.
-    let exact = forge_inner((PROTOCOL_VERSION << 5) | MsgType::Dropped as u8, 7, &[0xac, 0x02]);
-    let tailed = forge_inner(
-        (PROTOCOL_VERSION << 5) | MsgType::Dropped as u8,
-        7,
-        &[0xac, 0x02, 0x05],
-    );
+    let exact = forge_inner(MsgType::Dropped as u8, CONSOLE_TAG, 7, &[0xac, 0x02]);
+    let tailed = forge_inner(MsgType::Dropped as u8, CONSOLE_TAG, 7, &[0xac, 0x02, 0x05]);
     assert!(matches!(
         decode_msg(&exact),
         Ok((7, Msg::Dropped(Dropped { count: 300 })))
@@ -304,9 +301,9 @@ fn crc_valid_body_with_trailing_bytes_is_malformed() {
 
     // Same for a borrowed type: a real Hello body plus one byte.
     let inner = hello_inner();
-    let mut payload = inner[3..inner.len() - 4].to_vec();
+    let mut payload = inner[5..inner.len() - 4].to_vec();
     payload.push(0);
-    let tailed = forge_inner((PROTOCOL_VERSION << 5) | MsgType::Hello as u8, 1, &payload);
+    let tailed = forge_inner(MsgType::Hello as u8, CONSOLE_TAG, 1, &payload);
     assert!(matches!(decode_msg(&tailed), Err(Error::Malformed)));
 }
 
@@ -314,11 +311,9 @@ fn crc_valid_body_with_trailing_bytes_is_malformed() {
 fn resync_after_garbage() {
     // Leading garbage (no 0x00) then a clean frame must still decode.
     let h = Hello {
-        protocol_version: PROTOCOL_VERSION,
         firmware_name: "a",
         firmware_version: "ok",
         session_id: 1,
-        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut frame = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 5, &h, &mut frame).unwrap();
@@ -341,9 +336,9 @@ fn resync_after_garbage() {
 
 // ---- boundary sizes & the inner-frame budget --------------------------------
 
-/// Bytes a payload may occupy; since 1.2.0 exported as [`MAX_PAYLOAD`]; keep the
-/// independent arithmetic here so a drive-by change to the exported const fails a test.
-const PAYLOAD_BUDGET: usize = MAX_FRAME - 3 - 4;
+/// Bytes a payload may occupy, exported as [`MAX_PAYLOAD`]; keep the independent arithmetic
+/// here (type + tag + seq, then the CRC) so a drive-by change to the exported const fails a test.
+const PAYLOAD_BUDGET: usize = MAX_FRAME - 5 - 4;
 
 #[test]
 fn exported_payload_budget_matches_the_frame_layout() {
@@ -391,11 +386,9 @@ fn oversize_payload_is_rejected_not_truncated() {
 #[test]
 fn small_output_buffer_overflows() {
     let h = Hello {
-        protocol_version: PROTOCOL_VERSION,
         firmware_name: "demo",
         firmware_version: "tower 0.1.0",
         session_id: 0xABCD,
-        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut tiny = [0u8; 4];
     assert_eq!(
@@ -408,7 +401,8 @@ fn small_output_buffer_overflows() {
 #[test]
 fn short_inner_is_rejected() {
     assert_eq!(decode_frame(&[]), Err(Error::TooShort));
-    assert_eq!(decode_frame(&[0x20, 0, 0, 0, 0, 0]), Err(Error::TooShort)); // 6 < HDR+CRC
+    assert_eq!(decode_frame(&[0x20, 0, 0, 0, 0, 0]), Err(Error::TooShort));
+    assert_eq!(decode_frame(&[0x20, 0, 0, 0, 0, 0, 0, 0]), Err(Error::TooShort)); // 8 < HDR+CRC
 }
 
 // ---- decoder state machine --------------------------------------------------
@@ -424,11 +418,9 @@ fn decoder_drops_oversize_then_resyncs() {
     assert!(dec.push(0x00).is_none(), "oversize frame must be dropped");
 
     let h = Hello {
-        protocol_version: PROTOCOL_VERSION,
         firmware_name: "a",
         firmware_version: "ok",
         session_id: 1,
-        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 3, &h, &mut out).unwrap();
@@ -444,11 +436,9 @@ fn decoder_reset_discards_partial() {
     assert!(dec.push(0x06).is_none());
     dec.reset();
     let h = Hello {
-        protocol_version: PROTOCOL_VERSION,
         firmware_name: "a",
         firmware_version: "ok",
         session_id: 1,
-        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
@@ -483,23 +473,17 @@ fn msg_type_from_u8_is_exhaustive() {
 
 #[test]
 fn unknown_type_is_rejected() {
-    // Forge a frame with a valid version but type 15 (unused), fixing the CRC.
-    let h = Hello {
-        protocol_version: PROTOCOL_VERSION,
-        firmware_name: "a",
-        firmware_version: "x",
-        session_id: 1,
-        wire_fingerprint: WIRE_FINGERPRINT,
-    };
-    let mut out = [0u8; MAX_WIRE];
-    let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
-    let mut dec = FrameDecoder::new();
-    let inner: Vec<u8> = (0..n).find_map(|i| dec.push(out[i]).map(|s| s.to_vec())).unwrap();
-    let mut bad = inner.clone();
-    bad[0] = (PROTOCOL_VERSION << 5) | 15;
-    let body = bad.len() - 4;
-    let crc = tower_protocol::crc::crc32_ieee(&bad[..body]);
-    bad[body..].copy_from_slice(&crc.to_le_bytes());
+    // A CRC-valid frame with our tag but type 15 (unused).
+    let inner = hello_inner();
+    let bad = forge_inner(15, CONSOLE_TAG, 1, &inner[5..inner.len() - 4]);
+    assert_eq!(decode_frame(&bad), Err(Error::BadType));
+    // A type byte past the old 5-bit range is just as unknown.
+    let bad = forge_inner(
+        0x80 | MsgType::Hello as u8,
+        CONSOLE_TAG,
+        1,
+        &inner[5..inner.len() - 4],
+    );
     assert_eq!(decode_frame(&bad), Err(Error::BadType));
 }
 
@@ -570,21 +554,15 @@ fn fuzz_roundtrip_exact() {
     }
 }
 
-/// A frame that passes version + CRC but whose postcard body does not deserialize into
-/// the type for its `MsgType` must surface as `Error::Malformed` from `decode_msg`: the
-/// one `Error` variant no other test exercises. Built by hand: a `Hello` payload cut to a
-/// single byte (`protocol_version` parses; the `firmware_name` string is missing).
+/// A frame that passes CRC + tag but whose postcard body does not deserialize into the type
+/// for its `MsgType` must surface as `Error::Malformed` from `decode_msg`. Built by hand: a
+/// `Hello` payload cut to a single byte (the `firmware_name` length says 5, no bytes follow).
 #[test]
 fn crc_valid_but_undeserializable_body_is_malformed() {
-    let payload = [PROTOCOL_VERSION]; // truncated Hello body
-    let mut inner = Vec::new();
-    inner.push((PROTOCOL_VERSION << 5) | (MsgType::Hello as u8));
-    inner.extend_from_slice(&7u16.to_le_bytes());
-    inner.extend_from_slice(&payload);
-    let crc = tower_protocol::crc::crc32_ieee(&inner);
-    inner.extend_from_slice(&crc.to_le_bytes());
+    let payload = [0x05]; // truncated Hello body
+    let inner = forge_inner(MsgType::Hello as u8, CONSOLE_TAG, 7, &payload);
 
-    // decode_frame is happy (version + CRC check out) …
+    // decode_frame is happy (CRC + tag check out) …
     let (mt, seq, body) = decode_frame(&inner).unwrap();
     assert_eq!((mt, seq, body), (MsgType::Hello, 7, &payload[..]));
     // … decode_msg owns the deserialize step and must report Malformed.
@@ -599,7 +577,7 @@ fn crc_valid_but_undeserializable_body_is_malformed() {
 fn fuzz_arbitrary_bytes_never_panic_the_decoder() {
     let mut rng = Lcg(0x5EED_5EED_5EED_5EED);
     let mut dec = FrameDecoder::new();
-    let (mut frames, mut bad_version) = (0u64, 0u64);
+    let (mut frames, mut mismatches) = (0u64, 0u64);
     for _ in 0..200_000 {
         // ~1/32 zeros keeps frame boundaries frequent without starving content bytes.
         let b = if rng.next_u32().is_multiple_of(32) {
@@ -609,10 +587,10 @@ fn fuzz_arbitrary_bytes_never_panic_the_decoder() {
         };
         if let Some(inner) = dec.push(b) {
             frames += 1;
-            // Any Err is fine; a panic/OOB is the failure, EXCEPT BadVersion: noise must never
-            // read as a lockstep mismatch (CRC is checked first; a 2^-32 collision is the only way).
-            if let Err(Error::BadVersion { .. }) = decode_msg(inner) {
-                bad_version += 1;
+            // Any Err is fine; a panic/OOB is the failure, EXCEPT SchemaMismatch: noise must
+            // never read as a stale peer (CRC is checked first; a 2^-32 collision is the only way).
+            if let Err(Error::SchemaMismatch { .. }) = decode_msg(inner) {
+                mismatches += 1;
             }
         }
     }
@@ -621,8 +599,8 @@ fn fuzz_arbitrary_bytes_never_panic_the_decoder() {
         "the byte-salad never completed a frame; fuzz not exercising decode"
     );
     assert_eq!(
-        bad_version, 0,
-        "line noise surfaced as BadVersion; CRC must be checked first"
+        mismatches, 0,
+        "line noise surfaced as SchemaMismatch; CRC must be checked first"
     );
 }
 
@@ -668,4 +646,46 @@ fn fuzz_single_bit_flip_is_always_detected() {
         completed > 0 && no_frame > 0,
         "fuzz should hit both paths: {completed} vs {no_frame}"
     );
+}
+
+/// A `Hello` from a peer built from another checkout is refused like any other frame, but its
+/// firmware identity can still be read as a hint for the mismatch message, best effort; a
+/// non-Hello frame, our own tag, or a body that does not read as a `Hello` gives `None`.
+#[test]
+fn a_foreign_hello_can_still_name_the_firmware() {
+    let h = Hello {
+        firmware_name: "radio_push_button",
+        firmware_version: "v0.1.0",
+        session_id: 3,
+    };
+    let foreign = CONSOLE_TAG ^ 0x5A5A;
+    let mut out = [0u8; MAX_WIRE];
+    let n = encode_frame_with_tag(foreign, MsgType::Hello, 0, &h, &mut out).unwrap();
+    let mut dec = FrameDecoder::new();
+    let inner: Vec<u8> = out[..n]
+        .iter()
+        .find_map(|&b| dec.push(b).map(|s| s.to_vec()))
+        .unwrap();
+    assert_eq!(
+        decode_msg(&inner).err(),
+        Some(Error::SchemaMismatch { got: foreign })
+    );
+    let back = decode_foreign_hello(&inner).expect("reads as a Hello");
+    assert_eq!(
+        (back.firmware_name, back.firmware_version),
+        ("radio_push_button", "v0.1.0")
+    );
+
+    // Our own tag: not foreign. Another type: not a Hello. A body that is not a Hello: None.
+    let n = encode_frame(MsgType::Hello, 0, &h, &mut out).unwrap();
+    let mut dec = FrameDecoder::new();
+    let ours: Vec<u8> = out[..n]
+        .iter()
+        .find_map(|&b| dec.push(b).map(|s| s.to_vec()))
+        .unwrap();
+    assert!(decode_foreign_hello(&ours).is_none());
+    let log = forge_inner(MsgType::Log as u8, foreign, 1, &[0, 0, 0, 0]);
+    assert!(decode_foreign_hello(&log).is_none());
+    let junk = forge_inner(MsgType::Hello as u8, foreign, 1, &[0x40, 1, 2]);
+    assert!(decode_foreign_hello(&junk).is_none());
 }

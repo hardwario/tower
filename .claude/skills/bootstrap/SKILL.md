@@ -65,8 +65,7 @@ for both workspaces, and CI installs exactly that channel. Then:
 
 - `just`: the task runner for every gate (`just --version`; CI uses 1.59.0). Install:
   `cargo install --locked just` or a package manager.
-- `python3` >= 3.11: the wire-bump guard (`crates/protocol/tools/check_wire_bump.py`), the
-  firmware RAM-budget guard and `just fw lists`.
+- `python3` >= 3.11: the firmware RAM-budget guard and `just fw lists`.
 - **firmware** (see `firmware/.cargo/config.toml` + `firmware/justfile`):
   - `flip-link`: the **linker** set in `firmware/.cargo/config.toml` (stack-overflow
     protection); without it nothing links. `which flip-link`; install:
@@ -90,8 +89,8 @@ cargo build --locked --release -p tower-cli
 ```
 
 Then `tower --version`: if a `tower` is on `PATH`, compare its version with `cli/Cargo.toml`. An
-installed binary built from an older tree may speak an older wire version (it reports
-BadVersion, exit 125, against freshly flashed firmware): suggest `just install-cli`
+installed binary built from another checkout speaks another schema (it reports a schema
+mismatch, exit 125, against freshly flashed firmware): suggest `just install-cli`
 (`cargo install --locked --path cli`) whenever it is missing or stale. Don't install it yourself.
 
 ## 5. hil (only if in scope)

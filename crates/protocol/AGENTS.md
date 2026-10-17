@@ -12,50 +12,36 @@ The shared wire-format crate (`crates/protocol` in the hardwario/tower monorepo;
 
 **Cardinal rule:** postcard is *not* self-describing: a producer and a consumer built against
 different schemas silently mis-decode. With path dependencies every *build* agrees by
-construction; what can still disagree is an *installed* artifact from an older tree (a `tower`
-binary, a flashed board). That is what the version constants are for: bump them on every wire
-change so the stale side fails loudly with `BadVersion` instead of decoding garbage.
+construction; what can still disagree is an *installed* artifact from another tree (a `tower`
+binary, a flashed board). That is what the schema tags are for: `CONSOLE_TAG` in every console
+frame header and `RADIO_TAG` at the head of every radio envelope, both derived at compile time
+from the schema's structural hash (`src/fingerprint.rs`), so the stale side fails loudly with
+`SchemaMismatch` instead of decoding garbage. Nothing is bumped by hand.
 
-## Releasing a change
+## Changing the wire
 
-1. **Change the types.** Any postcard struct/enum change (field *or* variant **order** counts,
-   and appending is a change too), the framing, or a `MsgType` discriminant.
-2. **Bump the version constant of the surface you touched.** The console wire is
-   `PROTOCOL_VERSION` in `src/lib.rs`. **The radio application schema (`src/radio.rs`) is a
-   second, independently-versioned surface**: a change there bumps `RADIO_SCHEMA_VERSION` (not
-   `PROTOCOL_VERSION`).
-3. **Update the goldens** (`tests/golden.rs` for the console, `tests/radio_golden.rs` for the
-   radio schema) and the variant-order fingerprint pins, if the change touches them. New
-   coverage = a NEW golden fn, never an edit to an existing one. Variant-order pins are hex
-   tables (`(Variant, 0x02)`), never `i as u8`.
-   **The wire fingerprint (since 1.6.0) makes this exhaustive:** `fingerprint::CONSOLE_HASH` is
-   pinned in `tests/golden.rs` and `fingerprint::RADIO_HASH` in `tests/radio_golden.rs`, so ANY
-   schema change (even one no byte vector exercises) fails a pin, and updating the pin is a
-   golden change the guard ties to the right version constant. `WIRE_FINGERPRINT` itself is
-   pinned in `tests/fingerprint.rs` (update it alongside). Renames don't move it (names are not
-   hashed). Never use a serde attribute that changes the encoding (`skip`, `with`, `flatten`,
-   ...): the `Schema` derive cannot see it. `postcard-schema` / `postcard-derive` are pinned with
-   `=` on purpose (the host and firmware workspaces each recompute the fingerprint from their own
-   lockfile); bumping them is a deliberate act: if a pin moves, treat it as a wire change.
-4. **Bump `version` in `Cargo.toml`** (semver: wire/behaviour change: minor; fix: patch) and add
-   a `CHANGELOG.md` entry. Fix every consumer the change breaks (firmware, cli, hil, kv) **in the
-   same commit**; the path dependencies make the build fail until you do.
-5. **One commit, then tag it** `protocol-vX.Y.Z`:
-   ```sh
-   git tag -a protocol-vX.Y.Z -m "tower-protocol X.Y.Z"
-   ```
-   The tag marks the release and is the next baseline of the wire-bump guard; nothing is
-   published from it (no crates.io, no GitHub Release). Push only when the user asks.
-6. Rebuild what is installed: reflash the boards and reinstall the CLI (`just install-cli`), or
-   the old binary reports `BadVersion` against the new firmware.
+1. **Change the types** (`src/msg.rs`, `src/mgmt.rs`: console; `src/radio.rs`: the radio
+   application schema) and fix every caller in `firmware/`, `cli/`, `hil/` (and `crates/kv` if
+   it is touched) **in the same commit**; the path dependencies make the build fail until you do.
+2. **Rebuild every end from that checkout**: reflash the boards and reinstall the CLI (`just
+   install-cli`). A board or a `tower` binary from another checkout is rejected by its tag
+   (`tower` prints the mismatch banner and exits 125).
 
-CI enforces both pairings: the `host` job fails if the goldens no longer match the code, and the
-`wire-guard` job (`tools/check_wire_bump.py`) checks each golden file against its own version
-constant, failing if any pre-existing golden fn (one holding hex literals) was edited, renamed
-or removed relative to the latest `protocol-v*` tag while that constant did not strictly
-increase (a decrease always fails). The guard runs from the repo root or from this directory
-(`python3 crates/protocol/tools/check_wire_bump.py`); `--base REF` compares against any ref
-instead of the latest tag. Changing the guard? Run it with `--self-test`.
+That is all: no version constant, no changelog, no golden bytes to update, no tag to cut. The
+`protocol-v*` git tags that exist are history (the earlier hand-versioned releases); no new ones
+are made. Things to keep in mind:
+
+- A rename keeps the tags (names are not hashed). Never use a serde attribute that changes the
+  encoding (`skip`, `with`, `flatten`, ...): the `Schema` derive cannot see it.
+- `postcard-schema` / `postcard-derive` are pinned with `=` on purpose (the host and firmware
+  workspaces each recompute the tags from their own lockfile); bumping them may move the tags,
+  which is harmless but makes every installed artifact stale.
+- The framing (header, COBS, CRC) is not hashed: change it deliberately, keep the CRC trailer
+  (it is what makes a foreign tag readable), and update `tests/framing.rs`, whose byte goldens
+  pin it with an explicit tag.
+- Size budgets: `MAX_FRAME` (256) and `MAX_PAYLOAD` (247) are what the firmware console, the
+  shell's `CompletionBudget`, the CLI and the harness size against; the capacity tests in
+  `tests/framing.rs` and `tests/radio.rs` hold the largest real payloads to them.
 
 ## Tests / checks
 
@@ -65,13 +51,9 @@ From the repo root (`just check` runs them all, with every other gate):
 cargo test -p tower-protocol
 cargo clippy -p tower-protocol --all-targets -- -D warnings
 cargo build -p tower-protocol --target thumbv6m-none-eabi
-python3 crates/protocol/tools/check_wire_bump.py
-python3 crates/protocol/tools/check_wire_bump.py --self-test
 ```
 
-The crate is formatted by the repo-wide `cargo fmt` gate (the root `rustfmt.toml`); it is no
-longer hand-formatted. Reformatting never trips the wire-bump guard: its fingerprints ignore
-whitespace, line wrapping and comments.
+The crate is formatted by the repo-wide `cargo fmt` gate (the root `rustfmt.toml`).
 
 ## Writing style
 
@@ -81,4 +63,4 @@ No em or en dashes. This applies everywhere: code, comments, docs, UI texts and 
 
 - Part of the hardwario/tower monorepo, developed straight on `main`; no feature branches or PRs
   unless the user asks.
-- Commit, tag and push only when the user requests it.
+- Commit and push only when the user requests it.

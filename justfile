@@ -27,11 +27,11 @@ default:
 
 # === Gates ========================================================================================
 
-# The hardware-free gates of both workspaces, the wire-bump guard and the RustSec audit: what CI
-# runs (plus a real `just fw build example blinky`, which also needs cargo-binutils). Needs
-# flip-link, cargo-binutils, cargo-audit, python3 >= 3.11 and network access for the advisory DB.
-# Run every gate (host, firmware, wire guard, audit).
-check: check-host check-firmware check-wire audit
+# The hardware-free gates of both workspaces and the RustSec audit: what CI runs (plus a real
+# `just fw build example blinky`, which also needs cargo-binutils). Needs flip-link,
+# cargo-binutils, cargo-audit, python3 >= 3.11 and network access for the advisory DB.
+# Run every gate (host, firmware, audit).
+check: check-host check-firmware audit
 
 # `tower-hil --features power` adds the PPK2 power group (compiled, never run). The no_std build
 # proves the shared crates still build for the MCU on their own (the firmware job builds them with
@@ -51,12 +51,6 @@ check-host: doc test-sha2-compact
 check-firmware:
     {{just}} -f firmware/justfile ci
     {{just}} -f firmware/justfile build example blinky
-
-# Baseline = the latest `protocol-v*` tag (see crates/protocol/AGENTS.md).
-# Wire-bump guard: changed golden vectors need a PROTOCOL_VERSION / RADIO_SCHEMA_VERSION bump.
-check-wire:
-    python3 crates/protocol/tools/check_wire_bump.py
-    python3 crates/protocol/tools/check_wire_bump.py --self-test
 
 # Vulnerabilities fail; informational warnings (unmaintained, yanked) do not.
 # RustSec audit of both lockfiles (host workspace + firmware).

@@ -29,13 +29,13 @@ prefixed packages; the Rust crate name is `tower_X`).
 
 | Path | Package | What it is |
 |------|---------|------------|
-| `crates/protocol` | `tower-protocol` | The wire contract (`no_std`): COBS + CRC-32 framing, the postcard console / management / radio schemas. Version 1.5.1. |
+| `crates/protocol` | `tower-protocol` | The wire contract (`no_std`): COBS + CRC-32 framing, the postcard console / management / radio schemas, the schema tags derived from them. |
 | `crates/kv` | `tower-kv` | Power-loss-safe EEPROM key-value codec behind the SDK's `tower::storage::Kv` (`no_std`, hardware-free). |
 | `crates/net` | `tower-net` | Decision kernels of the radio network layer's security invariants (replay, TX-counter watermark, ACK, FHSS epoch, pairing, CCM nonce). Not the network layer itself (`tower::radio::net`). |
 | `crates/radio` | `tower-radio` | Radio timing / CCM / compliance logic (duty token buckets, time-on-air, FHSS hop permutation). Not the SPIRIT1 driver (`tower::radio`). |
 | `crates/gateway` | `tower-gateway` | Decision core of the Radio Dongle gateway firmware (node-registry codec, downlink queue). Not the host `tower gateway` MQTT bridge (that is in `cli`). |
 | `crates/shell` | `tower-shell` | Pure kernels behind the device shell (`addr` parser + PRNG, pagination window, TAB completion). Not the shell itself (`tower::shell`). |
-| `crates/boot` | `tower-boot` | Boot control around the STM32 ROM UART bootloader (AN3155): flash / erase / verify, chip info, NRST/BOOT0 reset pulses. Library only; **formerly the `jolt` flasher** (its binary is gone, its commands live in `tower`). Version 1.5.0. |
+| `crates/boot` | `tower-boot` | Boot control around the STM32 ROM UART bootloader (AN3155): flash / erase / verify, chip info, NRST/BOOT0 reset pulses. Library only; **formerly the `jolt` flasher** (its binary is gone, its commands live in `tower`). |
 | `firmware/` | `tower-sdk` (lib `tower`) | Embassy firmware SDK for the Core Module, `examples/` (demos) and `apps/` (TOWER IoT Kit products). Its **own Cargo workspace** (thumbv6m + flip-link). |
 | `cli/` | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip, the `tower gateway` radio-to-MQTT bridge, `tower nodes` / `tower net`. Version 2.0.0. |
 | `hil/` | `tower-hil` | Hardware-in-the-loop bench harness: builds images from `../firmware`, flashes real boards, decodes the console natively, measures power (PPK2). |
@@ -44,8 +44,9 @@ Two Cargo workspaces:
 
 - **Host workspace** (root `Cargo.toml`): `members = ["crates/*", "cli", "hil"]`, one root
   `Cargo.lock`, `[workspace.package]` (edition 2024, `rust-version` 1.99.1, MIT, repository)
-  inherited by every member, shared versions in `[workspace.dependencies]`; each crate keeps
-  its own `version`.
+  inherited by every member, shared versions in `[workspace.dependencies]`. The internal library
+  crates (`crates/*`) are `version = "0.0.0"`, `publish = false`; `tower-cli` keeps its release
+  version (2.0.0) and the firmware SDK its own (shown to humans in the boot `Hello`).
 - **Firmware workspace** (`firmware/`, excluded from the host workspace): only the SDK package,
   with `firmware/.cargo/config.toml` (target `thumbv6m-none-eabi`, linker `flip-link`), the
   size-tuned profiles and its own `firmware/Cargo.lock`. It depends on `../crates/*` by path.
@@ -70,10 +71,13 @@ more), one `LICENSE`, one `SECURITY.md`, one `.github/`.
    └─────────────────────────────┘
 ```
 
-Every end decodes with the same `crates/protocol` source tree, so a build can no longer mix
-wire versions. What can still differ at **run time** is a device flashed, or a `tower` binary
-installed, from an older tree: that shows up as `BadVersion` / exit 125. After a wire change,
-reflash the boards and reinstall the CLI (`just install-cli`).
+Every end decodes with the same `crates/protocol` source tree, so a build can never mix
+schemas. What can still differ at **run time** is a device flashed, or a `tower` binary
+installed, from another checkout: every console frame carries `CONSOLE_TAG` and every radio
+envelope `RADIO_TAG`, 16-bit tags derived from the schema's structural hash, so the stale side is
+refused (`SchemaMismatch`; `tower` prints a banner naming the device's firmware and exits 125).
+The tag can't say which side is older: after a wire change, reflash the boards and reinstall
+the CLI (`just install-cli`).
 
 ---
 
@@ -89,12 +93,13 @@ just fmt                       # rustfmt both workspaces
 just fuzz <target> [secs]      # cargo-fuzz one target (nightly + cargo-fuzz; fuzz/README.md), `just fuzz-all` = all
 ```
 
-`just check` = `check-host` (fmt, clippy `-D warnings`, tests, `tower-hil --features power`
-clippy + compile, the no_std build of the shared crates, rustdoc) + `check-firmware`
-(`just fw ci`: fmt, MCU build, RAM budget, clippy + the five role variants, rustdoc, example /
-app list drift; plus `just fw build example blinky`) + `check-wire` (the wire-bump guard and its
-self-test) + `audit` (`cargo audit` on both lockfiles). It needs `flip-link`, `cargo-binutils`,
-`cargo-audit`, `python3` >= 3.11 and network access for the advisory DB.
+`just check` = `check-host` (fmt, clippy `-D warnings`, tests, tower-net's tests on the
+firmware's compact SHA-256 backend (`test-sha2-compact`), `tower-hil --features power` clippy +
+compile, the no_std build of the shared crates, rustdoc) + `check-firmware` (`just fw ci`: fmt,
+MCU build, RAM budget, clippy + the five role variants, rustdoc, example / app list drift; plus
+`just fw build example blinky`) + `audit` (`cargo audit` on both lockfiles). It needs
+`flip-link`, `cargo-binutils`, `cargo-audit`, `python3` >= 3.11 and network access for the
+advisory DB.
 
 Firmware day to day (`just fw` lists everything): `just fw examples`, `just fw build example
 blinky`, `just fw flash example blinky` and `just fw run app radio_push_button` (these two need
@@ -119,25 +124,18 @@ Definitions live in `.claude/skills/<name>/SKILL.md`.
 
 ## Changing the wire format (the runbook)
 
-postcard is **not self-describing**: field order and variant indices are the wire. One commit
-does it all:
+postcard is **not self-describing**: field order and variant indices are the wire. There are no
+version constants to bump, no compatibility with older peers and no negotiation:
 
 1. **Change the types** in `crates/protocol` (`src/msg.rs`, `src/mgmt.rs`: console;
    `src/radio.rs`: the radio application schema) and every caller in `firmware/`, `cli/` and
-   `hil/` (they build against the change at once; the compiler finds them).
-2. **Bump the version constant** of the surface you touched: `PROTOCOL_VERSION`
-   (`src/lib.rs`, the console framing) or `RADIO_SCHEMA_VERSION` (`src/radio.rs`, versioned
-   independently because the gateway forwards it opaquely).
-3. **Update the goldens** (`tests/golden.rs` / `tests/radio_golden.rs`) and the variant-order
-   fingerprint pins if the change touches them; new coverage is a NEW golden fn, never an edit
-   of an existing one. Bump `crates/protocol/Cargo.toml` `version` (minor for a wire change,
-   patch for a fix) and add a `CHANGELOG.md` entry.
-4. **One commit**, all gates green (`just check`; the wire-bump guard fails if a golden changed
-   without its constant strictly increasing).
-5. **Tag** `protocol-vX.Y.Z` (the guard's next baseline). Then reflash devices and reinstall
-   the CLI.
+   `hil/` in the same commit (they build against the change at once; the compiler finds them).
+2. **Every end rebuilds from that checkout**: reflash the boards, reinstall the CLI
+   (`just install-cli`). A stale peer is rejected by its tag: `CONSOLE_TAG` / `RADIO_TAG` are
+   derived from the schema at compile time, so any change that reaches the bytes moves them.
 
-Details: `crates/protocol/AGENTS.md`, "Releasing a change".
+The framing itself (header, COBS, CRC) is not hashed; `crates/protocol/tests/framing.rs` pins
+it. Details: `crates/protocol/AGENTS.md`, "Changing the wire".
 
 ## Tags and releases
 
@@ -145,9 +143,10 @@ Details: `crates/protocol/AGENTS.md`, "Releasing a change".
   tag matches `cli/Cargo.toml`, the commit is on `main` and CI is green for it, then builds
   cross-platform archives (`tower-cli-vX.Y.Z-<target>`) with checksums and signed
   build-provenance attestations.
-- `protocol-vX.Y.Z` marks a wire-format release (no build; the wire-bump guard's baseline).
-- `tower-boot` and the other `crates/*` are internal path dependencies: no releases. The
-  imported `jolt-v*` tags (tower-boot's history) and `cli-v1.0.0` are history.
+- `tower-protocol`, `tower-boot` and the other `crates/*` are internal path dependencies
+  (`0.0.0`, `publish = false`): no releases, no tags. The `protocol-v*` tags already pushed
+  (the hand-versioned wire releases), the imported `jolt-v*` tags (tower-boot's history) and
+  `cli-v1.0.0` are history; no new `protocol-v*` tags are made.
 
 ---
 
@@ -167,7 +166,7 @@ Details: `crates/protocol/AGENTS.md`, "Releasing a change".
 - **Formatting:** one `rustfmt.toml` (110 cols, stable options only; comment content is never
   reflowed), `cargo fmt --all` in both workspaces (`just fmt`), gated in CI.
 - **CI / supply chain:** `.github/workflows/ci.yml` (jobs `host`, `host-os`, `firmware`,
-  `wire-guard`, `audit`) and `release-cli.yml`. Every GitHub Action is pinned to a full commit
+  `audit`) and `release-cli.yml`. Every GitHub Action is pinned to a full commit
   SHA with a `# vX.Y.Z` comment (Dependabot bumps them weekly with a 7-day cooldown); workflow
   tokens are read-only by default (`permissions: contents: read`; write only in the release
   `publish` job); checkouts use `persist-credentials: false`; every cargo call is `--locked`;
@@ -180,9 +179,8 @@ No em or en dashes. This applies everywhere: code, comments, docs, UI texts and 
 
 ## Don't
 
-- Don't change the wire format without bumping `PROTOCOL_VERSION` (or `RADIO_SCHEMA_VERSION`)
-  and updating the goldens in the same commit.
-- Don't edit an existing golden fn to make it pass; add a new one.
+- Don't add version numbers, compatibility shims or migrations to the wire: change the types,
+  rebuild every end from the same checkout, and let the schema tags refuse a stale peer.
 - Don't depend on a sibling crate by git tag or registry version; use the workspace path
   dependency (`tower-protocol.workspace = true`, or `{ path = "../crates/..." }` from the
   firmware).

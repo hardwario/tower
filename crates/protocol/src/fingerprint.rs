@@ -1,13 +1,11 @@
-//! The wire fingerprint: a compile-time structural hash of the postcard schema.
+//! The schema fingerprint: a compile-time structural hash of the postcard schema, folded into the
+//! 16-bit schema tags every frame and envelope carries ([`CONSOLE_TAG`](crate::CONSOLE_TAG),
+//! [`RADIO_TAG`](crate::radio::RADIO_TAG)).
 //!
-//! postcard is not self-describing, and the 3-bit [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION)
-//! only protects a link if someone remembered to bump it. [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT)
-//! closes that gap: it is derived from the schema itself, so two builds whose wire schemas
-//! differ get different fingerprints even under the same `PROTOCOL_VERSION` (a forgotten
-//! bump, or two consumers pinning different tower-protocol tags). The device announces its
-//! fingerprint in [`Hello`](crate::msg::Hello) and in the [`DeviceInfo`](crate::mgmt::DeviceInfo)
-//! `Describe` reply; a host compares it with its own and treats a difference exactly like a
-//! version mismatch.
+//! postcard is not self-describing: nothing in the bytes says which schema produced them, so a
+//! peer built from another checkout would be silently mis-decoded. The tags close that gap with
+//! nothing to bump by hand: they are derived from the schema itself, so any change to it moves
+//! them, and a receiver rejects a frame or envelope whose tag is not its own.
 //!
 //! # How it is computed
 //!
@@ -23,42 +21,36 @@
 //!   variant, and each variant's shape (unit / newtype / tuple / struct and its contents) all
 //!   change the hash;
 //! * **no names at all**: type names, field names and variant names are skipped, because
-//!   postcard never encodes them. A rename is wire-neutral and leaves the fingerprint unchanged
-//!   (the v1.4.0 and v1.5.0 renames would have kept it).
+//!   postcard never encodes them. A rename is wire-neutral and leaves the tags unchanged.
 //!
 //! It is deliberately conservative: a few changes that happen to be byte-compatible still move
 //! it (a struct turned into a tuple struct, `&[u8]` swapped for a serde byte string, a `u16`
 //! widened to `u32` even though small values encode the same). Those are rare and erring
 //! toward "mismatch" is the safe side.
 //!
-//! The 64-bit hash is xor-folded to 32 bits for the wire (`(h >> 32) ^ h`, truncated). 32 bits
-//! are ample against accidental drift (about one chance in 4 * 10^9 that two different schemas
-//! collide); this is an integrity check, not a defence against a deliberate forgery.
+//! Each 64-bit surface hash is xor-folded to the 16-bit tag ([`fold16`]). Two different schemas
+//! share a tag with probability 2⁻¹⁶: ample against an accidentally stale build (the case the
+//! tag exists for); this is an integrity check, not a defence against a deliberate forgery.
 //!
 //! # What is covered
 //!
-//! [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT) = [`combine`]`(`[`CONSOLE_HASH`]`, `[`RADIO_HASH`]`)`:
-//!
-//! * [`CONSOLE_HASH`], the console surface:
+//! * [`CONSOLE_HASH`] (folded into [`CONSOLE_TAG`](crate::CONSOLE_TAG)), the console surface:
 //!   - every [`MsgType`], in the fixed order of [`MsgType::ALL`] (ascending discriminant): its
-//!     discriminant **value** (the low 5 bits of `ver_type` on the wire) paired with the schema
-//!     of the payload type that `MsgType` carries ([`payload_schema`]);
+//!     discriminant **value** (the type byte on the wire) paired with the schema of the payload
+//!     type that `MsgType` carries ([`payload_schema`]);
 //!   - the management surface, in this fixed order: [`MgmtOp`](crate::mgmt::MgmtOp) and every
 //!     reply record streamed in `MgmtResponse.data`: [`DeviceInfo`](crate::mgmt::DeviceInfo),
 //!     [`NodeEntry`](crate::mgmt::NodeEntry), [`NodeKey`](crate::mgmt::NodeKey),
 //!     [`Paired`](crate::mgmt::Paired), [`QueueId`](crate::mgmt::QueueId),
 //!     [`QueueEntry`](crate::mgmt::QueueEntry), [`ProvisionAck`](crate::mgmt::ProvisionAck),
 //!     [`Joined`](crate::mgmt::Joined) (and, nested inside those, `Provision`, `DeviceRole`).
-//! * [`RADIO_HASH`], the radio application schema: [`NodeMsg`](crate::radio::NodeMsg) and
-//!   [`NodeCmd`](crate::radio::NodeCmd) (and, nested, `NodeInfo`, `NodeShellChunk`,
-//!   `ButtonKind`, `AccelKind`).
+//! * [`RADIO_HASH`] (folded into [`RADIO_TAG`](crate::radio::RADIO_TAG)), the radio application
+//!   schema: [`NodeMsg`](crate::radio::NodeMsg) and [`NodeCmd`](crate::radio::NodeCmd) (and,
+//!   nested, `NodeInfo`, `NodeShellChunk`, `ButtonKind`, `AccelKind`).
 //!
-//! The two components are pinned separately, each next to the version constant that guards
-//! it: `CONSOLE_HASH` in `tests/golden.rs` (`PROTOCOL_VERSION`), `RADIO_HASH` in
-//! `tests/radio_golden.rs` (`RADIO_SCHEMA_VERSION`), so `tools/check_wire_bump.py` demands the
-//! matching bump for a schema change on either surface. A radio-only schema change therefore
-//! moves `WIRE_FINGERPRINT` without a `PROTOCOL_VERSION` bump (the console bytes did not
-//! change); the exchanged fingerprint still flags a gateway built from a different tag.
+//! The two surfaces are tagged separately because the gateway forwards radio envelopes
+//! opaquely: a radio-only change moves only the radio tag (the console bytes did not change),
+//! and the node and the host check it on every envelope.
 //!
 //! # What is NOT covered
 //!
@@ -67,24 +59,25 @@
 //!   length-prefixed. A receiver whose capacity is smaller than the sender's rejects a longer
 //!   list as `Malformed` instead of mis-decoding it. String length limits (`MAX_NODE_NAME`,
 //!   the documented byte caps) are likewise not part of the schema.
-//! * Constant values and their meaning: `PROTOCOL_VERSION` and `RADIO_SCHEMA_VERSION` themselves
-//!   (they ride on the wire on their own), the `mgmt::MGMT_*` result codes, `TX_*` outcomes,
+//! * Constant values and their meaning: the `mgmt::MGMT_*` result codes, `TX_*` outcomes,
 //!   `NODE_FLAG_*`, `BAND_*`, the `LAST_SEEN_NEVER` / `RSSI_NONE` sentinels.
-//! * The framing: COBS, the CRC-32 trailer, the `ver_type`/`seq` header, `MAX_FRAME` /
-//!   `MAX_PAYLOAD`, the radio envelope's leading version byte, `MAX_RADIO_PAYLOAD`,
-//!   `RADIO_SHELL_CHUNK`.
+//! * The framing: COBS, the CRC-32 trailer, the type / tag / seq header, `MAX_FRAME` /
+//!   `MAX_PAYLOAD`, the radio envelope's leading tag, `MAX_RADIO_PAYLOAD`, `RADIO_SHELL_CHUNK`.
+//!   A framing change shows up differently: frames from the other side fail their CRC (the
+//!   `tower` CLI reports that pattern) or carry a tag in the wrong place.
 //! * Which mgmt op answers with which record (only the records' shapes are hashed).
 //! * serde attributes that change the encoding (`skip`, `with`, `flatten`, `untagged`,
 //!   `transparent`, ...): the `Schema` derive does not see them, so this crate uses none (only
-//!   `borrow`, which does not affect the bytes). Adding one would desynchronize the fingerprint
-//!   from the real encoding.
+//!   `borrow`, which does not affect the bytes). Adding one would desynchronize the tags from
+//!   the real encoding.
 //!
 //! # Stability
 //!
-//! The tag bytes and traversal order below are part of the contract: changing them changes
-//! every fingerprint, which the golden pins report as a wire change. The value also depends on
-//! how `postcard-schema` / `postcard-derive` reflect types, which is why both are pinned to an
-//! exact version in `Cargo.toml` (each consumer recomputes the fingerprint in its own build).
+//! The kind bytes and traversal order below are part of the contract: changing them changes
+//! every tag, which is harmless (every end rebuilds from the same checkout) but makes every
+//! installed artifact stale at once. The value also depends on how `postcard-schema` /
+//! `postcard-derive` reflect types, which is why both are pinned to an exact version in
+//! `Cargo.toml` (the host and firmware workspaces each recompute the tags from their own lockfile).
 
 use postcard_schema::Schema;
 use postcard_schema::schema::{DataModelType, DataModelVariant, NamedType, NamedValue, NamedVariant};
@@ -233,23 +226,15 @@ pub const fn schema_hash<T: Schema + ?Sized>() -> u64 {
     hash_type(FNV_BASIS, T::SCHEMA)
 }
 
-/// Xor-fold a 64-bit hash to the 32 bits carried on the wire: `((h >> 32) ^ h) as u32`.
-pub const fn fold32(hash: u64) -> u32 {
-    ((hash >> 32) ^ hash) as u32
-}
-
-/// Combine the two surface hashes into the 32-bit wire value:
-/// FNV-1a 64 over `console` then `radio` (each little-endian), then [`fold32`].
-pub const fn combine(console: u64, radio: u64) -> u32 {
-    fold32(feed(
-        feed(FNV_BASIS, &console.to_le_bytes()),
-        &radio.to_le_bytes(),
-    ))
+/// Xor-fold a 64-bit hash to the 16-bit schema tag carried on the wire: the xor of its four
+/// 16-bit words.
+pub const fn fold16(hash: u64) -> u16 {
+    (hash ^ (hash >> 16) ^ (hash >> 32) ^ (hash >> 48)) as u16
 }
 
 /// The payload type each [`MsgType`] carries (the type [`decode_msg`](crate::decode_msg)
 /// deserializes for it). The match is exhaustive, so a new `MsgType` does not compile until it
-/// is paired here and so covered by the fingerprint.
+/// is paired here and so covered by the console tag.
 pub const fn payload_schema(msg_type: MsgType) -> &'static NamedType {
     match msg_type {
         MsgType::Hello => <msg::Hello<'static> as Schema>::SCHEMA,
@@ -300,10 +285,9 @@ const fn console_hash() -> u64 {
 }
 
 /// 64-bit structural hash of the console surface: every `MsgType` value paired with its payload
-/// schema, plus the mgmt op and reply-record schemas. Pinned in `tests/golden.rs`, so changing
-/// it is a console wire change that needs a `PROTOCOL_VERSION` bump.
+/// schema, plus the mgmt op and reply-record schemas. Folded into [`CONSOLE_TAG`](crate::CONSOLE_TAG).
 pub const CONSOLE_HASH: u64 = console_hash();
 
-/// 64-bit structural hash of the radio application schema (`NodeMsg`, `NodeCmd`). Pinned in
-/// `tests/radio_golden.rs`, so changing it needs a `RADIO_SCHEMA_VERSION` bump.
+/// 64-bit structural hash of the radio application schema (`NodeMsg`, `NodeCmd`). Folded into
+/// [`RADIO_TAG`](crate::radio::RADIO_TAG).
 pub const RADIO_HASH: u64 = hash_types(FNV_BASIS, S_RADIO, &RADIO_TYPES);

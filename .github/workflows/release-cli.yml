@@ -1,8 +1,7 @@
 # Release the `tower` binary (cli/, package tower-cli) for every platform on a `cli-vX.Y.Z` tag.
 #
-# The other crates are internal path dependencies with no releases of their own: `protocol-v*`
-# tags only mark wire-format releases (the wire-bump guard's baseline), and the historical
-# `jolt-v*` tags are not built.
+# The other crates are internal path dependencies with no releases of their own; the historical
+# `protocol-v*` and `jolt-v*` tags are not built.
 
 name: Release (tower CLI)
 

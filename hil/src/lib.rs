@@ -420,14 +420,12 @@ pub fn build_image(kind: &str, name: &str, features: &str) -> Result<PathBuf, St
 /// `tower-protocol` message fields, so a frame outlives the decoder's buffer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
-    /// Boot banner: protocol version, firmware name + version, per-boot session id, and the
-    /// firmware's `tower_protocol::WIRE_FINGERPRINT` (wire v4).
+    /// Boot banner: firmware name + version and the per-boot session id. (Its frame carried
+    /// this harness's schema tag, or [`Console::next`] would have failed on it.)
     Hello {
-        protocol_version: u8,
         firmware_name: String,
         firmware_version: String,
         session_id: u32,
-        wire_fingerprint: u32,
     },
     /// A `log::` record.
     Log {
@@ -445,7 +443,7 @@ pub enum Frame {
     },
     /// The writer's dropped-frame marker (queue overflow / unplugged drain).
     Dropped { count: u32 },
-    /// A forwarded radio uplink from the gateway firmware (wire v3): the decrypted,
+    /// A forwarded radio uplink from the gateway firmware: the decrypted,
     /// authenticated payload verbatim, plus reception metadata.
     Uplink {
         src: u32,
@@ -454,7 +452,7 @@ pub enum Frame {
         lqi: u8,
         data: Vec<u8>,
     },
-    /// One chunk of a management reply (wire v3); reassemble by `req_id` (see
+    /// One chunk of a management reply; reassemble by `req_id` (see
     /// [`Console::mgmt_roundtrip`]).
     Mgmt {
         req_id: u16,
@@ -472,7 +470,7 @@ pub enum Frame {
         last: bool,
         text: String,
     },
-    /// A radio-diagnostics sample (wire v3): ambient channel RSSI or a TX report.
+    /// A radio-diagnostics sample: ambient channel RSSI or a TX report.
     Stat(RadioStat),
     /// A frame whose `MsgType` we don't model here (e.g. shell traffic), kept so seq accounting
     /// stays exact.
@@ -486,8 +484,8 @@ pub enum Frame {
 /// of frames the device skipped, i.e. dropped in transit or by the writer's queue), surfaced via
 /// [`seq_gaps`](Self::seq_gaps): something `strings | grep` fundamentally cannot see. Frames that
 /// fail to decode are counted ([`decode_errors`](Self::decode_errors)) and named in timeout
-/// diagnostics; a CRC-valid frame of a different protocol version, or a `Hello` announcing a
-/// different wire fingerprint, fails [`next`](Self::next) fast.
+/// diagnostics; a CRC-valid frame carrying another schema tag (a firmware built from another
+/// checkout) fails [`next`](Self::next) fast.
 pub struct Console {
     // Option only so the host unit tests can build a port-less Console (`for_test`). The reset
     // pulse drives the modem lines on THIS handle (Console::reset_into_app); serialport 4.9 flocks
@@ -499,13 +497,10 @@ pub struct Console {
     /// `session_id` of the most recent `Hello` (a per-boot counter; the same id re-sent means a
     /// USB re-plug within one boot, a new id a reboot).
     session: Option<u32>,
-    /// `wire_fingerprint` of the most recent `Hello` (recorded even when it mismatches, so a
-    /// caller can report it after [`next`](Self::next) failed fast on it).
-    wire_fingerprint: Option<u32>,
     /// Complete frames that failed to decode (bad CRC / COBS / type …): counted, never silent.
     decode_errors: u32,
     last_decode_error: Option<String>,
-    /// Host→device frame counter for the writer helpers (wire v3 gateway tests),
+    /// Host→device frame counter for the writer helpers (the gateway tests),
     /// per-link, restarting at 0 like every sender's.
     tx_seq: u16,
 }
@@ -541,15 +536,14 @@ impl Console {
             last_seq: None,
             seq_gaps: 0,
             session: None,
-            wire_fingerprint: None,
             decode_errors: 0,
             last_decode_error: None,
             tx_seq: 0,
         })
     }
 
-    /// Write one host→device frame (the harness's first TX path; until wire v3 it only
-    /// ever read). Used to drive the management channel and the shell from tests.
+    /// Write one host→device frame (the harness's only TX path). Used to drive the management
+    /// channel and the shell from tests.
     pub fn send_frame<T: serde::Serialize>(&mut self, msg_type: MsgType, payload: &T) -> Result<(), String> {
         let mut buf = [0u8; tower_protocol::MAX_WIRE];
         let n = encode_frame(msg_type, self.tx_seq, payload, &mut buf)
@@ -688,12 +682,6 @@ impl Console {
         self.session
     }
 
-    /// `wire_fingerprint` of the most recent `Hello` seen, if any (equal to
-    /// `tower_protocol::WIRE_FINGERPRINT` unless [`next`](Self::next) just failed on it).
-    pub fn wire_fingerprint(&self) -> Option<u32> {
-        self.wire_fingerprint
-    }
-
     /// `""`, or a parenthetical naming the undecodable frames, appended to timeout / failure
     /// messages so a wall of corrupt frames reads as a diagnosable cause, not "did it boot?".
     fn decode_note(&self) -> String {
@@ -716,11 +704,9 @@ impl Console {
     /// Read the next complete frame, waiting up to `timeout`. `Ok(None)` means the window elapsed
     /// with no full frame (idle line). A corrupt frame (bad CRC/COBS/type) is skipped and counted
     /// ([`decode_errors`](Self::decode_errors)); the next `0x00` resynchronizes, exactly like the
-    /// CLI. A **CRC-valid** frame carrying a different protocol version is the golden-rule lockstep
-    /// break, so it is an `Err` at once (otherwise every test would just report "no Hello"). So is
-    /// a `Hello` whose `wire_fingerprint` differs from this harness's `WIRE_FINGERPRINT`: the same
-    /// protocol version but a different wire schema (firmware and harness built from different
-    /// tower-protocol sources), which postcard would otherwise silently mis-decode.
+    /// CLI. A **CRC-valid** frame carrying another schema tag (the firmware was built from another
+    /// checkout than this harness) is the lockstep break, so it is an `Err` at once, naming the
+    /// firmware when the frame is its `Hello` (otherwise every test would just report "no Hello").
     pub fn next(&mut self, timeout: Duration) -> Result<Option<Frame>, String> {
         let deadline = Instant::now() + timeout;
         let mut byte = [0u8; 1];
@@ -735,22 +721,24 @@ impl Console {
                     let Some(decoded) = self.decoder.push(byte[0]).map(|inner| {
                         decode_frame(inner)
                             .map(|(msg_type, seq, payload)| (seq, to_frame(msg_type, payload)))
-                            .map_err(|e| (e, crc_valid(inner)))
+                            .map_err(|e| match e {
+                                // Only ever reported for a CRC-valid frame (tower-protocol checks
+                                // the CRC first), so it is never line noise.
+                                tower_protocol::Error::SchemaMismatch { got } => {
+                                    Err(lockstep_break(got, inner))
+                                }
+                                other => Ok(other),
+                            })
                     }) else {
                         continue;
                     };
                     match decoded {
                         Ok((seq, frame)) => {
                             self.on_frame(seq, &frame);
-                            check_fingerprint(&frame)?;
                             return Ok(Some(frame));
                         }
-                        // tower-protocol ≤ 1.5.0 checks the version BEFORE the CRC, so a torn or
-                        // noisy frame can masquerade as BadVersion; only a CRC-valid one is real.
-                        Err((tower_protocol::Error::BadVersion { got }, true)) => {
-                            return Err(lockstep_break(got));
-                        }
-                        Err((e, _)) => {
+                        Err(Err(lockstep)) => return Err(lockstep),
+                        Err(Ok(e)) => {
                             self.decode_errors = self.decode_errors.saturating_add(1);
                             self.last_decode_error = Some(format!("{e:?}"));
                         }
@@ -815,15 +803,9 @@ impl Console {
     /// `seq` on boot and re-emits `Hello` on a USB re-plug), so re-baseline the gap tracking on
     /// it, exactly like tower-cli (`render.rs`), instead of counting the jump as ~65k lost frames.
     fn on_frame(&mut self, seq: u16, frame: &Frame) {
-        if let Frame::Hello {
-            session_id,
-            wire_fingerprint,
-            ..
-        } = frame
-        {
+        if let Frame::Hello { session_id, .. } = frame {
             self.last_seq = None;
             self.session = Some(*session_id);
-            self.wire_fingerprint = Some(*wire_fingerprint);
         }
         self.account_seq(seq);
     }
@@ -849,7 +831,6 @@ impl Console {
             last_seq: None,
             seq_gaps: 0,
             session: None,
-            wire_fingerprint: None,
             decode_errors: 0,
             last_decode_error: None,
             tx_seq: 0,
@@ -878,49 +859,19 @@ fn pulse_reset_clearing_input(sp: &mut dyn serialport::SerialPort) -> Result<(),
     Ok(())
 }
 
-/// Whether an inner (COBS-decoded) frame's trailing CRC-32 matches its body, i.e. the bytes are
-/// what the device sent, so a `BadVersion` on them is a genuine version mismatch, not line noise.
-fn crc_valid(inner: &[u8]) -> bool {
-    // ver_type(1) + seq(2) + crc(4) is the shortest frame.
-    if inner.len() < 7 {
-        return false;
-    }
-    let body = inner.len() - 4;
-    let stored = u32::from_le_bytes([inner[body], inner[body + 1], inner[body + 2], inner[body + 3]]);
-    tower_protocol::crc::crc32_ieee(&inner[..body]) == stored
-}
-
-/// The fail-fast message for a CRC-valid frame of another protocol version.
-fn lockstep_break(got: u8) -> String {
+/// The fail-fast message for a CRC-valid frame carrying another schema tag `got`. The tag is a
+/// hash: it can't say which side is older, so the message names the firmware (from its `Hello`,
+/// when `inner` is one) and asks for both to come from this checkout.
+fn lockstep_break(got: u16, inner: &[u8]) -> String {
+    let device = tower_protocol::decode_foreign_hello(inner)
+        .map(|h| format!(" ({} {})", h.firmware_name, h.firmware_version))
+        .unwrap_or_default();
     format!(
-        "HIL: the device speaks tower-protocol wire version {got}, but this harness decodes version \
-         {}: a lockstep break (postcard would silently mis-decode). Rebuild and reflash the \
-         firmware from this checkout, so it and the harness share the one crates/protocol.",
-        tower_protocol::PROTOCOL_VERSION
-    )
-}
-
-/// Fail fast on a `Hello` whose wire fingerprint differs from the one this harness was built with:
-/// the frame header's version matched (else `decode_frame` would have said `BadVersion`), so the
-/// two ends speak the same `PROTOCOL_VERSION` but a different wire schema. Every other frame passes.
-fn check_fingerprint(frame: &Frame) -> Result<(), String> {
-    match frame {
-        Frame::Hello { wire_fingerprint, .. } if *wire_fingerprint != tower_protocol::WIRE_FINGERPRINT => {
-            Err(fingerprint_break(*wire_fingerprint))
-        }
-        _ => Ok(()),
-    }
-}
-
-/// The fail-fast message for a `Hello` announcing another wire fingerprint.
-fn fingerprint_break(got: u32) -> String {
-    format!(
-        "HIL: the device announces tower-protocol wire fingerprint {got:#010x}, but this harness was \
-         built with {:#010x}: same wire version {} but a different wire schema, a lockstep break \
-         (the tower-protocol sources differ; postcard would silently mis-decode). Rebuild the firmware \
-         and this harness from the SAME checkout (both build crates/protocol by path).",
-        tower_protocol::WIRE_FINGERPRINT,
-        tower_protocol::PROTOCOL_VERSION
+        "HIL: the device's console frames carry schema tag {got:#06x}, but this harness decodes \
+         {:#06x}: the firmware{device} and the harness were built from different checkouts, a \
+         lockstep break (postcard would silently mis-decode). Rebuild and reflash the firmware \
+         from this checkout, so it and the harness share the one crates/protocol.",
+        tower_protocol::CONSOLE_TAG
     )
 }
 
@@ -930,11 +881,9 @@ fn to_frame(msg_type: MsgType, payload: &[u8]) -> Frame {
     match msg_type {
         MsgType::Hello => match postcard::from_bytes::<Hello>(payload) {
             Ok(h) => Frame::Hello {
-                protocol_version: h.protocol_version,
                 firmware_name: h.firmware_name.to_string(),
                 firmware_version: h.firmware_version.to_string(),
                 session_id: h.session_id,
-                wire_fingerprint: h.wire_fingerprint,
             },
             Err(_) => Frame::Other(msg_type),
         },
@@ -1359,22 +1308,18 @@ mod tests {
             MsgType::Hello,
             1,
             &Hello {
-                protocol_version: tower_protocol::PROTOCOL_VERSION,
                 firmware_name: "blinky",
                 firmware_version: "v0.1.0",
                 session_id: 0xDEAD_BEEF,
-                wire_fingerprint: 0x1234_5678,
             },
         );
         assert_eq!(seq, 1, "seq is carried through decode");
         assert_eq!(
             frame,
             Frame::Hello {
-                protocol_version: tower_protocol::PROTOCOL_VERSION,
                 firmware_name: "blinky".to_string(),
                 firmware_version: "v0.1.0".to_string(),
                 session_id: 0xDEAD_BEEF,
-                wire_fingerprint: 0x1234_5678,
             }
         );
     }
@@ -1444,7 +1389,7 @@ mod tests {
 
     #[test]
     fn to_frame_maps_uplink() {
-        // wire-v3 gateway frame.
+        // A gateway-link frame.
         let (_, frame) = decode_via_wire(
             MsgType::Uplink,
             6,
@@ -1470,7 +1415,7 @@ mod tests {
 
     #[test]
     fn to_frame_maps_mgmt_response() {
-        // wire-v3 gateway frame.
+        // A gateway-link frame.
         let (_, frame) = decode_via_wire(
             MsgType::MgmtResponse,
             7,
@@ -1496,7 +1441,7 @@ mod tests {
 
     #[test]
     fn to_frame_maps_radio_stat() {
-        // wire-v3 gateway frame: both RadioStat variants map verbatim into Frame::Stat.
+        // A gateway-link frame: both RadioStat variants map verbatim into Frame::Stat.
         let (_, ch) = decode_via_wire(
             MsgType::RadioStat,
             8,
@@ -1757,11 +1702,9 @@ mod tests {
     fn hello_rebaselines_seq_tracking() {
         let mut c = Console::for_test();
         let hello = Frame::Hello {
-            protocol_version: tower_protocol::PROTOCOL_VERSION,
             firmware_name: "x".into(),
             firmware_version: "v".into(),
             session_id: 7,
-            wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
         };
         let stat = Frame::Other(MsgType::RadioStat);
         for s in [900u16, 901, 902] {
@@ -1772,94 +1715,58 @@ mod tests {
         c.on_frame(1, &stat);
         assert_eq!(c.seq_gaps(), 0);
         assert_eq!(c.session_id(), Some(7));
-        assert_eq!(c.wire_fingerprint(), Some(tower_protocol::WIRE_FINGERPRINT));
         // A real gap inside the new session still counts.
         c.on_frame(3, &stat);
         assert_eq!(c.seq_gaps(), 1);
     }
 
-    /// A `Hello` announcing another wire fingerprint (same `PROTOCOL_VERSION`, different schema)
-    /// fails fast with the lockstep message naming both values; the matching one, and every
-    /// non-`Hello` frame, pass. The fingerprint is recorded either way.
+    /// A CRC-valid frame carrying another schema tag is the lockstep break: the message names
+    /// both tags, the firmware when the frame is its `Hello`, and the remedy. A corrupted frame
+    /// is never one (tower-protocol checks the CRC first).
     #[test]
-    fn foreign_wire_fingerprint_fails_fast() {
-        let ours = tower_protocol::WIRE_FINGERPRINT;
-        let foreign = ours ^ 0x0000_0001;
-        let hello = |wire_fingerprint| Frame::Hello {
-            protocol_version: tower_protocol::PROTOCOL_VERSION,
-            firmware_name: "blinky".into(),
-            firmware_version: "v0.1.0".into(),
-            session_id: 1,
-            wire_fingerprint,
-        };
-        assert_eq!(check_fingerprint(&hello(ours)), Ok(()));
-        assert_eq!(check_fingerprint(&Frame::Print { text: "x".into() }), Ok(()));
-        let err = check_fingerprint(&hello(foreign)).unwrap_err();
-        assert!(err.contains("lockstep"), "{err}");
-        assert!(
-            err.contains(&format!("{foreign:#010x}")),
-            "names the device's value: {err}"
-        );
-        assert!(err.contains(&format!("{ours:#010x}")), "names ours: {err}");
-
-        let mut c = Console::for_test();
-        c.on_frame(0, &hello(foreign));
-        assert_eq!(
-            c.wire_fingerprint(),
-            Some(foreign),
-            "recorded even when it mismatches"
-        );
-
-        // End to end through the real decode seam: the fingerprint survives the wire.
-        let (_, frame) = decode_via_wire(
-            MsgType::Hello,
-            0,
-            &Hello {
-                protocol_version: tower_protocol::PROTOCOL_VERSION,
-                firmware_name: "blinky",
-                firmware_version: "v0.1.0",
-                session_id: 1,
-                wire_fingerprint: foreign,
-            },
-        );
-        assert!(check_fingerprint(&frame).is_err());
-    }
-
-    /// A CRC-valid frame of another wire version is told apart from a corrupted one, so only a
-    /// genuine lockstep break fails fast.
-    #[test]
-    fn crc_valid_separates_version_mismatch_from_noise() {
-        let mut wire = [0u8; tower_protocol::MAX_WIRE];
-        let n = encode_frame(MsgType::Print, 3, &Print { text: "hi" }, &mut wire).expect("encode");
-        let mut decoder = FrameDecoder::new();
-        let mut inner = Vec::new();
-        for &b in &wire[..n] {
-            if let Some(f) = decoder.push(b) {
-                inner = f.to_vec();
-            }
+    fn a_foreign_schema_tag_is_a_lockstep_break() {
+        let foreign = tower_protocol::CONSOLE_TAG ^ 0x0001;
+        fn deframe<T: serde::Serialize>(tag: u16, mt: MsgType, payload: &T) -> Vec<u8> {
+            let mut wire = [0u8; tower_protocol::MAX_WIRE];
+            let n = tower_protocol::encode_frame_with_tag(tag, mt, 0, payload, &mut wire).expect("encode");
+            let mut decoder = FrameDecoder::new();
+            wire[..n]
+                .iter()
+                .find_map(|&b| decoder.push(b).map(|f| f.to_vec()))
+                .expect("one frame")
         }
-        assert!(crc_valid(&inner), "an intact frame's CRC checks out");
+        let hello = Hello {
+            firmware_name: "blinky",
+            firmware_version: "v0.1.0",
+            session_id: 1,
+        };
+        let inner = deframe(foreign, MsgType::Hello, &hello);
+        assert_eq!(
+            decode_frame(&inner),
+            Err(tower_protocol::Error::SchemaMismatch { got: foreign })
+        );
+        let msg = lockstep_break(foreign, &inner);
+        assert!(msg.contains("lockstep"), "{msg}");
+        assert!(
+            msg.contains(&format!("{foreign:#06x}")),
+            "names the device's tag: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("{:#06x}", tower_protocol::CONSOLE_TAG)),
+            "names ours: {msg}"
+        );
+        assert!(msg.contains("(blinky v0.1.0)"), "names the firmware: {msg}");
+        assert!(msg.contains("from this checkout"), "{msg}");
 
-        // Re-stamp the version field (top 3 bits of byte 0) and fix the CRC: a different-version
-        // peer, byte-perfect on the wire → BadVersion with a valid CRC.
-        let other = (tower_protocol::PROTOCOL_VERSION + 1) & 0x07;
-        let mut foreign = inner.clone();
-        foreign[0] = (other << 5) | (foreign[0] & 0x1F);
-        let body = foreign.len() - 4;
-        let crc = tower_protocol::crc::crc32_ieee(&foreign[..body]).to_le_bytes();
-        foreign[body..].copy_from_slice(&crc);
-        assert!(matches!(
-            decode_frame(&foreign),
-            Err(tower_protocol::Error::BadVersion { .. })
-        ));
-        assert!(crc_valid(&foreign), "genuine mismatch → fail fast");
-        assert!(lockstep_break(other).contains("lockstep"));
+        // Any other frame of that firmware is a break too, just without the name.
+        let print = deframe(foreign, MsgType::Print, &Print { text: "hi" });
+        let msg = lockstep_break(foreign, &print);
+        assert!(msg.contains("the firmware and the harness"), "{msg}");
 
-        // The same version flip WITHOUT fixing the CRC is line noise, not a mismatch.
-        let mut noisy = inner.clone();
-        noisy[0] = (other << 5) | (noisy[0] & 0x1F);
-        assert!(!crc_valid(&noisy));
-        assert!(!crc_valid(&[0u8; 3]), "too short to carry a CRC");
+        // The same tag flip WITHOUT fixing the CRC is line noise, not a mismatch.
+        let mut noisy = deframe(tower_protocol::CONSOLE_TAG, MsgType::Print, &Print { text: "hi" });
+        noisy[1] ^= 0x01;
+        assert_eq!(decode_frame(&noisy), Err(tower_protocol::Error::BadCrc));
     }
 
     #[test]

@@ -10,9 +10,9 @@ to MQTT.
 
 The wire format is shared with the firmware via the [`tower-protocol`](../crates/protocol)
 crate, a path dependency both build from the same source, so the two cannot drift at build
-time. A `tower` binary built before a wire change still speaks the old version: after pulling
-a protocol change, rebuild it (see *Install*); a stale binary reports a protocol-version
-mismatch (exit `125`) rather than mis-decoding.
+time. A `tower` binary built before a wire change still speaks the old schema: after pulling
+a protocol change, rebuild it (see *Install*); a stale binary reports a schema mismatch
+(exit `125`) rather than mis-decoding.
 
 ## Install
 
@@ -166,7 +166,7 @@ the cause of a failure:
 | `1`  | tool error: I/O (incl. a port that fails mid-command, or a `logs`/`events` link lost under `--no-reconnect`), bad file, encode/decode, truncated/incomplete device response; also `flash`/`erase` refusing a readout-protected board, and `protect`/`unprotect` not confirmed |
 | `2`  | usage error (bad arguments, emitted by clap) |
 | `124`| device command timed out (no response at all to `exec` / `complete`; also: no gateway reply to an MQTT RPC) |
-| `125`| protocol mismatch: the device was built from a different tree (another `PROTOCOL_VERSION`, or the same version with a different wire fingerprint); rebuild `tower` or reflash the device from the same tree |
+| `125`| protocol mismatch: the device was built from another checkout (its frames carry another schema tag); rebuild `tower` and the firmware from the same checkout |
 | `126`| wrong firmware role (`tower gateway`/`nodes add --port` pointed at the wrong kind of device) |
 | `1..=123` | `exec` only: the device-reported shell result (clamped into this range) |
 
@@ -174,28 +174,31 @@ A response that arrives but is missing chunks (or runs past 256 KiB without endi
 `1`, not `124`: the device *did* answer, the output just can't be trusted. Likewise a port
 that errors out (unplugged mid-command) is `1`: `124` strictly means a live link on which
 the device stayed silent. `125` is deliberately distinct so CI can
-detect the version-mismatch failure mode (stale `tower` binary vs. freshly flashed firmware)
+detect the schema-mismatch failure mode (stale `tower` binary vs. freshly flashed firmware)
 instead of misreading it as a timeout.
 
 ### Protocol mismatch detection
 
-Two checks catch a device built against a different `tower-protocol` than this `tower`:
+Every console frame carries a 16-bit **schema tag** (`CONSOLE_TAG`) in its header, derived at
+compile time from the whole console schema (every message type with its payload, the management
+records); every radio envelope carries `RADIO_TAG` the same way. A device built from another
+checkout than this `tower` puts another tag in every frame, so each one is refused before its
+payload is read (postcard would otherwise decode it into silently wrong values). The tag is a
+hash: it can't say which side is older, so the advice is always to rebuild both from the same
+checkout (`just install-cli`, then reflash).
 
-- **`PROTOCOL_VERSION`** rides in every frame header; a frame of another version is rejected
-  before its payload is read.
-- **The wire fingerprint** (`tower-protocol` v1.6.0+, wire v4): the device's `Hello` (and its
-  `Describe` reply, for `tower gateway` and `nodes add --port`) carries `WIRE_FINGERPRINT`, a
-  compile-time hash of the whole wire schema. A device whose fingerprint differs from this
-  build's speaks the **same `PROTOCOL_VERSION` but a different wire schema** (the two were
-  built from different source trees, or someone changed the schema without bumping
-  the version), which postcard would otherwise decode into silently wrong values.
+A mismatch is handled the same way everywhere: the banner on stderr (both tags, and the
+device's firmware name and version, read best effort from its `Hello`), exit code `125` for
+`exec`, `shell --reset`, `complete`, `tower gateway` and `nodes add --port`, and no
+interpretation of the device's frames: `logs`/`events` and the TUI count them as undecodable
+until frames with this build's tag arrive (the device reflashed from this checkout). The
+`hello:` line `tower logs` prints shows the schema tag, `/system/resource print` shows both tags
+on the device side (`wire: console 0x… radio 0x…`), and `tower net status` the bridge's.
 
-Either one is handled the same way: the mismatch banner on stderr (naming both versions, or
-both fingerprints in hex), exit code `125` for `exec`, `shell --reset`, `complete`, `tower
-gateway` and `nodes add --port`, and no further interpretation of the stream: `logs`/`events`
-and the TUI count the frames as undecodable instead of rendering them, until a matching
-`Hello` arrives. The `hello:` line `tower logs` prints shows the device's fingerprint
-(`protocol v4 fp 0x…`), and `/system/resource print` shows it on the device side (`wire:`).
+A change of the **framing** itself (header layout, COBS, CRC) is not covered by the tags: such a
+device's frames all fail their CRC. When many frames in a row fail their CRC and none passes,
+`tower` says so once: `every frame fails its CRC: likely a different framing (an older or newer
+checkout); rebuild both`.
 
 ## Flashing firmware
 

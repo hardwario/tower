@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "tower-gateway"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "heapless",
  "postcard",
@@ -1150,14 +1150,14 @@ dependencies = [
 
 [[package]]
 name = "tower-kv"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "tower-protocol",
 ]
 
 [[package]]
 name = "tower-net"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "hkdf",
  "hmac",
@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "tower-protocol"
-version = "1.6.0"
+version = "0.0.0"
 dependencies = [
  "cobs 0.5.1",
  "heapless",
@@ -1180,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "tower-radio"
-version = "0.1.0"
+version = "0.0.0"
 
 [[package]]
 name = "tower-sdk"
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "tower-shell"
-version = "0.1.0"
+version = "0.0.0"
 
 [[package]]
 name = "tracing"

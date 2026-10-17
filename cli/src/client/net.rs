@@ -64,10 +64,10 @@ fn status(opts: &MqttOpts, json: bool) -> Result<u8> {
             println!("state:    offline (the gateway's last-will fired; the bridge process is gone)");
         } else {
             // Retained-topic text anyone with broker access can plant: escape it.
-            // The bridge takes the version from the startup `Describe` (wire v4 `DeviceInfo`
-            // carries it), so it is known even when no boot Hello was seen; an older bridge
-            // could only learn it from a Hello, so a blank is still tolerated: show the
-            // version when known instead of a blank with a trailing space.
+            // The bridge takes the version from the startup `Describe` (`DeviceInfo` carries
+            // it), so it is known even when no boot Hello was seen; a blank is still tolerated
+            // (a planted or truncated payload): show the version when known instead of a blank
+            // with a trailing space.
             let firmware = if status.firmware_version.is_empty() {
                 sanitize_line(&status.firmware).into_owned()
             } else {
@@ -85,7 +85,11 @@ fn status(opts: &MqttOpts, json: bool) -> Result<u8> {
                 sanitize_line(&status.serial_port)
             );
         }
-        println!("protocol: v{} · mqtt schema v{}", status.protocol, status.schema);
+        println!(
+            "wire:     {} · mqtt schema v{}",
+            sanitize_line(&status.wire),
+            status.schema
+        );
         if let Some(st) = &stats {
             println!(
                 "network:  {} node(s), {} uplink(s), {} queued downlink(s)",

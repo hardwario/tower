@@ -1,6 +1,6 @@
 # TOWER Gateway: the wireless product guide
 
-> **Status:** shipped and HW-verified (wire v3 / `tower-protocol` v1.3.0). The two product
+> **Status:** shipped and HW-verified. The two product
 > apps, `apps/radio_push_button.rs` (a sleeping sensor node) and
 > `apps/radio_dongle_gateway.rs` (the network coordinator), are complete firmwares, not
 > skeletons. The host side (`tower gateway`, `tower nodes`, `tower net`, MQTT) lives in the
@@ -8,7 +8,7 @@
 
 This is the standalone reference for the TOWER gateway product: a wireless push-button node
 that reports button/temperature/accelerometer events and sleeps between them, a Radio Dongle
-that bridges the secured radio network to the host, and the wire-v3 schema they speak. For
+that bridges the secured radio network to the host, and the schema they speak. For
 the radio stack itself (framing, CCM, pairing handshake, FHSS, duty cycle) see
 [`radio.md`](radio.md); for the console framing and the settings framework see
 [`console.md`](console.md).
@@ -18,7 +18,7 @@ the radio stack itself (framing, CCM, pairing handshake, FHSS, duty cycle) see
 ## Three pieces
 
 ```
-   push-button node  ──radio (CCM, NodeMsg schema)──▶  gateway dongle  ──serial v3──▶  tower gateway  ──▶ MQTT
+   push-button node  ──radio (CCM, NodeMsg schema)──▶  gateway dongle  ──serial──▶  tower gateway  ──▶ MQTT
    apps/radio_push_button        transparent bridge       apps/radio_dongle_gateway       (cli/)          tower nodes / net
    (STM32L083, sleeps)           forwards Uplink verbatim  registry + queue + pairing      TUI | --service
 ```
@@ -36,14 +36,14 @@ the radio stack itself (framing, CCM, pairing handshake, FHSS, duty cycle) see
 
 The transparent-bridge split is the design's backbone: **a new node app type needs no gateway
 firmware change**, because the gateway never interprets `NodeMsg`/`NodeCmd`; only the node
-firmware and the host CLI agree on that schema (versioned separately; see below).
+firmware and the host CLI agree on that schema (tagged separately; see below).
 
 ---
 
-## The wire-v3 gateway link
+## The gateway link
 
-Wire v3 (`PROTOCOL_VERSION = 3`) added four console message types on top of the log/event/shell
-set (full table in [`console.md`](console.md)):
+Four console message types carry the gateway link, on top of the log/event/shell set (full table
+in [`console.md`](console.md)):
 
 | Type | # | Dir | Payload |
 |---|---|---|---|
@@ -52,29 +52,29 @@ set (full table in [`console.md`](console.md)):
 | `RadioStat` | 9 | T→H | ambient channel-RSSI sample, or a per-TX delivery outcome |
 | `MgmtRequest` | 18 | H→T | `req_id, op` (a `mgmt::MgmtOp`) |
 
-Two **independently versioned** schemas ride these frames:
+Two **separately tagged** schemas ride these frames:
 
-- **`tower_protocol::mgmt`**: the console-side management contract (host ↔ device). Bumps with
-  `PROTOCOL_VERSION`. `MgmtRequest{req_id, op}` → one or more `MgmtResponse` chunks with the same
-  `req_id`; the `data` chunks concatenate into a stream of postcard records typed per op.
+- **`tower_protocol::mgmt`**: the console-side management contract (host ↔ device), part of the
+  console schema: covered by `CONSOLE_TAG` in every frame header. `MgmtRequest{req_id, op}` → one
+  or more `MgmtResponse` chunks with the same `req_id`; the `data` chunks concatenate into a
+  stream of postcard records typed per op.
 - **`tower_protocol::radio`**: the application schema *inside* the encrypted radio frame, carried
-  opaquely by `Uplink`/`QueuePush`. Versioned by its own leading byte `RADIO_SCHEMA_VERSION`
-  (2 today), so it evolves without a console `PROTOCOL_VERSION` bump and the gateway never
-  decodes it. (Since wire v4 the gateway's `WIRE_FINGERPRINT`, announced in `Hello` and
-  `DeviceInfo`, covers the radio schema too, so the host expects the gateway built from the same
-  source tree as everything else.) Envelope:
-  `[RADIO_SCHEMA_VERSION] ‖ postcard(NodeMsg | NodeCmd)`, always ≤ `MAX_RADIO_PAYLOAD` (74 B).
+  opaquely by `Uplink`/`QueuePush`. Tagged by its own `RADIO_TAG` (2 bytes, LE) at the head of
+  every envelope, so a radio-only change leaves the console tag alone and the gateway never
+  decodes it; the node and the host check it on every envelope (a node or host built from
+  another checkout: `SchemaMismatch`, logged with both tags). Envelope:
+  `RADIO_TAG ‖ postcard(NodeMsg | NodeCmd)`, always ≤ `MAX_RADIO_PAYLOAD` (74 B).
 
 ### Management ops (`mgmt::MgmtOp`)
 
 | op | served by | reply record |
 |---|---|---|
-| `Describe` | both | `DeviceInfo` (role probe: the authoritative "is this a gateway?"; since wire v4 also the device's `wire_fingerprint` + `firmware_version`, for a host that missed the boot `Hello`) |
+| `Describe` | both | `DeviceInfo` (role probe: the authoritative "is this a gateway?"; also the firmware name + version, for a host that missed the boot `Hello`) |
 | `NodeList` | gateway | `NodeEntry` × N (chunked) |
 | `NodeAdd {addr,key,name,flags}` | gateway | none (install a cable-paired node) |
 | `NodeRemove {addr}` / `NodeUpdate {addr,name?,flags?}` | gateway | none |
 | `NodeRevealKey {addr}` | gateway | `NodeKey` (the only path that discloses a stored key) |
-| `PairingOpen {window,key}` / `PairingCancel` | gateway | `Paired` (delayed) / `MGMT_TIMEOUT` |
+| `PairingOpen {window}` / `PairingCancel` | gateway | `Paired` (delayed) / `MGMT_TIMEOUT` |
 | `QueuePush {node_addr,ttl,data}` | gateway | `QueueId` |
 | `QueueList {node_addr}` / `QueueDrop {node_addr,item?}` | gateway | `QueueEntry` × N / none |
 | `StatsConfig {channel_period_ms}` | gateway | none (RAM override of `stats-period`) |
@@ -86,8 +86,8 @@ Result codes: `MGMT_OK`(0), `UNSUPPORTED`(1), `BAD_ARG`(2), `NOT_FOUND`(3), `FUL
 concurrent pairing window → `BUSY`. **Keys:** a cable-provisioned key is minted by the host
 (its CSPRNG) and travels host→device in `NodeAdd`/`Provision`; an OTA-paired link key is
 **derived on both ends** by the X25519 key agreement (docs/radio.md "OTA pairing") from TRNG
-ephemerals, so `PairingOpen`'s `key` field is ignored (it stays in the schema until the next wire
-revision). Keys never travel device→host except through the deliberate `NodeRevealKey`.
+ephemerals, so `PairingOpen` carries no key. Keys never travel device→host except through the
+deliberate `NodeRevealKey`.
 
 ### Radio application schema (`radio::NodeMsg` / `NodeCmd`)
 
@@ -229,8 +229,8 @@ uplink cycle.
 
 ### Pairing (gateway side)
 
-- **OTA**: host sends `PairingOpen{window, key}` (`key` ignored: the link key is derived by the
-  X25519 key agreement); the gateway precomputes its first ephemeral and nonce (~1.2 s; no
+- **OTA**: host sends `PairingOpen{window}` (no key: the link key is derived by the X25519 key
+  agreement); the gateway precomputes its first ephemeral and nonce (~1.2 s; no
   hardware TRNG → `UNSUPPORTED` and an error log), opens the radio window, and on a completed
   handshake (the commitment round, then a valid JOIN_CONFIRM under the derived key) logs
   `net: pairing: SAS 123456`, commits the registry entry (flags `UNNAMED` until the host

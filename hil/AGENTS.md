@@ -28,9 +28,9 @@ tests and runs only the host unit tests, safe anywhere. The `just hil` / `just h
 `tower-protocol` (`crates/protocol`) and `tower-boot` (`crates/boot`, the NRST/BOOT0 reset
 pulses) come from the root workspace by path. The harness decodes exactly the schema the
 firmware and the `tower` CLI build, so a wire mismatch cannot arise at build time; a protocol
-change updates the harness in the same commit (see `crates/protocol/AGENTS.md`, "Releasing a
-change"). At run time a board flashed from another tree still shows up as a wire-version
-mismatch in the console decode.
+change updates the harness in the same commit (see `crates/protocol/AGENTS.md`, "Changing the
+wire"). At run time a board flashed from another checkout carries another schema tag in every
+console frame, and `Console::next` fails fast with the lockstep message.
 
 ## Checks
 

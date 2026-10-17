@@ -406,14 +406,14 @@ dependencies = [
 
 [[package]]
 name = "tower-kv"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "tower-protocol",
 ]
 
 [[package]]
 name = "tower-protocol"
-version = "1.6.0"
+version = "0.0.0"
 dependencies = [
  "cobs 0.5.1",
  "heapless",
@@ -425,11 +425,11 @@ dependencies = [
 
 [[package]]
 name = "tower-radio"
-version = "0.1.0"
+version = "0.0.0"
 
 [[package]]
 name = "tower-shell"
-version = "0.1.0"
+version = "0.0.0"
 
 [[package]]
 name = "typenum"

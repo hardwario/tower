@@ -1,4 +1,4 @@
-//! HIL gateway group: the full wire-v3 product path on two boards: Dongle =
+//! HIL gateway group: the full gateway product path on two boards: Dongle =
 //! `radio_dongle_gateway`, Core = `radio_push_button`. Exercises cable provisioning
 //! (typed mgmt frames on both consoles), the transparent uplink bridge (typed
 //! `Frame::Uplink` with a decodable `radio::NodeMsg`), the downlink queue with the
@@ -35,14 +35,9 @@ fn describe_full(console: &mut Console, req_id: u16) -> (DeviceRole, u32, u8, u8
         .mgmt_roundtrip(req_id, &MgmtOp::Describe, Duration::from_secs(10))
         .expect("Describe reply");
     assert_eq!(result, mgmt::MGMT_OK);
+    // The reply decoded, so its frame carried this harness's schema tag (`Console` fails fast on
+    // another). It also carries the firmware version (so a host that missed the Hello learns it).
     let info = postcard::from_bytes::<DeviceInfo>(&data).expect("DeviceInfo record");
-    // Wire v4: the Describe reply carries the same lockstep fingerprint as the boot Hello, plus
-    // the firmware version (so a host that missed the Hello still learns both).
-    assert_eq!(
-        info.wire_fingerprint,
-        tower_protocol::WIRE_FINGERPRINT,
-        "Describe wire fingerprint drift: device and harness built from different tower-protocol source trees"
-    );
     assert!(
         !info.firmware_version.is_empty(),
         "empty firmware_version in DeviceInfo"

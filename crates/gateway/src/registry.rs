@@ -230,7 +230,7 @@ mod tests {
 
     /// The persisted `NodeRecord` postcard layout IS the on-EEPROM format: a serde field
     /// reorder or a postcard bump would silently mis-decode every stored bucket on upgrade
-    /// (the same silent-drift class the protocol golden vectors guard). Pin the exact bytes
+    /// (the same silent-drift class the protocol's schema tags guard on the wire). Pin the exact bytes
     /// AND the format marker, so a layout change is a conscious, versioned decision.
     #[test]
     fn node_record_golden_bytes() {

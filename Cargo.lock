@@ -3112,7 +3112,7 @@ dependencies = [
 
 [[package]]
 name = "tower-boot"
-version = "1.5.0"
+version = "0.0.0"
 dependencies = [
  "serialport",
  "thiserror 2.0.21",
@@ -3146,7 +3146,7 @@ dependencies = [
 
 [[package]]
 name = "tower-gateway"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "heapless",
  "postcard",
@@ -3167,7 +3167,7 @@ dependencies = [
 
 [[package]]
 name = "tower-kv"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "tower-protocol",
 ]
@@ -3180,7 +3180,7 @@ checksum = "121c2a6cda46980bb0fcd1647ffaf6cd3fc79a013de288782836f6df9c48780e"
 
 [[package]]
 name = "tower-net"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "hkdf",
  "hmac",
@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "tower-protocol"
-version = "1.6.0"
+version = "0.0.0"
 dependencies = [
  "cobs 0.5.1",
  "heapless",
@@ -3203,7 +3203,7 @@ dependencies = [
 
 [[package]]
 name = "tower-radio"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "aes",
 ]
@@ -3216,7 +3216,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tower-shell"
-version = "0.1.0"
+version = "0.0.0"
 
 [[package]]
 name = "tracing"

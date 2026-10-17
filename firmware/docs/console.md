@@ -309,7 +309,7 @@ tower complete "/system settings set "   # ask the target what completes here
 | Command | Does |
 |---|---|
 | `/system reboot` | flush the reply, then `SCB::sys_reset()` |
-| `/system/resource print` | firmware name + version, session id, `wire: v<PROTOCOL_VERSION> fp 0x<WIRE_FINGERPRINT>` (the lockstep schema fingerprint the boot `Hello` carries), uptime, CPU, clock, memory, `uid: XXXXXXXX-XXXXXXXX-XXXXXXXX` (the MCU's 96-bit factory unique ID, `tower::board::unique_id`), `rng:` source (`TRNG` / `SW fallback`) |
+| `/system/resource print` | firmware name + version, session id, `wire: console 0xXXXX radio 0xXXXX` (the schema tags this image was built with: every console frame carries the first, every radio envelope the second), uptime, `mcu:` (part, clock, LSE RTC, flash / RAM / EEPROM), `uid: XXXXXXXX-XXXXXXXX-XXXXXXXX` (the MCU's 96-bit factory unique ID, `tower::board::unique_id`), `rng:` source (`TRNG` / `SW fallback`) |
 | `/system/stack print` | measured stack high-water (boot-painted): used/free/total vs the budget, plus the previous boot's peak after a software/IWDG reset |
 | `/system/eeprom print` | wear gauge: compaction flips vs budget, live/free bytes, resets |
 | `/system/eeprom wipe confirm` | factory reset: an atomic flip to an empty store (power-loss-safe; the store is frozen until the reboot that follows, also on failure). **Console-only** |
@@ -334,7 +334,7 @@ sensitive checks `ctx.is_remote()` itself. `shell::run_line` (no transport conte
 treated as remote.
 
 Responses longer than one frame are **chunked** (192-byte `chunk`/`last` frames) and
-reassembled by the host into one response; `/system/resource print` is an 8-line
+reassembled by the host into one response; `/system/resource print` is a 7-line
 example.
 
 ---
@@ -519,9 +519,10 @@ being captured while the viewport holds still.
 
 ```
 wire:   COBS( inner )  0x00
-inner:  ver_type(1) │ seq(2, LE) │ payload(postcard) │ crc32(4, LE)
-        ver_type = (PROTOCOL_VERSION << 5) | (msg_type & 0x1F)
-        crc32    = CRC-32/IEEE over [ver_type, seq, payload…]
+inner:  type(1) │ tag(2, LE) │ seq(2, LE) │ payload(postcard) │ crc32(4, LE)
+        type  = the MsgType discriminant
+        tag   = CONSOLE_TAG (the console schema's structural hash, folded to 16 bits)
+        crc32 = CRC-32/IEEE over [type, tag, seq, payload…]
 ```
 
 - **COBS** framing with a `0x00` delimiter (the only zero on the wire); the host
@@ -531,54 +532,58 @@ inner:  ver_type(1) │ seq(2, LE) │ payload(postcard) │ crc32(4, LE)
 - **postcard** for the payload: compact and `no_std`, but **not self-describing**, so
   both ends must share the exact struct/enum definitions. That's why `tower-protocol`
   is one crate that both ends build from the same source.
+- **The schema tag** catches the case a build can't: a board or a `tower` binary built from
+  another checkout. `CONSOLE_TAG` is derived at compile time from every message type and its
+  payload schema (and the management records), so any change that reaches the bytes moves it;
+  a CRC-valid frame with another tag is refused (`SchemaMismatch`) before its payload is read.
+  It can't say which side is older: the remedy is always to rebuild both from one checkout.
 - **`seq`** (writer-assigned) lets the host detect real wire loss.
 
-Message types (the low 5 bits of `ver_type`; target→host are 0..15, host→target 16+):
+Message types (the `type` byte; target→host are 0..15, host→target 16+):
 
 | Type | # | Dir | Payload |
 |---|---|---|---|
-| `Hello` | 0 | T→H | protocol_version, firmware_name, firmware_version, per-boot session_id, wire_fingerprint (boot announce; see below) |
+| `Hello` | 0 | T→H | firmware_name, firmware_version, per-boot session_id (boot announce; see below) |
 | `Log` | 1 | T→H | level, uptime_us, module, message |
 | `Print` | 2 | T→H | raw text |
 | `Event` | 3 | T→H | name + (key, value) pairs (wire allows 8; the SDK emits ≤6) |
 | `ShellResponse` | 4 | T→H | cmd_id, result, chunk, last, text |
 | `ShellCompletions` | 5 | T→H | req_id, token_start, common_prefix, candidates, more |
 | `Dropped` | 6 | T→H | count of dropped frames |
-| `MgmtResponse` | 7 | T→H | req_id, result, chunk, last, data (chunked mgmt reply; wire v3 gateway link) |
+| `MgmtResponse` | 7 | T→H | req_id, result, chunk, last, data (chunked mgmt reply; the gateway link) |
 | `Uplink` | 8 | T→H | src, counter, rssi, lqi, data (gateway forwards a node's radio payload verbatim) |
 | `RadioStat` | 9 | T→H | channel RSSI sample, or a TX-delivery outcome |
 | `ShellCommand` | 16 | H→T | cmd_id, line |
 | `ShellComplete` | 17 | H→T | req_id, line, cursor |
-| `MgmtRequest` | 18 | H→T | req_id, op (a `mgmt::MgmtOp`; wire v3 gateway link) |
+| `MgmtRequest` | 18 | H→T | req_id, op (a `mgmt::MgmtOp`; the gateway link) |
 
 A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, then
-`decode_frame` checks CRC, then version + type, and returns `(MsgType, seq, payload)`.
+`decode_frame` checks the CRC, then the tag and the type, and returns `(MsgType, seq, payload)`.
 
-**The `Hello` and the wire fingerprint (wire v4).** The writer synthesizes `Hello` as seq 0 of
-every console session (boot and each USB plug-in). Its fields, in wire order:
+**The `Hello`.** The writer synthesizes `Hello` as seq 0 of every console session (boot and
+each USB plug-in). Its fields, in wire order:
 
 | Field | Meaning |
 |---|---|
-| `protocol_version` | `tower_protocol::PROTOCOL_VERSION` (also in every frame header) |
 | `firmware_name` | the app/example name passed to `app!` (≤ 32 bytes) |
 | `firmware_version` | the SDK crate version, `v`-prefixed (e.g. `v0.1.0`) |
 | `session_id` | the persisted per-boot counter: same id on a re-plug, new id after a reboot |
-| `wire_fingerprint` | `tower_protocol::WIRE_FINGERPRINT`: a compile-time structural hash of the whole wire schema (names ignored) |
 
-The frame header's 3-bit version only catches a mismatch if someone bumped it; the fingerprint
-is derived from the schema itself, so a host built from a different tower-protocol source tree with the
-same `PROTOCOL_VERSION` sees a different value and refuses the link (`tower` prints its
-protocol-mismatch banner and exits with code 125). The gateway and push-button apps also return
-`wire_fingerprint` and `firmware_version` in their `Describe` reply (`DeviceInfo`), for hosts that
-attach after the boot `Hello`. `/system/resource print` shows it on its `wire:` line.
+The lockstep check is the tag in the `Hello`'s (and every) frame header: a host built from
+another checkout refuses the frame (`tower` prints its mismatch banner, naming the firmware read
+best effort from that `Hello`, and exits with code 125). The gateway and push-button apps also
+return `firmware_version` in their `Describe` reply (`DeviceInfo`), for hosts that attach after
+the boot `Hello`. `/system/resource print` shows the tags this image was built with on its
+`wire:` line (`wire: console 0xXXXX radio 0xXXXX`). A stream in which every frame fails its CRC
+is a framing difference the tags can't see; `tower` reports that pattern once.
 
 ### Limits & constants
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `PROTOCOL_VERSION` | 4 | top 3 bits of `ver_type` (caps at 7; 3 = the wire-v3 gateway link, 4 = the wire fingerprint in `Hello` / `DeviceInfo`) |
-| `WIRE_FINGERPRINT` | (u32) | compile-time schema hash; carried in `Hello` and `DeviceInfo`, compared by the host |
-| `MAX_FRAME` | 256 | inner frame, pre-COBS (payload budget ≈ 249) |
+| `CONSOLE_TAG` | (u16) | the console schema tag in every frame header (structural hash, folded) |
+| `MAX_FRAME` | 256 | inner frame, pre-COBS |
+| `MAX_PAYLOAD` | 247 | postcard payload per frame (`MAX_FRAME` minus the 5-byte header and the CRC) |
 | `MAX_WIRE` | 272 | COBS-expanded frame + delimiter |
 | `MAX_MSG` | 192 | log / print text |
 | `SHELL_CHUNK` | 192 | shell-response text per frame (chunked) |
@@ -615,7 +620,7 @@ attach after the boot `Hello`. `/system/resource print` shows it on its `wire:` 
 - constants: `MAX_SETTING`, `R_OK`/`R_NOT_FOUND`/`R_BAD_ARG`/`R_STORAGE`/`R_TRUNCATED`/`R_DENIED`
 
 `tower_protocol`: `encode_frame`, `decode_frame`, `FrameDecoder`, `MsgType`, the payload
-structs, `PROTOCOL_VERSION`, `WIRE_FINGERPRINT`, `MAX_FRAME`, `MAX_WIRE`,
+structs, `CONSOLE_TAG`, `radio::RADIO_TAG`, `MAX_FRAME`, `MAX_PAYLOAD`, `MAX_WIRE`,
 `crc::{crc32_update, crc32_ieee}`.
 
 ## Examples
@@ -671,10 +676,9 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
 - **Setting values can't contain `/`, space, or tab**: those are command tokenizers.
   Enum values dodge this by being a fixed set.
 - **postcard is not self-describing:** any change to a payload struct/enum is a wire
-  change: bump `PROTOCOL_VERSION` and follow the runbook in `crates/protocol/AGENTS.md`
-  (goldens, one commit, a `protocol-vX.Y.Z` tag). Both ends build the change together; then
-  reflash the board and reinstall the `tower` CLI, or the stale side reports `BadVersion`.
-  Since wire v4 a forgotten bump is caught at runtime too: the `Hello` carries
-  `WIRE_FINGERPRINT`, and the host refuses a device whose schema fingerprint differs from its own.
+  change: make it in one commit across `crates/protocol` and its callers (runbook in
+  `crates/protocol/AGENTS.md`); there is nothing to bump. Both ends build the change together;
+  then reflash the board and reinstall the `tower` CLI, or the stale side's frames carry
+  another schema tag and are refused (`SchemaMismatch`).
 - **A response is capped at `MAX_SETTING`/`MAX_RESP`-sized text** before chunking; very
   large dumps are clipped. Raise the caps (and `MAX_RESP`) if you need more.

@@ -912,7 +912,7 @@ impl Net {
             };
             let is_ack = hdr.frame_type == FrameType::Ack;
             if wait.offer(is_ack, hdr.src, hdr.dest, &buf[range.clone()]) == AckVerdict::Resolved {
-                // Keep the resolving ACK's metadata (receiver RSSI + the wire-v3
+                // Keep the resolving ACK's metadata (receiver RSSI + the
                 // pending-downlink flag) for `last_ack()`: the sleeping-node cue.
                 self.last_ack = ack_meta(&buf[range]);
                 return true;

@@ -48,10 +48,10 @@ pagination / completion kernels; not `tower::shell` itself). There is nothing to
 cannot drift between the ends at build time.
 
 **If you change the protocol:** follow the runbook in `../crates/protocol/AGENTS.md`
-("Releasing a change": bump `PROTOCOL_VERSION` or `RADIO_SCHEMA_VERSION`, update the goldens,
-one commit, tag `protocol-vX.Y.Z`), fixing the firmware, the CLI and the harness in that same
-commit. Then reflash the boards and reinstall the CLI (`just install-cli` at the repo root): an
-old `tower` binary reports `BadVersion` against the new firmware.
+("Changing the wire": change the types and fix the firmware, the CLI and the harness in the same
+commit; nothing to bump). Then reflash the boards and reinstall the CLI (`just install-cli` at
+the repo root): a `tower` binary from another checkout reports a schema mismatch (exit 125)
+against the new firmware, because every frame carries the schema tag it was built with.
 
 ## Conventions
 

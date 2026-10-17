@@ -109,8 +109,8 @@ enum GateDecision {
 
 /// Map one `Describe` outcome onto the gateway-verification decision (see the exit-code
 /// contract in `main`): a non-gateway role or a refused probe is [`EXIT_WRONG_FIRMWARE`], a
-/// lockstep mismatch (a header version mismatch, or a `DeviceInfo` announcing another wire
-/// fingerprint) is [`EXIT_PROTOCOL_MISMATCH`], and a mute probe is retryable.
+/// lockstep mismatch (the device's frames carry another schema tag) is
+/// [`EXIT_PROTOCOL_MISMATCH`], and a mute probe is retryable.
 /// Pure but for the operator-facing diagnostics it prints on a refusal.
 fn gate_describe(port: &str, outcome: DescribeOutcome) -> GateDecision {
     match outcome {
@@ -131,7 +131,7 @@ fn gate_describe(port: &str, outcome: DescribeOutcome) -> GateDecision {
             GateDecision::Reject(EXIT_WRONG_FIRMWARE)
         }
         DescribeOutcome::Mismatch(m) => {
-            warn_mismatch(m);
+            warn_mismatch(&m);
             eprintln!("[tower] {port}: {}; {}", m.what(), m.remedy());
             GateDecision::Reject(EXIT_PROTOCOL_MISMATCH)
         }
@@ -166,7 +166,7 @@ pub(crate) fn verify_gateway(port: &str, reset: bool) -> Result<Verified> {
             GateDecision::Retry => {}
         }
     }
-    eprintln!("[tower] {port}: no answer to the management probe; not a gateway (or pre-v3 firmware)?");
+    eprintln!("[tower] {port}: no answer to the management probe; not a gateway?");
     Ok(Err(EXIT_DEVICE_TIMEOUT))
 }
 
@@ -381,9 +381,12 @@ mod tests {
 
     use tower_protocol::mgmt::{DeviceInfo, MGMT_OK, MGMT_UNSUPPORTED};
     use tower_protocol::msg::{Hello, MgmtResponse};
-    use tower_protocol::{MAX_WIRE, MsgType, WIRE_FINGERPRINT, encode_frame};
+    use tower_protocol::{CONSOLE_TAG, MAX_WIRE, MsgType, encode_frame_with_tag};
 
     use crate::session::Mismatch;
+
+    /// The schema tag of a device built from another checkout.
+    const FOREIGN: u16 = CONSOLE_TAG ^ 0x8000;
 
     /// In-memory duplex port, same contract as the `MockPort`s in `mgmt.rs` / `main.rs`
     /// tests: a drained read returns `TimedOut` exactly like a real serial port past its
@@ -427,14 +430,8 @@ mod tests {
 
     /// A postcard `DeviceInfo` record for the given role (the `Describe` reply body).
     fn device_info(role: DeviceRole) -> Vec<u8> {
-        device_info_fp(role, WIRE_FINGERPRINT)
-    }
-
-    /// [`device_info`] announcing the given wire fingerprint.
-    fn device_info_fp(role: DeviceRole, wire_fingerprint: u32) -> Vec<u8> {
         postcard::to_stdvec(&DeviceInfo {
             role,
-            radio_schema_version: 1,
             addr: 0xAB12,
             band: 0,
             channel: 0,
@@ -443,16 +440,16 @@ mod tests {
             provisioned: true,
             gw_addr: 0xAB12,
             firmware_name: "radio_push_button",
-            wire_fingerprint,
             firmware_version: "v0.1.0",
         })
         .unwrap()
     }
 
-    /// A single-chunk `MgmtResponse` wire frame answering `req_id`.
-    fn mgmt_response(req_id: u16, result: u8, data: &[u8]) -> Vec<u8> {
+    /// A single-chunk `MgmtResponse` wire frame answering `req_id`, carrying schema `tag`.
+    fn mgmt_response_tagged(tag: u16, req_id: u16, result: u8, data: &[u8]) -> Vec<u8> {
         let mut buf = [0u8; MAX_WIRE];
-        let n = encode_frame(
+        let n = encode_frame_with_tag(
+            tag,
             MsgType::MgmtResponse,
             0,
             &MgmtResponse {
@@ -468,17 +465,22 @@ mod tests {
         buf[..n].to_vec()
     }
 
-    fn hello_frame(wire_fingerprint: u32) -> Vec<u8> {
+    /// [`mgmt_response_tagged`] with this build's tag.
+    fn mgmt_response(req_id: u16, result: u8, data: &[u8]) -> Vec<u8> {
+        mgmt_response_tagged(CONSOLE_TAG, req_id, result, data)
+    }
+
+    /// A boot `Hello` carrying schema `tag`.
+    fn hello_frame(tag: u16) -> Vec<u8> {
         let mut buf = [0u8; MAX_WIRE];
-        let n = encode_frame(
+        let n = encode_frame_with_tag(
+            tag,
             MsgType::Hello,
             0,
             &Hello {
-                protocol_version: tower_protocol::PROTOCOL_VERSION,
-                firmware_name: "radio_push_button",
+                firmware_name: "radio_dongle_gateway",
                 firmware_version: "v0.1.0",
                 session_id: 1,
-                wire_fingerprint,
             },
             &mut buf,
         )
@@ -490,13 +492,8 @@ mod tests {
     /// probe only lockstep-checks) followed by a `Describe` reply, then classify it through
     /// the gate.
     fn gate_scripted(result: u8, data: &[u8]) -> GateDecision {
-        gate_scripted_after_hello(WIRE_FINGERPRINT, result, data)
-    }
-
-    /// [`gate_scripted`] with the leading `Hello` announcing `hello_fp`.
-    fn gate_scripted_after_hello(hello_fp: u32, result: u8, data: &[u8]) -> GateDecision {
         let mut m = Mock::new();
-        m.feed(&hello_frame(hello_fp));
+        m.feed(&hello_frame(CONSOLE_TAG));
         m.feed(&mgmt_response(0x7000, result, data));
         let mut dec = FrameDecoder::new();
         let outcome = describe(&mut m, &mut dec, 0x7000, Duration::from_millis(300));
@@ -545,13 +542,17 @@ mod tests {
     }
 
     #[test]
-    fn version_mismatch_yields_exit_125_and_mute_retries() {
-        // The two non-Describe outcomes of the gate: a header version mismatch is the lockstep
-        // failure (125, not retryable); a mute probe is inconclusive and asks for a retry.
+    fn schema_mismatch_yields_exit_125_and_mute_retries() {
+        // The two non-Describe outcomes of the gate: a schema mismatch is the lockstep failure
+        // (125, not retryable); a mute probe is inconclusive and asks for a retry.
         assert_eq!(EXIT_PROTOCOL_MISMATCH, 125);
-        match gate_describe("/dev/ttyTEST", DescribeOutcome::Mismatch(Mismatch::Version(1))) {
+        let m = Mismatch {
+            tag: FOREIGN,
+            device: None,
+        };
+        match gate_describe("/dev/ttyTEST", DescribeOutcome::Mismatch(m)) {
             GateDecision::Reject(code) => assert_eq!(code, EXIT_PROTOCOL_MISMATCH),
-            _ => panic!("a version mismatch must be refused as 125"),
+            _ => panic!("a schema mismatch must be refused as 125"),
         }
         assert!(matches!(
             gate_describe("/dev/ttyTEST", DescribeOutcome::Timeout),
@@ -560,32 +561,20 @@ mod tests {
     }
 
     #[test]
-    fn foreign_wire_fingerprint_in_device_info_yields_exit_125() {
-        // A gateway built from another tower-protocol source tree with the same PROTOCOL_VERSION: the
-        // frames decode, the role is right, but its DeviceInfo announces a different
-        // WIRE_FINGERPRINT. That is the lockstep failure (125), refused before the bridge
-        // starts, exactly like a version mismatch.
-        let foreign = WIRE_FINGERPRINT ^ 0x8000_0000;
-        match gate_scripted(MGMT_OK, &device_info_fp(DeviceRole::Gateway, foreign)) {
-            GateDecision::Reject(code) => assert_eq!(code, EXIT_PROTOCOL_MISMATCH),
-            _ => panic!("a foreign wire fingerprint must be refused as 125"),
-        }
-    }
-
-    #[test]
-    fn foreign_fingerprint_hello_poisons_the_probe() {
-        // The boot Hello announces a foreign fingerprint: every later frame is on a foreign
-        // schema, so the Describe reply behind it is not interpreted and the probe reports the
-        // mismatch (125) rather than accepting fields that may have mis-decoded.
-        let foreign = WIRE_FINGERPRINT.wrapping_add(1);
-        match gate_scripted_after_hello(foreign, MGMT_OK, &device_info(DeviceRole::Gateway)) {
-            GateDecision::Reject(code) => assert_eq!(code, EXIT_PROTOCOL_MISMATCH),
-            _ => panic!("a foreign-fingerprint Hello must make the probe a 125"),
-        }
+    fn a_gateway_from_another_checkout_yields_exit_125() {
+        // A gateway built from another checkout: its boot Hello and its Describe reply carry
+        // another schema tag. Neither is interpreted (the reply's fields could mis-decode); the
+        // probe reports the mismatch, naming the firmware its Hello announced, and the gate
+        // refuses it as 125 before the bridge starts.
         let outcome = {
             let mut m = Mock::new();
-            m.feed(&hello_frame(foreign));
-            m.feed(&mgmt_response(0x7000, MGMT_OK, &device_info(DeviceRole::Gateway)));
+            m.feed(&hello_frame(FOREIGN));
+            m.feed(&mgmt_response_tagged(
+                FOREIGN,
+                0x7000,
+                MGMT_OK,
+                &device_info(DeviceRole::Gateway),
+            ));
             describe(
                 &mut m,
                 &mut FrameDecoder::new(),
@@ -593,10 +582,17 @@ mod tests {
                 Duration::from_millis(300),
             )
         };
-        assert!(matches!(
-            outcome,
-            DescribeOutcome::Mismatch(Mismatch::Fingerprint(fp)) if fp == foreign
-        ));
+        match outcome {
+            DescribeOutcome::Mismatch(ref m) => {
+                assert_eq!(m.tag, FOREIGN);
+                assert_eq!(m.device.as_deref(), Some("radio_dongle_gateway v0.1.0"));
+            }
+            _ => panic!("a foreign-tag reply must be a mismatch"),
+        }
+        match gate_describe("/dev/ttyTEST", outcome) {
+            GateDecision::Reject(code) => assert_eq!(code, EXIT_PROTOCOL_MISMATCH),
+            _ => panic!("a gateway from another checkout must be refused as 125"),
+        }
     }
 
     #[test]

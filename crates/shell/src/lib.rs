@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn completion_budget_keeps_every_reply_in_one_frame() {
-        const PAYLOAD: usize = 249; // tower_protocol::MAX_PAYLOAD
+        const PAYLOAD: usize = 247; // tower_protocol::MAX_PAYLOAD (256 - 5 header - 4 CRC)
         // 16 candidates of 20 chars (~22 B each): the case that used to overflow the frame.
         let long: std::vec::Vec<std::string::String> = (0..16)
             .map(|i| std::format!("very-long-setting-{i:02}"))
