@@ -120,10 +120,9 @@ Little-endian frame, fits the 96-byte FIFO:
   `nonce_for(src, counter, bulk_index)` = `src ‖ counter ‖ bulk_index ‖ 0x0000`.
   `bulk_index` is 0 for non-bulk frames, so each (key, frame) nonce is unique.
 - MTU: ≤ 74 B payload (non-bulk), ≤ 64 B per bulk chunk.
-- **ACK payload** (`tower_net::ack`): `acked(4 LE) ‖ rssi(1, i8) ‖ flags(1) ‖ [tail]`. The
-  receiver accepts any ACK of 4 B or more (the `len >= 4` rule), so the trailing fields are
-  optional and older peers' 4- and 5-byte ACKs still resolve a wait. ACK flag bits
-  (`ack_flags`):
+- **ACK payload** (`tower_net::ack`): `acked(4 LE) ‖ rssi(1, i8) ‖ flags(1) ‖ [tail]`,
+  `ACK_LEN` = 6 B. Every ACK carries all three fields; a shorter payload never resolves a wait,
+  and bytes past the flags byte are ignored (`len >= ACK_LEN`). ACK flag bits (`ack_flags`):
   - bit 0 `PENDING`: the ACKer (a gateway) holds a queued downlink for the ACKed sender.
   - bit 1 `CTRL`: **reserved** for the HARDWARIO STICKER P2P profile, which runs this frame
     layer over LoRa. When set, a control TLV tail `{ id(1) ‖ len(1) ‖ value }…` follows the
@@ -221,9 +220,9 @@ genuine uplinks. The default stays *on* so the single-link `net_*` examples work
 under the **same key**; a re-add under a new key (a re-paired or factory-reset node whose
 counter restarted) starts fresh at 0 instead of having every frame dropped as a replay. A new
 peer takes a never-written lane local before it evicts a removed peer's record, so remove A →
-add B → re-add A keeps A's replay window. Legacy 8-byte records (pre-KCV) restore as before and
-are upgraded in place on the next `add_peer`. Replays dropped from a registered peer are logged
-(`net` target, rate-limited to one line per 10 s).
+add B → re-add A keeps A's replay window. A lane record of any other length is invalid and
+reads as absent. Replays dropped from a registered peer are logged (`net` target, rate-limited
+to one line per 10 s).
 
 Registering and inspecting peers:
 
@@ -476,7 +475,7 @@ separate ~20 ms deaf window.
 | Confirmed repetitions (range / default) | 1-10 (`MAX_REPS`) / 3 |
 | Re-ACKs per received counter | ≤ 9 (`MAX_REPS − 1`; reset by the next fresh frame) |
 | RX sync-hold (deadline extension, once per `rx`) | ≈ 55 ms (`SYNC_HOLD`) |
-| Replay-lane record (`NS_NET` 0x10-0x1F) | 12 B `addr ‖ last_seen ‖ KCV` (legacy 8 B accepted, upgraded) |
+| Replay-lane record (`NS_NET` 0x10-0x1F) | 12 B `addr ‖ last_seen ‖ KCV` (any other length is invalid) |
 | Confirmed latency (N=3 / N=10) | ≈ 1.06 s / ≈ 3.55 s worst case |
 | Replay counter | 32-bit; starts at 1; **saturating** at 2³²−1 (fail-closed, not wrap); re-key well before |
 | Reserve block `RESERVE` / lazy-persist `P` | 1024 / 32 transfers |

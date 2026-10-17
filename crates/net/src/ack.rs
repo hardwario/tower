@@ -8,9 +8,12 @@
 //! the rest of the window rather than treating it as a failed delivery. Once resolved, further
 //! (duplicate) ACKs are ignored too: a delivery resolves at most once.
 
-/// ACK payload flags byte (byte 5, appended in wire v3). Absent on older peers'
-/// 4/5-byte ACKs; the `len >= 4` acceptance rule (pinned below) is what makes the
-/// append interop-safe in a mixed-version network.
+/// ACK payload length: `acked(4 LE) ‖ rssi(1, i8) ‖ flags(1)`. Every ACK carries all three
+/// fields; a shorter payload is not an ACK. Bytes beyond this are ignored (the STICKER control
+/// tail, [`ack_flags::CTRL`]).
+pub const ACK_LEN: usize = 6;
+
+/// ACK payload flags byte (byte 5).
 pub mod ack_flags {
     /// The ACKer (a gateway) holds a queued downlink for the ACKed sender, who
     /// should keep its radio in RX for a short window instead of going to sleep.
@@ -18,32 +21,31 @@ pub mod ack_flags {
     /// **Reserved** for the HARDWARIO STICKER P2P profile, which runs this frame
     /// layer over LoRa: a control TLV tail (`id(1) ‖ len(1) ‖ value`) follows the
     /// flags byte up to the end of the ACK payload. TOWER firmware never sets it and
-    /// ignores it; the tail is skipped by the `len >= 4` rule. Do not assign bit 1 to
-    /// anything else.
+    /// ignores it; bytes past [`ACK_LEN`](super::ACK_LEN) are never read. Do not assign
+    /// bit 1 to anything else.
     pub const CTRL: u8 = 1 << 1;
 }
 
 /// Metadata parsed out of an ACK payload: the receiver-side RSSI report and the
-/// wire-v3 pending-downlink flag. Layout: `acked(4 LE) ‖ rssi(1, i8) ‖ flags(1)`,
-/// with both trailing bytes optional (older peers send 4- or 5-byte ACKs).
+/// pending-downlink flag (layout: [`ACK_LEN`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AckMeta {
-    /// RSSI at which the receiver heard our frame, as it packed it (clamped i8 dBm);
-    /// `None` on a 4-byte (no-RSSI) ACK.
-    pub rssi: Option<i8>,
-    /// The ACKer holds a queued downlink for us ([`ack_flags::PENDING`]); always
-    /// `false` on a pre-v3 (≤ 5-byte) ACK.
+    /// RSSI at which the receiver heard our frame, as it packed it (clamped i8 dBm).
+    pub rssi: i8,
+    /// The ACKer holds a queued downlink for us ([`ack_flags::PENDING`]).
     pub pending: bool,
 }
 
-/// Parse the metadata bytes of an ACK payload (pure; the caller has already matched
-/// the ACK via [`AckWait::offer`], so `payload` is the accepted ACK's).
+/// Parse the metadata bytes of an ACK payload (pure; the caller has already matched the ACK
+/// via [`AckWait::offer`], so `payload` is the accepted ACK's). `None` for a payload shorter
+/// than [`ACK_LEN`], which [`AckWait::offer`] never resolves.
 #[must_use]
-pub fn ack_meta(payload: &[u8]) -> AckMeta {
-    AckMeta {
-        rssi: payload.get(4).map(|&b| b as i8),
-        pending: payload.get(5).is_some_and(|&f| f & ack_flags::PENDING != 0),
-    }
+pub fn ack_meta(payload: &[u8]) -> Option<AckMeta> {
+    let (&rssi, &flags) = (payload.get(4)?, payload.get(5)?);
+    Some(AckMeta {
+        rssi: rssi as i8,
+        pending: flags & ack_flags::PENDING != 0,
+    })
 }
 
 /// The verdict for one frame heard inside the ACK window.
@@ -84,8 +86,9 @@ impl AckWait {
     /// Offer one authenticated frame heard in the window: its type (`is_ack`), clear-header
     /// `src`/`dest`, and decrypted payload.
     ///
-    /// ACK payload: acked counter (4 LE) + rssi (1). A valid ACK for a *different* counter
-    /// (a stale/duplicate ACK) also isn't ours; keep waiting for the right one.
+    /// ACK payload: [`ACK_LEN`] bytes, the acked counter first; a shorter payload never
+    /// resolves. A valid ACK for a *different* counter (a stale/duplicate ACK) also isn't ours;
+    /// keep waiting for the right one.
     pub fn offer(&mut self, is_ack: bool, src: u32, dest: u32, payload: &[u8]) -> AckVerdict {
         if self.resolved {
             return AckVerdict::Ignore; // a delivery resolves at most once
@@ -93,7 +96,7 @@ impl AckWait {
         if !is_ack || src != self.peer || dest != self.me {
             return AckVerdict::Ignore;
         }
-        if payload.len() >= 4
+        if payload.len() >= ACK_LEN
             && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == self.counter
         {
             self.resolved = true;
@@ -111,9 +114,9 @@ mod tests {
     const ME: u32 = 0x1111_1111;
     const PEER: u32 = 0x2222_2222;
 
-    /// A well-formed ACK payload: acked counter (4 LE) + rssi (1).
-    fn ack_payload(counter: u32, rssi: u8) -> [u8; 5] {
-        let mut p = [0u8; 5];
+    /// A well-formed ACK payload: acked counter (4 LE) + rssi (1) + flags (1, none set).
+    fn ack_payload(counter: u32, rssi: u8) -> [u8; ACK_LEN] {
+        let mut p = [0u8; ACK_LEN];
         p[..4].copy_from_slice(&counter.to_le_bytes());
         p[4] = rssi;
         p
@@ -181,78 +184,58 @@ mod tests {
         assert_eq!(w.offer(true, PEER, ME, &ack_payload(42, 0)), AckVerdict::Resolved);
     }
 
-    /// A short payload (< 4 bytes, no full acked-counter field) never resolves.
+    /// A payload shorter than [`ACK_LEN`] never resolves, even with the right counter: every
+    /// ACK carries the rssi and flags bytes (there are no 4- or 5-byte ACKs to accept).
     #[test]
     fn short_payload_ignored() {
-        let mut w = AckWait::new(ME, PEER, 42);
-        assert_eq!(w.offer(true, PEER, ME, &[]), AckVerdict::Ignore);
-        assert_eq!(w.offer(true, PEER, ME, &[42]), AckVerdict::Ignore);
-        assert_eq!(w.offer(true, PEER, ME, &[42, 0, 0]), AckVerdict::Ignore);
+        let full = ack_payload(42, 0);
+        for len in 0..ACK_LEN {
+            let mut w = AckWait::new(ME, PEER, 42);
+            assert_eq!(
+                w.offer(true, PEER, ME, &full[..len]),
+                AckVerdict::Ignore,
+                "len {len}"
+            );
+        }
     }
 
-    /// The rule is `len >= 4`: exactly 4 bytes (no rssi byte) still matches, and trailing bytes
-    /// beyond the rssi are tolerated; pin the current contract.
+    /// The rule is `len >= ACK_LEN`: exactly 6 bytes resolves, and trailing bytes beyond them
+    /// are tolerated (the STICKER control tail); pin the current contract.
     #[test]
-    fn payload_length_rule_is_at_least_four() {
+    fn payload_length_rule_is_at_least_ack_len() {
         let mut w = AckWait::new(ME, PEER, 42);
-        assert_eq!(
-            w.offer(true, PEER, ME, &42u32.to_le_bytes()),
-            AckVerdict::Resolved
-        );
+        assert_eq!(w.offer(true, PEER, ME, &ack_payload(42, 0)), AckVerdict::Resolved);
         let mut w2 = AckWait::new(ME, PEER, 42);
         let mut long = [0u8; 8];
-        long[..4].copy_from_slice(&42u32.to_le_bytes());
+        long[..ACK_LEN].copy_from_slice(&ack_payload(42, 0));
         assert_eq!(w2.offer(true, PEER, ME, &long), AckVerdict::Resolved);
     }
 
-    /// `ack_meta` over every historical ACK length: 4 bytes (no RSSI, pre-RSSI era),
-    /// 5 bytes (RSSI, wire v2), 6 bytes (RSSI + flags, wire v3). Older-peer ACKs must
-    /// parse as "no pending", never as a spurious RX window on the node.
+    /// `ack_meta` reads the rssi and flags bytes; unknown flag bits never read as pending, and a
+    /// payload too short to be an ACK has no metadata.
     #[test]
-    fn ack_meta_all_lengths() {
+    fn ack_meta_fields() {
+        let mut p = ack_payload(42, -67i8 as u8);
         assert_eq!(
-            ack_meta(&42u32.to_le_bytes()),
-            AckMeta {
-                rssi: None,
+            ack_meta(&p),
+            Some(AckMeta {
+                rssi: -67,
                 pending: false
-            }
+            })
         );
-
-        let mut p5 = [0u8; 5];
-        p5[..4].copy_from_slice(&42u32.to_le_bytes());
-        p5[4] = -67i8 as u8;
+        p[5] = ack_flags::PENDING;
         assert_eq!(
-            ack_meta(&p5),
-            AckMeta {
-                rssi: Some(-67),
-                pending: false
-            }
-        );
-
-        let mut p6 = [0u8; 6];
-        p6[..5].copy_from_slice(&p5);
-        p6[5] = ack_flags::PENDING;
-        assert_eq!(
-            ack_meta(&p6),
-            AckMeta {
-                rssi: Some(-67),
+            ack_meta(&p),
+            Some(AckMeta {
+                rssi: -67,
                 pending: true
-            }
+            })
         );
-
-        // Flags byte present but pending bit clear.
-        p6[5] = 0;
-        assert_eq!(
-            ack_meta(&p6),
-            AckMeta {
-                rssi: Some(-67),
-                pending: false
-            }
-        );
-
-        // Unknown future flag bits don't read as pending.
-        p6[5] = 0xFE;
-        assert!(!ack_meta(&p6).pending);
+        p[5] = 0xFE; // every other bit, incl. the reserved CTRL
+        assert_eq!(ack_meta(&p).map(|m| m.pending), Some(false));
+        for len in 0..ACK_LEN {
+            assert_eq!(ack_meta(&p[..len]), None, "len {len}");
+        }
     }
 
     /// A STICKER-style ACK with the reserved CTRL bit and a TLV tail after the flags
@@ -280,23 +263,13 @@ mod tests {
         assert_eq!(&ids[..n], &[0x10, 0x14]);
         assert_eq!(
             ack_meta(&p),
-            AckMeta {
-                rssi: Some(-67),
+            Some(AckMeta {
+                rssi: -67,
                 pending: true
-            }
+            })
         );
         let mut w = AckWait::new(ME, PEER, 42);
         assert_eq!(w.offer(true, PEER, ME, &p), AckVerdict::Resolved);
-    }
-
-    /// A 6-byte (flags-bearing) ACK still resolves the wait: the `len >= 4` rule.
-    #[test]
-    fn six_byte_ack_still_resolves() {
-        let mut w = AckWait::new(ME, PEER, 42);
-        let mut p6 = [0u8; 6];
-        p6[..4].copy_from_slice(&42u32.to_le_bytes());
-        p6[5] = ack_flags::PENDING;
-        assert_eq!(w.offer(true, PEER, ME, &p6), AckVerdict::Resolved);
     }
 
     /// Counter matching is exact over the full u32 range (LE decode of the payload).

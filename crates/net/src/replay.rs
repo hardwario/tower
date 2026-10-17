@@ -133,7 +133,8 @@ impl ReplayLane {
 
 /// One persisted replay-lane record as read back from EEPROM: the peer `addr` it belongs to,
 /// its persisted last-seen `seen`, and the **key-check value** of the key that lane was tracked
-/// under (`None` for a legacy 8-byte record written before the KCV existed).
+/// under. A record of any other shape than this one (12 bytes on EEPROM) is invalid: the
+/// caller reads it as absent.
 ///
 /// The KCV (the first 4 bytes of `AES_K(0¹²⁸)`, computed by the firmware's AES engine) lets a
 /// re-added peer restore its lane **only under the same key**. The all-zero block is never an
@@ -143,11 +144,12 @@ impl ReplayLane {
 pub struct LaneRecord {
     pub addr: u32,
     pub seen: u32,
-    pub kcv: Option<u32>,
+    pub kcv: u32,
 }
 
-/// Where a peer's replay lane is persisted, and what the caller must do with it.
-/// The result of [`assign_lane`].
+/// Where a peer's replay lane is persisted. The result of [`assign_lane`]. A `fresh` binding
+/// must be written now (`(addr, 0, kcv)` at `index`: it claims the local for this addr + key);
+/// a restored one needs no write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaneBinding {
     /// Index (`0..records.len()`) of the persisted lane local this peer's lane lives at.
@@ -157,10 +159,6 @@ pub struct LaneBinding {
     /// `true` = the lane starts fresh at 0 (a newly claimed local, an evicted removed peer's
     /// local, or this addr's own record under a *different* key); `false` = restored.
     pub fresh: bool,
-    /// The caller must (re)write `(addr, seen, kcv)` at `index` now: every fresh binding (claim
-    /// the local for this addr + key), and a restored *legacy* record (upgrade it in place to
-    /// carry the KCV, so a later re-add under a different key can tell the difference).
-    pub persist: bool,
 }
 
 /// Bind a peer address (installed under the key whose KCV is `kcv`) to one of `records.len()`
@@ -178,10 +176,8 @@ pub struct LaneBinding {
 /// never share a local; a removed peer's record stays behind for resume-on-re-add while its local
 /// becomes reusable). Priority:
 ///
-/// 1. **This addr's own record** at a free local. Restored when its KCV matches `kcv`, or when
-///    it is a legacy record without one (backward compatible with deployed EEPROM, and then
-///    `persist` asks the caller to upgrade it in place). If the addr's only record carries a
-///    *different* KCV, the peer was re-added under a **new key**: a new key is a disjoint nonce
+/// 1. **This addr's own record** at a free local. Restored when its KCV matches `kcv`. If the
+///    addr's only record carries a *different* KCV, the peer was re-added under a **new key**: a new key is a disjoint nonce
 ///    space and the peer may have restarted its counter (a factory-reset / re-paired node), so
 ///    restoring the old high last-seen would classify all its fresh frames as replays and drop
 ///    them silently. That local is reused, fresh at 0 (at most one record per addr). Among
@@ -205,7 +201,6 @@ pub fn assign_lane(addr: u32, kcv: u32, records: &[Option<LaneRecord>], used: u3
             index,
             seen: 0,
             fresh: true,
-            persist: true,
         })
     };
     // 1. This addr's own record(s), at locals no live peer occupies.
@@ -216,21 +211,15 @@ pub fn assign_lane(addr: u32, kcv: u32, records: &[Option<LaneRecord>], used: u3
         if r.addr != addr || !free(l) {
             continue;
         }
-        match r.kcv {
-            Some(k) if k != kcv => {
-                stale_own.get_or_insert(l);
-            }
-            // KCV match (no write needed) or legacy (upgrade in place).
-            k => {
-                if restore.is_none_or(|b| r.seen > b.seen) {
-                    restore = Some(LaneBinding {
-                        index: l,
-                        seen: r.seen,
-                        fresh: false,
-                        persist: k.is_none(),
-                    });
-                }
-            }
+        if r.kcv != kcv {
+            stale_own.get_or_insert(l);
+        } else if restore.is_none_or(|b| r.seen > b.seen) {
+            // KCV match: restore (no write needed).
+            restore = Some(LaneBinding {
+                index: l,
+                seen: r.seen,
+                fresh: false,
+            });
         }
     }
     if restore.is_some() {
@@ -442,17 +431,12 @@ mod tests {
     const K1: u32 = 0x1111_1111;
     const K2: u32 = 0x2222_2222;
 
-    fn rec(addr: u32, seen: u32, kcv: Option<u32>) -> Option<LaneRecord> {
+    fn rec(addr: u32, seen: u32, kcv: u32) -> Option<LaneRecord> {
         Some(LaneRecord { addr, seen, kcv })
     }
 
-    fn bind(index: usize, seen: u32, fresh: bool, persist: bool) -> Option<LaneBinding> {
-        Some(LaneBinding {
-            index,
-            seen,
-            fresh,
-            persist,
-        })
+    fn bind(index: usize, seen: u32, fresh: bool) -> Option<LaneBinding> {
+        Some(LaneBinding { index, seen, fresh })
     }
 
     /// An unknown peer with no record claims the lowest free local (fresh, persisted); an
@@ -460,8 +444,8 @@ mod tests {
     #[test]
     fn assign_lane_claims_lowest_free() {
         let records = [None, None, None, None];
-        assert_eq!(assign_lane(0xAAAA, K1, &records, 0), bind(0, 0, true, true));
-        assert_eq!(assign_lane(0xAAAA, K1, &records, 0b0001), bind(1, 0, true, true));
+        assert_eq!(assign_lane(0xAAAA, K1, &records, 0), bind(0, 0, true));
+        assert_eq!(assign_lane(0xAAAA, K1, &records, 0b0001), bind(1, 0, true));
     }
 
     /// A peer finds its OWN record by addr, at whatever local it sits: the restore path (same
@@ -469,13 +453,13 @@ mod tests {
     #[test]
     fn assign_lane_restores_own_record_by_addr() {
         let records = [
-            rec(0xA, 10, Some(K1)),
-            rec(0xB, 20, Some(K1)),
-            rec(0xC, 30, Some(K1)),
-            rec(0xD, 40, Some(K2)),
+            rec(0xA, 10, K1),
+            rec(0xB, 20, K1),
+            rec(0xC, 30, K1),
+            rec(0xD, 40, K2),
         ];
-        assert_eq!(assign_lane(0xC, K1, &records, 0), bind(2, 30, false, false));
-        assert_eq!(assign_lane(0xD, K2, &records, 0), bind(3, 40, false, false));
+        assert_eq!(assign_lane(0xC, K1, &records, 0), bind(2, 30, false));
+        assert_eq!(assign_lane(0xD, K2, &records, 0), bind(3, 40, false));
     }
 
     /// THE slot-shift regression: A,B,C,D registered (records A@0,B@1,C@2,D@3) → B removed (its
@@ -484,10 +468,10 @@ mod tests {
     #[test]
     fn assign_lane_survives_remove_then_reboot() {
         let records = [
-            rec(0xA, 10, Some(K1)),
-            rec(0xB, 20, Some(K1)),
-            rec(0xC, 30, Some(K1)),
-            rec(0xD, 40, Some(K1)),
+            rec(0xA, 10, K1),
+            rec(0xB, 20, K1),
+            rec(0xC, 30, K1),
+            rec(0xD, 40, K1),
         ];
         let mut used = 0u32;
         let a = assign_lane(0xA, K1, &records, used).unwrap();
@@ -514,21 +498,20 @@ mod tests {
     #[test]
     fn assign_lane_prefers_never_written_over_removed_peers_record() {
         // A was at local 0 (last-seen 500), then removed: nothing live.
-        let mut records = [rec(0xA, 500, Some(K1)), None, None, None];
+        let mut records = [rec(0xA, 500, K1), None, None, None];
         let b = assign_lane(0xB, K2, &records, 0).unwrap();
         assert_eq!(
             b.index, 1,
             "B must not evict removed A's record while never-written locals remain"
         );
-        records[b.index] = rec(0xB, 0, Some(K2));
+        records[b.index] = rec(0xB, 0, K2);
         let a = assign_lane(0xA, K1, &records, 1 << b.index).unwrap();
         assert_eq!(
             a,
             LaneBinding {
                 index: 0,
                 seen: 500,
-                fresh: false,
-                persist: false
+                fresh: false
             }
         );
     }
@@ -538,13 +521,13 @@ mod tests {
     #[test]
     fn assign_lane_evicts_only_when_no_never_written_local() {
         let records = [
-            rec(0xA, 10, Some(K1)),
-            rec(0xB, 20, Some(K1)),
-            rec(0xC, 30, Some(K1)),
-            rec(0xD, 40, Some(K1)),
+            rec(0xA, 10, K1),
+            rec(0xB, 20, K1),
+            rec(0xC, 30, K1),
+            rec(0xD, 40, K1),
         ];
         let used = 0b1101; // A@0, C@2, D@3 live; local 1 holds removed B's record.
-        assert_eq!(assign_lane(0xE, K1, &records, used), bind(1, 0, true, true));
+        assert_eq!(assign_lane(0xE, K1, &records, used), bind(1, 0, true));
     }
 
     /// Finding #5(b): a peer re-added under a DIFFERENT key must not inherit the old key's
@@ -552,35 +535,22 @@ mod tests {
     /// drop every fresh frame as a replay. Its own local is reused, fresh at 0, persisted.
     #[test]
     fn assign_lane_key_change_starts_fresh_at_own_local() {
-        let records = [rec(0xB, 7, Some(K1)), rec(0xA, 900, Some(K1)), None];
-        assert_eq!(assign_lane(0xA, K2, &records, 0), bind(1, 0, true, true));
-    }
-
-    /// A legacy 8-byte record (no KCV) is treated as matching (backward compatible with
-    /// deployed EEPROM) and flagged for an in-place upgrade so the KCV is present from then on.
-    #[test]
-    fn assign_lane_legacy_record_restores_and_upgrades() {
-        let records = [rec(0xA, 321, None), None];
-        assert_eq!(assign_lane(0xA, K2, &records, 0), bind(0, 321, false, true));
+        let records = [rec(0xB, 7, K1), rec(0xA, 900, K1), None];
+        assert_eq!(assign_lane(0xA, K2, &records, 0), bind(1, 0, true));
     }
 
     /// Duplicate own records (only after a failed claim write): the highest acceptable last-seen
     /// is restored; a mismatched-key duplicate is ignored when an acceptable one exists.
     #[test]
     fn assign_lane_duplicates_restore_highest_acceptable() {
-        let records = [
-            rec(0xA, 10, Some(K1)),
-            rec(0xA, 9999, Some(K2)),
-            rec(0xA, 50, None),
-            None,
-        ];
-        assert_eq!(assign_lane(0xA, K1, &records, 0), bind(2, 50, false, true));
+        let records = [rec(0xA, 10, K1), rec(0xA, 9999, K2), rec(0xA, 50, K1), None];
+        assert_eq!(assign_lane(0xA, K1, &records, 0), bind(2, 50, false));
     }
 
     /// No free local (every local bound to a live peer) → None.
     #[test]
     fn assign_lane_none_when_full() {
-        let records = [rec(0xA, 1, Some(K1)), rec(0xB, 2, Some(K1))];
+        let records = [rec(0xA, 1, K1), rec(0xB, 2, K1)];
         assert_eq!(assign_lane(0xC, K1, &records, 0b11), None);
     }
 
@@ -588,7 +558,7 @@ mod tests {
     /// local); fall through to a claim.
     #[test]
     fn assign_lane_skips_addr_match_at_occupied_local() {
-        let records = [rec(0xA, 10, Some(K1)), None];
-        assert_eq!(assign_lane(0xA, K1, &records, 0b01), bind(1, 0, true, true));
+        let records = [rec(0xA, 10, K1), None];
+        assert_eq!(assign_lane(0xA, K1, &records, 0b01), bind(1, 0, true));
     }
 }

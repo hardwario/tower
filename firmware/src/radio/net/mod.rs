@@ -36,7 +36,7 @@ use embassy_time::{Duration, Instant, Timer};
 // ACK resolution) live in the host-testable `tower_net` leaf crate; this module keeps the
 // radio/EEPROM flow and delegates each decision there. Zero behavioural change on target.
 pub use tower_net::ack::AckMeta;
-use tower_net::ack::{AckVerdict, AckWait, ack_flags, ack_meta};
+use tower_net::ack::{ACK_LEN, AckVerdict, AckWait, ack_flags, ack_meta};
 /// Reserved-address rules shared by pairing, the gateway's `NodeAdd`, a node's `Provision` and
 /// [`Net::add_peer`] (docs/radio.md "Reserved IDs").
 pub use tower_net::addr::{ADDR_BROADCAST, ADDR_UNASSIGNED, is_reserved_addr, peer_addr_valid};
@@ -473,9 +473,8 @@ impl Net {
             return false;
         };
         let local = KEY_LASTSEEN_BASE + bind.index as u8;
-        if bind.persist {
-            // Claim the local for (addr, key), or upgrade a legacy 8-byte record in place so it
-            // carries the KCV from now on. One small append, only on a bind change.
+        if bind.fresh {
+            // Claim the local for (addr, key): one small append, only on a bind change.
             let _ = nkv.set_bytes(local, &lane_record(peer_addr, bind.seen, kcv));
         }
         self.peers[slot] = Some(Peer {
@@ -906,7 +905,7 @@ impl Net {
             if wait.offer(is_ack, hdr.src, hdr.dest, &buf[range.clone()]) == AckVerdict::Resolved {
                 // Keep the resolving ACK's metadata (receiver RSSI + the wire-v3
                 // pending-downlink flag) for `last_ack()`: the sleeping-node cue.
-                self.last_ack = Some(ack_meta(&buf[range]));
+                self.last_ack = ack_meta(&buf[range]);
                 return true;
             }
         }
@@ -921,15 +920,14 @@ impl Net {
         }
         // Let the sender finish its TX→RX turnaround before we transmit.
         Timer::after(ACK_TURNAROUND).await;
-        let mut payload = [0u8; 6];
+        let mut payload = [0u8; ACK_LEN];
         payload[..4].copy_from_slice(&acked.to_le_bytes());
         // Clamp to i8 range before packing: rssi is i16 and the SPIRIT1 noise floor reaches
         // below −128 dBm, where a bare `as i8` wraps (−130 → +126) and reports a strong link for
         // the weakest one. Clamp so the reported margin is monotonic at the edges.
         payload[4] = rssi.clamp(i8::MIN as i16, i8::MAX as i16) as i8 as u8;
-        // Flags byte (wire v3): advertise a queued downlink so a sleeping sender holds an RX
-        // window open after this uplink. Appending is interop-safe: the ACK acceptance rule is
-        // `len >= 4` (pinned in tower-net), so pre-v3 peers simply ignore the byte.
+        // Flags byte: advertise a queued downlink so a sleeping sender holds an RX window open
+        // after this uplink (`ack_flags`; bit 1 is reserved for the STICKER profile).
         payload[5] = match self.peer_slot(dest) {
             Some(i) if self.peers[i].as_ref().unwrap().pending => ack_flags::PENDING,
             _ => 0,
@@ -1036,9 +1034,7 @@ fn has_record(kv: Scoped, local: u8) -> bool {
 /// little-endian). Persisting the addr lets [`add_peer`](Net::add_peer) restore a lane only
 /// for the peer that owns it, not whichever peer inherits the slot; the KCV restricts that to
 /// the *same key*: a peer re-added under a new key (possibly with a restarted counter) starts
-/// fresh instead of having its frames dropped as replays. Format history: the original record
-/// was the 8-byte `addr ‖ last_seen`; [`read_lane_record`] still accepts it (as "KCV unknown,
-/// assume match") and `add_peer` upgrades it in place.
+/// fresh instead of having its frames dropped as replays.
 fn lane_record(addr: u32, last_seen: u32, kcv: u32) -> [u8; 12] {
     let mut b = [0u8; 12];
     b[..4].copy_from_slice(&addr.to_le_bytes());
@@ -1047,23 +1043,17 @@ fn lane_record(addr: u32, last_seen: u32, kcv: u32) -> [u8; 12] {
     b
 }
 
-/// Read a replay-lane record: 12 bytes (with KCV) or the legacy 8 (`kcv: None`); anything
-/// else reads as absent.
+/// Read a replay-lane record: exactly 12 bytes ([`lane_record`]); anything else is invalid and
+/// reads as absent.
 fn read_lane_record(kv: Scoped, local: u8) -> Option<LaneRecord> {
     let mut b = [0u8; 12];
-    let len = kv.get_bytes(local, &mut b).ok()??;
-    let word = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
-    match len {
-        8 => Some(LaneRecord {
-            addr: word(0),
-            seen: word(4),
-            kcv: None,
-        }),
-        12 => Some(LaneRecord {
-            addr: word(0),
-            seen: word(4),
-            kcv: Some(word(8)),
-        }),
-        _ => None,
+    if kv.get_bytes(local, &mut b).ok()?? != 12 {
+        return None;
     }
+    let word = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+    Some(LaneRecord {
+        addr: word(0),
+        seen: word(4),
+        kcv: word(8),
+    })
 }

@@ -560,7 +560,7 @@ async fn run(b: Board) {
                     dest: rx.src,
                     item: item_id,
                     outcome,
-                    ack_rssi: net.last_ack().and_then(|m| m.rssi),
+                    ack_rssi: net.last_ack().map(|m| m.rssi),
                 })
                 .await;
             }

@@ -251,7 +251,7 @@ mod tests {
         records[2] = Some(LaneRecord {
             addr: NODE,
             seen: 5000,
-            kcv: Some(KCV_OLD),
+            kcv: KCV_OLD,
         });
 
         // Re-provisioned under a new key: the lane binds fresh at 0, so the node's first
@@ -271,7 +271,7 @@ mod tests {
         records[bind.index] = Some(LaneRecord {
             addr: NODE,
             seen: lane.last_seen(),
-            kcv: Some(KCV_NEW),
+            kcv: KCV_NEW,
         });
         let bind = assign_lane(NODE, KCV_NEW, &records, 0).unwrap();
         assert!(!bind.fresh && bind.seen == 1);
@@ -283,7 +283,7 @@ mod tests {
         records[2] = Some(LaneRecord {
             addr: NODE,
             seen: 5000,
-            kcv: Some(KCV_OLD),
+            kcv: KCV_OLD,
         });
         let bind = assign_lane(NODE, KCV_OLD, &records, 0).unwrap();
         assert!(!bind.fresh && bind.seen == 5000);
