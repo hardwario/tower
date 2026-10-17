@@ -28,6 +28,15 @@ change so the stale side fails loudly with `BadVersion` instead of decoding garb
    radio schema) and the variant-order fingerprint pins, if the change touches them. New
    coverage = a NEW golden fn, never an edit to an existing one. Variant-order pins are hex
    tables (`(Variant, 0x02)`), never `i as u8`.
+   **The wire fingerprint (since 1.6.0) makes this exhaustive:** `fingerprint::CONSOLE_HASH` is
+   pinned in `tests/golden.rs` and `fingerprint::RADIO_HASH` in `tests/radio_golden.rs`, so ANY
+   schema change (even one no byte vector exercises) fails a pin, and updating the pin is a
+   golden change the guard ties to the right version constant. `WIRE_FINGERPRINT` itself is
+   pinned in `tests/fingerprint.rs` (update it alongside). Renames don't move it (names are not
+   hashed). Never use a serde attribute that changes the encoding (`skip`, `with`, `flatten`,
+   ...): the `Schema` derive cannot see it. `postcard-schema` / `postcard-derive` are pinned with
+   `=` on purpose (the host and firmware workspaces each recompute the fingerprint from their own
+   lockfile); bumping them is a deliberate act: if a pin moves, treat it as a wire change.
 4. **Bump `version` in `Cargo.toml`** (semver: wire/behaviour change: minor; fix: patch) and add
    a `CHANGELOG.md` entry. Fix every consumer the change breaks (firmware, cli, hil, kv) **in the
    same commit**; the path dependencies make the build fail until you do.

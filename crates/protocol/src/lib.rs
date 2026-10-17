@@ -39,15 +39,22 @@
 //!    builds whose schemas differ under the *same* `PROTOCOL_VERSION` silently mis-decode
 //!    (wrong field values, no error). The golden vectors + the CI wire-bump guard make the
 //!    bump mechanical; building every end from the same tree makes it moot.
-//! 4. Ship it as one commit: the firmware, the CLI and the HIL harness depend on this
+//! 4. Since v4 the schema also has a runtime check: [`WIRE_FINGERPRINT`], a compile-time
+//!    structural hash of the schema (see [`fingerprint`]), travels in [`Hello`] and in the
+//!    `Describe` reply ([`mgmt::DeviceInfo`]), and a host treats a fingerprint that differs from
+//!    its own exactly like a version mismatch. It changes with any field / variant order,
+//!    shape or width change, and not with a rename. Its two components are pinned in the golden
+//!    files, so a schema change is a golden change and the guard demands the bump.
+//! 5. Ship it as one commit: the firmware, the CLI and the HIL harness depend on this
 //!    crate by path, so they move together by construction; tag the release
 //!    `protocol-vX.Y.Z`. Devices and installed `tower` binaries built from an older tree
 //!    still speak the old version: reflash and reinstall both ends (a mismatch shows up
-//!    as [`Error::BadVersion`]).
+//!    as [`Error::BadVersion`], or as a fingerprint mismatch under the same version).
 
 #![no_std]
 
 pub mod crc;
+pub mod fingerprint;
 pub mod mgmt;
 pub mod msg;
 pub mod radio;
@@ -66,7 +73,26 @@ use serde::Serialize;
 /// schema they carry. (The [`radio`] application schema added alongside is versioned
 /// separately; its [`radio::RADIO_SCHEMA_VERSION`] byte rides *inside* `Uplink`
 /// payloads and does not affect the console framing.)
-pub const PROTOCOL_VERSION: u8 = 3;
+///
+/// v4 (crate 1.6.0): the wire fingerprint. [`Hello`] gained a trailing `wire_fingerprint`;
+/// [`mgmt::DeviceInfo`] gained trailing `wire_fingerprint` and `firmware_version` fields. Both
+/// carry the producer's [`WIRE_FINGERPRINT`], which a host compares with its own.
+///
+/// Only values 0..=7 fit the header (asserted below); v4 leaves 5, 6 and 7. Spend them on real
+/// console wire changes only (the radio schema has its own version byte).
+pub const PROTOCOL_VERSION: u8 = 4;
+
+/// Compile-time structural fingerprint of the whole wire schema: every [`MsgType`] value paired
+/// with its payload's schema, the [`mgmt`] op and reply records, and the [`radio`] application
+/// schema. Names are ignored (a rename is wire-neutral); field and variant order, shapes, integer
+/// widths and nesting are not. See the [`fingerprint`] module for exactly what is and is not
+/// covered, and how it is computed (FNV-1a 64, xor-folded to 32 bits).
+///
+/// The device sends it in [`Hello::wire_fingerprint`] and [`mgmt::DeviceInfo::wire_fingerprint`];
+/// a host that sees a value different from its own must treat the link as a lockstep mismatch
+/// (same `PROTOCOL_VERSION` but a different wire schema: the two ends were built from different
+/// tower-protocol sources) and refuse to interpret further frames.
+pub const WIRE_FINGERPRINT: u32 = fingerprint::combine(fingerprint::CONSOLE_HASH, fingerprint::RADIO_HASH);
 
 // The version occupies only the top 3 bits of `ver_type` (`PROTOCOL_VERSION << 5`), so it must
 // fit in 0..=7. Bumping past 7 would silently wrap in release builds and alias an old version
@@ -116,6 +142,24 @@ pub enum MsgType {
 }
 
 impl MsgType {
+    /// Every message type, in ascending discriminant order (the fixed order the
+    /// [`WIRE_FINGERPRINT`] hashes them in).
+    pub const ALL: [MsgType; 13] = [
+        Self::Hello,
+        Self::Log,
+        Self::Print,
+        Self::Event,
+        Self::ShellResponse,
+        Self::ShellCompletions,
+        Self::Dropped,
+        Self::MgmtResponse,
+        Self::Uplink,
+        Self::RadioStat,
+        Self::ShellCommand,
+        Self::ShellComplete,
+        Self::MgmtRequest,
+    ];
+
     pub fn from_u8(v: u8) -> Option<Self> {
         Some(match v {
             0 => Self::Hello,

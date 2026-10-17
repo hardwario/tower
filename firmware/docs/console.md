@@ -309,7 +309,7 @@ tower complete "/system settings set "   # ask the target what completes here
 | Command | Does |
 |---|---|
 | `/system reboot` | flush the reply, then `SCB::sys_reset()` |
-| `/system/resource print` | firmware/protocol version, uptime, CPU, clock, memory, `rng:` source (`TRNG` / `SW fallback`) |
+| `/system/resource print` | firmware name + version, session id, `wire: v<PROTOCOL_VERSION> fp 0x<WIRE_FINGERPRINT>` (the lockstep schema fingerprint the boot `Hello` carries), uptime, CPU, clock, memory, `rng:` source (`TRNG` / `SW fallback`) |
 | `/system/stack print` | measured stack high-water (boot-painted): used/free/total vs the budget, plus the previous boot's peak after a software/IWDG reset |
 | `/system/eeprom print` | wear gauge: compaction flips vs budget, live/free bytes, resets |
 | `/system/eeprom wipe confirm` | factory reset: an atomic flip to an empty store (power-loss-safe; the store is frozen until the reboot that follows, also on failure). **Console-only** |
@@ -334,7 +334,7 @@ sensitive checks `ctx.is_remote()` itself. `shell::run_line` (no transport conte
 treated as remote.
 
 Responses longer than one frame are **chunked** (192-byte `chunk`/`last` frames) and
-reassembled by the host into one response; `/system/resource print` is a 7-line
+reassembled by the host into one response; `/system/resource print` is an 8-line
 example.
 
 ---
@@ -537,7 +537,7 @@ Message types (the low 5 bits of `ver_type`; target→host are 0..15, host→tar
 
 | Type | # | Dir | Payload |
 |---|---|---|---|
-| `Hello` | 0 | T→H | protocol + firmware version, firmware_name, per-boot session_id (boot announce) |
+| `Hello` | 0 | T→H | protocol_version, firmware_name, firmware_version, per-boot session_id, wire_fingerprint (boot announce; see below) |
 | `Log` | 1 | T→H | level, uptime_us, module, message |
 | `Print` | 2 | T→H | raw text |
 | `Event` | 3 | T→H | name + (key, value) pairs (wire allows 8; the SDK emits ≤6) |
@@ -552,13 +552,32 @@ Message types (the low 5 bits of `ver_type`; target→host are 0..15, host→tar
 | `MgmtRequest` | 18 | H→T | req_id, op (a `mgmt::MgmtOp`; wire v3 gateway link) |
 
 A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, then
-`decode_frame` checks version + type + CRC and returns `(MsgType, seq, payload)`.
+`decode_frame` checks CRC, then version + type, and returns `(MsgType, seq, payload)`.
+
+**The `Hello` and the wire fingerprint (wire v4).** The writer synthesizes `Hello` as seq 0 of
+every console session (boot and each USB plug-in). Its fields, in wire order:
+
+| Field | Meaning |
+|---|---|
+| `protocol_version` | `tower_protocol::PROTOCOL_VERSION` (also in every frame header) |
+| `firmware_name` | the app/example name passed to `app!` (≤ 32 bytes) |
+| `firmware_version` | the SDK crate version, `v`-prefixed (e.g. `v0.1.0`) |
+| `session_id` | the persisted per-boot counter: same id on a re-plug, new id after a reboot |
+| `wire_fingerprint` | `tower_protocol::WIRE_FINGERPRINT`: a compile-time structural hash of the whole wire schema (names ignored) |
+
+The frame header's 3-bit version only catches a mismatch if someone bumped it; the fingerprint
+is derived from the schema itself, so a host built from a different tower-protocol source tree with the
+same `PROTOCOL_VERSION` sees a different value and refuses the link (`tower` prints its
+protocol-mismatch banner and exits with code 125). The gateway and push-button apps also return
+`wire_fingerprint` and `firmware_version` in their `Describe` reply (`DeviceInfo`), for hosts that
+attach after the boot `Hello`. `/system/resource print` shows it on its `wire:` line.
 
 ### Limits & constants
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `PROTOCOL_VERSION` | 3 | top 3 bits of `ver_type` (caps at 7; bumped to 3 for the wire-v3 gateway link) |
+| `PROTOCOL_VERSION` | 4 | top 3 bits of `ver_type` (caps at 7; 3 = the wire-v3 gateway link, 4 = the wire fingerprint in `Hello` / `DeviceInfo`) |
+| `WIRE_FINGERPRINT` | (u32) | compile-time schema hash; carried in `Hello` and `DeviceInfo`, compared by the host |
 | `MAX_FRAME` | 256 | inner frame, pre-COBS (payload budget ≈ 249) |
 | `MAX_WIRE` | 272 | COBS-expanded frame + delimiter |
 | `MAX_MSG` | 192 | log / print text |
@@ -596,7 +615,8 @@ A receiver feeds bytes to a `FrameDecoder` until it yields a deframed buffer, th
 - constants: `MAX_SETTING`, `R_OK`/`R_NOT_FOUND`/`R_BAD_ARG`/`R_STORAGE`/`R_TRUNCATED`/`R_DENIED`
 
 `tower_protocol`: `encode_frame`, `decode_frame`, `FrameDecoder`, `MsgType`, the payload
-structs, `PROTOCOL_VERSION`, `MAX_FRAME`, `MAX_WIRE`, `crc::{crc32_update, crc32_ieee}`.
+structs, `PROTOCOL_VERSION`, `WIRE_FINGERPRINT`, `MAX_FRAME`, `MAX_WIRE`,
+`crc::{crc32_update, crc32_ieee}`.
 
 ## Examples
 
@@ -654,5 +674,7 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
   change: bump `PROTOCOL_VERSION` and follow the runbook in `crates/protocol/AGENTS.md`
   (goldens, one commit, a `protocol-vX.Y.Z` tag). Both ends build the change together; then
   reflash the board and reinstall the `tower` CLI, or the stale side reports `BadVersion`.
+  Since wire v4 a forgotten bump is caught at runtime too: the `Hello` carries
+  `WIRE_FINGERPRINT`, and the host refuses a device whose schema fingerprint differs from its own.
 - **A response is capped at `MAX_SETTING`/`MAX_RESP`-sized text** before chunking; very
   large dumps are clipped. Raise the caps (and `MAX_RESP`) if you need more.

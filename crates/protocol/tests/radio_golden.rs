@@ -354,3 +354,15 @@ fn node_msgs_roundtrip() {
     let n = encode_node_cmd(&c, &mut buf).unwrap();
     assert_eq!(decode_node_cmd(&buf[..n]).unwrap(), c);
 }
+
+// --- the radio half of the wire fingerprint (crate 1.6.0) ------------------------
+//
+// `fingerprint::RADIO_HASH` is the structural hash (names ignored) of `NodeMsg` and `NodeCmd`.
+// Pinning it here turns ANY radio schema change into a golden change, so the wire-bump guard
+// demands a `RADIO_SCHEMA_VERSION` bump (not a console `PROTOCOL_VERSION` one). It is part of
+// `WIRE_FINGERPRINT`, which a device announces in `Hello` / `DeviceInfo`.
+
+#[test]
+fn golden_radio_schema_hash() {
+    assert_eq!(tower_protocol::fingerprint::RADIO_HASH, 0xa74f_b364_abcb_0fd0);
+}

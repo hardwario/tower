@@ -53,7 +53,9 @@ use tower_protocol::msg::{
     Dropped, Event, Hello, Level, Log, MgmtResponse, Print, RadioStat, ShellCompletions, ShellResponse,
     Uplink,
 };
-use tower_protocol::{FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, decode_frame, encode_frame};
+use tower_protocol::{
+    FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, WIRE_FINGERPRINT, decode_frame, encode_frame,
+};
 
 use crate::storage::{NS_SYS, Nv};
 
@@ -501,6 +503,10 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
                 firmware_name: &name,
                 firmware_version: FW_VERSION,
                 session_id: session_id(),
+                // The compile-time schema hash of the tower-protocol this image was built with: the
+                // host compares it with its own and refuses a same-version, different-schema pairing
+                // (two builds from different tower-protocol source trees) that postcard would mis-decode.
+                wire_fingerprint: WIRE_FINGERPRINT,
             },
         )
         .await;

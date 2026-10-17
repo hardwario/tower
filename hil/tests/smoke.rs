@@ -57,7 +57,9 @@ fn smoke_ccm_kat_all_pass() {
 /// the harness pins; a mismatch is exactly the silent-mis-decode hazard the golden rule guards).
 /// A mismatched firmware's frames fail the header's version check before any `Hello` payload is
 /// parsed, so in practice `Console::next` fails fast with the lockstep message; the assert below
-/// is the belt-and-braces check on the decoded field.
+/// is the belt-and-braces check on the decoded field. The same goes for the wire fingerprint
+/// (wire v4): a firmware built from another tower-protocol source tree with the same `PROTOCOL_VERSION`
+/// fails `Console::next` fast; the assert pins it explicitly.
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn smoke_hello_banner_decodes() {
@@ -94,6 +96,7 @@ fn smoke_hello_banner_decodes() {
         firmware_name,
         firmware_version,
         session_id,
+        wire_fingerprint,
     } = hello
     {
         assert_eq!(
@@ -101,6 +104,14 @@ fn smoke_hello_banner_decodes() {
             tower_protocol::PROTOCOL_VERSION,
             "protocol version drift"
         );
+        // `Console::next` already fails fast on a foreign fingerprint; this is the explicit check
+        // that the firmware announces exactly the schema this harness decodes with.
+        assert_eq!(
+            wire_fingerprint,
+            tower_protocol::WIRE_FINGERPRINT,
+            "wire fingerprint drift: firmware and harness built from different tower-protocol source trees"
+        );
+        assert_eq!(console.wire_fingerprint(), Some(tower_protocol::WIRE_FINGERPRINT));
         assert!(!firmware_name.is_empty(), "empty firmware name in Hello");
         assert!(!firmware_version.is_empty(), "empty firmware version in Hello");
         assert!(session_id > 0, "session_id should be a bumped boot counter (>=1)");

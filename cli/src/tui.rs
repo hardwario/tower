@@ -28,7 +28,7 @@ use tower_protocol::msg::{
 };
 use tower_protocol::{FrameDecoder, MsgType, decode_frame, encode_frame};
 
-use crate::session::{MAX_RESPONSE_BYTES, completion_start, read_some};
+use crate::session::{MAX_RESPONSE_BYTES, Mismatch, completion_start, read_some};
 
 const CAP: usize = 5000; // scrollback per pane
 
@@ -98,6 +98,14 @@ struct App {
     payload_errors: u64,
     /// The version byte from the first header-level `BadVersion` seen (for the header hint).
     mismatch_got: Option<u8>,
+    /// The foreign `WIRE_FINGERPRINT` the last `Hello` announced (same `PROTOCOL_VERSION`,
+    /// different wire schema), for the header hint. Cleared by a matching `Hello`.
+    fingerprint_got: Option<u32>,
+    /// The last `Hello` announced a foreign schema (another version or wire fingerprint): every
+    /// frame since decodes against the WRONG struct definitions, so it is counted as a decode
+    /// failure and not interpreted, like a header-level `BadVersion`. The next `Hello`
+    /// re-evaluates.
+    foreign_schema: bool,
     /// Last failed (re)connect error, shown next to the reconnect indicator. `None` while
     /// connected or before the first failed attempt.
     last_open_error: Option<String>,
@@ -176,6 +184,8 @@ impl App {
             seq_gaps: 0,
             payload_errors: 0,
             mismatch_got: None,
+            fingerprint_got: None,
+            foreign_schema: false,
             last_open_error: None,
             last_open_attempt: Instant::now() - Duration::from_secs(10),
             boot_wait: None,
@@ -398,6 +408,13 @@ fn handle_frame(app: &mut App, inner: &[u8]) {
         }
     };
 
+    // After a `Hello` that announced a foreign schema, nothing but the next `Hello` is
+    // interpreted: the payloads would decode against the wrong definitions (see `foreign_schema`).
+    if app.foreign_schema && mt != MsgType::Hello {
+        app.decode_failures += 1;
+        return;
+    }
+
     // Sequence-gap accounting (mirrors the plain-CLI renderer): a `Hello` marks a new device
     // session and re-baselines `seq` (the console re-emits `Hello` on every USB plug-in), so a
     // fresh 0 isn't a spurious gap. Done before the pause check because frames still arrive
@@ -427,27 +444,40 @@ fn handle_frame(app: &mut App, inner: &[u8]) {
 
     match mt {
         // Decode the Hello (the TUI otherwise ignores it) purely to enforce the lockstep rule:
-        // a payload-version mismatch is a secondary guard: a *real* tag mismatch is caught at
-        // the frame header above and never parses a Hello.
+        // a payload-version mismatch is a secondary guard (a *real* version mismatch is caught
+        // at the frame header above and never parses a Hello); the wire fingerprint is the only
+        // way to see a same-version peer built from a different tower-protocol source tree.
         MsgType::Hello => match postcard::from_bytes::<Hello>(payload) {
             Ok(h) => {
-                if h.protocol_version != tower_protocol::PROTOCOL_VERSION && !app.warned_mismatch {
-                    push_cap(
-                        &mut app.logs,
-                        (
-                            format!(
-                                "⚠ PROTOCOL MISMATCH: device v{}, tower built for v{}: frames \
-                                 will mis-decode; rebuild both from the same checkout of \
-                                 crates/protocol.",
-                                h.protocol_version,
-                                tower_protocol::PROTOCOL_VERSION
-                            ),
-                            String::new(),
-                            Color::Red,
+                let verdict = Mismatch::of_hello(&h);
+                app.foreign_schema = verdict.is_some();
+                app.fingerprint_got = match verdict {
+                    Some(Mismatch::Fingerprint(fp)) => Some(fp),
+                    _ => None,
+                };
+                if let Some(Mismatch::Version(v)) = verdict {
+                    app.mismatch_got = Some(v);
+                }
+                if let Some(m) = verdict
+                    && !app.warned_mismatch
+                {
+                    let text = match m {
+                        Mismatch::Version(v) => format!(
+                            "⚠ PROTOCOL MISMATCH: device v{v}, tower built for v{}: frames \
+                             will mis-decode; rebuild both from the same checkout of \
+                             crates/protocol.",
+                            tower_protocol::PROTOCOL_VERSION
                         ),
-                    );
+                        Mismatch::Fingerprint(fp) => format!(
+                            "✖ PROTOCOL MISMATCH: device wire fingerprint {fp:#010x}, this \
+                             `tower` {:#010x}: same PROTOCOL_VERSION but a different wire \
+                             schema: the tower-protocol sources differ; rebuild both from the same \
+                             tag. Frames are not interpreted until a matching Hello.",
+                            tower_protocol::WIRE_FINGERPRINT
+                        ),
+                    };
+                    push_cap(&mut app.logs, (text, String::new(), Color::Red));
                     app.warned_mismatch = true;
-                    app.mismatch_got = Some(h.protocol_version);
                 }
             }
             Err(_) => app.payload_errors += 1,
@@ -907,11 +937,18 @@ fn send_frame<T: serde::Serialize>(app: &mut App, mt: MsgType, payload: &T) -> b
 /// The header's decode/seq/payload diagnostics string, or `None` when everything's clean.
 /// e.g. `"✖ 37 bad frames (v2?) · 4 seq gaps · 2 payload errs"`.
 fn header_diagnostics(app: &App) -> Option<String> {
-    if app.decode_failures == 0 && app.seq_gaps == 0 && app.payload_errors == 0 {
+    if app.decode_failures == 0
+        && app.seq_gaps == 0
+        && app.payload_errors == 0
+        && app.fingerprint_got.is_none()
+    {
         return None;
     }
     let plural = |n: u64| if n == 1 { "" } else { "s" };
     let mut parts: Vec<String> = Vec::new();
+    if let Some(fp) = app.fingerprint_got {
+        parts.push(format!("foreign wire fp {fp:#010x}"));
+    }
     if app.decode_failures > 0 {
         let mut d = format!("{} bad frame{}", app.decode_failures, plural(app.decode_failures));
         if let Some(v) = app.mismatch_got {
@@ -1290,13 +1327,28 @@ mod tests {
             firmware_name: "app",
             firmware_version: "test",
             session_id: 2,
+            wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
+        })
+        .unwrap();
+        valid_inner(MsgType::Hello, 0, &payload)
+    }
+
+    /// The deframed inner bytes of a boot `Hello` announcing wire fingerprint `fp` (with the
+    /// current `PROTOCOL_VERSION`).
+    fn hello_inner_fp(fp: u32) -> Vec<u8> {
+        let payload = postcard::to_allocvec(&Hello {
+            protocol_version: tower_protocol::PROTOCOL_VERSION,
+            firmware_name: "app",
+            firmware_version: "test",
+            session_id: 3,
+            wire_fingerprint: fp,
         })
         .unwrap();
         valid_inner(MsgType::Hello, 0, &payload)
     }
 
     /// A COBS-framed wire frame whose header advertises protocol version `ver` (top 3 bits of
-    /// `ver_type`), i.e. what a firmware built against a *different* tower-protocol tag puts on
+    /// `ver_type`), i.e. what a firmware built against a *different* tower-protocol source puts on
     /// the wire. Its CRC is valid: `decode_frame` checks the CRC first (tower-protocol
     /// ≥ 1.5.1), so only an intact frame from another version is `Error::BadVersion` (a corrupt
     /// one is `BadCrc`), and `handle_frame` sees `BadVersion`. Returns the deframed *inner*
@@ -1855,6 +1907,52 @@ mod tests {
                 .filter(|(s, _, _)| s.contains("PROTOCOL MISMATCH"))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn handle_frame_refuses_a_foreign_wire_fingerprint() {
+        // Same PROTOCOL_VERSION, different wire schema: the Hello decodes, but its fingerprint
+        // is not ours. One red banner naming both values, the header hint, and every later
+        // frame is counted as a decode failure instead of being rendered; a matching Hello
+        // (the device reflashed back) re-opens the stream.
+        let ours = tower_protocol::WIRE_FINGERPRINT;
+        let foreign = ours ^ 0x0000_0100;
+        let mut app = test_app();
+        handle_frame(&mut app, &hello_inner_fp(foreign));
+        assert!(app.warned_mismatch);
+        assert!(app.foreign_schema);
+        assert_eq!(app.fingerprint_got, Some(foreign));
+        let banner = app
+            .logs
+            .iter()
+            .find(|(s, _, c)| *c == Color::Red && s.contains("PROTOCOL MISMATCH"))
+            .map(|(s, _, _)| s.clone())
+            .expect("a red mismatch line");
+        assert!(banner.contains(&format!("{foreign:#010x}")), "{banner}");
+        assert!(banner.contains(&format!("{ours:#010x}")), "{banner}");
+        assert!(banner.contains("tower-protocol sources differ"), "{banner}");
+        let logs_before = app.logs.len();
+        handle_frame(&mut app, &log_inner(1));
+        assert_eq!(
+            app.decode_failures, 1,
+            "a foreign-schema frame is not interpreted"
+        );
+        assert_eq!(app.logs.len(), logs_before, "and not rendered");
+        let text = render_to_text_sized(&mut app, 160, 24);
+        assert!(
+            text.contains(&format!("foreign wire fp {foreign:#010x}")),
+            "{text}"
+        );
+
+        handle_frame(&mut app, &hello_inner());
+        assert!(!app.foreign_schema);
+        assert_eq!(app.fingerprint_got, None);
+        handle_frame(&mut app, &log_inner(1));
+        assert_eq!(
+            app.logs.len(),
+            logs_before + 1,
+            "a matching Hello re-opens the stream"
         );
     }
 

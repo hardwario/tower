@@ -177,6 +177,7 @@ VBUS-poll wake spikes) under 100 µA.
 | Roster says "cables or hil.toml slots swapped?" | The `[core]` path holds a Radio Dongle (or vice versa); swap the paths in `hil.toml` |
 | Roster says "not a TOWER Core Module/Radio Dongle" | Some other FTDI sits at that path; fix the path, or pin `usb_serial` if it really is the board on a third-party adapter |
 | Console read fails: "speaks tower-protocol wire version N" | The board runs firmware built from a different `tower-protocol` than the harness (an older flash, or another checkout); rebuild and reflash from this tree (the harness's own `just build` does) |
+| Console read fails: "announces tower-protocol wire fingerprint 0x..." | Same wire version, different schema: the boot `Hello` carries the firmware's `WIRE_FINGERPRINT` (wire v4) and it differs from the harness's, so the two were built from different trees; rebuild and reflash from this checkout |
 | `tower flash` Write-Memory timeouts, ports renaming mid-run | Concurrent FTDI flashing on one USB bus; the harness flashes sequentially by design; don't parallelize it |
 | Power test: median < 1 µA, "probably USB/VBUS-powered" | A VBUS-carrying USB back-feeds VDD (PPK2 reads ~0.3 µA); unplug it, or use a data-only FTDI adapter |
 | Power test: "ppk2d … no PPK2 initialised" | Read the reason it gives (unplugged PPK2, missing `ppk2-api`, dangling `.venv` python after a Python upgrade → recreate the venv) |

@@ -20,7 +20,7 @@ use clap::ValueEnum;
 use tower_protocol::msg::{Dropped, Event, Level, Log, Print};
 use tower_protocol::{FrameDecoder, Msg, decode_msg};
 
-use crate::session::{Transport, read_some};
+use crate::session::{Mismatch, Transport, read_some};
 use crate::term::{sanitize, sanitize_line};
 
 /// Which entity stream to render.
@@ -185,26 +185,51 @@ pub(crate) struct RenderState {
     /// Frames the codec refused to decode (`BadVersion`/`BadType`/`BadCrc`/…). A burst of
     /// these on an otherwise-live link is the classic symptom of a protocol tag mismatch.
     pub(crate) decode_failures: u64,
-    /// Whether we've already shouted about a protocol-version mismatch (warn once per stream).
+    /// Whether we've already shouted about a lockstep mismatch (warn once per stream).
     warned_mismatch: bool,
+    /// The last `Hello` announced another protocol version or wire fingerprint: the stream is
+    /// on a foreign schema, so its frames are dropped (not mis-rendered) until a matching
+    /// `Hello` (the device reflashed back).
+    foreign_schema: bool,
     /// The `session_id` from the last `Hello`. The console re-emits `Hello` on every USB
     /// plug-in with the SAME id within a boot, so a *changed* id means the device rebooted.
     last_session: Option<u32>,
 }
 
-/// Emit the loud, persistent protocol-mismatch banner (stderr). `device` is the version the
-/// firmware announced in its `Hello`; we compare against the version this binary was built
-/// against. A mismatch means postcard will silently mis-decode; see the lockstep rule.
-pub(crate) fn warn_protocol_mismatch(device: u8) {
+/// Emit the loud, persistent lockstep-mismatch banner (stderr): the device speaks another
+/// `PROTOCOL_VERSION` (frame header or `Hello`), or the same version with a different
+/// `WIRE_FINGERPRINT` (its `Hello` / `DeviceInfo`). Either way postcard will silently
+/// mis-decode; see the lockstep rule.
+pub(crate) fn warn_mismatch(m: Mismatch) {
     eprintln!("[tower] ============================================================");
-    eprintln!(
-        "[tower] PROTOCOL VERSION MISMATCH: device speaks v{device}, this `tower` was built for v{}.",
-        tower_protocol::PROTOCOL_VERSION
-    );
-    eprintln!("[tower] postcard is NOT self-describing: frames will silently mis-decode. Rebuild");
-    eprintln!(
-        "[tower] `tower` and the firmware from the SAME checkout of crates/protocol (the lockstep rule)."
-    );
+    match m {
+        Mismatch::Version(device) => {
+            eprintln!(
+                "[tower] PROTOCOL VERSION MISMATCH: device speaks v{device}, this `tower` was built for v{}.",
+                tower_protocol::PROTOCOL_VERSION
+            );
+            eprintln!("[tower] postcard is NOT self-describing: frames will silently mis-decode. Rebuild");
+            eprintln!(
+                "[tower] `tower` and the firmware from the SAME checkout of crates/protocol (the lockstep rule)."
+            );
+        }
+        Mismatch::Fingerprint(device) => {
+            eprintln!(
+                "[tower] PROTOCOL MISMATCH (wire fingerprint): device {device:#010x}, this `tower` {:#010x}.",
+                tower_protocol::WIRE_FINGERPRINT
+            );
+            eprintln!(
+                "[tower] Same PROTOCOL_VERSION (v{}) but a different wire schema: the tower-protocol",
+                tower_protocol::PROTOCOL_VERSION
+            );
+            eprintln!(
+                "[tower] trees differ. postcard is NOT self-describing: frames will silently mis-decode."
+            );
+            eprintln!(
+                "[tower] Rebuild both `tower` and the firmware from the SAME checkout (the lockstep rule)."
+            );
+        }
+    }
     eprintln!("[tower] ============================================================");
 }
 
@@ -267,7 +292,7 @@ pub(crate) fn render(inner: &[u8], mode: OutputMode, view: View, st: &mut Render
             if let tower_protocol::Error::BadVersion { got } = e
                 && !st.warned_mismatch
             {
-                warn_protocol_mismatch(got);
+                warn_mismatch(Mismatch::Version(got));
                 st.warned_mismatch = true;
             }
             // A version-tagged codec error is the smoking gun for a tag mismatch; surface the
@@ -288,6 +313,24 @@ pub(crate) fn render(inner: &[u8], mode: OutputMode, view: View, st: &mut Render
             return;
         }
     };
+    // After a `Hello` that announced a foreign schema (another version or wire fingerprint),
+    // every frame decodes against the WRONG struct definitions: drop it like a header-level
+    // `BadVersion` (counted, diagnosed) instead of rendering mis-decoded fields. The next
+    // `Hello` re-evaluates (a device reflashed to a matching build is rendered again).
+    if st.foreign_schema && !matches!(msg, Msg::Hello(_)) {
+        st.decode_failures += 1;
+        match mode {
+            OutputMode::Json => println!(
+                "{{\"type\":\"decode_error\",\"error\":\"ForeignWireSchema\",\"count\":{}}}",
+                st.decode_failures
+            ),
+            OutputMode::Text { .. } => eprintln!(
+                "[tower] dropped a frame from a foreign wire schema ({} undecodable frame(s); lockstep mismatch)",
+                st.decode_failures
+            ),
+        }
+        return;
+    }
     // A `Hello` marks a new device session: the firmware resets its per-session `seq`
     // (the dynamic console re-emits `Hello` on every USB plug-in), so re-baseline our
     // tracking on it rather than reporting a spurious gap across the reconnect.
@@ -316,17 +359,25 @@ pub(crate) fn render(inner: &[u8], mode: OutputMode, view: View, st: &mut Render
             let rebooted = st.last_session.is_some_and(|s| s != h.session_id);
             st.last_session = Some(h.session_id);
             eprintln!(
-                "[tower] hello: {} {} (protocol v{}, session {}){}",
+                "[tower] hello: {} {} (protocol v{} fp {:#010x}, session {}){}",
                 sanitize_line(h.firmware_name),
                 sanitize_line(h.firmware_version),
                 h.protocol_version,
+                h.wire_fingerprint,
                 h.session_id,
                 if rebooted { "; device rebooted" } else { "" }
             );
-            if h.protocol_version != tower_protocol::PROTOCOL_VERSION && !st.warned_mismatch {
-                warn_protocol_mismatch(h.protocol_version);
+            // The lockstep check: the payload version (a secondary guard; a real version
+            // mismatch is rejected at the frame header above) and the wire fingerprint (the
+            // only way to see a same-version peer built from a different tower-protocol source tree).
+            let verdict = Mismatch::of_hello(&h);
+            if let Some(m) = verdict
+                && !st.warned_mismatch
+            {
+                warn_mismatch(m);
                 st.warned_mismatch = true;
             }
+            st.foreign_schema = verdict.is_some();
         }
         Msg::Log(l) if view == View::Logs => emit_log(&l, mode),
         Msg::Print(p) if view == View::Logs => emit_print(&p, mode),
@@ -438,6 +489,22 @@ mod tests {
                 firmware_name: "app",
                 firmware_version: "test",
                 session_id: 1,
+                wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
+            },
+        )
+    }
+
+    /// A current-version `Hello` announcing wire fingerprint `fp`.
+    fn hello_frame_fp(fp: u32) -> Vec<u8> {
+        frame(
+            MsgType::Hello,
+            0,
+            &Hello {
+                protocol_version: tower_protocol::PROTOCOL_VERSION,
+                firmware_name: "app",
+                firmware_version: "test",
+                session_id: 1,
+                wire_fingerprint: fp,
             },
         )
     }
@@ -476,6 +543,27 @@ mod tests {
         // Hello re-baselined: last_seq is the Hello's own seq (0), no spurious gap.
         assert_eq!(st.last_seq, Some(0));
         assert_eq!(st.decode_failures, 0);
+    }
+
+    #[test]
+    fn render_drops_frames_after_a_foreign_fingerprint_hello() {
+        // Same PROTOCOL_VERSION, different wire schema: the banner fires once and every frame
+        // after the Hello is counted as a decode failure instead of being rendered (it would
+        // decode against the wrong definitions), exactly like header-level BadVersion frames.
+        // A matching Hello (device reflashed back) re-opens the stream.
+        let foreign = tower_protocol::WIRE_FINGERPRINT ^ 0x00FF_0000;
+        let mut st = RenderState::default();
+        feed_render(&mut st, &hello_frame_fp(foreign));
+        assert!(st.warned_mismatch && st.foreign_schema);
+        feed_render(&mut st, &log_frame(1, "mis-decoded"));
+        feed_render(&mut st, &log_frame(2, "mis-decoded"));
+        assert_eq!(st.decode_failures, 2);
+        assert_eq!(st.last_seq, Some(0), "dropped frames don't advance seq tracking");
+        feed_render(&mut st, &hello_frame(tower_protocol::PROTOCOL_VERSION));
+        assert!(!st.foreign_schema);
+        feed_render(&mut st, &log_frame(1, "fine"));
+        assert_eq!(st.decode_failures, 2);
+        assert_eq!(st.last_seq, Some(1));
     }
 
     #[test]

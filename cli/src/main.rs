@@ -35,14 +35,14 @@ mod tui;
 
 use port::{devices, open_console, pick_port};
 use render::{
-    ColorMode, OutputMode, Renderer, View, device_text, hexline, read_loop, resolve_color,
-    warn_protocol_mismatch,
+    ColorMode, OutputMode, Renderer, View, device_text, hexline, read_loop, resolve_color, warn_mismatch,
 };
 #[cfg(test)]
 use session::await_ready;
 use session::{
-    CompletionOutcome, ReadOutcome, Readiness, await_ready_with, completion_start, read_response, read_some,
-    request_completions, result_tag,
+    CompletionOutcome, LockstepGate, ReadOutcome, Readiness, await_ready_with, completion_start,
+    read_response, read_response_gated, read_some, request_completions, request_completions_gated,
+    result_tag,
 };
 use term::sanitize_line;
 
@@ -60,7 +60,8 @@ use term::sanitize_line;
 //   2    usage error (bad args, emitted by clap itself)
 //   124  device command timed out (no response at all: `exec`, `complete`, an MQTT RPC; a
 //        truncated response is 1)
-//   125  protocol-version mismatch (device speaks a different tower-protocol tag)
+//   125  protocol mismatch (device speaks a different tower-protocol source tree: another
+//        PROTOCOL_VERSION, or the same version with a different WIRE_FINGERPRINT)
 //   126  wrong firmware role (the role probe found the wrong kind of device, or was refused)
 //
 // So a device `result` can't be confused with the reserved codes, `exec` clamps a
@@ -73,8 +74,10 @@ const EXIT_DEVICE_TIMEOUT: u8 = 124;
 /// from 124/125 so scripts can say "flash the right firmware" instead of "check the cable".
 const EXIT_WRONG_FIRMWARE: u8 = 126;
 /// A freshly-reset device announced (or its frames were tagged with) a `tower-protocol`
-/// version this build doesn't speak: every frame would silently mis-decode, so `exec`
-/// refuses rather than emitting junk. Distinct from a plain timeout so CI can branch on it.
+/// version this build doesn't speak, or the same version with a different wire fingerprint
+/// (`Hello` / `DeviceInfo` carry the device's `WIRE_FINGERPRINT`; a difference means the two
+/// were built from different tower-protocol source trees): every frame would silently mis-decode, so
+/// `exec` refuses rather than emitting junk. Distinct from a plain timeout so CI can branch on it.
 const EXIT_PROTOCOL_MISMATCH: u8 = 125;
 
 /// Default per-command response timeout (`--timeout`), in milliseconds.
@@ -132,7 +135,7 @@ impl BootTicker {
             return;
         }
         match readiness {
-            Readiness::Hello(_) => {
+            Readiness::Hello { .. } => {
                 eprintln!(
                     "\r[tower] device booted in {:.1}s                    ",
                     self.last.as_secs_f32()
@@ -448,12 +451,8 @@ fn stream(
                         Some(&mut boot),
                     );
                     ticker.finish(&readiness);
-                    match readiness {
-                        Readiness::BadVersion(got) => warn_protocol_mismatch(got),
-                        Readiness::Hello(v) if v != tower_protocol::PROTOCOL_VERSION => {
-                            warn_protocol_mismatch(v)
-                        }
-                        Readiness::Hello(_) | Readiness::Timeout => {}
+                    if let Some(m) = readiness.mismatch() {
+                        warn_mismatch(m);
                     }
                     // Everything the wait consumed (the Hello and the early boot lines) is
                     // rendered now, in wire order, before the poke; the live stream then picks
@@ -509,6 +508,10 @@ fn stream(
 struct Conn {
     sp: Box<dyn serialport::SerialPort>,
     dec: FrameDecoder,
+    /// Shared by every command and TAB request of the session: once a `Hello` announces a
+    /// foreign schema (another version or wire fingerprint), later replies are not interpreted
+    /// until a matching `Hello`, rather than re-trusted on the next command.
+    gate: LockstepGate,
     req_id: u16,
 }
 
@@ -528,10 +531,11 @@ impl Completer for ShellHelper {
         let mut conn = self.conn.borrow_mut();
         conn.req_id = conn.req_id.wrapping_add(1);
         let req_id = conn.req_id;
-        let Conn { sp, dec, .. } = &mut *conn;
-        match request_completions(
+        let Conn { sp, dec, gate, .. } = &mut *conn;
+        match request_completions_gated(
             &mut **sp,
             dec,
+            gate,
             line,
             pos as u16,
             req_id,
@@ -594,21 +598,18 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
         let mut ticker = BootTicker::new();
         let readiness = await_ready_with(&mut *sp, &mut dec, delay, |el| ticker.tick(el), None);
         ticker.finish(&readiness);
-        let mismatch = match readiness {
-            Readiness::BadVersion(got) => Some(got),
-            Readiness::Hello(v) if v != tower_protocol::PROTOCOL_VERSION => Some(v),
-            Readiness::Hello(_) | Readiness::Timeout => None,
-        };
-        if let Some(v) = mismatch {
-            warn_protocol_mismatch(v);
-            eprintln!(
-                "[tower] protocol version mismatch (device v{v}, tower v{}); refusing to open the shell; rebuild the firmware and `tower` from the same checkout",
-                tower_protocol::PROTOCOL_VERSION
-            );
+        if let Some(m) = readiness.mismatch() {
+            warn_mismatch(m);
+            eprintln!("[tower] {}; refusing to open the shell; {}", m.what(), m.remedy());
             return Ok(EXIT_PROTOCOL_MISMATCH);
         }
     }
-    let conn = Rc::new(RefCell::new(Conn { sp, dec, req_id: 0 }));
+    let conn = Rc::new(RefCell::new(Conn {
+        sp,
+        dec,
+        gate: LockstepGate::default(),
+        req_id: 0,
+    }));
     let mut rl: Editor<ShellHelper, rustyline::history::DefaultHistory> = Editor::new()?;
     rl.set_helper(Some(ShellHelper { conn: conn.clone() }));
 
@@ -629,7 +630,7 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
                 let _ = rl.add_history_entry(line);
 
                 let mut c = conn.borrow_mut();
-                let Conn { sp, dec, .. } = &mut *c;
+                let Conn { sp, dec, gate, .. } = &mut *c;
                 let mut buf = [0u8; tower_protocol::MAX_WIRE];
                 // A line too long to fit one frame fails to encode. That's a *per-line* error,
                 // not a session error: print a hint and return to the prompt instead of
@@ -652,7 +653,7 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
                 seq = seq.wrapping_add(1);
                 sp.write_all(&buf[..n])?;
                 sp.flush()?;
-                match read_response(&mut **sp, dec, cmd_id, timeout) {
+                match read_response_gated(&mut **sp, dec, gate, cmd_id, timeout) {
                     ReadOutcome::Response(r) => {
                         let text = device_text(&r.text);
                         print!("{text}");
@@ -672,17 +673,14 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
                     // The device answered, with frames from a different tower-protocol
                     // tag. Without this, the interactive shell was the one consumer that
                     // stayed mute on the mismatch the ecosystem got burned by.
-                    ReadOutcome::Timeout { bad_version: Some(v) } => {
+                    ReadOutcome::Timeout { mismatch: Some(m) } => {
                         if !warned_mismatch {
-                            warn_protocol_mismatch(v);
+                            warn_mismatch(m);
                             warned_mismatch = true;
                         }
-                        eprintln!(
-                            "[tower] no response: device speaks protocol v{v}, tower speaks v{} (lockstep mismatch)",
-                            tower_protocol::PROTOCOL_VERSION
-                        );
+                        eprintln!("[tower] no response: {}; {}", m.what(), m.remedy());
                     }
-                    ReadOutcome::Timeout { bad_version: None } => {
+                    ReadOutcome::Timeout { mismatch: None } => {
                         eprintln!("[tower] no response (timeout)")
                     }
                 }
@@ -732,17 +730,9 @@ fn exec_cmd(
         let mut ticker = BootTicker::new();
         let readiness = await_ready_with(&mut *sp, &mut dec, delay, |el| ticker.tick(el), None);
         ticker.finish(&readiness);
-        let mismatch = match readiness {
-            Readiness::BadVersion(got) => Some(got),
-            Readiness::Hello(v) if v != tower_protocol::PROTOCOL_VERSION => Some(v),
-            Readiness::Hello(_) | Readiness::Timeout => None,
-        };
-        if let Some(v) = mismatch {
-            warn_protocol_mismatch(v);
-            eprintln!(
-                "[tower] protocol version mismatch (device v{v}, tower v{}); refusing to exec; rebuild the firmware and `tower` from the same checkout",
-                tower_protocol::PROTOCOL_VERSION
-            );
+        if let Some(m) = readiness.mismatch() {
+            warn_mismatch(m);
+            eprintln!("[tower] {}; refusing to exec; {}", m.what(), m.remedy());
             return Ok(EXIT_PROTOCOL_MISMATCH);
         }
     }
@@ -788,18 +778,15 @@ fn exec_line(
             }
             Ok(EXIT_OK)
         }
-        // Frames arrived but every one was version-rejected: that's the lockstep failure
-        // (125), not a mute device (124), even without --reset, where the Hello-based
-        // check above never ran.
-        ReadOutcome::Timeout { bad_version: Some(v) } => {
-            warn_protocol_mismatch(v);
-            eprintln!(
-                "[tower] no response: device speaks protocol v{v}, tower speaks v{} (lockstep mismatch)",
-                tower_protocol::PROTOCOL_VERSION
-            );
+        // Frames arrived but every one was version-rejected (or a Hello announced a foreign
+        // wire fingerprint): that's the lockstep failure (125), not a mute device (124), even
+        // without --reset, where the Hello-based check above never ran.
+        ReadOutcome::Timeout { mismatch: Some(m) } => {
+            warn_mismatch(m);
+            eprintln!("[tower] no response: {}; {}", m.what(), m.remedy());
             Ok(EXIT_PROTOCOL_MISMATCH)
         }
-        ReadOutcome::Timeout { bad_version: None } => {
+        ReadOutcome::Timeout { mismatch: None } => {
             eprintln!("[tower] no response (timeout)");
             Ok(EXIT_DEVICE_TIMEOUT)
         }
@@ -846,18 +833,16 @@ fn complete_line(
             }
             Ok(EXIT_OK)
         }
-        // Same 125 rule as exec: version-rejected frames mean lockstep, not a dead link.
-        CompletionOutcome::Timeout { bad_version: Some(v) } => {
-            warn_protocol_mismatch(v);
-            eprintln!(
-                "[tower] no completions: device speaks protocol v{v}, tower speaks v{} (lockstep mismatch)",
-                tower_protocol::PROTOCOL_VERSION
-            );
+        // Same 125 rule as exec: version-rejected frames (or a foreign-fingerprint Hello) mean
+        // lockstep, not a dead link.
+        CompletionOutcome::Timeout { mismatch: Some(m) } => {
+            warn_mismatch(m);
+            eprintln!("[tower] no completions: {}; {}", m.what(), m.remedy());
             Ok(EXIT_PROTOCOL_MISMATCH)
         }
         // No answer at all is the documented device timeout (124); exiting 0 told scripts a
         // mute or absent device had answered with nothing to complete.
-        CompletionOutcome::Timeout { bad_version: None } => {
+        CompletionOutcome::Timeout { mismatch: None } => {
             eprintln!("[tower] no completions (timeout)");
             Ok(EXIT_DEVICE_TIMEOUT)
         }
@@ -1127,16 +1112,16 @@ mod tests {
     use super::*;
     // Session functions live in `crate::session`; pull in the ones exercised here that aren't
     // already re-exported into `main` (which imports only what the command layer calls).
-    use crate::session::wait_for_hello;
+    use crate::session::{Mismatch, wait_for_hello};
     use std::collections::VecDeque;
     use std::io::{self, Read, Write};
     use std::time::Duration;
     // (CandidateKind, ShellCommand, MsgType, decode_frame, encode_frame, FrameDecoder come
     // via `super::*` from the command layer's imports; only add what's test-only here.)
-    use tower_protocol::MAX_WIRE;
     use tower_protocol::msg::{
         Candidate, Dropped, Event, Hello, Level, Log, ShellCompletions, ShellResponse,
     };
+    use tower_protocol::{MAX_WIRE, PROTOCOL_VERSION, WIRE_FINGERPRINT};
 
     /// In-memory duplex transport. `to_read` feeds the code-under-test (as if from the
     /// device); `written` captures everything the code writes (host→device).
@@ -1222,9 +1207,30 @@ mod tests {
                 firmware_name: "app",
                 firmware_version: "test",
                 session_id: 1,
+                wire_fingerprint: WIRE_FINGERPRINT,
             },
         )
     }
+
+    /// A current-version `Hello` announcing wire fingerprint `fp`: a peer built from another
+    /// tower-protocol source with the same `PROTOCOL_VERSION` when `fp != WIRE_FINGERPRINT`. The
+    /// header is valid, so only the fingerprint can tell.
+    fn hello_fp(fp: u32) -> Vec<u8> {
+        frame(
+            MsgType::Hello,
+            0,
+            &Hello {
+                protocol_version: PROTOCOL_VERSION,
+                firmware_name: "app",
+                firmware_version: "test",
+                session_id: 1,
+                wire_fingerprint: fp,
+            },
+        )
+    }
+
+    /// A wire fingerprint that is not ours.
+    const FOREIGN_FP: u32 = WIRE_FINGERPRINT ^ 0x0F0F_0F0F;
 
     /// Canonical COBS encode of `inner`, plus the trailing `0x00` delimiter: the same wire
     /// shape `encode_frame` produces. Used to forge a frame the host's own encoder can't (a
@@ -1256,7 +1262,7 @@ mod tests {
     }
 
     /// A full wire frame whose *header* advertises protocol version `ver` (top 3 bits of
-    /// `ver_type`): what a firmware built against a different tower-protocol tag actually puts
+    /// `ver_type`): what a firmware built against a different tower-protocol source tree actually puts
     /// on the wire, CRC intact. `decode_frame` passes the CRC, then rejects the version, so the
     /// session sees `Error::BadVersion` and never parses the Hello payload. `ver` must be 0..=7.
     fn hello_wire_bad_version(ver: u8) -> Vec<u8> {
@@ -1269,6 +1275,7 @@ mod tests {
                 firmware_name: "app",
                 firmware_version: "mismatch",
                 session_id: 1,
+                wire_fingerprint: WIRE_FINGERPRINT,
             },
             &mut pbuf,
         )
@@ -1393,7 +1400,7 @@ mod tests {
         let mut sp = MockPort::new(hello_wire_bad_version(1));
         let mut dec = FrameDecoder::new();
         match read_response(&mut sp, &mut dec, 1, SHORT) {
-            ReadOutcome::Timeout { bad_version } => assert_eq!(bad_version, Some(1)),
+            ReadOutcome::Timeout { mismatch } => assert_eq!(mismatch, Some(Mismatch::Version(1))),
             ReadOutcome::Response(_) => panic!("a version-rejected frame must not decode"),
             ReadOutcome::Failed(e) => panic!("the mock never fails: {e}"),
         }
@@ -1404,7 +1411,9 @@ mod tests {
         let mut sp = MockPort::new(hello_wire_bad_version(1));
         let mut dec = FrameDecoder::new();
         match request_completions(&mut sp, &mut dec, "/s", 2, 1, SHORT) {
-            CompletionOutcome::Timeout { bad_version } => assert_eq!(bad_version, Some(1)),
+            CompletionOutcome::Timeout { mismatch } => {
+                assert_eq!(mismatch, Some(Mismatch::Version(1)))
+            }
             CompletionOutcome::Completions(_) => {
                 panic!("a version-rejected frame must not decode")
             }
@@ -1420,10 +1429,60 @@ mod tests {
         // the current version and the Hello decodes cleanly.
         let mut sp = MockPort::new(hello(tower_protocol::PROTOCOL_VERSION));
         let mut dec = FrameDecoder::new();
+        let readiness = wait_for_hello(&mut sp, &mut dec, SHORT);
         assert_eq!(
-            wait_for_hello(&mut sp, &mut dec, SHORT),
-            Readiness::Hello(tower_protocol::PROTOCOL_VERSION)
+            readiness,
+            Readiness::Hello {
+                version: PROTOCOL_VERSION,
+                fingerprint: WIRE_FINGERPRINT
+            }
         );
+        assert_eq!(readiness.mismatch(), None);
+    }
+
+    #[test]
+    fn wait_for_hello_reports_a_foreign_wire_fingerprint() {
+        // Same PROTOCOL_VERSION, different wire schema: the header passes and the Hello
+        // decodes, so only the fingerprint reveals the mismatch.
+        let mut sp = MockPort::new(hello_fp(FOREIGN_FP));
+        let mut dec = FrameDecoder::new();
+        let readiness = wait_for_hello(&mut sp, &mut dec, SHORT);
+        assert_eq!(
+            readiness,
+            Readiness::Hello {
+                version: PROTOCOL_VERSION,
+                fingerprint: FOREIGN_FP
+            }
+        );
+        assert_eq!(readiness.mismatch(), Some(Mismatch::Fingerprint(FOREIGN_FP)));
+        // await_ready propagates it (exec/shell then refuse with 125) and skips the
+        // post-Hello settle: a mismatch is not worth waiting for.
+        let mut sp = MockPort::new(hello_fp(FOREIGN_FP));
+        let t = std::time::Instant::now();
+        let readiness = await_ready(&mut sp, &mut FrameDecoder::new(), Some(5_000));
+        assert_eq!(readiness.mismatch(), Some(Mismatch::Fingerprint(FOREIGN_FP)));
+        assert!(t.elapsed() < Duration::from_secs(4), "no settle on a mismatch");
+    }
+
+    #[test]
+    fn mismatch_message_names_both_fingerprints_and_the_cause() {
+        assert_eq!(Mismatch::check(PROTOCOL_VERSION, WIRE_FINGERPRINT), None);
+        assert_eq!(
+            Mismatch::check(PROTOCOL_VERSION + 1, FOREIGN_FP),
+            Some(Mismatch::Version(PROTOCOL_VERSION + 1)),
+            "a version mismatch takes precedence"
+        );
+        let m = Mismatch::check(PROTOCOL_VERSION, FOREIGN_FP).unwrap();
+        let what = m.what();
+        assert!(what.contains(&format!("{FOREIGN_FP:#010x}")), "{what}");
+        assert!(what.contains(&format!("{WIRE_FINGERPRINT:#010x}")), "{what}");
+        assert!(
+            what.contains("same PROTOCOL_VERSION but a different wire schema")
+                && what.contains("the tower-protocol sources differ"),
+            "{what}"
+        );
+        assert_eq!(m.remedy(), "rebuild both from the same checkout");
+        assert_eq!(EXIT_PROTOCOL_MISMATCH, 125);
     }
 
     #[test]
@@ -1551,6 +1610,63 @@ mod tests {
             exec_line(&mut sp, &mut dec, "/x", SHORT).unwrap(),
             EXIT_DEVICE_TIMEOUT
         );
+    }
+
+    #[test]
+    fn exec_line_foreign_fingerprint_is_protocol_mismatch() {
+        // A Hello announcing a foreign wire fingerprint closes the stream: the response that
+        // follows (which would decode against the wrong schema) is not interpreted, and the
+        // outcome is the lockstep exit code (125), exactly like a version mismatch.
+        let mut bytes = hello_fp(FOREIGN_FP);
+        bytes.extend(shell_resp(exec_cmd_id(), 0, 0, true, "would mis-decode"));
+        let mut sp = MockPort::new(bytes);
+        let mut dec = FrameDecoder::new();
+        assert_eq!(
+            exec_line(&mut sp, &mut dec, "/x", SHORT).unwrap(),
+            EXIT_PROTOCOL_MISMATCH
+        );
+        // A matching Hello in the same position is harmless.
+        let mut bytes = hello_fp(WIRE_FINGERPRINT);
+        bytes.extend(shell_resp(exec_cmd_id(), 0, 0, true, "ok"));
+        let mut sp = MockPort::new(bytes);
+        let mut dec = FrameDecoder::new();
+        assert_eq!(exec_line(&mut sp, &mut dec, "/x", SHORT).unwrap(), EXIT_OK);
+        // And `complete` maps it the same way.
+        let mut dec = FrameDecoder::new();
+        assert_eq!(
+            complete_line(&mut MockPort::new(hello_fp(FOREIGN_FP)), &mut dec, "/s", SHORT).unwrap(),
+            EXIT_PROTOCOL_MISMATCH
+        );
+    }
+
+    #[test]
+    fn a_shared_gate_keeps_a_foreign_verdict_across_commands() {
+        // The interactive shell runs many commands over one link with one gate: after a Hello
+        // with a foreign wire fingerprint, the NEXT command's reply is not interpreted either
+        // (a fresh per-command gate would re-trust the stream). A matching Hello re-opens it.
+        let mut gate = LockstepGate::default();
+        let mut bytes = hello_fp(FOREIGN_FP);
+        bytes.extend(shell_resp(1, 0, 0, true, "first"));
+        let mut sp = MockPort::new(bytes);
+        let mut dec = FrameDecoder::new();
+        assert!(matches!(
+            read_response_gated(&mut sp, &mut dec, &mut gate, 1, SHORT),
+            ReadOutcome::Timeout {
+                mismatch: Some(Mismatch::Fingerprint(FOREIGN_FP))
+            }
+        ));
+        let mut sp = MockPort::new(shell_resp(2, 0, 0, true, "second"));
+        assert!(matches!(
+            read_response_gated(&mut sp, &mut dec, &mut gate, 2, SHORT),
+            ReadOutcome::Timeout { mismatch: Some(_) }
+        ));
+        let mut bytes = hello_fp(WIRE_FINGERPRINT);
+        bytes.extend(shell_resp(3, 0, 0, true, "third"));
+        let mut sp = MockPort::new(bytes);
+        match read_response_gated(&mut sp, &mut dec, &mut gate, 3, SHORT) {
+            ReadOutcome::Response(r) => assert_eq!(r.text, "third"),
+            _ => panic!("a matching Hello re-opens the stream"),
+        }
     }
 
     #[test]
@@ -1682,7 +1798,10 @@ mod tests {
         let mut dec = FrameDecoder::new();
         assert_eq!(
             wait_for_hello(&mut sp, &mut dec, SHORT),
-            Readiness::Hello(tower_protocol::PROTOCOL_VERSION)
+            Readiness::Hello {
+                version: PROTOCOL_VERSION,
+                fingerprint: WIRE_FINGERPRINT
+            }
         );
         let r = read_response(&mut sp, &mut dec, 9, SHORT).unwrap();
         assert_eq!(r.text, "split across reads");
@@ -1703,7 +1822,7 @@ mod tests {
             |_| {},
             Some(&mut transcript),
         );
-        assert!(matches!(readiness, Readiness::Hello(_)));
+        assert!(matches!(readiness, Readiness::Hello { .. }));
         assert_eq!(transcript, bytes);
     }
 

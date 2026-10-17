@@ -22,7 +22,7 @@ use tower_protocol::mgmt::{DeviceRole, MgmtOp, Provision};
 use crate::gateway::topics;
 use crate::mgmt::{DescribeOutcome, MgmtOutcome, describe, mgmt_roundtrip};
 use crate::port::open_console;
-use crate::render::warn_protocol_mismatch;
+use crate::render::warn_mismatch;
 use crate::term::sanitize_line;
 use crate::{EXIT_DEVICE_TIMEOUT, EXIT_OK, EXIT_PROTOCOL_MISMATCH, EXIT_WRONG_FIRMWARE};
 
@@ -39,13 +39,14 @@ pub(crate) fn run(s: &mut Session, node_port: &str, name: Option<&str>) -> Resul
             eprintln!("[tower] {node_port}: refused the role probe (code {code})");
             return Ok(EXIT_WRONG_FIRMWARE);
         }
-        DescribeOutcome::Timeout {
-            bad_version: Some(got),
-        } => {
-            warn_protocol_mismatch(got);
+        // A foreign header version, or a node announcing another wire fingerprint (same
+        // PROTOCOL_VERSION, different tower-protocol source tree): refuse before provisioning anything.
+        DescribeOutcome::Mismatch(m) => {
+            warn_mismatch(m);
+            eprintln!("[tower] {node_port}: {}; {}", m.what(), m.remedy());
             return Ok(EXIT_PROTOCOL_MISMATCH);
         }
-        DescribeOutcome::Timeout { bad_version: None } => {
+        DescribeOutcome::Timeout => {
             eprintln!("[tower] {node_port}: no answer; is this a v3 TOWER node?");
             return Ok(EXIT_DEVICE_TIMEOUT);
         }

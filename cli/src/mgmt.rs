@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use tower_protocol::mgmt::{DeviceInfo, DeviceRole, MgmtOp, NodeEntry, QueueEntry};
 use tower_protocol::msg::{MgmtRequest, MgmtResponse};
-use tower_protocol::{Error, FrameDecoder, MAX_WIRE, MsgType, decode_frame, encode_frame};
+use tower_protocol::{FrameDecoder, MAX_WIRE, MsgType, encode_frame};
 
-use crate::session::{Transport, read_some};
+use crate::session::{LockstepGate, Mismatch, Transport, read_some};
 
 /// Owned `DeviceInfo`: what `Describe` answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +29,19 @@ pub(crate) struct DeviceInfoOwned {
     pub provisioned: bool,
     pub gw_addr: u32,
     pub firmware_name: String,
+    /// The device's `WIRE_FINGERPRINT` (wire v4): checked against ours by every `Describe`
+    /// caller ([`DeviceInfoOwned::mismatch`]).
+    pub wire_fingerprint: u32,
+    /// The firmware version string (wire v4), the same one `Hello` carries.
+    pub firmware_version: String,
+}
+
+impl DeviceInfoOwned {
+    /// The lockstep verdict on this `Describe` reply. It decoded under our `PROTOCOL_VERSION`
+    /// (the frame header passed), so only the fingerprint can still differ.
+    pub(crate) fn mismatch(&self) -> Option<Mismatch> {
+        Mismatch::check(tower_protocol::PROTOCOL_VERSION, self.wire_fingerprint)
+    }
 }
 
 impl From<DeviceInfo<'_>> for DeviceInfoOwned {
@@ -44,6 +57,8 @@ impl From<DeviceInfo<'_>> for DeviceInfoOwned {
             provisioned: d.provisioned,
             gw_addr: d.gw_addr,
             firmware_name: d.firmware_name.to_string(),
+            wire_fingerprint: d.wire_fingerprint,
+            firmware_version: d.firmware_version.to_string(),
         }
     }
 }
@@ -131,7 +146,7 @@ pub(crate) struct MgmtReply {
 pub(crate) enum MgmtOutcome {
     Reply(MgmtReply),
     Timeout {
-        bad_version: Option<u8>,
+        mismatch: Option<Mismatch>,
     },
     /// The transport itself failed (write error, unplugged, EIO, …): a broken link, not a
     /// silent device; callers must not report it as "no answer".
@@ -165,9 +180,9 @@ pub(crate) fn mgmt_roundtrip(
     op: &MgmtOp<'_>,
     timeout: Duration,
 ) -> MgmtOutcome {
-    let mut bad_version: Option<u8> = None;
+    let mut gate = LockstepGate::default();
     let Some(frame) = encode_mgmt(0, req_id, op) else {
-        return MgmtOutcome::Timeout { bad_version };
+        return MgmtOutcome::Timeout { mismatch: None };
     };
     if let Err(e) = sp.write_all(&frame).and_then(|()| sp.flush()) {
         return MgmtOutcome::Failed(e);
@@ -185,13 +200,9 @@ pub(crate) fn mgmt_roundtrip(
         };
         for &b in &buf[..nread] {
             let Some(inner) = dec.push(b) else { continue };
-            let (mt, _, payload) = match decode_frame(inner) {
-                Ok(t) => t,
-                Err(Error::BadVersion { got }) => {
-                    bad_version = Some(got);
-                    continue;
-                }
-                Err(_) => continue,
+            // Corrupt / version-rejected / foreign-schema frames are skipped (see `LockstepGate`).
+            let Some((mt, payload)) = gate.admit(inner) else {
+                continue;
             };
             if mt != MsgType::MgmtResponse {
                 continue;
@@ -217,7 +228,9 @@ pub(crate) fn mgmt_roundtrip(
             }
         }
     }
-    MgmtOutcome::Timeout { bad_version }
+    MgmtOutcome::Timeout {
+        mismatch: gate.mismatch(),
+    }
 }
 
 /// The role probe: `Describe`, decoded. This is the authoritative "is this a
@@ -227,9 +240,12 @@ pub(crate) enum DescribeOutcome {
     Info(DeviceInfoOwned),
     /// The device answered but refused (result code): malformed/unsupported.
     Refused(u8),
-    Timeout {
-        bad_version: Option<u8>,
-    },
+    /// A lockstep mismatch: the reply never came but the frames carried another protocol
+    /// version (or a `Hello` announced another wire fingerprint), or the `DeviceInfo` that did
+    /// come announces a wire fingerprint different from ours. Exit 125 territory.
+    Mismatch(Mismatch),
+    /// No reply and no lockstep evidence: a mute device (or pre-v3 firmware).
+    Timeout,
     /// The transport failed; see [`MgmtOutcome::Failed`].
     Failed(std::io::Error),
 }
@@ -243,12 +259,22 @@ pub(crate) fn describe(
     match mgmt_roundtrip(sp, dec, req_id, &MgmtOp::Describe, timeout) {
         MgmtOutcome::Reply(r) if r.result == tower_protocol::mgmt::MGMT_OK => {
             match postcard::from_bytes::<DeviceInfo>(&r.data) {
-                Ok(info) => DescribeOutcome::Info(info.into()),
+                Ok(info) => {
+                    let info = DeviceInfoOwned::from(info);
+                    // The reply carries the device's wire fingerprint: a same-version,
+                    // different-schema device is refused here, before any caller acts on
+                    // fields that may have mis-decoded.
+                    match info.mismatch() {
+                        Some(m) => DescribeOutcome::Mismatch(m),
+                        None => DescribeOutcome::Info(info),
+                    }
+                }
                 Err(_) => DescribeOutcome::Refused(u8::MAX),
             }
         }
         MgmtOutcome::Reply(r) => DescribeOutcome::Refused(r.result),
-        MgmtOutcome::Timeout { bad_version } => DescribeOutcome::Timeout { bad_version },
+        MgmtOutcome::Timeout { mismatch: Some(m) } => DescribeOutcome::Mismatch(m),
+        MgmtOutcome::Timeout { mismatch: None } => DescribeOutcome::Timeout,
         MgmtOutcome::Failed(e) => DescribeOutcome::Failed(e),
     }
 }
@@ -258,6 +284,7 @@ mod tests {
     use std::io::Read;
 
     use super::*;
+    use tower_protocol::decode_frame;
     use tower_protocol::mgmt::{MGMT_OK, NodeEntry};
 
     /// In-memory duplex transport (same contract as main.rs's MockPort: drained reads
@@ -364,14 +391,13 @@ mod tests {
         let mut m = Mock::new();
         let mut dec = FrameDecoder::new();
         match mgmt_roundtrip(&mut m, &mut dec, 1, &MgmtOp::Describe, Duration::from_millis(50)) {
-            MgmtOutcome::Timeout { bad_version: None } => {}
+            MgmtOutcome::Timeout { mismatch: None } => {}
             _ => panic!("expected a clean timeout"),
         }
     }
 
-    #[test]
-    fn describe_decodes_device_info() {
-        let info = DeviceInfo {
+    fn device_info_record(wire_fingerprint: u32) -> Vec<u8> {
+        postcard::to_stdvec(&DeviceInfo {
             role: DeviceRole::Gateway,
             radio_schema_version: 1,
             addr: 0xAB12,
@@ -382,8 +408,15 @@ mod tests {
             provisioned: true,
             gw_addr: 0xAB12,
             firmware_name: "radio_dongle_gateway",
-        };
-        let rec = postcard::to_stdvec(&info).unwrap();
+            wire_fingerprint,
+            firmware_version: "v0.1.0",
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn describe_decodes_device_info() {
+        let rec = device_info_record(tower_protocol::WIRE_FINGERPRINT);
         let mut m = Mock::new();
         m.feed(&mgmt_response_frame(1, MGMT_OK, 0, true, &rec));
         let mut dec = FrameDecoder::new();
@@ -392,8 +425,34 @@ mod tests {
                 assert_eq!(d.role, DeviceRole::Gateway);
                 assert_eq!(d.addr, 0xAB12);
                 assert_eq!(d.firmware_name, "radio_dongle_gateway");
+                // Wire v4: the version (the bridge's status no longer needs the boot Hello)
+                // and the fingerprint (checked: it matches, so no mismatch).
+                assert_eq!(d.firmware_version, "v0.1.0");
+                assert_eq!(d.wire_fingerprint, tower_protocol::WIRE_FINGERPRINT);
+                assert_eq!(d.mismatch(), None);
             }
             _ => panic!("expected device info"),
+        }
+    }
+
+    #[test]
+    fn describe_refuses_a_foreign_wire_fingerprint() {
+        // The device answers under our PROTOCOL_VERSION but announces another wire fingerprint
+        // (built from a different tower-protocol source tree): `describe` reports the lockstep
+        // mismatch instead of handing callers fields that may have mis-decoded.
+        let foreign = tower_protocol::WIRE_FINGERPRINT ^ 0x1;
+        let mut m = Mock::new();
+        m.feed(&mgmt_response_frame(
+            1,
+            MGMT_OK,
+            0,
+            true,
+            &device_info_record(foreign),
+        ));
+        let mut dec = FrameDecoder::new();
+        match describe(&mut m, &mut dec, 1, Duration::from_millis(300)) {
+            DescribeOutcome::Mismatch(Mismatch::Fingerprint(fp)) => assert_eq!(fp, foreign),
+            _ => panic!("expected a fingerprint mismatch"),
         }
     }
 

@@ -4,11 +4,12 @@
 //! order are load-bearing (postcard encodes enums by variant **index**).
 
 use heapless::Vec;
+use postcard_schema::Schema;
 use serde::{Deserialize, Serialize};
 
 /// Log severity. Order matches the `log` crate (Error highest). postcard encodes
 /// this by variant index, so both ends must keep this order.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Level {
     Error,
     Warn,
@@ -23,18 +24,26 @@ pub enum Level {
 /// version string (e.g. `"v0.1.0"`). `session_id` is a per-boot id (a persisted boot
 /// counter) so the host can tell a device **reboot** from a continuous link.
 ///
+/// `wire_fingerprint` (v4) is the producer's [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT):
+/// a host compares it with its own and treats a difference exactly like a
+/// `PROTOCOL_VERSION` mismatch. It catches what the 3-bit version cannot: two builds that
+/// speak the same `PROTOCOL_VERSION` but a different wire schema (a forgotten bump, or
+/// two consumers pinning different tower-protocol source trees).
+///
 /// Field order is load-bearing (postcard encodes positionally); changing it is a wire
 /// break, so bump [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION).
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct Hello<'a> {
     pub protocol_version: u8,
     pub firmware_name: &'a str,
     pub firmware_version: &'a str,
     pub session_id: u32,
+    /// The producer's [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT) (since v4).
+    pub wire_fingerprint: u32,
 }
 
 /// Target → host: a structured log record. The host prepends local time + colorizes.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct Log<'a> {
     pub level: Level,
     pub uptime_us: u64,
@@ -43,14 +52,14 @@ pub struct Log<'a> {
 }
 
 /// Target → host: raw text from `print!`/`println!`, rendered verbatim.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct Print<'a> {
     pub text: &'a str,
 }
 
 /// Target → host: a self-describing event (key=value pairs) so the host renders any
 /// app's event without a shared per-app schema.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct Event<'a> {
     #[serde(borrow)]
     pub name: &'a str,
@@ -60,7 +69,7 @@ pub struct Event<'a> {
 
 /// Target → host: one chunk of a shell response. `result` is authoritative only on
 /// the `last` chunk; `chunk` indexes detect a CRC-dropped chunk mid-response.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct ShellResponse<'a> {
     pub cmd_id: u16,
     pub result: u8, // 0 = success
@@ -70,7 +79,7 @@ pub struct ShellResponse<'a> {
 }
 
 /// What a completion candidate is; drives host coloring + the auto-insert separator.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CandidateKind {
     Menu,
     Command,
@@ -79,7 +88,7 @@ pub enum CandidateKind {
 }
 
 /// One completion candidate (text from the static command tree).
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct Candidate<'a> {
     pub text: &'a str,
     pub kind: CandidateKind,
@@ -87,7 +96,7 @@ pub struct Candidate<'a> {
 
 /// Target → host: completion result for a `ShellComplete`. `token_start` is the byte
 /// offset in the request line the host should replace; `more` flags >16 candidates.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct ShellCompletions<'a> {
     pub req_id: u16,
     pub token_start: u16,
@@ -98,7 +107,7 @@ pub struct ShellCompletions<'a> {
 }
 
 /// Target → host: overflow marker; `count` log/print frames were dropped.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct Dropped {
     pub count: u32,
 }
@@ -109,7 +118,7 @@ pub struct Dropped {
 /// app types therefore never require a gateway firmware change. `counter` is the
 /// net-layer frame counter (dedup/diagnostics); `rssi`/`lqi` are the reception
 /// metadata for the host's link table and graph.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct Uplink<'a> {
     pub src: u32,
     pub counter: u32,
@@ -124,7 +133,7 @@ pub struct Uplink<'a> {
 /// `result` is authoritative only on the `last` chunk, `chunk` indexes detect a
 /// CRC-dropped chunk mid-reply. The `data` of all chunks concatenate into a stream
 /// of postcard records typed per-op.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct MgmtResponse<'a> {
     pub req_id: u16,
     /// One of the `mgmt::MGMT_*` codes; [`MGMT_OK`](crate::mgmt::MGMT_OK) = success.
@@ -136,7 +145,7 @@ pub struct MgmtResponse<'a> {
 
 /// Target → host: one sample of the radio-diagnostics stream feeding the host's
 /// running channel graph. Variant order is the wire; never reorder.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RadioStat {
     /// Ambient RSSI of the current receive channel, sampled at the cadence set by
     /// `MgmtOp::StatsConfig` (or the gateway's persisted `stats-period` setting).
@@ -153,7 +162,7 @@ pub enum RadioStat {
 }
 
 /// Host → target: a shell command line. `cmd_id` correlates the response.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct ShellCommand<'a> {
     pub cmd_id: u16,
     pub line: &'a str,
@@ -162,7 +171,7 @@ pub struct ShellCommand<'a> {
 /// Host → target: one management operation (see the [`mgmt`](crate::mgmt) module
 /// for the op set and reply contract). Requests always fit a single frame; `req_id`
 /// correlates the (possibly chunked, possibly delayed) [`MgmtResponse`].
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct MgmtRequest<'a> {
     pub req_id: u16,
     #[serde(borrow)]
@@ -170,7 +179,7 @@ pub struct MgmtRequest<'a> {
 }
 
 /// Host → target: a completion request. `req_id` correlates `ShellCompletions`.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Schema, Debug)]
 pub struct ShellComplete<'a> {
     pub req_id: u16,
     pub line: &'a str,

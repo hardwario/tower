@@ -64,9 +64,10 @@ fn status(opts: &MqttOpts, json: bool) -> Result<u8> {
             println!("state:    offline (the gateway's last-will fired; the bridge process is gone)");
         } else {
             // Retained-topic text anyone with broker access can plant: escape it.
-            // The version arrives only in the dongle's boot Hello, which the bridge's startup
-            // probe usually never sees (DeviceInfo carries the name, not the version): show it
-            // when known instead of a blank with a trailing space.
+            // The bridge takes the version from the startup `Describe` (wire v4 `DeviceInfo`
+            // carries it), so it is known even when no boot Hello was seen; an older bridge
+            // could only learn it from a Hello, so a blank is still tolerated: show the
+            // version when known instead of a blank with a trailing space.
             let firmware = if status.firmware_version.is_empty() {
                 sanitize_line(&status.firmware).into_owned()
             } else {

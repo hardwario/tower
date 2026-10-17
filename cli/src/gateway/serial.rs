@@ -15,6 +15,7 @@ use tower_protocol::{Error, FrameDecoder, MsgType, decode_frame};
 
 use super::engine::{Input, SerialMsg};
 use crate::port::open_console_responsive;
+use crate::session::Mismatch;
 
 /// Decode one inner frame into an owned engine message (`None` = not engine-relevant).
 pub(crate) fn to_serial_msg(inner: &[u8]) -> Option<SerialMsg> {
@@ -30,12 +31,18 @@ pub(crate) fn to_serial_msg(inner: &[u8]) -> Option<SerialMsg> {
         Err(_) => return None,
     };
     match mt {
+        // A Hello announcing another version or wire fingerprint (a mid-session reflash to a
+        // firmware built from a different tower-protocol source tree): surfaced as `Foreign`, which
+        // also closes the [`schema_gate`] until a matching Hello.
         MsgType::Hello => postcard::from_bytes::<Hello>(payload)
             .ok()
-            .map(|h| SerialMsg::Hello {
-                firmware_name: h.firmware_name.to_string(),
-                firmware_version: h.firmware_version.to_string(),
-                session_id: h.session_id,
+            .map(|h| match Mismatch::of_hello(&h) {
+                Some(m) => SerialMsg::Foreign(m),
+                None => SerialMsg::Hello {
+                    firmware_name: h.firmware_name.to_string(),
+                    firmware_version: h.firmware_version.to_string(),
+                    session_id: h.session_id,
+                },
             }),
         MsgType::Log => postcard::from_bytes::<Log>(payload).ok().map(|l| SerialMsg::Log {
             line: format!(
@@ -84,6 +91,26 @@ pub(crate) fn to_serial_msg(inner: &[u8]) -> Option<SerialMsg> {
     }
 }
 
+/// The mid-session lockstep gate in front of the engine: after a [`SerialMsg::Foreign`] (a
+/// `Hello` announcing a foreign schema), every frame decodes against the wrong definitions, so
+/// nothing but the next `Hello` is forwarded (exactly like header-level `BadVersion` frames,
+/// which never decode at all); a matching `Hello` re-opens it. `foreign` is the serial loop's
+/// state, kept across reconnects (a replug of a still-foreign dongle re-announces itself).
+pub(crate) fn schema_gate(foreign: &mut bool, msg: SerialMsg) -> Option<SerialMsg> {
+    match msg {
+        SerialMsg::Foreign(_) => {
+            *foreign = true;
+            Some(msg)
+        }
+        SerialMsg::Hello { .. } => {
+            *foreign = false;
+            Some(msg)
+        }
+        _ if *foreign => None,
+        _ => Some(msg),
+    }
+}
+
 fn level_tag(l: tower_protocol::msg::Level) -> &'static str {
     use tower_protocol::msg::Level;
     match l {
@@ -106,6 +133,7 @@ pub(crate) fn run(
     let mut dec = FrameDecoder::new();
     let mut buf = [0u8; 512];
     let mut up = true;
+    let mut foreign = false;
     loop {
         // Outbound first: mgmt requests are latency-sensitive (the TUI is waiting).
         loop {
@@ -147,6 +175,7 @@ pub(crate) fn run(
                 for &b in &buf[..n] {
                     if let Some(inner) = dec.push(b)
                         && let Some(msg) = to_serial_msg(inner)
+                        && let Some(msg) = schema_gate(&mut foreign, msg)
                         && input.send(Input::SerialFrame(msg)).is_err()
                     {
                         return;
@@ -316,6 +345,7 @@ mod tests {
                 firmware_name: "radio_dongle_gateway",
                 firmware_version: "v0.1.0",
                 session_id: 9,
+                wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
             },
         );
         match to_serial_msg(&inner).expect("engine-relevant") {
@@ -334,6 +364,46 @@ mod tests {
             SerialMsg::Dropped(n) => assert_eq!(n, 4),
             other => panic!("expected Dropped, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn foreign_fingerprint_hello_closes_the_gate_until_a_matching_one() {
+        // A mid-session reflash to a firmware from another tower-protocol source tree (same
+        // PROTOCOL_VERSION): its Hello maps to `Foreign`, and the gate then drops every frame
+        // (they would mis-decode) until a matching Hello re-opens it.
+        let hello = |wire_fingerprint| {
+            inner_of(
+                MsgType::Hello,
+                &Hello {
+                    protocol_version: tower_protocol::PROTOCOL_VERSION,
+                    firmware_name: "radio_dongle_gateway",
+                    firmware_version: "v0.1.0",
+                    session_id: 10,
+                    wire_fingerprint,
+                },
+            )
+        };
+        let foreign_fp = tower_protocol::WIRE_FINGERPRINT ^ 0x0001_0000;
+        let foreign = to_serial_msg(&hello(foreign_fp)).expect("engine-relevant");
+        assert!(matches!(
+            foreign,
+            SerialMsg::Foreign(Mismatch::Fingerprint(fp)) if fp == foreign_fp
+        ));
+        let log = || to_serial_msg(&inner_of(MsgType::Dropped, &Dropped { count: 1 })).unwrap();
+        let mut gate = false;
+        assert!(schema_gate(&mut gate, log()).is_some(), "open by default");
+        assert!(
+            schema_gate(&mut gate, foreign).is_some(),
+            "the mismatch itself is reported"
+        );
+        assert!(schema_gate(&mut gate, log()).is_none(), "then frames are dropped");
+        let matching = to_serial_msg(&hello(tower_protocol::WIRE_FINGERPRINT)).unwrap();
+        assert!(matches!(matching, SerialMsg::Hello { .. }));
+        assert!(schema_gate(&mut gate, matching).is_some());
+        assert!(
+            schema_gate(&mut gate, log()).is_some(),
+            "a matching Hello re-opens it"
+        );
     }
 
     #[test]

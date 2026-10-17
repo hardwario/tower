@@ -58,15 +58,18 @@ Two **independently versioned** schemas ride these frames:
   `PROTOCOL_VERSION`. `MgmtRequest{req_id, op}` → one or more `MgmtResponse` chunks with the same
   `req_id`; the `data` chunks concatenate into a stream of postcard records typed per op.
 - **`tower_protocol::radio`**: the application schema *inside* the encrypted radio frame, carried
-  opaquely by `Uplink`/`QueuePush`. Versioned by its own leading byte
-  `RADIO_SCHEMA_VERSION = 1`, so it evolves without touching the gateway. Envelope:
+  opaquely by `Uplink`/`QueuePush`. Versioned by its own leading byte `RADIO_SCHEMA_VERSION`
+  (2 today), so it evolves without a console `PROTOCOL_VERSION` bump and the gateway never
+  decodes it. (Since wire v4 the gateway's `WIRE_FINGERPRINT`, announced in `Hello` and
+  `DeviceInfo`, covers the radio schema too, so the host expects the gateway built from the same
+  source tree as everything else.) Envelope:
   `[RADIO_SCHEMA_VERSION] ‖ postcard(NodeMsg | NodeCmd)`, always ≤ `MAX_RADIO_PAYLOAD` (74 B).
 
 ### Management ops (`mgmt::MgmtOp`)
 
 | op | served by | reply record |
 |---|---|---|
-| `Describe` | both | `DeviceInfo` (role probe: the authoritative "is this a gateway?") |
+| `Describe` | both | `DeviceInfo` (role probe: the authoritative "is this a gateway?"; since wire v4 also the device's `wire_fingerprint` + `firmware_version`, for a host that missed the boot `Hello`) |
 | `NodeList` | gateway | `NodeEntry` × N (chunked) |
 | `NodeAdd {addr,key,name,flags}` | gateway | none (install a cable-paired node) |
 | `NodeRemove {addr}` / `NodeUpdate {addr,name?,flags?}` | gateway | none |

@@ -35,6 +35,7 @@ fn hello_roundtrip() {
         firmware_name: "demo",
         firmware_version: "tower 0.1.0",
         session_id: 0xABCD,
+        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 7, &h, &mut out).unwrap();
@@ -50,6 +51,7 @@ fn hello_roundtrip() {
             assert_eq!(h2.firmware_name, "demo");
             assert_eq!(h2.firmware_version, "tower 0.1.0");
             assert_eq!(h2.session_id, 0xABCD);
+            assert_eq!(h2.wire_fingerprint, WIRE_FINGERPRINT);
             decoded = true;
         }
     }
@@ -64,6 +66,7 @@ fn decode_msg_typed_hello() {
         firmware_name: "blinky",
         firmware_version: "v0.1.0",
         session_id: 42,
+        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 3, &h, &mut out).unwrap();
@@ -79,6 +82,7 @@ fn decode_msg_typed_hello() {
             assert_eq!(h.firmware_name, "blinky");
             assert_eq!(h.firmware_version, "v0.1.0");
             assert_eq!(h.session_id, 42);
+            assert_eq!(h.wire_fingerprint, WIRE_FINGERPRINT);
         }
         other => panic!("expected Msg::Hello, got {other:?}"),
     }
@@ -149,6 +153,7 @@ fn crc_corruption_is_rejected() {
         firmware_name: "a",
         firmware_version: "x",
         session_id: 1,
+        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
@@ -177,6 +182,7 @@ fn version_mismatch_is_rejected() {
         firmware_name: "a",
         firmware_version: "x",
         session_id: 1,
+        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
@@ -216,6 +222,7 @@ fn hello_inner() -> Vec<u8> {
         firmware_name: "a",
         firmware_version: "x",
         session_id: 1,
+        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
@@ -311,6 +318,7 @@ fn resync_after_garbage() {
         firmware_name: "a",
         firmware_version: "ok",
         session_id: 1,
+        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut frame = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 5, &h, &mut frame).unwrap();
@@ -387,6 +395,7 @@ fn small_output_buffer_overflows() {
         firmware_name: "demo",
         firmware_version: "tower 0.1.0",
         session_id: 0xABCD,
+        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut tiny = [0u8; 4];
     assert_eq!(
@@ -419,6 +428,7 @@ fn decoder_drops_oversize_then_resyncs() {
         firmware_name: "a",
         firmware_version: "ok",
         session_id: 1,
+        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 3, &h, &mut out).unwrap();
@@ -438,6 +448,7 @@ fn decoder_reset_discards_partial() {
         firmware_name: "a",
         firmware_version: "ok",
         session_id: 1,
+        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
@@ -478,6 +489,7 @@ fn unknown_type_is_rejected() {
         firmware_name: "a",
         firmware_version: "x",
         session_id: 1,
+        wire_fingerprint: WIRE_FINGERPRINT,
     };
     let mut out = [0u8; MAX_WIRE];
     let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();

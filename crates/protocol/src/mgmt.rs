@@ -1,4 +1,5 @@
-//! Management schema: the typed op/reply contract of the gateway link (wire v3).
+//! Management schema: the typed op/reply contract of the gateway link (wire v3; the
+//! [`DeviceInfo`] record grew two trailing fields in v4).
 //!
 //! A host drives a device with [`MgmtRequest`](crate::msg::MgmtRequest) frames
 //! (`{ req_id, op: MgmtOp }`; requests always fit a single frame). The device answers
@@ -29,6 +30,10 @@
 //! check: a v3 device answers with its [`DeviceRole`]; an op a device does not serve
 //! gets [`MGMT_UNSUPPORTED`]; pre-v3 firmware never answers at all (the host times
 //! out). This is stronger than matching `Hello.firmware_name`, which is display-only.
+//! Since v4 the [`DeviceInfo`] reply also carries the device's
+//! [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT) and firmware version, so a host that attaches
+//! to an already-running device (and so never sees its boot `Hello`) can still run the
+//! lockstep check and report the version.
 //!
 //! **Delayed responses.** `PairingOpen` / `JoinOpen` reply when their radio window
 //! *resolves*: a join commits, the window expires ([`MGMT_TIMEOUT`]), or it is
@@ -44,6 +49,7 @@
 //! by index, so appending an op later is a wire change (bump
 //! [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION)). It is designed complete now.
 
+use postcard_schema::Schema;
 use serde::{Deserialize, Serialize};
 
 // --- result codes (MgmtResponse.result) ---------------------------------------
@@ -104,7 +110,7 @@ pub const MAX_NODE_NAME: usize = 16;
 
 /// One management operation. Variant order is the wire format (postcard encodes by
 /// variant index). Never reorder; appending is a wire change.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub enum MgmtOp<'a> {
     /// Identify the device: role, radio schema, network parameters. Both roles.
     Describe,
@@ -158,7 +164,7 @@ pub enum MgmtOp<'a> {
 }
 
 /// Network credentials installed on a node by [`MgmtOp::Provision`].
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub struct Provision {
     /// `Some` overrides the node's UID-derived radio address; `None` keeps it.
     pub addr: Option<u32>,
@@ -170,7 +176,7 @@ pub struct Provision {
 }
 
 /// What kind of device answered [`MgmtOp::Describe`]. Variant order pinned by test.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DeviceRole {
     Gateway,
     Node,
@@ -178,7 +184,7 @@ pub enum DeviceRole {
 }
 
 /// Reply record for [`MgmtOp::Describe`].
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub struct DeviceInfo<'a> {
     pub role: DeviceRole,
     /// The `radio` module schema version this firmware encodes/decodes.
@@ -195,10 +201,17 @@ pub struct DeviceInfo<'a> {
     /// Node: the gateway it is paired to (`0` = none); gateway: equals `addr`.
     pub gw_addr: u32,
     pub firmware_name: &'a str,
+    /// The device's [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT) (since v4), the same value
+    /// its boot `Hello` carries, so a host that missed the `Hello` (e.g. a gateway bridge
+    /// attaching to a running dongle) still runs the lockstep check.
+    pub wire_fingerprint: u32,
+    /// The firmware version string (the same as `Hello.firmware_version`, e.g. `"v0.1.0"`;
+    /// since v4), so a host that missed the boot `Hello` can still report it.
+    pub firmware_version: &'a str,
 }
 
 /// Reply record for [`MgmtOp::NodeList`]: one registered node.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub struct NodeEntry<'a> {
     pub addr: u32,
     /// ≤ [`MAX_NODE_NAME`] bytes; empty while [`NODE_FLAG_UNNAMED`].
@@ -217,27 +230,27 @@ pub struct NodeEntry<'a> {
 }
 
 /// Reply record for [`MgmtOp::NodeRevealKey`].
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub struct NodeKey {
     pub addr: u32,
     pub key: [u8; 16],
 }
 
 /// Delayed reply record for [`MgmtOp::PairingOpen`]: a node joined the window.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Paired {
     pub addr: u32,
 }
 
 /// Reply record for [`MgmtOp::QueuePush`]: the handle for `QueueDrop` and the
 /// `item` echoed in `RadioStat::Tx` reports. Monotonic from 1 per gateway boot.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct QueueId {
     pub item: u16,
 }
 
 /// Reply record for [`MgmtOp::QueueList`]: one pending downlink.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub struct QueueEntry<'a> {
     pub node_addr: u32,
     pub item: u16,
@@ -247,13 +260,13 @@ pub struct QueueEntry<'a> {
 }
 
 /// Reply record for [`MgmtOp::Provision`]: the node's effective radio address.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ProvisionAck {
     pub addr: u32,
 }
 
 /// Delayed reply record for [`MgmtOp::JoinOpen`]: the node joined a gateway.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Joined {
     pub gw_addr: u32,
 }

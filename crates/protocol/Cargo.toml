@@ -1,6 +1,6 @@
 [package]
 name = "tower-protocol"
-version = "1.5.1"
+version = "1.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -20,3 +20,13 @@ postcard.workspace = true
 cobs = { version = "0.5", default-features = false }
 # Bounded collections for the candidate/field lists; `serde` feature for (de)ser.
 heapless.workspace = true
+# Compile-time schema reflection for `WIRE_FINGERPRINT` (src/fingerprint.rs): every wire type
+# derives `postcard_schema::Schema`, and a const-fn hasher folds the schema tree into a u32 the
+# two ends exchange at runtime. Pinned EXACTLY (`=`), together with the derive crate below: the
+# host and firmware workspaces each resolve their own Cargo.lock and recompute the fingerprint
+# at build time, so a different postcard-schema / postcard-derive release (a changed builtin
+# impl or derive expansion) could otherwise give the two ends different values for the SAME
+# source, a false mismatch. With both pinned, the fingerprint is a pure function of this crate.
+postcard-schema = { version = "=0.2.5", default-features = false, features = ["derive", "heapless-v0_9"] }
+# Not used directly: listed only to pin the `Schema` derive's expansion (see above).
+postcard-derive = { version = "=0.2.2" }

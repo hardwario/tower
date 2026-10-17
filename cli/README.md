@@ -166,7 +166,7 @@ the cause of a failure:
 | `1`  | tool error: I/O (incl. a port that fails mid-command, or a `logs`/`events` link lost under `--no-reconnect`), bad file, encode/decode, truncated/incomplete device response |
 | `2`  | usage error (bad arguments, emitted by clap) |
 | `124`| device command timed out (no response at all to `exec` / `complete`; also: no gateway reply to an MQTT RPC) |
-| `125`| protocol-version mismatch (device speaks a different `PROTOCOL_VERSION`; rebuild `tower` or reflash the device from the same tree) |
+| `125`| protocol mismatch: the device was built from a different tree (another `PROTOCOL_VERSION`, or the same version with a different wire fingerprint); rebuild `tower` or reflash the device from the same tree |
 | `126`| wrong firmware role (`tower gateway`/`nodes add --port` pointed at the wrong kind of device) |
 | `1..=123` | `exec` only: the device-reported shell result (clamped into this range) |
 
@@ -176,6 +176,26 @@ that errors out (unplugged mid-command) is `1`: `124` strictly means a live link
 the device stayed silent. `125` is deliberately distinct so CI can
 detect the version-mismatch failure mode (stale `tower` binary vs. freshly flashed firmware)
 instead of misreading it as a timeout.
+
+### Protocol mismatch detection
+
+Two checks catch a device built against a different `tower-protocol` than this `tower`:
+
+- **`PROTOCOL_VERSION`** rides in every frame header; a frame of another version is rejected
+  before its payload is read.
+- **The wire fingerprint** (`tower-protocol` v1.6.0+, wire v4): the device's `Hello` (and its
+  `Describe` reply, for `tower gateway` and `nodes add --port`) carries `WIRE_FINGERPRINT`, a
+  compile-time hash of the whole wire schema. A device whose fingerprint differs from this
+  build's speaks the **same `PROTOCOL_VERSION` but a different wire schema** (the two were
+  built from different source trees, or someone changed the schema without bumping
+  the version), which postcard would otherwise decode into silently wrong values.
+
+Either one is handled the same way: the mismatch banner on stderr (naming both versions, or
+both fingerprints in hex), exit code `125` for `exec`, `shell --reset`, `complete`, `tower
+gateway` and `nodes add --port`, and no further interpretation of the stream: `logs`/`events`
+and the TUI count the frames as undecodable instead of rendering them, until a matching
+`Hello` arrives. The `hello:` line `tower logs` prints shows the device's fingerprint
+(`protocol v4 fp 0x…`), and `/system/resource print` shows it on the device side (`wire:`).
 
 ## Flashing firmware
 

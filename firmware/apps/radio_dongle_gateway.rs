@@ -299,7 +299,8 @@ async fn respond_empty(req_id: u16, result: u8) {
 }
 
 /// Reply `MGMT_OK` with a single postcard record (largest single record is a
-/// max-name `DeviceInfo` at ~60 B; 96 covers every one-record reply).
+/// max-name `DeviceInfo` at ~62 B since wire v4 added `wire_fingerprint` + `firmware_version`;
+/// 96 covers every one-record reply).
 async fn respond_record<T: serde::Serialize>(req_id: u16, record: &T) {
     let mut buf = [0u8; 96];
     match postcard::to_slice(record, &mut buf) {
@@ -646,6 +647,10 @@ async fn handle_mgmt(
                     provisioned: true,
                     gw_addr: addr,
                     firmware_name: name.as_str(),
+                    // Wire v4: the same lockstep fingerprint + version the boot `Hello` carries, so
+                    // a host that attached after boot (missed the Hello) still checks and shows them.
+                    wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
+                    firmware_version: console::firmware_version(),
                 },
             )
             .await;

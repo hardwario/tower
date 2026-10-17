@@ -1935,6 +1935,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "postcard-derive"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0232bd009a197ceec9cc881ba46f727fcd8060a2d8d6a9dde7a69030a6fe2bb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "postcard-schema"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9475666d89f42231a0a57da32d5f6ca7f9b5cd4c335ea1fe8f3278215b7a21ff"
+dependencies = [
+ "heapless",
+ "postcard-derive",
+ "serde",
+]
+
+[[package]]
 name = "powerfmt"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3067,11 +3089,13 @@ version = "0.1.0"
 
 [[package]]
 name = "tower-protocol"
-version = "1.5.1"
+version = "1.6.0"
 dependencies = [
  "cobs 0.5.1",
  "heapless",
  "postcard",
+ "postcard-derive",
+ "postcard-schema",
  "serde",
 ]
 

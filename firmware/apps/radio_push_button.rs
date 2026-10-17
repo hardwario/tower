@@ -864,6 +864,10 @@ async fn handle_mgmt(
                     provisioned: provision.is_some(),
                     gw_addr: provision.map(|p| p.gw_addr).unwrap_or(0),
                     firmware_name: name.as_str(),
+                    // Wire v4: the same lockstep fingerprint + version the boot `Hello` carries, so
+                    // a host that attached after boot (missed the Hello) still checks and shows them.
+                    wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
+                    firmware_version: console::firmware_version(),
                 },
             )
             .await;

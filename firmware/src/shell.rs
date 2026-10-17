@@ -45,7 +45,7 @@ use embassy_executor::Spawner;
 use embassy_time::Instant;
 use heapless::{String, Vec};
 use tower_protocol::msg::{Candidate, CandidateKind, ShellCommand, ShellComplete, ShellCompletions};
-use tower_protocol::{MsgType, PROTOCOL_VERSION, decode_frame};
+use tower_protocol::{MsgType, PROTOCOL_VERSION, WIRE_FINGERPRINT, decode_frame};
 use tower_shell::{CompletionBudget, Window};
 
 use crate::console;
@@ -738,18 +738,20 @@ fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let us = Instant::now().as_micros();
     // "firmware:" reports the app/example NAME + version and the per-boot session id: the exact
     // fields the boot `Hello` carries and `tower` prints on connect (they must agree). The name
-    // is per-app; the version is the SDK crate version; the session bumps once per boot. Multi-line
-    // summary (spans more than one wire frame, which exercises chunking).
+    // is per-app; the version is the SDK crate version; the session bumps once per boot. "wire:"
+    // is the tower-protocol `PROTOCOL_VERSION` plus the `WIRE_FINGERPRINT` the Hello carries (the
+    // schema hash a host checks for lockstep). Multi-line summary (spans more than one wire frame,
+    // which exercises chunking).
     // Lines kept terse so the whole summary fits the shell response buffer (`RESP_CAP` = 256 B)
-    // even at worst case: a 32-char firmware name + 10-digit session + large uptime + the
-    // longest `rng:` label (~245 B). `rng:` names the source behind `addr=random`: the
-    // hardware TRNG, or the non-cryptographic fallback if the TRNG failed to come up
-    // (`board::rand_source`; probes once if nothing has drawn yet, then stays cached).
+    // even at worst case: a 32-char firmware name + 10-digit session + a 9-digit uptime in
+    // seconds (31 years) + the longest `rng:` label (~252 B). `rng:` names the source behind
+    // `addr=random`: the hardware TRNG, or the non-cryptographic fallback if the TRNG failed to
+    // come up (`board::rand_source`; probes once if nothing has drawn yet, then stays cached).
     let _ = write!(
         ctx,
         "firmware: {} {}\r\n\
          session: {}\r\n\
-         protocol: v{}\r\n\
+         wire: v{} fp {:#010x}\r\n\
          uptime: {}.{:03} s\r\n\
          cpu: STM32L083CZ @ 16 MHz, LSE RTC\r\n\
          memory: 192K flash / 20K RAM / 6K EEPROM\r\n\
@@ -759,6 +761,7 @@ fn cmd_resource(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
         console::firmware_version(),
         console::session_id(),
         PROTOCOL_VERSION,
+        WIRE_FINGERPRINT,
         us / 1_000_000,
         (us % 1_000_000) / 1000,
         crate::board::rand_source().as_str(),

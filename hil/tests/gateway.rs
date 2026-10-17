@@ -36,6 +36,17 @@ fn describe_full(console: &mut Console, req_id: u16) -> (DeviceRole, u32, u8, u8
         .expect("Describe reply");
     assert_eq!(result, mgmt::MGMT_OK);
     let info = postcard::from_bytes::<DeviceInfo>(&data).expect("DeviceInfo record");
+    // Wire v4: the Describe reply carries the same lockstep fingerprint as the boot Hello, plus
+    // the firmware version (so a host that missed the Hello still learns both).
+    assert_eq!(
+        info.wire_fingerprint,
+        tower_protocol::WIRE_FINGERPRINT,
+        "Describe wire fingerprint drift: device and harness built from different tower-protocol source trees"
+    );
+    assert!(
+        !info.firmware_version.is_empty(),
+        "empty firmware_version in DeviceInfo"
+    );
     (info.role, info.addr, info.band, info.channel)
 }
 

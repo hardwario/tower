@@ -20,6 +20,7 @@ use tower_protocol::msg::RadioStat;
 use tower_protocol::radio::{self, NodeCmd, NodeMsg};
 
 use crate::mgmt::{DeviceInfoOwned, NodeEntryOwned, encode_mgmt, parse_records};
+use crate::session::Mismatch;
 
 use super::payload::{self, PendingEntry, RpcRequest, RpcResponse};
 use super::topics;
@@ -74,6 +75,10 @@ pub(crate) enum SerialMsg {
     },
     Stat(RadioStat),
     Dropped(u32),
+    /// A `Hello` announcing another protocol version or wire fingerprint: the dongle now runs
+    /// a firmware built from a different tower-protocol source tree (a mid-session reflash). The
+    /// serial thread drops every later frame until a matching `Hello` (`serial::schema_gate`).
+    Foreign(Mismatch),
 }
 
 /// Everything that can happen to the engine.
@@ -306,7 +311,6 @@ pub(crate) struct Engine {
     port_name: String,
     describe: DeviceInfoOwned,
     hello_session: Option<u32>,
-    firmware_version: String,
     serial_up: bool,
     mqtt_up: bool,
     seq: u16,
@@ -378,7 +382,6 @@ impl Engine {
             port_name,
             describe,
             hello_session: None,
-            firmware_version: String::new(),
             serial_up: true,
             mqtt_up: false,
             seq: 0,
@@ -539,7 +542,7 @@ impl Engine {
                 // repeats the pinned session (a console restart without a reboot) is benign.
                 let rebooted = self.hello_session != Some(session_id);
                 self.hello_session = Some(session_id);
-                self.firmware_version = firmware_version;
+                self.describe.firmware_version = firmware_version;
                 self.describe.firmware_name = firmware_name;
                 if rebooted {
                     out.push(Output::Event(Event::Log(format!(
@@ -587,6 +590,14 @@ impl Engine {
             SerialMsg::Dropped(count) => {
                 out.push(Output::Event(Event::Log(format!(
                     "gateway console dropped {count} frame(s) (link congestion)"
+                ))));
+            }
+            SerialMsg::Foreign(m) => {
+                out.push(Output::Event(Event::Log(format!(
+                    "PROTOCOL MISMATCH (dongle reflashed?): {}; {}; its frames are ignored \
+                     until a matching firmware is back",
+                    m.what(),
+                    m.remedy()
                 ))));
             }
         }
@@ -944,7 +955,21 @@ impl Engine {
             // ---- happy paths ----
             (OpKind::Describe, None) => {
                 if let Ok(info) = postcard::from_bytes::<tower_protocol::mgmt::DeviceInfo>(&p.data) {
-                    self.describe = info.into();
+                    let info = DeviceInfoOwned::from(info);
+                    if let Some(m) = info.mismatch() {
+                        // Startup verification refused a foreign gateway, so this is a
+                        // mid-session reflash: keep the verified identity, say why.
+                        out.push(Output::Event(Event::Log(format!(
+                            "PROTOCOL MISMATCH in the Describe reply: {}; {}",
+                            m.what(),
+                            m.remedy()
+                        ))));
+                        self.rpc_err(out, &p, "protocol mismatch (wire fingerprint)");
+                        return;
+                    }
+                    // Carries `firmware_version` too (wire v4), so the status no longer
+                    // depends on having seen a boot Hello.
+                    self.describe = info;
                     self.publish_status(out);
                 }
                 // Band + channel are what a cable-provisioned node must be told
@@ -1975,7 +2000,9 @@ impl Engine {
                 schema: payload::SCHEMA,
                 gateway: topics::node_hex(self.describe.addr),
                 firmware: self.describe.firmware_name.clone(),
-                firmware_version: self.firmware_version.clone(),
+                // From the startup `Describe` (wire v4 `DeviceInfo.firmware_version`), then
+                // refreshed by every Hello / Describe: known even if no boot Hello was seen.
+                firmware_version: self.describe.firmware_version.clone(),
                 session_id: self.hello_session.unwrap_or(0),
                 protocol: tower_protocol::PROTOCOL_VERSION,
                 serial_port: self.port_name.clone(),
@@ -2057,6 +2084,8 @@ mod tests {
                 provisioned: true,
                 gw_addr: 0x0000_0001,
                 firmware_name: "radio_dongle_gateway".into(),
+                wire_fingerprint: tower_protocol::WIRE_FINGERPRINT,
+                firmware_version: "v0.1.0".into(),
             },
         )
     }
@@ -2118,6 +2147,33 @@ mod tests {
         assert!(op.contains("NodeList"));
         let out = reply(e, req_id, MGMT_OK, &node_entry_record(id, name, flags));
         assert!(!publishes(&out, &format!("tower/nodes/{}", topics::node_hex(id))).is_empty());
+    }
+
+    #[test]
+    fn status_carries_the_firmware_version_from_describe() {
+        // Wire v4: the startup Describe (`DeviceInfo.firmware_version`) seeds the version, so
+        // the retained status (what `tower net status` prints) has it before, and without,
+        // any boot Hello; the startup probe usually consumes that Hello anyway.
+        let mut e = engine();
+        let out = e.handle(Input::SerialUp);
+        let raw = publishes(&out, &topics::gateway_status("tower/"));
+        let st: payload::Status = serde_json::from_slice(raw[0]).unwrap();
+        assert_eq!(st.firmware_version, "v0.1.0");
+        assert_eq!(st.session_id, 0, "no Hello seen yet");
+    }
+
+    #[test]
+    fn a_foreign_dongle_hello_is_logged_as_a_protocol_mismatch() {
+        // A mid-session reflash to a firmware from another tower-protocol source tree: the serial
+        // thread maps its Hello to `Foreign` (and stops forwarding frames); the engine says so.
+        let mut e = engine();
+        let out = e.handle(Input::SerialFrame(SerialMsg::Foreign(Mismatch::Fingerprint(
+            0xDEAD_BEEF,
+        ))));
+        assert!(out.iter().any(|o| matches!(
+            o,
+            Output::Event(Event::Log(l)) if l.contains("PROTOCOL MISMATCH") && l.contains("0xdeadbeef")
+        )));
     }
 
     #[test]

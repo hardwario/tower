@@ -23,6 +23,47 @@ git tag.
 - The crate joins the repo-wide rustfmt gate (one root `rustfmt.toml`, max_width 110); the
   reformat is whitespace-only, which the guard's per-golden fingerprints ignore.
 
+## v1.6.0 (2026-10-17)
+
+**WIRE CHANGE: `PROTOCOL_VERSION` 3 → 4. Consumer re-pin required**: `tower-firmware` (both
+manifests), `tower-cli` and `tower-hil` must move to `v1.6.0` together; a v4 build and a v3
+build reject each other's frames (`BadVersion`). `RADIO_SCHEMA_VERSION` stays 2 (the radio
+schema is unchanged).
+
+- **Wire fingerprint.** New `WIRE_FINGERPRINT: u32`, a compile-time structural hash of the wire
+  schema, so a host can detect two builds that speak the same `PROTOCOL_VERSION` but a different
+  schema (a forgotten bump, or consumers pinning different tags), which postcard would otherwise
+  silently mis-decode. Every wire type now derives `postcard_schema::Schema`; the new
+  `fingerprint` module walks those schemas with a `const fn` FNV-1a 64 hasher that ignores all
+  names (type, field, variant) and hashes only what fixes the layout: data-model kinds (integer
+  width and signedness, string vs bytes), field and variant order, variant shapes, nesting. The
+  64-bit result is xor-folded to 32 bits. It covers every `MsgType` value paired with its payload
+  schema, the mgmt op and reply records, and the radio schema (`NodeMsg`, `NodeCmd`); heapless
+  capacities, constant values and the framing are not covered (see the module docs for the
+  exact list). Checked against history: the console hash is identical for v1.3.0, v1.4.0, v1.5.0
+  and v1.5.1 (the renames are invisible) and the radio hash moves only at v1.5.0.
+- **`Hello` gains a trailing `wire_fingerprint: u32`** (the producer's `WIRE_FINGERPRINT`).
+- **`mgmt::DeviceInfo` gains trailing `wire_fingerprint: u32` and `firmware_version: &str`**, so a
+  host that attaches to a running device (a gateway bridge that missed the boot `Hello`) can still
+  run the check and learn the firmware version.
+- Golden pins: `fingerprint::CONSOLE_HASH` in `tests/golden.rs` (guarded by `PROTOCOL_VERSION`)
+  and `fingerprint::RADIO_HASH` in `tests/radio_golden.rs` (guarded by `RADIO_SCHEMA_VERSION`), so
+  `tools/check_wire_bump.py` now demands the matching bump for ANY schema change, even one no byte
+  vector exercises. `WIRE_FINGERPRINT` (= `fingerprint::combine` of the two) is pinned in the new
+  `tests/fingerprint.rs`, next to hasher property tests (renames are invisible; field reorder,
+  variant reorder, width, signedness, added field / variant, variant shape, string vs bytes and
+  nesting are not; heapless capacity is documented as not covered). All framed golden vectors are
+  regenerated for the new version bits; `Hello` and `DeviceInfo` vectors for the new fields.
+- New API: `MsgType::ALL` (every message type in ascending discriminant order), the `fingerprint`
+  module (`schema_hash`, `fold32`, `combine`, `payload_schema`, `CONSOLE_HASH`, `RADIO_HASH`).
+- Dependencies: `postcard-schema =0.2.5` (features `derive`, `heapless-v0_9`; no_std) and
+  `postcard-derive =0.2.2`, both pinned exactly: each consumer recomputes the fingerprint in its
+  own build, so a different reflection release must not change the value for the same tag.
+  (`postcard-derive` brings host-only `syn` 2 into the build graph.)
+- Consequence for the radio schema: it still versions independently (its own byte and guard), but
+  a gateway now announces a fingerprint that covers it, so a host checks that the gateway was
+  built from the same tag too.
+
 ## v1.5.1 (2026-10-17)
 
 **Hardening, wire UNCHANGED** (`PROTOCOL_VERSION` stays 3, `RADIO_SCHEMA_VERSION` stays 2;

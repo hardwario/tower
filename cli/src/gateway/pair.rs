@@ -112,14 +112,12 @@ fn run(
     let node_info = match describe(&mut *sp, &mut dec, 0x7100, Duration::from_secs(4)) {
         DescribeOutcome::Info(info) => info,
         DescribeOutcome::Refused(code) => return Err(format!("role probe refused (code {code})")),
-        DescribeOutcome::Timeout {
-            bad_version: Some(got),
-        } => {
-            return Err(format!(
-                "protocol mismatch: device speaks v{got}; rebuild/reflash"
-            ));
+        // A foreign header version, or a node announcing another wire fingerprint (same
+        // PROTOCOL_VERSION, different tower-protocol source tree): refuse before provisioning anything.
+        DescribeOutcome::Mismatch(m) => {
+            return Err(format!("{}; {}", m.what(), m.remedy()));
         }
-        DescribeOutcome::Timeout { bad_version: None } => {
+        DescribeOutcome::Timeout => {
             return Err("no answer; is this a v3 TOWER node?".into());
         }
         DescribeOutcome::Failed(e) => {

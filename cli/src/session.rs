@@ -12,7 +12,63 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use tower_protocol::msg::{CandidateKind, Hello, ShellComplete, ShellCompletions, ShellResponse};
-use tower_protocol::{Error, FrameDecoder, MAX_WIRE, MsgType, decode_frame, encode_frame};
+use tower_protocol::{
+    Error, FrameDecoder, MAX_WIRE, MsgType, PROTOCOL_VERSION, WIRE_FINGERPRINT, decode_frame, encode_frame,
+};
+
+/// A lockstep mismatch: the device was built against a different `tower-protocol` than this
+/// `tower`. Either kind means postcard would silently mis-decode, so every consumer treats both
+/// the same way (the mismatch banner, exit code 125, no further interpretation of the stream).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Mismatch {
+    /// The device speaks another `PROTOCOL_VERSION`: seen in a CRC-valid frame header
+    /// (`Error::BadVersion`) or, as a secondary guard, in a `Hello` payload.
+    Version(u8),
+    /// Same `PROTOCOL_VERSION`, but the device announced (in `Hello` or the `Describe` reply's
+    /// `DeviceInfo`) a different `WIRE_FINGERPRINT`: a different wire schema, i.e. the two ends
+    /// were built from different tower-protocol source trees.
+    Fingerprint(u32),
+}
+
+impl Mismatch {
+    /// The lockstep verdict on a device's announced `(protocol_version, wire_fingerprint)`.
+    pub(crate) fn check(protocol_version: u8, wire_fingerprint: u32) -> Option<Mismatch> {
+        if protocol_version != PROTOCOL_VERSION {
+            Some(Mismatch::Version(protocol_version))
+        } else if wire_fingerprint != WIRE_FINGERPRINT {
+            Some(Mismatch::Fingerprint(wire_fingerprint))
+        } else {
+            None
+        }
+    }
+
+    /// [`Mismatch::check`] on a decoded `Hello`.
+    pub(crate) fn of_hello(h: &Hello) -> Option<Mismatch> {
+        Self::check(h.protocol_version, h.wire_fingerprint)
+    }
+
+    /// What differs, naming both sides: `protocol version mismatch (device v3, tower v4)`, or
+    /// for the fingerprint the hex values plus the explanation.
+    pub(crate) fn what(&self) -> String {
+        match self {
+            Mismatch::Version(v) => {
+                format!("protocol version mismatch (device v{v}, tower v{PROTOCOL_VERSION})")
+            }
+            Mismatch::Fingerprint(fp) => format!(
+                "wire fingerprint mismatch (device {fp:#010x}, tower {WIRE_FINGERPRINT:#010x}): same \
+                 PROTOCOL_VERSION but a different wire schema: the tower-protocol sources differ"
+            ),
+        }
+    }
+
+    /// The remedy clause that ends a one-line refusal.
+    pub(crate) fn remedy(&self) -> &'static str {
+        match self {
+            Mismatch::Version(_) => "rebuild `tower` and the firmware from the same checkout",
+            Mismatch::Fingerprint(_) => "rebuild both from the same checkout",
+        }
+    }
+}
 
 /// The byte transport the session runs over: just `Read + Write`. A real
 /// `Box<dyn serialport::SerialPort>` already satisfies this (so production callers are
@@ -98,14 +154,28 @@ const POST_HELLO_GUARD: Duration = Duration::from_millis(150);
 /// out. Surfacing [`Readiness::BadVersion`] lets `exec` fail fast with a clear diagnostic.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Readiness {
-    /// A `Hello` decoded cleanly; carries the `protocol_version` it announced (which the
-    /// caller still checks against its own, as a secondary guard; see `exec`).
-    Hello(u8),
+    /// A `Hello` decoded cleanly; carries the `protocol_version` and `wire_fingerprint` it
+    /// announced, which the caller checks against its own ([`Readiness::mismatch`]): the
+    /// version as a secondary guard, the fingerprint as the only way to see a same-version,
+    /// different-schema peer.
+    Hello { version: u8, fingerprint: u32 },
     /// `decode_frame` rejected a frame's header version: the peer speaks a different
-    /// `tower-protocol` tag. Carries the version byte actually seen on the wire.
+    /// `tower-protocol` source. Carries the version byte actually seen on the wire.
     BadVersion(u8),
     /// No `Hello` (and no version-tagged frame) arrived before the timeout.
     Timeout,
+}
+
+impl Readiness {
+    /// The lockstep mismatch this readiness reveals, if any: a header-level `BadVersion`, or a
+    /// `Hello` announcing another version or wire fingerprint.
+    pub(crate) fn mismatch(self) -> Option<Mismatch> {
+        match self {
+            Readiness::BadVersion(got) => Some(Mismatch::Version(got)),
+            Readiness::Hello { version, fingerprint } => Mismatch::check(version, fingerprint),
+            Readiness::Timeout => None,
+        }
+    }
 }
 
 /// Block until the device announces itself with a `Hello` frame (so its shell is up before we
@@ -154,9 +224,14 @@ pub(crate) fn wait_for_hello_with(
         for (i, &b) in buf[..n].iter().enumerate() {
             let Some(inner) = dec.push(b) else { continue };
             let found = match decode_frame(inner) {
-                Ok((MsgType::Hello, _, payload)) => postcard::from_bytes::<Hello>(payload)
-                    .ok()
-                    .map(|h| Readiness::Hello(h.protocol_version)),
+                Ok((MsgType::Hello, _, payload)) => {
+                    postcard::from_bytes::<Hello>(payload)
+                        .ok()
+                        .map(|h| Readiness::Hello {
+                            version: h.protocol_version,
+                            fingerprint: h.wire_fingerprint,
+                        })
+                }
                 // The smoking gun for a tag mismatch: the header version didn't match, so
                 // this (and every) frame is rejected before its payload is even read.
                 Err(Error::BadVersion { got }) => Some(Readiness::BadVersion(got)),
@@ -203,12 +278,14 @@ pub(crate) fn await_ready_with(
 ) -> Readiness {
     let readiness = wait_for_hello_with(sp, dec, HELLO_WAIT, on_tick, transcript);
     match readiness {
+        // Mismatch (a foreign header version, or a Hello announcing another version or wire
+        // fingerprint): don't settle; the caller is about to bail.
+        _ if readiness.mismatch().is_some() => {}
         // A Hello arrived: guard against the boot-burst deaf window (see POST_HELLO_GUARD),
         // extended by an explicit `--delay` if the caller asked for more.
-        Readiness::Hello(_) => {
+        Readiness::Hello { .. } => {
             std::thread::sleep(POST_HELLO_GUARD.max(Duration::from_millis(delay.unwrap_or(0))));
         }
-        // Mismatch: don't settle; the caller is about to bail.
         Readiness::BadVersion(_) => {}
         // No Hello even at the worst-case ceiling: the device may be wedged, held in reset,
         // or running firmware with no console. Say so: the send that follows is a best-effort
@@ -223,6 +300,51 @@ pub(crate) fn await_ready_with(
         }
     }
     readiness
+}
+
+// ---- lockstep gate for the request/response waits ----------------------------
+
+/// Lockstep bookkeeping for a wait loop (`read_response`, `request_completions`, the mgmt
+/// round trip): remembers a header-level version rejection, and a `Hello` that announces a
+/// foreign version or wire fingerprint. After such a `Hello` the stream is on a foreign schema,
+/// so further frames are not interpreted (postcard would silently mis-decode them) until a
+/// matching `Hello` (the device reflashed back) re-opens it.
+#[derive(Default)]
+pub(crate) struct LockstepGate {
+    mismatch: Option<Mismatch>,
+    foreign: bool,
+}
+
+impl LockstepGate {
+    /// Validate one deframed frame and return `(MsgType, payload)` to interpret, or `None` when
+    /// it is corrupt, version-rejected, a `Hello` (consumed here: it only feeds the check) or
+    /// from a foreign schema.
+    pub(crate) fn admit<'a>(&mut self, inner: &'a [u8]) -> Option<(MsgType, &'a [u8])> {
+        match decode_frame(inner) {
+            Ok((MsgType::Hello, _, payload)) => {
+                if let Ok(h) = postcard::from_bytes::<Hello>(payload) {
+                    // A matching Hello (the device reflashed back) clears earlier evidence.
+                    let verdict = Mismatch::of_hello(&h);
+                    self.foreign = verdict.is_some();
+                    self.mismatch = verdict;
+                }
+                None
+            }
+            Ok(_) if self.foreign => None,
+            Ok((mt, _, payload)) => Some((mt, payload)),
+            // The device IS talking; its frames just carry a different protocol version.
+            Err(Error::BadVersion { got }) => {
+                self.mismatch = Some(Mismatch::Version(got));
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// The lockstep mismatch seen so far, if any (for the timeout diagnosis).
+    pub(crate) fn mismatch(&self) -> Option<Mismatch> {
+        self.mismatch
+    }
 }
 
 // ---- shell command response ------------------------------------------------
@@ -240,12 +362,14 @@ pub(crate) struct Response {
 
 /// The result of waiting for a shell response. The timeout variant carries the lockstep
 /// smoking gun: if frames DID arrive but every one was rejected at the header for its
-/// protocol version, the link isn't dead (the two ends speak different `tower-protocol`
-/// tags) and callers must say so (exit 125) instead of reporting a mute device (124).
+/// protocol version (or a `Hello` announced a foreign wire fingerprint, after which the
+/// stream is not interpreted), the link isn't dead (the two ends speak different
+/// `tower-protocol` sources) and callers must say so (exit 125) instead of reporting a mute
+/// device (124).
 pub(crate) enum ReadOutcome {
     Response(Response),
     Timeout {
-        bad_version: Option<u8>,
+        mismatch: Option<Mismatch>,
     },
     /// The transport itself failed (unplugged, EIO, …): a tool error (exit 1), not a device
     /// that stayed silent (124): conflating the two sent CI chasing a mute firmware.
@@ -278,9 +402,10 @@ impl ReadOutcome {
 /// CRC-dropped (the frame decoder silently discards corrupt frames), which would otherwise
 /// yield silently-truncated output with result 0, so we flag it `incomplete` instead.
 ///
-/// Times out only if no matching chunk arrives before the idle deadline; version-rejected
-/// frames seen while waiting are reported in the [`ReadOutcome::Timeout`] so the caller can
-/// diagnose a lockstep mismatch. A hard transport error is [`ReadOutcome::Failed`]. A response
+/// Times out only if no matching chunk arrives before the idle deadline; a lockstep mismatch
+/// seen while waiting (version-rejected frames, or a `Hello` with a foreign wire fingerprint;
+/// see [`LockstepGate`]) is reported in the [`ReadOutcome::Timeout`] so the caller can
+/// diagnose it. A hard transport error is [`ReadOutcome::Failed`]. A response
 /// that outgrows [`MAX_RESPONSE_BYTES`] is returned early, cut off and flagged `incomplete`.
 pub(crate) fn read_response(
     sp: &mut (impl Transport + ?Sized),
@@ -288,11 +413,23 @@ pub(crate) fn read_response(
     cmd_id: u16,
     timeout: Duration,
 ) -> ReadOutcome {
+    read_response_gated(sp, dec, &mut LockstepGate::default(), cmd_id, timeout)
+}
+
+/// [`read_response`] with a caller-owned [`LockstepGate`], so a session that runs several
+/// commands over one link (the interactive `tower shell`) keeps a foreign-schema verdict
+/// across commands instead of re-trusting the stream on the next one.
+pub(crate) fn read_response_gated(
+    sp: &mut (impl Transport + ?Sized),
+    dec: &mut FrameDecoder,
+    gate: &mut LockstepGate,
+    cmd_id: u16,
+    timeout: Duration,
+) -> ReadOutcome {
     let mut deadline = Instant::now() + timeout;
     let mut text = String::new();
     let mut next_chunk: u16 = 0; // expected `chunk` index of the next matching frame
     let mut incomplete = false;
-    let mut bad_version: Option<u8> = None;
     let mut buf = [0u8; 256];
     while Instant::now() < deadline {
         let nread = match read_some(sp, &mut buf) {
@@ -301,15 +438,10 @@ pub(crate) fn read_response(
         };
         for &b in &buf[..nread] {
             let Some(inner) = dec.push(b) else { continue };
-            let (mt, _, payload) = match decode_frame(inner) {
-                Ok(t) => t,
-                Err(Error::BadVersion { got }) => {
-                    // The device IS talking; its frames just carry a different protocol
-                    // version. Remember it so a "timeout" can be diagnosed as lockstep.
-                    bad_version = Some(got);
-                    continue;
-                }
-                Err(_) => continue,
+            // Corrupt, version-rejected and foreign-schema frames are skipped; the gate keeps
+            // the lockstep evidence so a "timeout" can be diagnosed as a mismatch.
+            let Some((mt, payload)) = gate.admit(inner) else {
+                continue;
             };
             if mt != MsgType::ShellResponse {
                 continue;
@@ -354,7 +486,9 @@ pub(crate) fn read_response(
             }
         }
     }
-    ReadOutcome::Timeout { bad_version }
+    ReadOutcome::Timeout {
+        mismatch: gate.mismatch(),
+    }
 }
 
 // ---- completion (target-authoritative) ------------------------------------
@@ -382,7 +516,7 @@ pub(crate) fn completion_start(line: &str, cursor: usize, token_start: u16) -> O
 pub(crate) enum CompletionOutcome {
     Completions(CompletionResult),
     Timeout {
-        bad_version: Option<u8>,
+        mismatch: Option<Mismatch>,
     },
     /// The request couldn't be sent (line too long to frame, write failed) or the transport
     /// failed while waiting: a tool error, not a silent device.
@@ -407,8 +541,8 @@ impl CompletionOutcome {
 }
 
 /// Send a `ShellComplete` and wait for the matching `ShellCompletions`. Shared by the
-/// `complete` command and the interactive TAB handler. Version-rejected frames seen while
-/// waiting are reported in the timeout variant (lockstep diagnosis, like [`read_response`]);
+/// `complete` command and the interactive TAB handler. A lockstep mismatch seen while waiting
+/// is reported in the timeout variant (like [`read_response`]);
 /// an unsendable request or a transport failure is [`CompletionOutcome::Failed`].
 pub(crate) fn request_completions(
     sp: &mut (impl Transport + ?Sized),
@@ -418,7 +552,20 @@ pub(crate) fn request_completions(
     req_id: u16,
     timeout: Duration,
 ) -> CompletionOutcome {
-    let mut bad_version: Option<u8> = None;
+    let mut gate = LockstepGate::default();
+    request_completions_gated(sp, dec, &mut gate, line, cursor, req_id, timeout)
+}
+
+/// [`request_completions`] with a caller-owned [`LockstepGate`] (see [`read_response_gated`]).
+pub(crate) fn request_completions_gated(
+    sp: &mut (impl Transport + ?Sized),
+    dec: &mut FrameDecoder,
+    gate: &mut LockstepGate,
+    line: &str,
+    cursor: u16,
+    req_id: u16,
+    timeout: Duration,
+) -> CompletionOutcome {
     let mut buf = [0u8; MAX_WIRE];
     let n = match encode_frame(
         MsgType::ShellComplete,
@@ -447,13 +594,8 @@ pub(crate) fn request_completions(
         };
         for &b in &rbuf[..nread] {
             let Some(inner) = dec.push(b) else { continue };
-            let (mt, _, payload) = match decode_frame(inner) {
-                Ok(t) => t,
-                Err(Error::BadVersion { got }) => {
-                    bad_version = Some(got);
-                    continue;
-                }
-                Err(_) => continue,
+            let Some((mt, payload)) = gate.admit(inner) else {
+                continue;
             };
             if mt != MsgType::ShellCompletions {
                 continue;
@@ -476,5 +618,7 @@ pub(crate) fn request_completions(
             });
         }
     }
-    CompletionOutcome::Timeout { bad_version }
+    CompletionOutcome::Timeout {
+        mismatch: gate.mismatch(),
+    }
 }

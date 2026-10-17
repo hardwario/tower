@@ -6,8 +6,11 @@
 //! (net layer) and forwards the payload verbatim; it never decodes this schema. Only
 //! the **node firmware** and the **host CLI** must agree on it, which is why it is
 //! versioned independently of the console framing: [`RADIO_SCHEMA_VERSION`] is the
-//! leading byte of every envelope, and a schema change means rebuilding node firmware +
-//! CLI while the gateway firmware stays put.
+//! leading byte of every envelope, and a schema change needs no console
+//! `PROTOCOL_VERSION` bump. (It is still part of the
+//! [`WIRE_FINGERPRINT`](crate::WIRE_FINGERPRINT) every device, the gateway included,
+//! announces, so the gateway is rebuilt from the same tree too: a host flags a gateway whose
+//! fingerprint differs from its own.)
 //!
 //! Envelope: `[RADIO_SCHEMA_VERSION] ‖ postcard(NodeMsg | NodeCmd)`, always ≤
 //! [`MAX_RADIO_PAYLOAD`] bytes (the radio MTU; the firmware static-asserts equality
@@ -18,6 +21,7 @@
 //! `tests/radio_golden.rs` (guarded by `tools/check_wire_bump.py`, independently of
 //! `PROTOCOL_VERSION`).
 
+use postcard_schema::Schema;
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, from_bytes_exact};
@@ -35,7 +39,7 @@ pub const MAX_RADIO_PAYLOAD: usize = 74;
 pub const RADIO_SHELL_CHUNK: usize = 56;
 
 /// Button event kinds. Variant order pinned by test.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ButtonKind {
     Press,
     Release,
@@ -44,7 +48,7 @@ pub enum ButtonKind {
 }
 
 /// Accelerometer event kinds. Variant order pinned by test.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AccelKind {
     /// Wake-on-motion (tilt interrupt) fired.
     Motion,
@@ -55,7 +59,7 @@ pub enum AccelKind {
 /// Node identity + health, sent at boot and every heartbeat period. The host uses
 /// `firmware_name` to auto-name unnamed nodes, and `session_id` to disambiguate a
 /// counter reset (reboot) from a wrapped counter.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub struct NodeInfo<'a> {
     /// ≤ 24 bytes.
     pub firmware_name: &'a str,
@@ -71,7 +75,7 @@ pub struct NodeInfo<'a> {
 /// One chunk of a remote-shell response (mirrors the console `ShellResponse`
 /// discipline: `result` authoritative on the `last` chunk, `chunk` indexes detect
 /// a lost chunk mid-response).
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub struct NodeShellChunk<'a> {
     pub cmd_id: u16,
     pub result: u8,
@@ -82,7 +86,7 @@ pub struct NodeShellChunk<'a> {
 }
 
 /// Node → host application messages. Variant order is the wire; never reorder.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub enum NodeMsg<'a> {
     #[serde(borrow)]
     Info(NodeInfo<'a>),
@@ -99,7 +103,7 @@ pub enum NodeMsg<'a> {
 
 /// Host → node application messages, delivered from the gateway's downlink queue
 /// on the node's next uplink. Variant order is the wire; never reorder.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub enum NodeCmd<'a> {
     /// Run `line` in the node's shell dispatcher; respond with [`NodeMsg::Shell`]
     /// chunks correlated by `cmd_id`. `epoch` is a per-host-process random tag: the
