@@ -13,6 +13,10 @@
 //! and keeps it. Both log the first key bytes (they must match), the joiner's address (the same
 //! on both sides) and the net layer's `pairing: SAS 123456` line (the same 6 digits on both
 //! sides: compared, it is the out-of-band check that no man in the middle sat between them).
+//!
+//! This example stops at the handshake. A product node treats the joined key as provisional
+//! and commits it only once the gateway acknowledges a confirmed uplink under it (the commit
+//! round of `apps/radio_push_button.rs`, docs/radio.md "OTA pairing").
 
 #![no_std]
 #![no_main]
@@ -74,17 +78,17 @@ async fn run(b: Board) {
         info!(target: "pair", "HOST {:08X}: opening pairing window (1 min)", HOST_ADDR);
         loop {
             // A fresh window, a fresh precomputed ephemeral (TRNG only; refused without it).
-            let Some(mut host) = PairingHost::prepare() else {
+            let Some(mut host) = PairingHost::prepare(PAIRING_WINDOW) else {
                 error!(target: "pair", "no hardware TRNG: pairing refused");
                 Timer::after_secs(10).await;
                 continue;
             };
             match net.open_pairing(&mut host, PAIRING_WINDOW).await {
-                // The joiner brought its own address; the host installs (peer_addr, key).
-                Some((peer_addr, key)) => info!(
+                // The joiner brought its own address; the host installs (peer.addr, peer.key).
+                Some(peer) => info!(
                     target: "pair",
                     "PAIRED *** node addr={:08X} (joiner-chosen) key[..4]={:02x}{:02x}{:02x}{:02x}",
-                    peer_addr, key[0], key[1], key[2], key[3]
+                    peer.addr, peer.key[0], peer.key[1], peer.key[2], peer.key[3]
                 ),
                 None => warn!(target: "pair", "pairing window closed (no joiner / lost confirm)"),
             }
@@ -97,10 +101,10 @@ async fn run(b: Board) {
         info!(target: "pair", "JOINER: requesting to join with my own address {:08X} (1 min)", MY_ADDR);
         loop {
             match net.join(MY_ADDR, PAIRING_WINDOW).await {
-                Some((gw_addr, key)) => info!(
+                Some(peer) => info!(
                     target: "pair",
                     "JOINED *** addr={:08X} (mine) gw={:08X} key[..4]={:02x}{:02x}{:02x}{:02x} (expect the host's) uid {}",
-                    MY_ADDR, gw_addr, key[0], key[1], key[2], key[3], tower::board::UniqueId::read()
+                    MY_ADDR, peer.addr, peer.key[0], peer.key[1], peer.key[2], peer.key[3], tower::board::UniqueId::read()
                 ),
                 None => warn!(target: "pair", "join failed (no host in range)"),
             }

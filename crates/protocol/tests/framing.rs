@@ -542,7 +542,8 @@ fn every_mgmt_record_roundtrips() {
         key: [0xA5; 16],
     };
     assert_eq!(rec_roundtrip(&nk, &mut buf), nk);
-    assert_eq!(rec_roundtrip(&Paired { addr: 7 }, &mut buf), Paired { addr: 7 });
+    let paired = Paired { addr: 7, sas: 12_345 };
+    assert_eq!(rec_roundtrip(&paired, &mut buf), paired);
     assert_eq!(rec_roundtrip(&QueueId { item: 8 }, &mut buf), QueueId { item: 8 });
     let qe = QueueEntry {
         node_addr: 9,
@@ -556,10 +557,11 @@ fn every_mgmt_record_roundtrips() {
         rec_roundtrip(&ProvisionAck { addr: 13 }, &mut buf),
         ProvisionAck { addr: 13 }
     );
-    assert_eq!(
-        rec_roundtrip(&Joined { gw_addr: 14 }, &mut buf),
-        Joined { gw_addr: 14 }
-    );
+    let joined = Joined {
+        gw_addr: 14,
+        sas: 999_999,
+    };
+    assert_eq!(rec_roundtrip(&joined, &mut buf), joined);
 }
 
 /// The documented `MgmtResponse.data` stream contract: reply records concatenate across chunks

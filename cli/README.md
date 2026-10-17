@@ -271,6 +271,21 @@ tower net status                                   # gateway online/offline + st
 
 Role is enforced: `tower gateway` at a node, or `nodes add --port` at a gateway, exits `126`.
 
+**Pairing over the air.** `tower nodes add --ota` opens the gateway's window; hold the node's
+button ≥ 1 s (an unpaired push button) to join. On success it prints the node and the
+handshake's 6-digit short authentication string, `paired 0x0000ab12 (SAS 123456)` (also in the
+bridge's log and on `gateway/pairing` as `"sas":"123456"`). Compare it with the SAS the node
+logs, `net: pairing: SAS 123456` (watch it with `tower -d <node port> logs` while the node is on
+USB and pairing): equal values rule out a man in the middle (a 1 in 10⁶ chance for an attacker);
+different values mean one sat in between, so remove the node and pair again. The node keeps the
+new key only once the gateway acknowledges its first uplink under it, so a lost handshake frame
+leaves it unpaired (another hold retries) rather than half-paired. A paired node whose gateway
+forgot it (removed, wiped, replaced), or one moving to another gateway, re-pairs with a **12 s
+hold**: remove it on its gateway first (`tower nodes remove <node>`; OTA pairing never re-keys a
+registered address), open a window, then hold. Its old pairing stays in force unless the new one
+commits. The RPC waits the window plus 15 s; a join the gateway reports even later is logged as
+such and published, not dropped.
+
 ### Exit codes
 
 `tower` follows a small, stable exit-code contract so scripts and CI can branch on

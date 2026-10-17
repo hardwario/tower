@@ -30,7 +30,12 @@ mod pairing;
 pub use afa::{AfaConfig, AfaRole};
 pub use bulk::{BULK_CHUNK, BulkSink, BulkSource};
 pub use fhss::{FhssConfig, FhssRole, FhssState, MasterSlot, NodeSlot, hop_channel};
-pub use pairing::{JOIN_FRAME_KEY, JoinError, PAIRING_WINDOW, PEER_KEX_TIME, PairingHost};
+pub use pairing::{
+    HOST_HANDSHAKE_TIME, JOIN_FRAME_KEY, JoinError, PAIRING_WINDOW, PEER_KEX_TIME, PairedPeer, PairingHost,
+};
+/// The joiner's commit round after [`Net::join`] (docs/radio.md "OTA pairing"): the key stays
+/// provisional until a confirmed uplink under it is acknowledged.
+pub use tower_net::pairing::{COMMIT_SETTLE_MS, CommitStep, commit_step};
 
 use embassy_time::{Duration, Instant, Timer};
 // The security-critical *decision* kernels (replay rule, TX-counter watermark/fail-closed,

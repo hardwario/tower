@@ -74,12 +74,12 @@ Two **separately tagged** schemas ride these frames:
 | `NodeAdd {addr,key,name,flags}` | gateway | none (install a cable-paired node) |
 | `NodeRemove {addr}` / `NodeUpdate {addr,name?,flags?}` | gateway | none |
 | `NodeRevealKey {addr}` | gateway | `NodeKey` (the only path that discloses a stored key) |
-| `PairingOpen {window}` / `PairingCancel` | gateway | `Paired` (delayed) / `MGMT_TIMEOUT` |
+| `PairingOpen {window}` / `PairingCancel` | gateway | `Paired {addr, sas}` (delayed; `sas` = the handshake's 6-digit SAS) / `MGMT_TIMEOUT` |
 | `QueuePush {node_addr,ttl,data}` | gateway | `QueueId` |
 | `QueueList {node_addr}` / `QueueDrop {node_addr,item?}` | gateway | `QueueEntry` × N / none |
 | `StatsConfig {channel_period_ms}` | gateway | none (RAM override of `stats-period`) |
 | `Provision {addr?,gw_addr,key,band,channel}` | node | `ProvisionAck` |
-| `JoinOpen {window}` | node | `Joined` (delayed) |
+| `JoinOpen {window}` | node | `Joined {gw_addr, sas}` (delayed, after the commit round) |
 
 Result codes: `MGMT_OK`(0), `UNSUPPORTED`(1), `BAD_ARG`(2), `NOT_FOUND`(3), `FULL`(4),
 `BUSY`(5), `STORAGE`(6), `TIMEOUT`(7). An op a device does not serve → `UNSUPPORTED`; a
@@ -155,27 +155,53 @@ define what the physical input *means*; the LED feedback is a separate fixed ind
   distinct shape is deliberate: a quick tap fires Press on the down edge and Release+Click
   together on the up edge, so a shared shape would blend on the one LED. The LED reacts only to
   *enabled* events.
+- **Pairing:** unpaired = a double-blink every 2 s (the background); pairing (the handshake and
+  the commit round) = a fast blink; afterwards the background goes dark when paired, or back to
+  the double-blink when the attempt left the node unpaired.
 
 ### `/button simulate <ms>`
 
-Injects a synthetic press of `<ms>` (1..10000) through the **real** recognition machine
+Injects a synthetic press of `<ms>` (1..15000) through the **real** recognition machine
 (debounce → click/hold classification) and on into reporting, the console "finger" for testing
 without a physical press. A `100` ms press is a click (> debounce, < click-timeout); a `1500` ms
-press is a hold. Used by the HIL gateway test.
+press is a hold; on a paired node a `13000` ms press is the re-pair gesture. Used by the HIL
+gateway test.
 
 ### Pairing (node side)
 
 - **OTA**: hold the button ≥ 1 s while unprovisioned: the node pairs (X25519 key agreement
-  with a commitment round, docs/radio.md "OTA pairing") with any gateway that has a window open
-  and persists `(gw_addr, key, band, channel)` in `NS_APP`. It logs `net: pairing: SAS 123456`
-  and `JOINED gateway XXXXXXXX`; the same SAS on the gateway's console is the man-in-the-middle
-  check (compared, it leaves an active attacker a 1 in 10⁶ chance; not compared, none is
-  detected). An attempt takes ~1.5 s when no gateway answers (fresh TRNG ephemeral, request,
-  300 ms wait) and ~3.8 s for a whole handshake. Without a working hardware TRNG the node refuses
-  to pair (logged).
+  with a commitment round, docs/radio.md "OTA pairing") with any gateway that has a window open.
+  It logs `net: pairing: SAS 123456` at the end of the handshake; the same SAS on the gateway's
+  side (its console, and `tower nodes add --ota`, which prints it) is the man-in-the-middle check
+  (compared, it leaves an active attacker a 1 in 10⁶ chance; not compared, none is detected). An
+  attempt takes ~1.5 s when no gateway answers (fresh TRNG ephemeral, request, 300 ms wait) and
+  ~3.8 s for a whole handshake. Without a working hardware TRNG the node refuses to pair (logged).
+- **Commit round**: the new key is provisional (RAM only) until the gateway acknowledges an
+  uplink under it: the node sends its `NodeInfo` confirmed (500 ms after the handshake, then up
+  to 6 attempts 2 s apart, ~15 s in all) and only on an ACK persists `(gw_addr, key, band,
+  channel)` in `NS_APP` and logs `JOINED gateway XXXXXXXX (SAS 123456, uid …)`. No ACK (a lost
+  JOIN_CONFIRM, a full or failing gateway registry): it logs `pairing with gateway XXXXXXXX not
+  confirmed (no ACK under the new key), discarded` and stays unpaired, so another hold retries
+  (the gateway's window stays open after a lost confirm). Before this round a lost confirm left a
+  node that believed it was paired while the gateway dropped all its uplinks, recoverable only
+  over USB. The one asymmetry left is the reverse and needs every acknowledgement of the round to
+  be lost: the gateway registered the node (it is in `tower nodes list`, never seen) while the
+  node gave the key up; the gateway refuses that address's JOIN_REQ, so remove it there first.
+- **Re-pair** (recovery): hold the button ≥ 12 s while paired (longer than any `hold-time`, so a
+  normal Hold never becomes one): the node runs the same OTA pairing (fast blink). The current
+  pairing stays in force, in RAM and in EEPROM, unless the new one commits, so an accidental long
+  press changes nothing. It is the way back for a node whose gateway forgot it (a removed node, a
+  wiped or replaced gateway) and the way to move a node to another gateway. OTA pairing never
+  re-keys an address a gateway still has registered (see the gateway side), so: **remove the node
+  on its gateway (`tower nodes remove <node>`), open a window (`tower nodes add --ota`), then hold
+  the button 12 s.** A paired node whose uplinks go unacknowledged 8 times in a row logs a hint
+  saying so (`gateway XXXXXXXX: 8 uplinks in a row unacknowledged; …`); it keeps sending, since
+  the usual cause is range or a gateway that is off.
 - **Cable**: on USB the node serves the management channel: `Describe` (role probe), `Provision`
   (host-minted credentials; the key never rides the shell history), and `JoinOpen`
-  (host-initiated OTA join). The node reboots into its new identity; watch for the fresh `Hello`.
+  (host-initiated OTA join, commit round included: `Joined {gw_addr, sas}` means the gateway
+  acknowledged the key; a join that does not commit answers `MGMT_TIMEOUT`). After a `Provision`
+  the node reboots into its new identity; watch for the fresh `Hello`.
   `Provision` answers `BAD_ARG` for a reserved address (`0` / `0xFFFFFFFF`) as either end, or a
   `gw_addr` equal to the node's own (effective) address (a shared `src` would collide CCM nonces).
 - The node runs its net layer **registered peers only**: it accepts radio frames from its
@@ -230,19 +256,37 @@ uplink cycle.
 ### Pairing (gateway side)
 
 - **OTA**: host sends `PairingOpen{window}` (no key: the link key is derived by the X25519 key
-  agreement); the gateway precomputes its first ephemeral and nonce (~1.2 s; no
-  hardware TRNG → `UNSUPPORTED` and an error log), opens the radio window, and on a completed
-  handshake (the commitment round, then a valid JOIN_CONFIRM under the derived key) logs
-  `net: pairing: SAS 123456`, commits the registry entry (flags `UNNAMED` until the host
-  auto-names it from the first `NodeInfo` via `NodeUpdate`) and answers the *delayed* `Paired`,
-  or `MGMT_TIMEOUT` on expiry. Compare the SAS with the node's to rule out a man in the middle
-  (an attacker's chance of matching it is 1 in 10⁶). **OTA pairing only adds new nodes:** a JOIN_REQ from an address
-  that is already registered (or reserved, or the gateway's own) gets no answer, and the gateway
-  logs `pairing: JOIN_REQ from XXXXXXXX refused (already registered …)`. The key agreement is
-  unauthenticated until the SAS is compared, so answering would let anyone re-key a registered
-  node by joining *as* it. **To re-pair a known node (e.g. after a factory reset), `NodeRemove`
+  agreement); the gateway fixes the window's end (`window` after the request's arrival),
+  precomputes its first ephemeral and nonce (~1.2 s; no hardware TRNG → `UNSUPPORTED` and an
+  error log), opens the radio window, and on a completed handshake (the commitment round, then a
+  valid JOIN_CONFIRM under the derived key) logs `net: pairing: SAS 123456`, commits the registry
+  entry (flags `UNNAMED` until the host auto-names it from the first `NodeInfo` via
+  `NodeUpdate`), logs `paired node XXXXXXXX (SAS 123456)` and answers the *delayed*
+  `Paired {addr, sas}`, or `MGMT_TIMEOUT` on expiry. The host prints the SAS (`tower nodes add
+  --ota`, the TUI and service logs, the `gateway/pairing` topic): compare it with the node's to
+  rule out a man in the middle (an attacker's chance of matching it is 1 in 10⁶). **OTA pairing
+  only adds new nodes:** a JOIN_REQ from an address that is already registered (or reserved, or
+  the gateway's own) gets no answer, and the gateway logs `pairing: JOIN_REQ from XXXXXXXX
+  refused (already registered …)`. The key agreement is unauthenticated until the SAS is
+  compared, so answering would let anyone re-key a registered node by joining *as* it. **To
+  re-pair a known node (e.g. after a factory reset, or with its 12 s re-pair hold), `NodeRemove`
   it first**, then open the window. The registry commit is insert-only as a backstop
   (`registry::add_new`; an existing address answers `BAD_ARG`).
+- **The window closes on the first commit**, and the very next loop turn serves receive slices
+  again: the joined node's commit round (its first confirmed `NodeInfo` under the new key,
+  docs/radio.md) is ACKed and forwarded like any uplink. While a window is open the gateway listens
+  only for pairing frames (registered nodes' uplinks wait for the window to end; a node retries
+  them like any unacknowledged uplink), which is why a window closes as soon as it served its
+  purpose. A JOIN_REQ is answered only while a whole handshake (~3.9 s) still fits before the
+  window's end (`pairing: JOIN_REQ from … refused (the window closes before a handshake could
+  finish)`), so no node is committed after the host was told the window expired. A commit can
+  still take a few seconds past the window (its registry write may absorb a synchronous EEPROM
+  compaction, ~5.2 s); `tower gateway` waits the window plus 15 s, and reports a `Paired` that
+  arrives even later (`node … paired after the window's answer timed out`, plus the
+  `gateway/pairing` topic) instead of dropping it.
+- **Watchdog**: the main loop checks in at its top, after the management requests and after each
+  pairing slice, so no stretch between check-ins (the 10 s liveness gate) stacks a PairingOpen's
+  ephemeral, a pairing slice's handshake and a commit's EEPROM compaction.
 - **Cable**: the host (which alone can reach the node's serial port) provisions the node
   directly, then registers it on the gateway with `NodeAdd{addr, key, name, flags}`. `NodeAdd`
   answers `BAD_ARG` for `0`, `0xFFFFFFFF` or the gateway's own address; for an already-registered

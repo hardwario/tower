@@ -75,7 +75,10 @@ pub(crate) fn run(events: Receiver<Event>) {
                 Some(s) if p.state == "open" => line(&format!("pairing window open ({s}s left)")),
                 _ => {
                     if let Some(j) = p.joined {
-                        line(&format!("paired {j}"));
+                        match p.sas {
+                            Some(sas) => line(&format!("paired {j} (SAS {sas})")),
+                            None => line(&format!("paired {j}")),
+                        }
                     }
                 }
             },

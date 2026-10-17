@@ -101,11 +101,17 @@ gateway's own.
 
    One SHA-256 hash of the whole transcript (both addresses, both public keys, both nonces) feeds
    HKDF for the link key, both confirm tags and a 6-digit short authentication string (SAS) that
-   both ends log. Ephemeral secrets and nonces come from the hardware TRNG only (pairing is refused
-   if the TRNG is unavailable) and are zeroized after use. The registry entry is committed only
-   after a valid node confirm. Cost on the Core Module: one X25519 scalar multiplication per side
-   during the exchange (measured 1175 ms at the firmware's clock; RFC 7748 vectors verified on
-   hardware by `crypto_x25519_kat`).
+   both ends log; the gateway also returns its SAS to the host (`Paired {addr, sas}`), so
+   `tower nodes add --ota`, the bridge's logs and the `gateway/pairing` topic show it for the
+   comparison with the node's `net: pairing: SAS` line. Ephemeral secrets and nonces come from
+   the hardware TRNG only (pairing is refused if the TRNG is unavailable) and are zeroized after
+   use. The registry entry is committed only after a valid node confirm, and only for a
+   handshake that ends inside the operator's window (a JOIN_REQ too close to its end is not
+   answered). The node commits only on the gateway's acknowledgement of a confirmed uplink under
+   the new key, which only a holder of the key can seal; without one it discards the key, so a
+   lost confirm leaves neither end half-paired. Cost on the Core Module: one X25519 scalar
+   multiplication per side during the exchange (measured 1175 ms at the firmware's clock; RFC 7748
+   vectors verified on hardware by `crypto_x25519_kat`).
 3. **Keyed join** (E4): a node that already holds its per-node key (cable or factory
    provisioned, or a replacement gateway that imported the node keys) finds its gateway with two
    frames sealed under that key; both ends prove the key, nothing secret travels, and a recorded
@@ -204,8 +210,12 @@ gateway's own.
    active attacker present during the window can run a man-in-the-middle; comparing the two
    `pairing: SAS` lines detects it except with probability 10^-6 per attempt (the commitment
    round leaves nothing to search, but a failed attempt can be retried within the window). The
-   node has no display: its SAS is only visible on its USB console. Prefer cable provisioning or
-   keyed join where possible, and keep windows short.
+   gateway's SAS reaches the operator through the tooling (`tower nodes add --ota` prints it);
+   the node has no display, so its SAS is only visible on its USB console (`tower -d <port>
+   logs` running while it pairs). Prefer cable provisioning or keyed join where possible, and
+   keep windows short. The node's re-pair gesture (a 12 s hold while paired) opens no extra door:
+   it only starts a join, which a gateway answers only inside an operator-opened window and never
+   for an address it still has registered.
 2. **No forward secrecy for data.** Link keys are static per node; whoever obtains a key (e.g. a
    board without RDP) can decrypt recorded past traffic of that node and impersonate it until it
    is re-keyed.

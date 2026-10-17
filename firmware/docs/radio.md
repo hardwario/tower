@@ -298,11 +298,28 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
   nonce or address gives different keys and a failing tag.
 - **Who proves what.** The node checks the commitment, then `tag_gw` before it confirms (the
   host holds the key); the host checks `tag_node` inside a frame that only opens under the
-  derived key, and commits only then. The node commits after sending the confirm; a lost confirm
-  leaves the host's window open (nothing installed) and the node with a key its gateway never
-  accepted: repeat the pairing.
+  derived key, and commits only then. A lost confirm leaves the host's window open (nothing
+  installed).
+- **The node's commit point: the first acknowledged uplink.** Nothing acknowledges the
+  JOIN_CONFIRM, so `join` returns the key **provisionally**: the host may never have committed it
+  (a lost or late confirm, a full or failing registry). A node that persisted it there would
+  believe it is paired while the host drops all of its traffic as an unregistered sender. So a
+  product node installs the key in RAM only and sends a confirmed uplink under it; an ACK, which
+  only a holder of the key can seal, proves the host installed it, and only then is the key
+  persisted (`tower_net::pairing::commit_step`, re-exported as `tower::radio::net::commit_step`).
+  The round: `COMMIT_SETTLE_MS` (500 ms) after the confirm, then up to `COMMIT_ATTEMPTS` (6)
+  confirmed sends 2 s apart, outlasting the host's worst post-confirm stall
+  (`GATEWAY_COMMIT_STALL_MS`, a registry write absorbing a synchronous EEPROM compaction; pinned by
+  a host test). No acknowledgement: the key is discarded and the node is unpaired again, free to
+  retry. The product gateway closes its window on the commit and serves the node's uplinks from
+  its next loop turn (docs/gateway.md). The residual asymmetry (the host committed but every
+  acknowledgement was lost) leaves a registered node that can re-pair only after it is removed
+  on the host, like any node its host still knows.
 - **SAS** (BLE g2): `u64 LE(SHA-256("tower pairing v3 sas" ‖ th)[..8]) mod 10⁶`. Both ends log
-  `net: pairing: SAS 123456`. Its real guarantee: an active man in the middle that runs one
+  `net: pairing: SAS 123456`, and both hand it to their caller (`PairedPeer::sas`): the product
+  gateway returns it in its `Paired` answer, so `tower nodes add --ota` prints it next to the
+  node's address, and the node repeats it in its `JOINED gateway` line. Its real guarantee: an
+  active man in the middle that runs one
   handshake with each side shows the same 6 digits on both with probability **10⁻⁶ per attempt,
   whatever its computing power**, IF the operator compares the two values. The commitment is
   what makes that true: whoever plays the host towards the node is bound to a nonce chosen
@@ -333,6 +350,15 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
   (ephemeral + request + 300 ms) and ~3.8 s for a whole handshake, so a one-minute window
   (`PAIRING_WINDOW`) gives it ~40 attempts. Too short a wait fails every pairing, too long only
   slows a retry: re-tune `PEER_KEX_TIME` from the KAT's `timing:` line if it moves.
+- **The host's window has a fixed end.** `PairingHost::prepare(window)` fixes it before it draws
+  the first ephemeral (~1.2 s), so the window closes `window` after the request that opened it.
+  `open_pairing` takes a listen slice, never listens past the window, and answers a JOIN_REQ only
+  while the whole host handshake still fits (`HOST_HANDSHAKE_TIME`: two turnarounds, two frames,
+  both waits and its own shared secret, ~3.9 s; `tower_net::pairing::handshake_fits`), refusing it
+  otherwise with `pairing: JOIN_REQ from … refused (the window closes before a handshake could
+  finish)`. A handshake therefore never commits after the window closed, when the operator's
+  tooling may already have reported a timeout. One `open_pairing` call lasts at most its slice
+  plus one handshake plus one ephemeral (~7 s for the gateway's 2 s slices).
 - **Framing.** `JOIN_FRAME_KEY` is public and never used for anything else: it only gives the
   four frames before the link key a CCM format, so a corrupted frame fails its tag and is
   dropped (its bytes still spell `v2`, so an older node's JOIN_REQ opens and is refused on its
@@ -358,14 +384,18 @@ carries a valid tag); the host accepts the nonce and the confirm only from that 
 addressed to it.
 
 ```rust
-// host: precompute the window's ephemeral and nonce (TRNG; None = refused), then listen in slices
-if let Some(mut host) = PairingHost::prepare() {
-    if let Some((peer_addr, key)) = net.open_pairing(&mut host, PAIRING_WINDOW).await {
-        let _ = net.add_peer(peer_addr, &key); // the derived link key
+// host: fix the window, precompute its ephemeral and nonce (TRNG; None = refused), listen in slices
+if let Some(mut host) = PairingHost::prepare(PAIRING_WINDOW) {
+    if let Some(peer) = net.open_pairing(&mut host, PAIRING_WINDOW).await {
+        let _ = net.add_peer(peer.addr, &peer.key); // the derived link key; show peer.sas
     }
 }
-// joiner: brings its own address, returns Some((gw_addr, link_key)) on success
-if let Some((gw_addr, key)) = net.join(addr, PAIRING_WINDOW).await { /* store both */ }
+// joiner: brings its own address; the result is provisional until an uplink under it is ACKed
+if let Some(peer) = net.join(addr, PAIRING_WINDOW).await {
+    let _ = net.add_peer(peer.addr, &peer.key); // RAM only
+    // confirmed sends to peer.addr until commit_step(attempt, delivered) says Commit (persist
+    // (peer.addr, peer.key)) or Discard (remove_peer(peer.addr))
+}
 ```
 
 **Keyed join (E4).** A node whose per-node key the host already holds joins under that key
@@ -563,6 +593,8 @@ separate ~20 ms deaf window.
 | Max bulk / chunk index | 16 MiB (streamed) / 24-bit |
 | Bulk idle timeout | 30 s |
 | Star nodes / P2P peers | ≤ 16 / ≤ 8 |
+| OTA pairing: window / peer computation budget / host handshake | 60 s (`PAIRING_WINDOW`) / 1.5 s (`PEER_KEX_TIME`) / ≈ 3.9 s (`HOST_HANDSHAKE_TIME`, the least window left to answer a JOIN_REQ) |
+| OTA pairing: joiner commit round | 500 ms settle, then ≤ 6 confirmed sends 2 s apart (`COMMIT_SETTLE_MS` / `COMMIT_ATTEMPTS` / `COMMIT_RETRY_MS`) |
 | Reserved IDs | `0x00000000`, `0xFFFFFFFF` (never a node/gateway/peer address; a peer at our own address is refused too) |
 | Frame format marker | 1 (`bits[7:5]` of the first byte; fixed, not a version) |
 | FHSS (US) | 80 channels · 300 ms slot · 24 s cycle |

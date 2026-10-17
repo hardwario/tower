@@ -27,6 +27,14 @@ use super::topics;
 
 /// Idle ticks (1 Hz) before an in-flight management op is failed as a device timeout.
 const MGMT_TIMEOUT_TICKS: u64 = 8;
+/// Seconds a `PairingOpen` may resolve after its window (the RPC waits `window` + this). The
+/// gateway's window runs from the request's arrival and it answers a JOIN_REQ only while a whole
+/// handshake still fits, so a join completes inside the window; what can follow is the registry
+/// commit absorbing a synchronous EEPROM compaction (~5.2 s worst case), or, for an expiry, the
+/// loop turn that notices it (two management requests, one with such a compaction, ~6.5 s), the
+/// console response, and this side's 1 s tick granularity. 15 s covers that with margin; a
+/// `Paired` that still arrives later is reported as a late join, never dropped.
+pub(crate) const PAIRING_SLACK_S: u64 = 15;
 /// Idle ticks before a delivered-but-unanswered remote shell command is failed (the
 /// node executed it on its wake cycle; a healthy reply arrives within its RX window).
 const SHELL_REPLY_TIMEOUT_TICKS: u64 = 30;
@@ -330,6 +338,9 @@ pub(crate) struct Engine {
     recent_ids: VecDeque<String>,
     pairing_rpc: Option<String>,
     pairing_until: Option<u64>,
+    /// The `req_id` of a `PairingOpen` this side gave up on (timed out): its answer may still
+    /// come, and a late `Paired` is a node the gateway did register.
+    late_pairing: Option<u16>,
     tick: u64,
     uplinks: u64,
     last_ambient: Option<(i16, u8)>,
@@ -396,6 +407,7 @@ impl Engine {
             recent_ids: VecDeque::new(),
             pairing_rpc: None,
             pairing_until: None,
+            late_pairing: None,
             tick: 0,
             uplinks: 0,
             last_ambient: None,
@@ -488,7 +500,7 @@ impl Engine {
                 // Retained world re-publish: reconnect-resync is free by design.
                 self.publish_status(&mut out);
                 self.publish_stats(&mut out);
-                self.publish_pairing(&mut out, None);
+                self.publish_pairing(&mut out, None, None);
                 for i in 0..self.nodes.len() {
                     self.publish_node(&mut out, i);
                     self.publish_pending(&mut out, i);
@@ -933,7 +945,11 @@ impl Engine {
         out: &mut Vec<Output>,
     ) {
         let Some(idx) = self.pending_mgmt.iter().position(|p| p.req_id == req_id) else {
-            return; // stale/unknown (e.g. a timed-out op answering late)
+            if last && self.late_pairing == Some(req_id) {
+                self.late_pairing = None;
+                self.on_late_pairing(result, &data, out);
+            }
+            return; // otherwise stale/unknown (e.g. a timed-out op answering late)
         };
         {
             let p = &mut self.pending_mgmt[idx];
@@ -1047,17 +1063,18 @@ impl Engine {
                 self.pairing_rpc = None;
                 self.pairing_until = None;
                 let joined = postcard::from_bytes::<Paired>(&p.data).ok();
-                if let Some(j) = &joined {
-                    self.provisional_node(j.addr, "", mgmt::NODE_FLAG_UNNAMED);
+                match joined {
+                    Some(j) => {
+                        let (hex, sas) = self.on_paired(j, false, out);
+                        self.rpc_ok(out, &p, serde_json::json!({ "joined": hex, "sas": sas }));
+                    }
+                    None => {
+                        out.push(Output::Event(Event::Log("pairing window resolved".into())));
+                        self.publish_pairing(out, None, None);
+                        self.rpc_ok(out, &p, serde_json::json!({ "joined": null }));
+                        self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+                    }
                 }
-                let hex = joined.map(|j| topics::node_hex(j.addr));
-                out.push(Output::Event(Event::Log(match &hex {
-                    Some(h) => format!("node {h} paired"),
-                    None => "pairing window resolved".into(),
-                })));
-                self.publish_pairing(out, hex.clone());
-                self.rpc_ok(out, &p, serde_json::json!({ "joined": hex }));
-                self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
             }
             (OpKind::PairingCancel, None) => self.rpc_ok(out, &p, serde_json::Value::Null),
             (OpKind::QueuePush { node, shell }, None) => {
@@ -1131,7 +1148,7 @@ impl Engine {
             (OpKind::PairingOpen, Some(e)) => {
                 self.pairing_rpc = None;
                 self.pairing_until = None;
-                self.publish_pairing(out, None);
+                self.publish_pairing(out, None, None);
                 if result == mgmt::MGMT_TIMEOUT {
                     // Window expired unjoined: a normal outcome, not an error.
                     self.rpc_ok(out, &p, serde_json::json!({ "joined": null }));
@@ -1464,19 +1481,19 @@ impl Engine {
                 // No key to mint: OTA pairing derives the link key on both ends (X25519).
                 self.pairing_rpc = Some(req.id.clone());
                 self.pairing_until = Some(self.tick + window as u64);
-                self.publish_pairing(out, None);
+                self.publish_pairing(out, None, None);
                 self.issue_delayed(
                     out,
                     OpKind::PairingOpen,
                     MgmtOp::PairingOpen { window },
                     rpc,
-                    window as u64 + 5,
+                    window as u64 + PAIRING_SLACK_S,
                 );
             }
             "pairing_cancel" => {
                 self.pairing_rpc = None;
                 self.pairing_until = None;
-                self.publish_pairing(out, None);
+                self.publish_pairing(out, None, None);
                 self.issue(out, OpKind::PairingCancel, MgmtOp::PairingCancel, rpc);
             }
             "queue_list" => {
@@ -1571,6 +1588,11 @@ impl Engine {
             // was lost): reconcile afterwards so such an orphan is dropped, not run with
             // nobody listening, which keeps the "not queued" answer below true.
             resync_queue |= matches!(p.op, OpKind::QueuePush { .. });
+            if matches!(p.op, OpKind::PairingOpen) {
+                // The window's answer may still come: a late `Paired` is a node the gateway did
+                // register, so it is reported when it lands (`on_late_pairing`), not dropped.
+                self.late_pairing = Some(p.req_id);
+            }
             self.fail_op(out, p.op, p.rpc.as_ref(), "device did not answer (timeout)");
         }
         if resync_queue {
@@ -1613,7 +1635,7 @@ impl Engine {
         }
         // Pairing countdown surface.
         if self.pairing_until.is_some() {
-            self.publish_pairing(out, None);
+            self.publish_pairing(out, None, None);
         }
         if self.tick.is_multiple_of(STATS_EVERY_TICKS) {
             self.publish_stats(out);
@@ -1671,7 +1693,7 @@ impl Engine {
             OpKind::PairingOpen => {
                 self.pairing_rpc = None;
                 self.pairing_until = None;
-                self.publish_pairing(out, None);
+                self.publish_pairing(out, None, None);
             }
             OpKind::QueuePush {
                 node,
@@ -2013,12 +2035,51 @@ impl Engine {
         });
     }
 
-    fn publish_pairing(&self, out: &mut Vec<Output>, joined: Option<String>) {
+    /// A node joined (the `PairingOpen` answer, or a `late` one that arrived after this side gave
+    /// up on the window): mirror it, log and publish it with the handshake's SAS, refresh the
+    /// registry. Returns the node's address and the SAS as the RPC shows them.
+    fn on_paired(&mut self, j: Paired, late: bool, out: &mut Vec<Output>) -> (String, String) {
+        self.provisional_node(j.addr, "", mgmt::NODE_FLAG_UNNAMED);
+        let hex = topics::node_hex(j.addr);
+        let sas = payload::sas_str(j.sas);
+        out.push(Output::Event(Event::Log(if late {
+            format!(
+                "node {hex} paired after the window's answer timed out (SAS {sas}): it is registered; \
+                 compare the SAS with the node's `net: pairing: SAS` log line, or remove it"
+            )
+        } else {
+            format!("node {hex} paired (SAS {sas}): compare it with the node's `net: pairing: SAS` log line")
+        })));
+        self.publish_pairing(out, Some(hex.clone()), Some(sas.clone()));
+        self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+        (hex, sas)
+    }
+
+    /// The answer to a `PairingOpen` that already timed out here (`late_pairing`). A `Paired`
+    /// means the gateway registered a node after all (its window and commit ran past this side's
+    /// slack): report it like a join, since dropping it would leave a registered node nobody was
+    /// told about. Anything else (the window's expiry or a refusal) only confirms the timeout.
+    fn on_late_pairing(&mut self, result: u8, data: &[u8], out: &mut Vec<Output>) {
+        if result != mgmt::MGMT_OK {
+            return;
+        }
+        match postcard::from_bytes::<Paired>(data) {
+            Ok(j) => {
+                let _ = self.on_paired(j, true, out);
+            }
+            Err(_) => out.push(Output::Event(Event::Log(
+                "late pairing answer from the gateway did not decode; run `nodes list`".into(),
+            ))),
+        }
+    }
+
+    fn publish_pairing(&self, out: &mut Vec<Output>, joined: Option<String>, sas: Option<String>) {
         let open = self.pairing_until.is_some();
         let p = payload::Pairing {
             state: if open { "open" } else { "idle" }.into(),
             remaining: self.pairing_until.map(|u| u.saturating_sub(self.tick)),
             joined,
+            sas,
         };
         out.push(Output::Publish {
             topic: topics::gateway_pairing(&self.prefix),
@@ -2641,6 +2702,106 @@ mod tests {
         assert!(rsp.data["joined"].is_null());
     }
 
+    /// Open an OTA window of `window` s over MQTT (RPC id `u-ota`); the PairingOpen's req_id.
+    fn open_ota(e: &mut Engine, window: u16) -> u16 {
+        let cmd = format!(r#"{{"id":"u-ota","op":"node_add_ota","params":{{"window":{window}}}}}"#);
+        let out = e.handle(mqtt_in("tower/gateway/cmd", cmd.as_bytes()));
+        let (req_id, op) = out.iter().find_map(sent_op).expect("PairingOpen issued");
+        assert!(op.contains("PairingOpen"), "{op}");
+        req_id
+    }
+
+    #[test]
+    fn ota_join_carries_the_sas_to_the_rpc_the_pairing_topic_and_the_log() {
+        let mut e = engine();
+        let req_id = open_ota(&mut e, 5);
+        let paired = postcard::to_stdvec(&Paired {
+            addr: 0xCD34,
+            sas: 4_321,
+        })
+        .unwrap();
+        let out = reply(&mut e, req_id, MGMT_OK, &paired);
+        let rsp = rpc_rsp(&out, "u-ota");
+        assert!(rsp.ok);
+        assert_eq!(rsp.data["joined"], "0x0000cd34");
+        // Zero-padded, as both ends log it.
+        assert_eq!(rsp.data["sas"], "004321");
+        let pairing = publishes(&out, "tower/gateway/pairing");
+        let p: payload::Pairing = serde_json::from_slice(pairing.last().unwrap()).unwrap();
+        assert_eq!(p.state, "idle");
+        assert_eq!(p.joined.as_deref(), Some("0x0000cd34"));
+        assert_eq!(p.sas.as_deref(), Some("004321"));
+        assert!(
+            logs(&out)
+                .iter()
+                .any(|l| l.contains("SAS 004321") && l.contains("net: pairing: SAS")),
+            "{:?}",
+            logs(&out)
+        );
+    }
+
+    #[test]
+    fn ota_window_waits_out_the_pairing_slack() {
+        // The gateway may answer up to PAIRING_SLACK_S after the window (a registry commit
+        // absorbing an EEPROM compaction): the RPC must still be pending until then.
+        let mut e = engine();
+        let _ = open_ota(&mut e, 5);
+        for _ in 0..(5 + PAIRING_SLACK_S - 1) {
+            let out = e.handle(Input::Tick);
+            assert!(
+                publishes(&out, "tower/gateway/rsp/u-ota").is_empty(),
+                "answered too early"
+            );
+        }
+        let out = e.handle(Input::Tick);
+        let rsp = rpc_rsp(&out, "u-ota");
+        assert!(!rsp.ok, "past the slack the window fails as a device timeout");
+    }
+
+    #[test]
+    fn late_paired_after_the_host_gave_up_is_reported_not_dropped() {
+        let mut e = engine();
+        let req_id = open_ota(&mut e, 5);
+        for _ in 0..(5 + PAIRING_SLACK_S) {
+            let _ = e.handle(Input::Tick);
+        }
+        // The gateway committed a node after all: it is registered, so it must be reported.
+        let paired = postcard::to_stdvec(&Paired { addr: 0xCD34, sas: 7 }).unwrap();
+        let out = reply(&mut e, req_id, MGMT_OK, &paired);
+        assert!(
+            logs(&out)
+                .iter()
+                .any(|l| l.contains("0x0000cd34") && l.contains("after") && l.contains("SAS 000007")),
+            "{:?}",
+            logs(&out)
+        );
+        let pairing = publishes(&out, "tower/gateway/pairing");
+        let p: payload::Pairing = serde_json::from_slice(pairing.last().unwrap()).unwrap();
+        assert_eq!(p.joined.as_deref(), Some("0x0000cd34"));
+        assert_eq!(p.sas.as_deref(), Some("000007"));
+        assert!(
+            out.iter()
+                .filter_map(sent_op)
+                .any(|(_, op)| op.contains("NodeList")),
+            "the registry mirror is refreshed"
+        );
+        assert!(e.nodes.iter().any(|n| n.entry.addr == 0xCD34), "mirrored at once");
+        // Reported once: a duplicate of the same answer is stale.
+        let out = reply(&mut e, req_id, MGMT_OK, &paired);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn late_window_expiry_after_the_host_gave_up_is_silent() {
+        let mut e = engine();
+        let req_id = open_ota(&mut e, 5);
+        for _ in 0..(5 + PAIRING_SLACK_S) {
+            let _ = e.handle(Input::Tick);
+        }
+        let out = reply(&mut e, req_id, mgmt::MGMT_TIMEOUT, &[]);
+        assert!(out.is_empty(), "the expiry only confirms the timeout: {out:?}");
+    }
+
     // ---- more uplink → topic mappings (alongside `button_uplink_maps_to_topic`) ----
 
     #[test]
@@ -3110,7 +3271,11 @@ mod tests {
             br#"{"id":"u-ota","op":"node_add_ota","params":{"window":5}}"#,
         ));
         let (req_id, _) = out.iter().find_map(sent_op).unwrap();
-        let joined = postcard::to_stdvec(&Paired { addr: 0xCD34 }).unwrap();
+        let joined = postcard::to_stdvec(&Paired {
+            addr: 0xCD34,
+            sas: 123_456,
+        })
+        .unwrap();
         let _ = reply(&mut e, req_id, MGMT_OK, &joined);
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let n = radio::encode_node_msg(

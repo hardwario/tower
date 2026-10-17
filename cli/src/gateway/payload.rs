@@ -70,9 +70,21 @@ pub(crate) struct Pairing {
     /// Seconds until the open window closes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining: Option<u64>,
-    /// The node that joined (set on the final `idle` transition after a join).
+    /// The node that joined (set on the final `idle` transition after a join, and on a late
+    /// join the gateway reported after the host had given up on the window).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joined: Option<String>,
+    /// The joined node's 6-digit short authentication string ([`sas_str`]), with `joined`:
+    /// compare it with the node's `net: pairing: SAS` log line (a mismatch is a man in the
+    /// middle). An added key, absent otherwise: subscribers that ignore unknown keys see no
+    /// change, so `SCHEMA` stays.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sas: Option<String>,
+}
+
+/// A pairing SAS as both ends log it: 6 digits, zero-padded (`net: pairing: SAS 012345`).
+pub(crate) fn sas_str(sas: u32) -> String {
+    format!("{sas:06}")
 }
 
 /// `nodes/{addr}` (retained; an empty MQTT payload, not JSON, clears a removed node).
@@ -490,12 +502,14 @@ mod tests {
 
     #[test]
     fn golden_pairing() {
-        // `remaining`/`joined` are `skip_serializing_if = Option::is_none`: the open window
-        // carries the countdown, the idle state omits both keys entirely.
+        // `remaining`/`joined`/`sas` are `skip_serializing_if = Option::is_none`: the open window
+        // carries the countdown, the idle state omits all three keys entirely, a join names the
+        // node and its SAS (6 digits, zero-padded, a string so the leading zeros survive).
         let open = Pairing {
             state: "open".into(),
             remaining: Some(45),
             joined: None,
+            sas: None,
         };
         assert_eq!(
             serde_json::to_string(&open).unwrap(),
@@ -505,16 +519,18 @@ mod tests {
             state: "idle".into(),
             remaining: None,
             joined: None,
+            sas: None,
         };
         assert_eq!(serde_json::to_string(&idle).unwrap(), r#"{"state":"idle"}"#);
         let joined = Pairing {
             state: "idle".into(),
             remaining: None,
             joined: Some("0x0000ab12".into()),
+            sas: Some(sas_str(4_321)),
         };
         assert_eq!(
             serde_json::to_string(&joined).unwrap(),
-            r#"{"state":"idle","joined":"0x0000ab12"}"#
+            r#"{"state":"idle","joined":"0x0000ab12","sas":"004321"}"#
         );
     }
 

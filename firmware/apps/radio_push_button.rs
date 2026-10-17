@@ -14,11 +14,19 @@
 //!
 //! Pairing:
 //! * **OTA**: hold the button ≥1 s while unprovisioned: the node pairs (an X25519 key
-//!   agreement, both ends log the same `pairing: SAS`) with any gateway that has a window open
-//!   and persists `(gw, key)`.
+//!   agreement, both ends log the same `pairing: SAS`) with any gateway that has a window open.
+//!   The new key is **provisional** until the gateway acknowledges an uplink under it (the
+//!   commit round: the `NodeInfo`, a few attempts over ~15 s); only then is `(gw, key)`
+//!   persisted. A key the gateway never acknowledges (a lost JOIN_CONFIRM, a full registry) is
+//!   discarded and the node stays unpaired, so another hold can retry.
+//! * **Re-pair** (the recovery gesture): hold the button ≥ [`REPAIR_HOLD`] (12 s) while
+//!   paired: the node runs the same OTA pairing; the old pairing stays in force (RAM and
+//!   EEPROM) unless the new one commits. For a node whose gateway forgot it, or a move to
+//!   another gateway. OTA pairing never re-keys an address a gateway still has registered, so
+//!   remove the node on its gateway first (`tower nodes remove`), then open a window and hold.
 //! * **Cable**: on USB, the node serves the management channel: `Describe` (role
 //!   probe), `Provision` (host-minted credentials; key never rides the shell), and
-//!   `JoinOpen` (host-initiated OTA join).
+//!   `JoinOpen` (host-initiated OTA join, with the same commit round).
 //!
 //! Each of the four button events has a **master enable**: a disabled event is ignored
 //! entirely: neither reported over radio nor shown on the LED. The event *recognition*
@@ -48,6 +56,8 @@
 #![no_std]
 #![no_main]
 
+use core::sync::atomic::{AtomicU8, Ordering};
+
 use embassy_futures::select::{Either4, select4};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_time::{Duration, Instant, Timer};
@@ -56,7 +66,10 @@ use tower::board::{GuardedI2c, UniqueId};
 use tower::lis2dh12::{self, Lis2dh12, Sensitivity, TiltConfig};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
-use tower::radio::net::{Net, NetConfig, PAIRING_WINDOW, SendResult, is_reserved_addr, peer_addr_valid};
+use tower::radio::net::{
+    COMMIT_SETTLE_MS, CommitStep, Net, NetConfig, PAIRING_WINDOW, SendResult, commit_step, is_reserved_addr,
+    peer_addr_valid,
+};
 use tower::shell::ShellSink;
 use tower::storage::{NS_APP, NS_SHELL, Nv};
 use tower::tmp112::{self, Tmp112};
@@ -200,8 +213,9 @@ static BTN_SETTINGS: &[shell::Setting] = &[
 
 // --- synthetic button press (the console "finger" / HIL bench) ---------------------
 
-/// Longest press `/button simulate` will inject (10 s, well past any hold-time).
-const SIM_MAX_MS: u32 = 10_000;
+/// Longest press `/button simulate` will inject (15 s: past any hold-time and past
+/// [`REPAIR_HOLD`], so the bench can drive the re-pair gesture too).
+const SIM_MAX_MS: u32 = 15_000;
 
 /// `/button simulate <ms>`: inject a synthetic press held `<ms>` milliseconds into the
 /// button driver, which derives the event(s) through the *real* recognition machine
@@ -248,6 +262,17 @@ const DOWNLINK_WINDOW: Duration = Duration::from_secs(1);
 /// Shell-response chunks ride confirmed uplinks with extra reps: the gateway's
 /// single-owner loop may be busy retrying a queued downlink when a chunk goes out.
 const CHUNK_REPS: u8 = 5;
+/// The re-pair gesture: a press held this long on a paired node runs OTA pairing again (the
+/// recovery for a node whose gateway forgot it, or a move to another gateway). Past the longest
+/// configurable `hold-time` (10 s), so no hold setting can turn an ordinary Hold into it, and far
+/// past any accidental press; even a deliberate one only costs a pairing attempt, since the old
+/// pairing stays in force unless a new one commits.
+const REPAIR_HOLD: Duration = Duration::from_secs(12);
+/// Consecutive unacknowledged uplinks after which the node logs a hint that its gateway may have
+/// forgotten it (once per streak; the node keeps sending: it may just be out of range).
+const UNACKED_HINT: u8 = 8;
+/// The current streak of unacknowledged uplinks (main task only; load/store is enough on M0+).
+static UNACKED: AtomicU8 = AtomicU8::new(0);
 
 fn read_u32_setting(kv: Nv, local: u8, default: u32) -> u32 {
     let mut b = [0u8; 4];
@@ -432,9 +457,19 @@ async fn run(b: Board) {
     let mut last_temp_tx = Instant::now();
     let mut next_temp = Instant::now(); // measure immediately on boot
     let mut next_heartbeat = Instant::now(); // boot Info doubles as the first heartbeat
+    // When the button went down (`None` = up): a paired node re-pairs once it is held for
+    // `REPAIR_HOLD`. Taken when the main loop sees the Press, so a busy loop only ever makes the
+    // gesture longer, never shorter; a Release queued meanwhile is seen before the timer (the
+    // button arm is polled first).
+    let mut pressed_at: Option<Instant> = None;
 
     loop {
-        let timer_due = next_temp.min(next_heartbeat);
+        let repair_due = pressed_at
+            .filter(|_| provision.is_some())
+            .map(|t| t + REPAIR_HOLD);
+        let timer_due = next_temp
+            .min(next_heartbeat)
+            .min(repair_due.unwrap_or(Instant::MAX));
         match select4(
             btn.next_event(),
             Timer::at(timer_due),
@@ -453,16 +488,23 @@ async fn run(b: Board) {
                 };
                 let idx = kind as usize;
                 counts[idx] = counts[idx].wrapping_add(1);
+                // The re-pair gesture's clock (every press, whatever the per-event enables).
+                match ev {
+                    button::Event::Press => pressed_at = Some(Instant::now()),
+                    button::Event::Release => pressed_at = None,
+                    _ => {}
+                }
 
                 // Pairing is a fixed gesture, not a reportable event: while unpaired a
                 // long hold always starts the OTA join, regardless of the per-event
                 // enables (which govern normal reporting once paired).
                 if provision.is_none() {
                     if matches!(ev, button::Event::Hold) {
-                        provision = ota_join(&mut net, addr, band, channel, kv, &led).await;
-                        if provision.is_some() {
-                            led.set_background(None);
-                            send_info(&mut net, provision, &counts).await;
+                        pressed_at = None; // this press is spent on the join
+                        if let PairOutcome::Paired { rec, .. } =
+                            pair(&mut net, addr, band, channel, kv, &led, PAIRING_WINDOW, None).await
+                        {
+                            provision = Some(rec);
                         }
                     }
                     continue; // unpaired: no gateway to report events to
@@ -487,8 +529,19 @@ async fn run(b: Board) {
                 uplink(&mut net, provision, &msg, reps).await;
             }
 
-            // --- periodic: temperature and/or heartbeat due ---
+            // --- periodic: temperature and/or heartbeat due; or the re-pair gesture ---
             Either4::Second(()) => {
+                if repair_due.is_some_and(|due| Instant::now() >= due) {
+                    // Held REPAIR_HOLD while paired (no Release seen): pair again. The current
+                    // pairing stays in force unless the new one commits.
+                    pressed_at = None; // one gesture, one attempt
+                    info!(target: "button", "re-pair: button held {} s", REPAIR_HOLD.as_secs());
+                    if let PairOutcome::Paired { rec, .. } =
+                        pair(&mut net, addr, band, channel, kv, &led, PAIRING_WINDOW, provision).await
+                    {
+                        provision = Some(rec);
+                    }
+                }
                 let now = Instant::now();
                 if now >= next_temp {
                     let period = read_u32_setting(kv, SET_THERM_PERIOD, 60) as u64;
@@ -511,7 +564,7 @@ async fn run(b: Board) {
                     let heartbeat = read_u32_setting(kv, SET_HEARTBEAT, 900) as u64;
                     next_heartbeat = now + Duration::from_secs(heartbeat.max(60));
                     if provision.is_some() {
-                        send_info(&mut net, provision, &counts).await;
+                        send_info(&mut net, provision).await;
                     }
                 }
             }
@@ -546,49 +599,135 @@ async fn run(b: Board) {
     }
 }
 
-/// OTA join (button held): run the pairing handshake for the standard window, persist the
-/// credentials on success.
-async fn ota_join(
+/// How an OTA pairing attempt ([`pair`]) ended.
+enum PairOutcome {
+    /// Committed: the gateway acknowledged an uplink under the new key. `persisted` is false
+    /// when the EEPROM write failed (the pairing then holds until the next reboot).
+    Paired {
+        rec: Provisioned,
+        sas: u32,
+        persisted: bool,
+    },
+    /// No gateway answered within the window.
+    NoWindow,
+    /// A handshake completed but the gateway never acknowledged the new key: discarded.
+    Unconfirmed,
+}
+
+/// OTA pairing (a button hold, the re-pair gesture or the cable's `JoinOpen`): run the handshake
+/// for `window`, then the **commit round**, and persist the credentials only once committed.
+///
+/// The handshake ends with our JOIN_CONFIRM, which nothing acknowledges: if it is lost (or the
+/// gateway's registry refuses the node) the gateway never installs the key. Persisting the key at
+/// that point used to leave a node that believed it was paired while the gateway dropped every
+/// uplink as an unregistered sender, and since a hold pairs only an unpaired node, nothing short
+/// of USB could fix it. So the key stays in the RAM peer table, the `NodeInfo` goes up confirmed
+/// under it (also what the host auto-names the node from), and only an ACK, which only a holder
+/// of the key can seal, commits it (`tower_net::pairing::commit_step`: a short settle, then up to
+/// six attempts 2 s apart, outlasting the gateway's worst post-confirm stall). The gateway closes
+/// its window on the commit, so it serves our uplinks again from its next loop turn.
+///
+/// `current` is the pairing in force before this attempt; it stays in force (in RAM and in
+/// EEPROM) unless the new one commits, so a failed re-pair changes nothing. One corner: a new
+/// pairing with the *same* gateway address that does not commit restores the old key under that
+/// address with a fresh replay lane (`Net::add_peer` resets the lane on every key change); a
+/// gateway only answers an address it no longer has registered, so that old key was already
+/// dead there.
+#[allow(clippy::too_many_arguments)]
+async fn pair(
     net: &mut Net,
     addr: u32,
     band: Band,
     channel: u8,
     kv: Nv,
     led: &led::Led,
-) -> Option<Provisioned> {
-    info!(target: "button", "JOIN: looking for a pairing window ({} s)…", PAIRING_WINDOW.as_secs());
+    window: Duration,
+    current: Option<Provisioned>,
+) -> PairOutcome {
+    info!(target: "button", "JOIN: looking for a pairing window ({} s)…", window.as_secs());
     led.set_background(Some(JOINING));
     let _ = net.wake().await;
-    let joined = net.join(addr, PAIRING_WINDOW).await;
+    let joined = net.join(addr, window).await;
     let _ = net.sleep().await;
-    match joined {
-        Some((gw_addr, key)) => {
-            let p = Provisioned {
-                gw_addr,
-                key,
-                band: if band == Band::Us915 {
-                    mgmt::BAND_US915
-                } else {
-                    mgmt::BAND_EU868
-                },
-                channel,
-            };
-            if kv.scope(NS_APP).set(KEY_PROVISION, &p).is_err() {
-                warn!(target: "button", "JOINED {:08X} but persist failed; will not survive reboot", gw_addr);
-            } else {
-                // The success line names this unit by its MCU factory ID, so a host log or the
-                // operator can tie the pairing (and the SAS logged just before) to a device.
-                info!(target: "button", "JOINED gateway {:08X} (uid {})", gw_addr, UniqueId::read());
+    let idle_led = if current.is_some() {
+        None
+    } else {
+        Some(UNPROVISIONED)
+    };
+    let Some(peer) = joined else {
+        warn!(target: "button", "join failed (no gateway window in range)");
+        led.set_background(idle_led);
+        return PairOutcome::NoWindow;
+    };
+    let sas = peer.sas;
+    let rec = Provisioned {
+        gw_addr: peer.addr,
+        key: peer.key,
+        band: if band == Band::Us915 {
+            mgmt::BAND_US915
+        } else {
+            mgmt::BAND_EU868
+        },
+        channel,
+    };
+
+    // The commit round: provisional key in RAM, confirmed NodeInfo uplinks until one is ACKed.
+    // (`add_peer` refuses only a reserved or our own address, which `join` never returns.)
+    let _ = net.add_peer(rec.gw_addr, &rec.key);
+    Timer::after_millis(COMMIT_SETTLE_MS as u64).await;
+    let mut attempt = 0u8;
+    loop {
+        attempt += 1;
+        match commit_step(attempt, commit_uplink(net, rec.gw_addr).await) {
+            CommitStep::Commit => break,
+            CommitStep::Retry { after_ms } => Timer::after_millis(after_ms as u64).await,
+            CommitStep::Discard => {
+                // Back to the pairing in force before (or to none).
+                match current {
+                    Some(c) if c.gw_addr == rec.gw_addr => {
+                        let _ = net.add_peer(c.gw_addr, &c.key);
+                    }
+                    _ => {
+                        net.remove_peer(rec.gw_addr);
+                    }
+                }
+                warn!(
+                    target: "button",
+                    "pairing with gateway {:08X} not confirmed (no ACK under the new key), discarded{}",
+                    rec.gw_addr,
+                    if current.is_some() { "; the previous pairing stays" } else { "; hold the button to retry" }
+                );
+                led.set_background(idle_led);
+                return PairOutcome::Unconfirmed;
             }
-            net.add_peer(gw_addr, &key);
-            Some(p)
-        }
-        None => {
-            warn!(target: "button", "join failed (no gateway window in range)");
-            led.set_background(Some(UNPROVISIONED));
-            None
         }
     }
+
+    // Committed: the gateway holds the key. Retire a previous gateway (it keeps the node
+    // registered until it is removed there), then persist.
+    if let Some(c) = current
+        && c.gw_addr != rec.gw_addr
+    {
+        net.remove_peer(c.gw_addr);
+    }
+    UNACKED.store(0, Ordering::Relaxed); // a fresh link: no unacknowledged streak
+
+    let persisted = kv.scope(NS_APP).set(KEY_PROVISION, &rec).is_ok();
+    if persisted {
+        // The success line names this unit by its MCU factory ID, so a host log or the operator
+        // can tie the pairing (and its SAS) to a device.
+        info!(
+            target: "button",
+            "JOINED gateway {:08X} (SAS {:06}, uid {})",
+            rec.gw_addr,
+            sas,
+            UniqueId::read()
+        );
+    } else {
+        warn!(target: "button", "JOINED {:08X} but persist failed; will not survive reboot", rec.gw_addr);
+    }
+    led.set_background(None);
+    PairOutcome::Paired { rec, sas, persisted }
 }
 
 /// One-shot temperature read: take the bus from the accelerometer, measure, hand it
@@ -616,9 +755,21 @@ async fn handle_tilt(bus: &mut AccelBus) -> Option<u8> {
     Some(face)
 }
 
+/// Encode this node's identity/heartbeat `Info` into `buf`; its length.
+fn encode_info(buf: &mut [u8; MAX_RADIO_PAYLOAD]) -> Option<usize> {
+    let name = console::firmware_name();
+    let msg = NodeMsg::Info(NodeInfo {
+        firmware_name: name.as_str(),
+        firmware_version: console::firmware_version(),
+        session_id: console::session_id(),
+        sleeping: true,
+    });
+    encode_node_msg(&msg, buf).ok()
+}
+
 /// Send the identity/heartbeat `Info` (also the delivery opportunity for queued
 /// downlinks on an otherwise idle node).
-async fn send_info(net: &mut Net, provision: Option<Provisioned>, _counts: &[u32; 4]) {
+async fn send_info(net: &mut Net, provision: Option<Provisioned>) {
     let name = console::firmware_name();
     let msg = NodeMsg::Info(NodeInfo {
         firmware_name: name.as_str(),
@@ -627,6 +778,27 @@ async fn send_info(net: &mut Net, provision: Option<Provisioned>, _counts: &[u32
         sleeping: true,
     });
     uplink(net, provision, &msg, 3).await;
+}
+
+/// One commit attempt of [`pair`]: the `Info` (the host auto-names the node from it), confirmed,
+/// to the gateway the handshake named; whether it was acknowledged. A plain confirmed send, no
+/// downlink window: a node this fresh has nothing queued, and a pending flag on its ACK is
+/// served by the next regular uplink. (Kept apart from [`uplink`] also for RAM: the downlink and
+/// remote-shell machinery inside it would otherwise be carried by `pair`'s future as well, and
+/// `handle_mgmt`'s with it.)
+async fn commit_uplink(net: &mut Net, gw_addr: u32) -> bool {
+    let mut buf = [0u8; MAX_RADIO_PAYLOAD];
+    let Some(n) = encode_info(&mut buf) else {
+        return false;
+    };
+    let _ = net.wake().await;
+    let result = net.send(gw_addr, &buf[..n], true, 3).await;
+    let _ = net.sleep().await;
+    if !matches!(result, SendResult::Delivered) {
+        warn!(target: "button", "commit uplink: {result}");
+        return false;
+    }
+    true
 }
 
 /// One uplink cycle: wake the radio, send confirmed, honour the ACK's pending flag
@@ -643,8 +815,23 @@ async fn uplink(net: &mut Net, provision: Option<Provisioned>, msg: &NodeMsg<'_>
     let _ = net.wake().await;
     let result = net.send(p.gw_addr, &buf[..n], true, reps).await;
     let delivered = matches!(result, SendResult::Delivered);
-    if !delivered {
+    if delivered {
+        UNACKED.store(0, Ordering::Relaxed);
+    } else {
         warn!(target: "button", "uplink: {result}");
+        let streak = UNACKED.load(Ordering::Relaxed).saturating_add(1);
+        UNACKED.store(streak, Ordering::Relaxed);
+        if streak == UNACKED_HINT {
+            // Most likely out of range or switched off; but a gateway that no longer knows this
+            // node drops everything it sends, and only a re-pair gets it back.
+            warn!(
+                target: "button",
+                "gateway {:08X}: {} uplinks in a row unacknowledged; if it no longer has this node, remove it there, open a pairing window and hold the button {} s to re-pair",
+                p.gw_addr,
+                streak,
+                REPAIR_HOLD.as_secs()
+            );
+        }
     }
     while net.last_ack().is_some_and(|m| m.pending) {
         if !downlink_window(net, p.gw_addr).await {
@@ -926,37 +1113,27 @@ async fn handle_mgmt(
                 respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                 return;
             }
-            led.set_background(Some(JOINING));
-            let _ = net.wake().await;
-            let joined = net.join(addr, Duration::from_secs(window as u64)).await;
-            let _ = net.sleep().await;
-            match joined {
-                Some((gw_addr, key)) => {
-                    let rec = Provisioned {
-                        gw_addr,
-                        key,
-                        band: if band == Band::Us915 {
-                            mgmt::BAND_US915
-                        } else {
-                            mgmt::BAND_EU868
-                        },
-                        channel,
-                    };
-                    if kv.scope(NS_APP).set(KEY_PROVISION, &rec).is_err() {
-                        respond_empty(req_id, mgmt::MGMT_STORAGE).await;
-                        return;
-                    }
-                    net.add_peer(gw_addr, &key);
+            // The same pairing as the button's, commit round included: `Joined` means the gateway
+            // acknowledged the new key, not merely that a JOIN_CONFIRM went out.
+            let window = Duration::from_secs(window as u64);
+            match pair(net, addr, band, channel, kv, led, window, *provision).await {
+                PairOutcome::Paired { rec, sas, persisted } => {
                     *provision = Some(rec);
-                    info!(target: "button", "JOINED gateway {:08X} (uid {})", gw_addr, UniqueId::read());
-                    respond_record(req_id, &Joined { gw_addr }).await;
-                }
-                None => {
-                    led.set_background(if provision.is_some() {
-                        None
+                    if persisted {
+                        respond_record(
+                            req_id,
+                            &Joined {
+                                gw_addr: rec.gw_addr,
+                                sas,
+                            },
+                        )
+                        .await;
                     } else {
-                        Some(UNPROVISIONED)
-                    });
+                        // Paired for this boot only (the gateway has it; the EEPROM refused it).
+                        respond_empty(req_id, mgmt::MGMT_STORAGE).await;
+                    }
+                }
+                PairOutcome::NoWindow | PairOutcome::Unconfirmed => {
                     respond_empty(req_id, mgmt::MGMT_TIMEOUT).await;
                 }
             }

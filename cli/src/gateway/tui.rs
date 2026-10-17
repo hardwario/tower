@@ -368,9 +368,11 @@ impl App {
             }
             Event::Pairing(p) => {
                 if p.state == "idle" && self.pairing.as_ref().is_some_and(|o| o.state == "open") {
-                    match &p.joined {
-                        Some(j) => self.push_log(format!("paired {j}")),
-                        None => self.push_log("pairing window closed".into()),
+                    // (The engine's log line next to it says what to do with the SAS.)
+                    match (&p.joined, &p.sas) {
+                        (Some(j), Some(sas)) => self.push_log(format!("paired {j} (SAS {sas})")),
+                        (Some(j), None) => self.push_log(format!("paired {j}")),
+                        (None, _) => self.push_log("pairing window closed".into()),
                     }
                 }
                 self.pairing = Some(p);

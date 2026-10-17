@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use rumqttc::{Event as MqttEvent, Incoming, QoS};
 
+use crate::gateway::engine::PAIRING_SLACK_S;
 use crate::gateway::payload::{Node, PendingEntry, ShellReq, ShellRsp};
 use crate::gateway::topics;
 use crate::term::{sanitize, sanitize_line};
@@ -254,11 +255,25 @@ fn table_row(n: &Node) -> String {
     )
 }
 
+/// What to do with the SAS `nodes add --ota` printed for the node `addr`.
+fn sas_hint(addr: &str) -> String {
+    format!(
+        "[tower] compare this SAS with the one the node logged (`net: pairing: SAS ...`, also in its \
+         `JOINED gateway` line); they must match. A mismatch means a man in the middle: remove the \
+         node (`tower nodes remove {addr}`) and pair it again."
+    )
+}
+
 fn add_ota(s: &mut Session, window: u16, name: Option<&str>) -> Result<u8> {
     eprintln!("[tower] pairing window open for {window}s: hold the node's button to join…");
-    // The RPC resolves when the window does (join / expiry), so give it the window
-    // plus slack over the generic RPC timeout.
-    let saved = std::mem::replace(&mut s.timeout, Duration::from_secs(window as u64 + 10));
+    eprintln!(
+        "[tower] to check the pairing's SAS, watch the node's console meanwhile (USB attached: \
+         `tower -d <node port> logs`)"
+    );
+    // The RPC resolves when the window does (join / expiry), up to the bridge's pairing slack
+    // after it (`PAIRING_SLACK_S`); wait that plus a margin for the broker round trip.
+    let wait = Duration::from_secs(window as u64 + PAIRING_SLACK_S + 5);
+    let saved = std::mem::replace(&mut s.timeout, wait);
     let rsp = s.rpc("node_add_ota", serde_json::json!({ "window": window }));
     s.timeout = saved;
     let data = match rsp {
@@ -268,7 +283,14 @@ fn add_ota(s: &mut Session, window: u16, name: Option<&str>) -> Result<u8> {
     };
     match data.get("joined").and_then(|v| v.as_str()) {
         Some(hex) => {
-            println!("paired {}", sanitize_line(hex));
+            let shown = sanitize_line(hex);
+            match data.get("sas").and_then(|v| v.as_str()) {
+                Some(sas) => {
+                    println!("paired {shown} (SAS {})", sanitize_line(sas));
+                    eprintln!("{}", sas_hint(&shown));
+                }
+                None => println!("paired {shown}"),
+            }
             if let Some(n) = name {
                 s.rpc_ok("node_rename", serde_json::json!({ "addr": hex, "name": n }))?;
                 println!("named \"{n}\"");
@@ -408,5 +430,12 @@ mod tests {
         };
         assert!(table_row(&plain).starts_with("0x0000ab12   kitchen          push-button "));
         assert_eq!(table_header().find("NAME"), table_row(&plain).find("kitchen"));
+    }
+
+    #[test]
+    fn sas_hint_names_the_node_log_line_and_the_removal() {
+        let hint = sas_hint("0x0000ab12");
+        assert!(hint.contains("net: pairing: SAS"), "{hint}");
+        assert!(hint.contains("tower nodes remove 0x0000ab12"), "{hint}");
     }
 }

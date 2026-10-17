@@ -45,7 +45,7 @@ use log::{info, warn};
 use tower::led::{self, LedChannel, Pattern, Polarity, Step};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
-use tower::radio::net::{Net, NetConfig, PairingHost, SendResult, peer_addr_valid};
+use tower::radio::net::{Net, NetConfig, PairedPeer, PairingHost, SendResult, peer_addr_valid};
 use tower::storage::{NS_APP, NS_SHELL, Nv, Scoped};
 use tower::{app, board::Board, console, shell, watchdog};
 use tower_gateway::queue::{PushError, Queue};
@@ -250,9 +250,8 @@ impl Stats {
 /// An armed OTA pairing window (delayed `MgmtResponse`: resolves on join/expiry/cancel).
 struct PairingSession {
     req_id: u16,
-    /// The window's precomputed X25519 ephemeral (zeroized when the session drops).
+    /// The window's end and its precomputed X25519 ephemeral (zeroized when the session drops).
     host: PairingHost,
-    deadline: Instant,
 }
 
 /// Chunked management-response sender: accumulates record bytes into ≤192-byte `data`
@@ -357,8 +356,15 @@ async fn run(b: Board) {
     // gated on the main loop below: the feeder task alone only proves the executor runs,
     // and the 2026-07-13 wedge (main loop parked on console backpressure after a lost
     // TC flag; LED blinking, IWDG fed, gateway deaf) sailed right past an ungated feeder.
-    // 10 s comfortably exceeds the longest legitimate iteration (a 2 s pairing slice, a
-    // full downlink retry tail); a loop older than that is gone, not busy.
+    // 10 s comfortably exceeds the longest legitimate stretch between two check-ins; a loop
+    // older than that is gone, not busy. The loop checks in at its top, after the management
+    // requests and after each pairing slice, so no stretch stacks two long steps: the requests
+    // (two at most: a synchronous EEPROM compaction, ~5.2 s worst case, plus a PairingOpen's
+    // ~1.2 s ephemeral: ~6.5 s), one pairing slice (2 s + a handshake that started inside it,
+    // ~3.9 s, + the next ephemeral, ~1.2 s: ~7 s, see `Net::open_pairing`), the pairing commit
+    // (a registry write that may absorb that compaction: ~5.5 s), a receive slice with a
+    // downlink retry tail (~1 s, or the compaction again). One iteration used to chain the
+    // ephemeral, a slice overrun and the commit's compaction past 10 s.
     watchdog::enable(b.iwdg, b.spawner, Duration::from_secs(26));
     watchdog::require_checkin(Duration::from_secs(10));
 
@@ -503,6 +509,9 @@ async fn run(b: Board) {
             )
             .await;
         }
+        // A second check-in: the requests above (a PairingOpen's ephemeral, an EEPROM compaction
+        // inside a registry write) and the pairing slice below must not add up in one stretch.
+        watchdog::checkin();
 
         let now_ms = Instant::now().as_millis();
 
@@ -516,22 +525,29 @@ async fn run(b: Board) {
                 respond_empty(sess.req_id, mgmt::MGMT_FULL).await;
                 led.set_background(Some(HEARTBEAT));
                 pairing = None;
-            } else if Instant::now() >= sess.deadline {
+            } else if Instant::now() >= sess.host.window_end() {
                 respond_empty(sess.req_id, mgmt::MGMT_TIMEOUT).await;
                 led.set_background(Some(HEARTBEAT));
                 pairing = None;
             } else {
-                let slice = PAIR_SLICE.min(sess.deadline.saturating_duration_since(Instant::now()));
                 // `open_pairing` never answers a JOIN_REQ for an already-registered (or reserved,
-                // or our own) address; OTA pairing only adds NEW nodes (docs/gateway.md). One
-                // call can outlast the slice by a handshake (the nonce wait, ~1.2 s compute, the
-                // 1.8 s confirm wait: ~3.4 s) plus ~1.2 s for the next ephemeral at its start:
-                // ~7 s worst case, still inside the 10 s liveness check-in.
-                if let Some((node_addr, key)) = net.open_pairing(&mut sess.host, slice).await {
+                // or our own) address; OTA pairing only adds NEW nodes (docs/gateway.md). Nor one
+                // whose handshake would end after the window (`HOST_HANDSHAKE_TIME`), so a node is
+                // never committed after the host was told the window expired. One call stops
+                // listening at the slice's end but finishes a handshake it started: ~7 s worst
+                // case (see the watchdog arming above).
+                let joined = net.open_pairing(&mut sess.host, PAIR_SLICE).await;
+                // Checked in again before the commit: its registry write may absorb a synchronous
+                // EEPROM compaction (~5.2 s), which must not stack on the slice.
+                watchdog::checkin();
+                if let Some(peer) = joined {
                     let req_id = sess.req_id;
+                    // The window closes on the first commit, so this node's commit uplinks (it
+                    // keeps the key provisional until one is ACKed, docs/radio.md) reach the
+                    // receive slices from the next iteration on.
                     led.set_background(Some(HEARTBEAT));
                     pairing = None;
-                    commit_pairing(node_addr, key, req_id, &mut net, &mut buckets).await;
+                    commit_pairing(peer, req_id, &mut net, &mut buckets).await;
                 }
             }
         } else if let Some(rx) = net.recv(RECV_SLICE).await {
@@ -614,30 +630,35 @@ async fn run(b: Board) {
 
 /// Commit a joined node: persist it (UNNAMED: the host auto-names from the first
 /// `NodeInfo` uplink via `NodeUpdate`, keeping this firmware payload-agnostic), install
-/// the peer, and resolve the delayed `PairingOpen` response. Insert-only
+/// the peer, and resolve the delayed `PairingOpen` response with the node's address and the
+/// handshake's SAS (the operator compares it with the node's). Insert-only
 /// (`registry::add_new`): an OTA join must never overwrite a registered node's key (the net
-/// layer already refuses such a JOIN_REQ; this is the registry-side backstop).
-async fn commit_pairing(
-    node_addr: u32,
-    key: [u8; 16],
-    req_id: u16,
-    net: &mut Net,
-    buckets: &mut EepromBuckets,
-) {
+/// layer already refuses such a JOIN_REQ; this is the registry-side backstop). On a refusal the
+/// node's commit uplinks go unanswered and it discards the key (its commit round), so neither
+/// end is left half-paired.
+async fn commit_pairing(peer: PairedPeer, req_id: u16, net: &mut Net, buckets: &mut EepromBuckets) {
+    let node_addr = peer.addr;
     let rec = NodeRecord {
         addr: node_addr,
-        key,
+        key: peer.key,
         flags: mgmt::NODE_FLAG_UNNAMED,
         name: heapless::String::new(),
     };
     match registry::add_new(buckets, &rec) {
         Ok(()) => {
-            if !net.add_peer(node_addr, &key) {
+            if !net.add_peer(node_addr, &peer.key) {
                 warn!(target: "gateway", "peer table refused {:08X}, node will not decrypt", node_addr);
             }
             STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
-            info!(target: "gateway", "paired node {:08X}", node_addr);
-            respond_record(req_id, &Paired { addr: node_addr }).await;
+            info!(target: "gateway", "paired node {:08X} (SAS {:06})", node_addr, peer.sas);
+            respond_record(
+                req_id,
+                &Paired {
+                    addr: node_addr,
+                    sas: peer.sas,
+                },
+            )
+            .await;
         }
         Err(RegistryError::Exists) => {
             warn!(target: "gateway", "pairing: {:08X} is already registered; remove it first to re-pair", node_addr);
@@ -801,20 +822,18 @@ async fn handle_mgmt(
                 respond_empty(req_id, mgmt::MGMT_FULL).await;
                 return;
             }
-            // The window's first ephemeral (one X25519 scalar multiplication, ~1 s): done now, so
-            // answering a JOIN_REQ costs only the shared secret. No TRNG, no pairing: an
-            // ephemeral from the software fallback would be guessable (logged by the net layer).
-            let Some(host) = PairingHost::prepare() else {
+            // The window's first ephemeral (one X25519 scalar multiplication, ~1.2 s): done now,
+            // so answering a JOIN_REQ costs only the shared secret. The window's end is fixed
+            // before it, so the window closes `window` after this request, as the host counts.
+            // No TRNG, no pairing: an ephemeral from the software fallback would be guessable
+            // (logged by the net layer).
+            let Some(host) = PairingHost::prepare(Duration::from_secs(window as u64)) else {
                 respond_empty(req_id, mgmt::MGMT_UNSUPPORTED).await;
                 return;
             };
             info!(target: "gateway", "pairing window open ({} s)", window);
             led.set_background(Some(PAIRING));
-            *pairing = Some(PairingSession {
-                req_id,
-                host,
-                deadline: Instant::now() + Duration::from_secs(window as u64),
-            });
+            *pairing = Some(PairingSession { req_id, host });
             // The response is DELAYED: it resolves when the window does.
         }
         MgmtOp::PairingCancel => {

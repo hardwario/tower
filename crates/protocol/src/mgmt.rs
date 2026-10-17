@@ -35,7 +35,13 @@
 //!
 //! **Delayed responses.** `PairingOpen` / `JoinOpen` reply when their radio window
 //! *resolves*: a join commits, the window expires ([`MGMT_TIMEOUT`]), or it is
-//! cancelled. That may be up to `window` seconds after the request. The `req_id`
+//! cancelled. That may be up to `window` seconds after the request, plus a tail: the
+//! gateway's window runs from the request's arrival and it answers a JOIN_REQ only while a
+//! whole handshake still fits, but its registry commit (and, for an expiry, its next loop
+//! turn) can add a few seconds (a synchronous EEPROM compaction is the ~5 s worst case), and a
+//! node's `Joined` follows its commit round (a confirmed uplink under the new key, retried for
+//! up to ~20 s). A host waits the window plus such a slack, and treats an answer that still
+//! arrives after it gave up as real (a late `Paired` is a registered node). The `req_id`
 //! correlation makes this safe; a second open while one runs answers [`MGMT_BUSY`].
 //!
 //! **Who makes AES keys.** OTA pairing derives the link key on both ends by an X25519 key
@@ -230,10 +236,15 @@ pub struct NodeKey {
     pub key: [u8; 16],
 }
 
-/// Delayed reply record for [`MgmtOp::PairingOpen`]: a node joined the window.
+/// Delayed reply record for [`MgmtOp::PairingOpen`]: a node joined the window (its handshake
+/// ended in a valid JOIN_CONFIRM and the gateway committed it to its registry).
 #[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Paired {
     pub addr: u32,
+    /// The handshake's 6-digit short authentication string, `0..1_000_000` (show it zero-padded
+    /// to 6 digits). The node logs the same value (`net: pairing: SAS 012345`); comparing the two
+    /// is OTA pairing's man-in-the-middle check (firmware/docs/radio.md, "OTA pairing").
+    pub sas: u32,
 }
 
 /// Reply record for [`MgmtOp::QueuePush`]: the handle for `QueueDrop` and the
@@ -259,8 +270,13 @@ pub struct ProvisionAck {
     pub addr: u32,
 }
 
-/// Delayed reply record for [`MgmtOp::JoinOpen`]: the node joined a gateway.
+/// Delayed reply record for [`MgmtOp::JoinOpen`]: the node joined a gateway and the gateway
+/// acknowledged a confirmed uplink under the new key, the node's commit point (until then the
+/// pairing is provisional, and it is discarded when the gateway never acknowledges it).
 #[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Joined {
     pub gw_addr: u32,
+    /// The handshake's 6-digit short authentication string (see [`Paired::sas`]): the gateway
+    /// shows the same value unless a man in the middle ran the exchange.
+    pub sas: u32,
 }
