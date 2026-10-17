@@ -49,7 +49,7 @@ Of particular interest, by component:
 - **`hil/`**: test tooling that runs on a developer's bench, not shipped product code; issues
   that could compromise the host running it (e.g. command injection via `hil.toml` or
   device-supplied data) are still in scope.
-- The repository's own tooling: the CI workflows, the wire-bump guard, the `.claude/` skills.
+- The repository's own tooling: the CI workflows, the `.claude/` skills.
 
 ## Supported versions
 

@@ -170,7 +170,7 @@ Flashable programs come in two kinds:
 | `lowpower` | Measure the SDK's STOP-mode idle floor: VBUS-gated STOP, parked forever; flash over SWD + measure VDD (probe detached) |
 | `watchdog` | The independent watchdog (IWDG): periodic pet, and a deliberate stall to show the reset |
 
-The radio stack adds 34 more (`radio_*`, `net_*`, `crypto_*`, `edge_*`, `fhss_*`). The
+The radio stack adds the rest (`radio_*`, `net_*`, `crypto_*`, `edge_*`, `fhss_*`). The
 reference apps `radio_gateway`/`radio_node` are the happy path; see the full table
 and protocol guide in [`docs/radio.md`](docs/radio.md). Two-board examples are one
 file built twice with a role feature, e.g. `TOWER_FEATURES=role-gateway just flash
@@ -179,7 +179,7 @@ example net_confirmed`. The console examples (`console_demo`, `console_full`,
 [`docs/console.md`](docs/console.md)), and three are bench/diagnostic tools: `kv_wipe`
 (factory-reset the EEPROM key-value store), `led_on` (a deliberately high-current anchor for
 power measurements) and `lse_probe` (per-boot reset-cause / RTC-domain forensics).
-`just examples` lists all 51.
+`just examples` lists them all.
 
 ### Writing an app
 

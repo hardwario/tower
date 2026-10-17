@@ -145,8 +145,27 @@ impl BootTicker {
     }
 }
 
+/// `--version`: the package version and the wire schema tags this binary speaks. Firmware built
+/// from other sources carries other tags, and its frames are refused (exit 125).
+fn version_text() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| {
+        format!(
+            "{} (wire: console 0x{:04x}, radio 0x{:04x})",
+            env!("CARGO_PKG_VERSION"),
+            tower_protocol::CONSOLE_TAG,
+            tower_protocol::radio::RADIO_TAG
+        )
+    })
+}
+
 #[derive(Parser)]
-#[command(name = "tower", version, about = "HARDWARIO TOWER console host")]
+#[command(
+    name = "tower",
+    version = version_text(),
+    about = "HARDWARIO TOWER host tool: console, flashing, and the radio to MQTT gateway \
+             (no subcommand opens the console TUI)"
+)]
 struct Cli {
     /// Serial device (auto-detected when exactly one USB serial device is present).
     // The field stays `port` since it holds a serial-port path; the user-facing flag is `--device`.
@@ -332,9 +351,33 @@ fn main() -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             eprintln!("[tower] error: {e:#}");
+            if cfg!(target_os = "linux") && permission_denied(&e) {
+                eprintln!(
+                    "[tower] hint: the serial port belongs to the `dialout` group (`uucp` on Arch): \
+                     `sudo usermod -aG dialout $USER`, then log out and back in"
+                );
+            }
             ExitCode::from(EXIT_ERROR)
         }
     }
+}
+
+/// Whether any cause in `e` is an OS "permission denied" (a serial port the user may not open).
+fn permission_denied(e: &anyhow::Error) -> bool {
+    use std::io::ErrorKind::PermissionDenied;
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == PermissionDenied)
+            || c.downcast_ref::<serialport::Error>()
+                .is_some_and(|e| e.kind() == serialport::ErrorKind::Io(PermissionDenied))
+            || matches!(
+                c.downcast_ref::<tower_flasher::error::Error>(),
+                Some(tower_flasher::error::Error::Serial(e)) if e.kind() == serialport::ErrorKind::Io(PermissionDenied)
+            )
+            || matches!(
+                c.downcast_ref::<tower_flasher::error::Error>(),
+                Some(tower_flasher::error::Error::Io(e)) if e.kind() == PermissionDenied
+            )
+    })
 }
 
 /// Dispatch a parsed command. Returns the process exit code (see the exit-code contract
@@ -1503,6 +1546,32 @@ mod tests {
     }
 
     const SHORT: Duration = Duration::from_millis(200);
+
+    /// The Linux dialout hint fires for a denied port open however the error is wrapped (the
+    /// console's serialport error, the flasher's, a plain io error), and for nothing else.
+    #[test]
+    fn permission_denied_is_found_in_the_chain() {
+        use std::io::ErrorKind;
+        let sp = |k| serialport::Error::new(serialport::ErrorKind::Io(k), "open");
+        let denied = [
+            anyhow::Error::new(sp(ErrorKind::PermissionDenied)).context("opening /dev/ttyUSB0"),
+            anyhow::Error::new(tower_flasher::error::Error::Serial(sp(
+                ErrorKind::PermissionDenied,
+            )))
+            .context("opening /dev/ttyUSB0"),
+            anyhow::Error::new(std::io::Error::from(ErrorKind::PermissionDenied)),
+        ];
+        for e in &denied {
+            assert!(permission_denied(e), "{e:#}");
+        }
+        let other = [
+            anyhow::Error::new(sp(ErrorKind::NotFound)).context("opening /dev/ttyUSB0"),
+            anyhow::anyhow!("permission denied (only words)"),
+        ];
+        for e in &other {
+            assert!(!permission_denied(e), "{e:#}");
+        }
+    }
 
     #[test]
     fn result_tag_names_sdk_codes_and_keeps_unknown_bare() {

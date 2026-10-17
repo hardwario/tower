@@ -17,7 +17,7 @@ fn help_lists_all_subcommands() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("HARDWARIO TOWER console host"))
+        .stdout(predicate::str::contains("HARDWARIO TOWER host tool"))
         .stdout(predicate::str::contains("logs"))
         .stdout(predicate::str::contains("events"))
         .stdout(predicate::str::contains("shell"))
@@ -34,7 +34,12 @@ fn version_prints_a_version() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")))
+        .stdout(predicate::str::contains(format!(
+            "console 0x{:04x}, radio 0x{:04x}",
+            tower_protocol::CONSOLE_TAG,
+            tower_protocol::radio::RADIO_TAG
+        )));
 }
 
 #[test]

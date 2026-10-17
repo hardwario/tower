@@ -53,10 +53,11 @@ check-firmware:
     {{just}} -f firmware/justfile build example blinky
 
 # Vulnerabilities fail; informational warnings (unmaintained, yanked) do not.
-# RustSec audit of both lockfiles (host workspace + firmware).
+# RustSec audit of all three lockfiles (host workspace, firmware, fuzz).
 audit:
     cargo audit
     cargo audit --file firmware/Cargo.lock
+    cargo audit --file fuzz/Cargo.lock
 
 # Build the host libraries' rustdoc, failing on any warning.
 [env("RUSTDOCFLAGS", "-D warnings")]

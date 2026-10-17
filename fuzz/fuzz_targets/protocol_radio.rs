@@ -23,7 +23,6 @@ enum MsgSpec<'a> {
         firmware_version: &'a str,
         session_id: u32,
         sleeping: bool,
-        battery_mv: Option<u16>,
     },
     Button {
         kind: u8,
@@ -53,13 +52,11 @@ impl<'a> MsgSpec<'a> {
                 firmware_version,
                 session_id,
                 sleeping,
-                battery_mv,
             } => NodeMsg::Info(NodeInfo {
                 firmware_name,
                 firmware_version,
                 session_id,
                 sleeping,
-                battery_mv,
             }),
             MsgSpec::Button { kind, count } => NodeMsg::Button {
                 kind: [

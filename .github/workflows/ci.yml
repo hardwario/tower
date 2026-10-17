@@ -25,10 +25,11 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref.
+# Cancel superseded runs of a pull request. Runs on main always finish: a release needs a
+# successful CI run on the exact commit it tags, and a cancelled run is not one.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -77,6 +78,12 @@ jobs:
       # The bench tests are #[ignore]d: this proves every HIL group (incl. power) compiles.
       - name: HIL harness compiles (incl. power, no hardware)
         run: cargo test -p tower-hil --features power --no-run --locked
+      # The fuzz targets run weekly on nightly (fuzz.yml); this stable check catches a target
+      # that a wire or API change broke on the day of the change.
+      - name: fuzz targets compile
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+        env:
+          CARGO_TARGET_DIR: target/fuzz-check
       # The shared crates must stay no_std on their own (the firmware job builds them only with
       # the SDK's feature set).
       - name: no_std build of the shared crates (thumbv6m)
@@ -178,7 +185,7 @@ jobs:
       - name: just examples / apps match examples/*.rs / apps/*.rs
         run: just lists
 
-  # 3. RustSec advisories for both lockfiles. Vulnerabilities fail the job; informational
+  # 3. RustSec advisories for all three lockfiles. Vulnerabilities fail the job; informational
   #    warnings (unmaintained / unsound / yanked) are printed but do not, notably `bare-metal`
   #    (unmaintained, RUSTSEC-2026-0110), pulled in by cortex-m 0.7 with no maintained
   #    replacement upstream yet.

@@ -484,7 +484,7 @@ Interactive Shell (scrollback + a `> ` prompt with in-pane TAB hints) and Device
 on one serial drain (35/65 split):
 
 ```
- HARDWARIO TOWER Console v0.1.0 (/dev/cu.usbserial-140) ●
+ HARDWARIO TOWER Console v2.0.0 (/dev/cu.usbserial-140) ●
 ┌Device Events──────────────┐┌Device Logs────────────────────────────────┐
 │12:01 measurement temp=23.5 ││12:01 [  64.030] INFO  app: heartbeat 32    │
 │                            ││12:01 [  66.031] WARN  app: link flaky      │

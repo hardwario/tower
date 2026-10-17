@@ -36,7 +36,8 @@ Argument `$ARGUMENTS`:
      harness compile, the no_std build of the shared crates, rustdoc;
   2. `just check-firmware`: `just fw ci` (fmt, MCU build, RAM budget, clippy + the five role
      variants, rustdoc, example/app list drift) and `just fw build example blinky`;
-  3. `just audit`: `cargo audit` on both lockfiles (needs network for the advisory DB);
+  3. `just audit`: `cargo audit` on all three lockfiles, host, firmware and fuzz (needs
+     network for the advisory DB);
 - `host`, `firmware` or `audit`: only that part (`just check-host`, ...);
 - `example <name>` or `app <name>`: build one flashable firmware artifact,
   `just fw build example <name>` / `just fw build app <name>` (needs cargo-binutils; output

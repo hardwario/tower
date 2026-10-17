@@ -36,8 +36,19 @@ shasum -a 256 -c tower-cli-vX.Y.Z-<target>.tar.gz.sha256
 gh attestation verify tower-cli-vX.Y.Z-<target>.tar.gz --repo hardwario/tower
 ```
 
-On Windows, extract the `.zip` and put `tower.exe` on your `PATH`. (Archives of the 1.x line,
-released from the former tower-cli repository, are named `tower-vX.Y.Z-<target>`.)
+On Windows, extract the `.zip` and put `tower.exe` on your `PATH`.
+
+On Linux, the serial ports belong to the `dialout` group (`uucp` on Arch). Join it once and log
+out and back in, or every open fails with "Permission denied":
+
+```sh
+sudo usermod -aG dialout $USER
+```
+
+A `tower` binary talks only to firmware built from the same source: every frame carries a schema
+tag of the wire types, and a mismatch is refused (exit `125`). With a release binary, flash
+firmware from the release's tag (`git checkout cli-vX.Y.Z`); `tower --version` prints the tags it
+speaks.
 
 | Platform | Target |
 |----------|--------|
@@ -63,7 +74,7 @@ tower logs                        # decoded logs + print! output
 tower logs --color never          # force plain output (--color auto|always|never)
 tower events                      # structured key=value events
 tower exec "/system/resource print"   # run one shell command, print its reply, exit
-tower exec "/slow/op" --timeout 5000   # widen the per-command idle timeout (ms)
+tower exec "/slow/op" --timeout 30000  # widen the idle timeout (ms, default 7000)
 tower logs --no-reconnect         # exit when the link drops instead of retrying
 ```
 

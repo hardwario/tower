@@ -89,8 +89,9 @@ for both workspaces, and CI installs exactly that channel. Then:
 cargo build --locked --release -p tower-cli
 ```
 
-Then `tower --version`: if a `tower` is on `PATH`, compare its version with `cli/Cargo.toml`. An
-installed binary built from another checkout speaks another schema (it reports a schema
+Then `tower --version`: if a `tower` is on `PATH`, compare the schema tags it prints (`wire:
+console 0x...., radio 0x....`) with those of the freshly built `target/release/tower --version`.
+An installed binary built from other sources speaks another schema (it reports a schema
 mismatch, exit 125, against freshly flashed firmware): suggest `just install-cli`
 (`cargo install --locked --path cli`) whenever it is missing or stale. Don't install it yourself.
 

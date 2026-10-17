@@ -66,7 +66,7 @@ more), one `LICENSE`, one `SECURITY.md`, one `.github/`.
    │ firmware/ (device)          │   │ cli/  `tower` (host)       │   │ hil/ (bench harness)   │
    │ STM32L083CZ, Embassy        │──▶│ decodes logs/events/shell  │   │ builds ../firmware,    │
    │ framed console over USB UART│◀──│ flash/erase/reset/chip     │   │ flashes, decodes,      │
-   │ uses crates/kv net radio    │   │ (crates/flasher), MQTT bridge │   │ measures (PPK2)        │
+   │ uses crates/kv net radio    │   │ (crates/flasher), MQTT     │   │ measures (PPK2)        │
    │ gateway shell               │   └────────────────────────────┘   └────────────────────────┘
    └─────────────────────────────┘
 ```
@@ -97,7 +97,7 @@ just fuzz <target> [secs]      # cargo-fuzz one target (nightly + cargo-fuzz; fu
 firmware's compact SHA-256 backend (`test-sha2-compact`), `tower-hil --features power` clippy +
 compile, the no_std build of the shared crates, rustdoc) + `check-firmware` (`just fw ci`: fmt,
 MCU build, RAM budget, clippy + the five role variants, rustdoc, example / app list drift; plus
-`just fw build example blinky`) + `audit` (`cargo audit` on both lockfiles). It needs
+`just fw build example blinky`) + `audit` (`cargo audit` on all three lockfiles). It needs
 `flip-link`, `cargo-binutils`, `cargo-audit`, `python3` >= 3.11 and network access for the
 advisory DB.
 
@@ -171,7 +171,8 @@ it. Details: `crates/protocol/AGENTS.md`, "Changing the wire".
   SHA with a `# vX.Y.Z` comment (Dependabot bumps them weekly with a 7-day cooldown); workflow
   tokens are read-only by default (`permissions: contents: read`; write only in the release
   `publish` job); checkouts use `persist-credentials: false`; every cargo call is `--locked`;
-  `cargo-audit` checks both lockfiles (vulnerabilities fail, unmaintained warnings don't).
+  `cargo-audit` checks all three lockfiles (host, firmware, fuzz; vulnerabilities fail,
+  unmaintained warnings don't).
   Security reports go through GitHub private vulnerability reporting (`SECURITY.md`). The threat
   model, mechanisms and residual risks are in `docs/security-model.md`: update it with any change
   to keys, counters, pairing, the MQTT access policy or readout protection.
