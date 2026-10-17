@@ -881,7 +881,7 @@ mod tests {
         let mut got: Option<Vec<u8>> = None;
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
-            match connection.recv_timeout(Duration::from_millis(500)) {
+            match connection.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
                 Ok(Ok(MqttEvent::Incoming(Incoming::ConnAck(_)))) => {
                     connected = true;
                     client.subscribe("tower/test", rumqttc::QoS::AtLeastOnce).unwrap();
@@ -957,6 +957,11 @@ mod tests {
 
     /// Connect one client and wait up to `wait` for its CONNACK: the live session, or the first
     /// connection error (`None`: no answer in time).
+    ///
+    /// Every wait here runs to the deadline in one `recv_timeout`: a timeout drops rumqttc's
+    /// poll future, and with it a connect still in progress, so short slices restart the connect
+    /// forever once it takes longer than a slice (Windows spends about 2 s on the refused `::1`
+    /// before it tries `127.0.0.1` for `localhost`).
     #[cfg(feature = "embedded-broker")]
     fn connect_once(
         opts: MqttOptions,
@@ -965,7 +970,7 @@ mod tests {
         let (client, mut conn) = Client::new(opts, 10);
         let deadline = std::time::Instant::now() + wait;
         while std::time::Instant::now() < deadline {
-            match conn.recv_timeout(Duration::from_millis(500)) {
+            match conn.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
                 Ok(Ok(MqttEvent::Incoming(Incoming::ConnAck(_)))) => return Ok((client, conn)),
                 Ok(Err(e)) => return Err(Some(Box::new(e))),
                 _ => {}
@@ -984,7 +989,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             if let Ok(Ok(MqttEvent::Incoming(Incoming::Publish(p)))) =
-                conn.recv_timeout(Duration::from_millis(500))
+                conn.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                 && p.topic == topic
             {
                 return p.payload.as_ref() == b"hi";
