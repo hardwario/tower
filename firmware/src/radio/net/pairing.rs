@@ -38,7 +38,7 @@ use tower_net::pairing::{
     keyed_resp_matches,
 };
 
-use super::{ACK_TURNAROUND, Net, TX_TIMEOUT, is_reserved_addr};
+use super::{ACK_TURNAROUND, Access, Net, TX_TIMEOUT, is_reserved_addr};
 use crate::radio::ccm::TAG_LEN;
 use crate::radio::duty;
 use crate::radio::frame::{self, FrameType, Header, MAX_FRAME, flags};
@@ -58,6 +58,34 @@ const JOIN_RESP_WINDOW: Duration = Duration::from_millis(300);
 const JOIN_CONFIRM_WINDOW: Duration = Duration::from_millis(300);
 /// One listen slice of the host's pairing window between JOIN_REQ polls.
 const PAIR_RX_SLICE: Duration = Duration::from_millis(500);
+
+/// Why a keyed join ([`Net::join_keyed`]) returned without a host address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinError {
+    /// No host answered within the timeout: none in range holds this node's key with the node
+    /// registered, the host refused (keyed joins switched off, a stale counter), or every
+    /// attempt was duty-limited.
+    Timeout,
+    /// The radio runs LBT+AFA or FHSS ([`Access`]): the keyed join is a fixed-channel
+    /// request/response with no listen-before-talk and no hop schedule, so it is refused there
+    /// like a plain `send` ([`SendResult::WrongMode`](super::SendResult::WrongMode)).
+    WrongMode,
+    /// TX is locked (fail closed, nonce safety; `RadioError::NonceLocked`).
+    NonceLocked,
+    /// `addr` is reserved (`0` / broadcast) and can never join.
+    BadAddr,
+}
+
+impl core::fmt::Display for JoinError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            JoinError::Timeout => "no host answered",
+            JoinError::WrongMode => "wrong access mode (keyed join needs Duty mode)",
+            JoinError::NonceLocked => "TX locked (nonce safety)",
+            JoinError::BadAddr => "reserved address",
+        })
+    }
+}
 
 impl Net {
     /// Host: open a pairing window for `timeout` (use [`PAIRING_WINDOW`] for the
@@ -203,7 +231,7 @@ impl Net {
     /// Joiner, keyed (E4): join a host that already holds this node's `key`, using `addr` (the
     /// node's own address) for up to `timeout`. Sends a KEYED JOIN_REQ under `key` and waits
     /// for the KEYED JOIN_RESP echoing that request's counter; returns the host's address on a
-    /// match (or `None` on timeout). Nothing is committed here: the caller already has the key
+    /// match. Nothing is committed here: the caller already has the key
     /// and installs the host with `add_peer(gw_addr, key)`. Each attempt uses a fresh TX
     /// counter, which is what makes the echo a freshness proof (`keyed_resp_matches`).
     ///
@@ -213,11 +241,29 @@ impl Net {
     /// so a caller that drops this future mid-TX or mid-window (a `select` timeout) can never
     /// leave the counter for the next transfer to seal different plaintext under the same
     /// nonce. The allocation also re-checks the TX lock on every attempt.
-    pub async fn join_keyed(&mut self, addr: u32, key: &[u8; 16], timeout: Duration) -> Option<u32> {
-        if self.txc.locked() {
-            return None; // fail closed (nonce safety): JOIN_REQ consumes TX counters
+    ///
+    /// Duty mode only: under LBT+AFA or FHSS ([`Access`]) it returns [`JoinError::WrongMode`]
+    /// without transmitting (a fixed-channel exchange there would skip the listen-before-talk
+    /// or break the hop schedule; the host refuses to answer in those modes for the same
+    /// reason).
+    pub async fn join_keyed(
+        &mut self,
+        addr: u32,
+        key: &[u8; 16],
+        timeout: Duration,
+    ) -> Result<u32, JoinError> {
+        if self.access != Access::Duty {
+            return Err(JoinError::WrongMode);
         }
-        let deadline = Instant::now().checked_add(timeout)?;
+        if is_reserved_addr(addr) {
+            return Err(JoinError::BadAddr); // a host refuses it anyway; don't advertise it on air
+        }
+        if self.txc.locked() {
+            return Err(JoinError::NonceLocked); // fail closed: JOIN_REQ consumes TX counters
+        }
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return Err(JoinError::Timeout);
+        };
         while Instant::now() < deadline {
             // The request's length is fixed (header + 4 B addr + tag), so the duty gate can run
             // before anything is allocated or sealed.
@@ -227,7 +273,9 @@ impl Net {
                 continue;
             }
             // None = TX locked (fail closed, nonce safety): stop, don't retry.
-            let req_counter = self.alloc_counter()?;
+            let Some(req_counter) = self.alloc_counter() else {
+                return Err(JoinError::NonceLocked);
+            };
             let req_hdr = Header {
                 frame_type: FrameType::JoinReq,
                 flags: flags::KEYED,
@@ -238,7 +286,7 @@ impl Net {
             };
             let mut req = [0u8; MAX_FRAME];
             let Ok(n) = frame::seal_frame(&mut self.ccm, key, &req_hdr, &addr.to_le_bytes(), &mut req) else {
-                return None;
+                return Err(JoinError::Timeout); // unreachable: a 4 B payload always fits
             };
             if self.radio.tx(&req[..n], false, TX_TIMEOUT).await.is_err() {
                 // A radio error: back off one response window, don't spin.
@@ -255,17 +303,19 @@ impl Net {
                     break;
                 }
                 let mut buf = [0u8; 8];
+                // `join_response_for`: addressed to us, from a plausible host (not reserved,
+                // not our own address, which `add_peer` would refuse anyway: shared nonces).
                 if let Some((hdr, plen)) = self.rx_pair(key, remaining, &mut buf).await
                     && hdr.frame_type == FrameType::JoinResp
                     && hdr.flags & flags::KEYED != 0
-                    && hdr.dest == addr
+                    && join_response_for(hdr.dest, hdr.src, addr)
                     && keyed_resp_matches(&buf[..plen], req_counter)
                 {
-                    return Some(hdr.src);
+                    return Ok(hdr.src);
                 }
             }
         }
-        None
+        Err(JoinError::Timeout)
     }
 
     /// Host, keyed (E4): answer a KEYED JOIN_REQ (`frame` = the whole received frame, dest 0)
@@ -279,7 +329,13 @@ impl Net {
     /// [`alloc_counter`](Net::alloc_counter) (which re-checks the TX lock), then the seal, all
     /// before the turnaround await, so dropping `recv` mid-response cannot leave the counter
     /// unconsumed.
+    ///
+    /// Duty mode only (see [`JoinError::WrongMode`]): in LBT+AFA or FHSS mode the request is
+    /// dropped unanswered (`fhss_master_tick` and `afa_serve` receive through `recv`).
     pub(super) async fn answer_keyed_join(&mut self, frame: &mut [u8]) -> Option<u32> {
+        if self.access != Access::Duty {
+            return None;
+        }
         if self.txc.locked() {
             return None; // fail closed (nonce safety): the JOIN_RESP consumes a TX counter
         }

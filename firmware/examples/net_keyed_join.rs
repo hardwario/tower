@@ -93,13 +93,13 @@ async fn run(b: Board) {
                 .join_keyed(NODE_ADDR, &NODE_KEY, Duration::from_secs(10))
                 .await
             {
-                Some(gw_addr) => {
+                Ok(gw_addr) => {
                     info!(target: "kjoin", "JOINED *** gw={:08X}", gw_addr);
                     let _ = net.add_peer(gw_addr, &NODE_KEY);
                     let r = net.send(gw_addr, b"hello", true, 3).await;
                     info!(target: "kjoin", "uplink: {:?}", r);
                 }
-                None => warn!(target: "kjoin", "keyed join failed (no host knows me in range)"),
+                Err(e) => warn!(target: "kjoin", "keyed join failed: {e}"),
             }
             Timer::after_secs(5).await;
         }
