@@ -338,7 +338,11 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
   handshake byte). Duty mode only: under LBT+AFA or FHSS both sides refuse (a fixed-channel
   exchange). The `PAIRING_KEY` key transport of v1 and the three-frame v2 exchange are gone;
   nothing answers or sends them.
-- **Cost.** ~22 KB of flash per image (X25519 + SHA-256 + HKDF + HMAC). Stack: the shared-secret
+- **Cost.** Roughly 16 KB of flash per image (X25519 + SHA-256 + HKDF + HMAC + the exchange: the
+  ~22 KB of the three-frame v2, +2.5 KB for the commitment round, -9 KB since SHA-256 is built
+  with sha2's compact software backend, the `sha2_backend_soft = "compact"` cfg in
+  `firmware/.cargo/config.toml`, whose rounds run as a loop instead of unrolled; pairing does
+  not feel the speed difference next to the 1.2 s scalar multiplication). Stack: the shared-secret
   computation needs ~2.5 KB below its caller (static estimate; `crypto_x25519_kat` reports the
   measured high-water), and it runs in non-inlined functions so that frame exists only while
   it computes.

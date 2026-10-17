@@ -64,6 +64,14 @@ jobs:
         run: cargo clippy -p tower-hil --all-targets --features power --locked -- -D warnings
       - name: test
         run: cargo test --workspace --locked
+      # The firmware builds SHA-256 with sha2's compact software backend (firmware/.cargo/
+      # config.toml); run the pairing kernel's tests on exactly that backend (`just
+      # test-sha2-compact`), in a target dir of its own.
+      - name: test tower-net on the firmware's SHA-256 backend (soft, compact)
+        run: cargo test -p tower-net --locked
+        env:
+          RUSTFLAGS: --cfg sha2_backend="soft" --cfg sha2_backend_soft="compact"
+          CARGO_TARGET_DIR: target/sha2-compact
       # The bench tests are #[ignore]d: this proves every HIL group (incl. power) compiles.
       - name: HIL harness compiles (incl. power, no hardware)
         run: cargo test -p tower-hil --features power --no-run --locked

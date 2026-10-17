@@ -37,7 +37,7 @@ check: check-host check-firmware check-wire audit
 # proves the shared crates still build for the MCU on their own (the firmware job builds them with
 # the SDK's feature set). Rustdoc covers the libraries; cli and hil are binaries/harness.
 # Host workspace gates: fmt, clippy, tests, the no_std build of the shared crates, rustdoc.
-check-host: doc
+check-host: doc test-sha2-compact
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --locked -- -D warnings
     cargo clippy -p tower-hil --all-targets --features power --locked -- -D warnings
@@ -68,6 +68,16 @@ audit:
 [env("RUSTDOCFLAGS", "-D warnings")]
 doc:
     cargo doc --locked --no-deps --workspace --exclude tower-cli --exclude tower-hil
+
+# The firmware builds SHA-256 with sha2's compact software backend (the `sha2_backend_soft` cfg
+# in firmware/.cargo/config.toml), which no other host build exercises: run the pairing kernel's
+# tests (RFC 5869, the handshake goldens) on exactly that backend, in a target dir of its own so
+# the cfg does not invalidate the main build. CI's host job runs the same.
+# Run tower-net's tests on the firmware's SHA-256 backend (soft, compact).
+[env("RUSTFLAGS", '--cfg sha2_backend="soft" --cfg sha2_backend_soft="compact"')]
+[env("CARGO_TARGET_DIR", "target/sha2-compact")]
+test-sha2-compact:
+    cargo test -p tower-net --locked
 
 # Extra args go to `cargo test`, e.g. `just test -p tower-protocol`.
 # Run the host workspace tests.

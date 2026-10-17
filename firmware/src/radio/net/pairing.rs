@@ -93,8 +93,9 @@ const JOIN_STEP_WINDOW: Duration = Duration::from_millis(300);
 /// The peer's computation inside the JOIN_REVEAL and JOIN_CONFIRM waits: one X25519 scalar
 /// multiplication plus the HKDF / HMAC key schedule, on a Cortex-M0+ at 16 MHz (HSI16, no wait
 /// states). Measured on a Core Module by `crypto_x25519_kat`: 1175 ms per scalar
-/// multiplication, 1185 ms for the whole handshake critical path (shared secret + schedule),
-/// so 1.5 s leaves ~27 % margin. (The estimate before the measurement: the curve25519-dalek u32
+/// multiplication, 1185 ms for the whole handshake critical path (shared secret + schedule,
+/// measured with sha2's unrolled SHA-256; the compact backend the firmware now builds costs a
+/// few ms more over the ~20 compressions of a schedule), so 1.5 s leaves ~25 % margin. (The estimate before the measurement: the curve25519-dalek u32
 /// ladder executes ~12.0 M instructions, counted in an instruction-accurate emulator; v6-M has
 /// no 32x32→64 multiply, so every limb product is a library call.) Err long: too short fails
 /// every pairing (the answer lands after the wait closed), too long only slows a retry. Re-tune

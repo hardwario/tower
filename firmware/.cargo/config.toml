@@ -19,3 +19,13 @@ linker = "flip-link"
 # Flash and run over SWD with a J-Link / ST-Link.
 # Requires probe-rs:  cargo install probe-rs-tools
 runner = "probe-rs run --chip STM32L083CZTx"
+# SHA-256 (the pairing handshake's SHA-256 / HMAC / HKDF, via tower-net's sha2 0.11): RustCrypto's
+# portable software backend is what thumbv6m gets anyway; `sha2_backend_soft = "compact"` keeps
+# its 64 rounds a loop instead of unrolling them, which saves flash on the 192 KB part at a cost
+# in speed that pairing does not feel (a few dozen compressions per handshake next to a ~1.2 s
+# X25519 scalar multiplication). The mechanism is the crate's documented cfg (sha2 README,
+# "Backends"); the host workspace runs tower-net's tests under the same cfg (`just
+# test-sha2-compact`, CI's host job), and crypto_x25519_kat checks the handshake golden on the
+# board. A `RUSTFLAGS` environment variable would replace this list, so set the cfg there too if
+# you use one.
+rustflags = ["--cfg", 'sha2_backend_soft="compact"']
