@@ -91,8 +91,8 @@ deliberate `NodeRevealKey`.
 
 ### Radio application schema (`radio::NodeMsg` / `NodeCmd`)
 
-Node → host (`NodeMsg`): `Info(NodeInfo{firmware_name, firmware_version, session_id, sleeping,
-battery_mv})` · `Button{kind, count}` · `Temperature{millic}` · `Accel{kind, face}` ·
+Node → host (`NodeMsg`): `Info(NodeInfo{firmware_name, firmware_version, session_id, sleeping})` ·
+`Button{kind, count}` · `Temperature{millic}` · `Accel{kind, face}` ·
 `Shell(NodeShellChunk{cmd_id, result, chunk, last, text})`. `ButtonKind` = Press/Release/Click/
 Hold; `AccelKind` = Motion/Orientation. Per-kind button `count` is RAM-only; a reset means the
 node rebooted (watch `NodeInfo::session_id`).

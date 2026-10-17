@@ -68,8 +68,6 @@ pub struct NodeInfo<'a> {
     pub session_id: u32,
     /// The node sleeps between uplinks (downlinks must be queued on the gateway).
     pub sleeping: bool,
-    /// Reserved until the SDK grows an ADC block; encode `None`.
-    pub battery_mv: Option<u16>,
 }
 
 /// One chunk of a remote-shell response (mirrors the console `ShellResponse`

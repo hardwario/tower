@@ -86,7 +86,6 @@ fn max_node_info_fits_the_mtu() {
         firmware_version: &ver,
         session_id: u32::MAX,
         sleeping: true,
-        battery_mv: Some(u16::MAX),
     });
     let mut buf = [0u8; MAX_RADIO_PAYLOAD];
     encode_node_msg(&m, &mut buf).expect("max NodeInfo must fit the radio MTU");
@@ -180,14 +179,12 @@ fn every_variant_roundtrips() {
             firmware_version: "v0.1.0",
             session_id: 3,
             sleeping: true,
-            battery_mv: None,
         }),
         NodeMsg::Info(NodeInfo {
             firmware_name: "radio_climate",
             firmware_version: "v1.2.3",
             session_id: 77,
             sleeping: false,
-            battery_mv: Some(3010),
         }),
         NodeMsg::Button {
             kind: ButtonKind::Press,

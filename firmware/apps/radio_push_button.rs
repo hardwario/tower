@@ -625,7 +625,6 @@ async fn send_info(net: &mut Net, provision: Option<Provisioned>, _counts: &[u32
         firmware_version: console::firmware_version(),
         session_id: console::session_id(),
         sleeping: true,
-        battery_mv: None, // reserved until the SDK grows an ADC block
     });
     uplink(net, provision, &msg, 3).await;
 }

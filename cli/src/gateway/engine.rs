@@ -2245,7 +2245,6 @@ mod tests {
                 firmware_version: "v0.1.0",
                 session_id: 1,
                 sleeping: true,
-                battery_mv: None,
             }),
             &mut env,
         )
@@ -3120,7 +3119,6 @@ mod tests {
                 firmware_version: "v0.1.0",
                 session_id: 1,
                 sleeping: true,
-                battery_mv: None,
             }),
             &mut env,
         )
