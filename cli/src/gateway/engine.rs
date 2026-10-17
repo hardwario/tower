@@ -27,6 +27,13 @@ use super::topics;
 
 /// Idle ticks (1 Hz) before an in-flight management op is failed as a device timeout.
 const MGMT_TIMEOUT_TICKS: u64 = 8;
+/// Ticks a sent `PairingOpen` holds the dongle's request slot. The gateway receives management
+/// requests through a one-deep inbox (RAM: every slot is a frame buffer) and takes the next one
+/// at the top of its main loop, so a request sent before it took the previous one is dropped.
+/// Every other op holds the slot until its answer, which comes after the gateway took it;
+/// `PairingOpen` is answered only when the window ends, so it holds the slot just long enough
+/// for one loop turn (a 250 ms receive slice plus the requests it serves) to take it.
+const PAIRING_PICKUP_TICKS: u64 = 2;
 /// Seconds a `PairingOpen` may resolve after its window (the RPC waits `window` + this). The
 /// gateway's window runs from the request's arrival and it answers a JOIN_REQ only while a whole
 /// handshake still fits, so a join completes inside the window; what can follow is the registry
@@ -273,8 +280,16 @@ struct PendingMgmt {
     data: Vec<u8>,
     next_chunk: u16,
     truncated: bool,
-    /// Tick deadline (delayed ops, i.e. pairing, get their window + slack).
+    /// Tick deadline (delayed ops, i.e. pairing, get their window + slack); `u64::MAX` while
+    /// the op still waits for the request slot ([`Engine::send_next_mgmt`]).
     deadline: u64,
+    /// The encoded request while it waits for the slot; `None` once sent.
+    frame: Option<Vec<u8>>,
+    /// Ticks from send to the answer's deadline.
+    timeout_ticks: u64,
+    /// Until this tick the sent request holds the dongle's one-deep request inbox
+    /// (`u64::MAX`: until its answer).
+    holds_slot_until: u64,
 }
 
 /// The registry mirror row (device truth + host-side enrichment).
@@ -491,6 +506,7 @@ impl Engine {
                     mqtt_up: self.mqtt_up,
                 }));
                 out.push(Output::Event(Event::Log(format!("serial lost: {error}"))));
+                self.fail_unsent_mgmt(&mut out);
             }
             Input::SerialFrame(msg) => self.on_serial(msg, &mut out),
             Input::MqttUp => {
@@ -964,6 +980,7 @@ impl Engine {
         }
         let done = self.pending_mgmt.remove(idx);
         self.on_mgmt_done(done, result, out);
+        self.send_next_mgmt(out);
     }
 
     fn on_mgmt_done(&mut self, p: PendingMgmt, result: u8, out: &mut Vec<Output>) {
@@ -1598,6 +1615,8 @@ impl Engine {
         if resync_queue {
             self.issue(out, OpKind::QueueSync, MgmtOp::QueueList { node_addr: 0 }, None);
         }
+        // A timed-out request, or a `PairingOpen` past its pickup time, frees the slot.
+        self.send_next_mgmt(out);
         // The startup registry sync must land eventually: uplinks are held until it does,
         // so a refused/timed-out first NodeList is retried rather than leaving them parked.
         if !self.registry_synced
@@ -1676,11 +1695,51 @@ impl Engine {
                     data: Vec::new(),
                     next_chunk: 0,
                     truncated: false,
-                    deadline: self.tick + timeout_ticks,
+                    deadline: u64::MAX,
+                    frame: Some(frame),
+                    timeout_ticks,
+                    holds_slot_until: u64::MAX,
                 });
-                out.push(Output::SerialSend(frame));
+                self.send_next_mgmt(out);
             }
             None => self.fail_op(out, kind, rpc.as_ref(), "request encode failed"),
+        }
+    }
+
+    /// Send the oldest waiting request once the dongle's request slot is free. The gateway takes
+    /// requests through a one-deep inbox: two sent back to back lose the second (it used to be
+    /// the startup queue sync, every time), so one request is out at a time and the rest wait
+    /// here in issue order ([`PAIRING_PICKUP_TICKS`] for the one op answered late).
+    fn send_next_mgmt(&mut self, out: &mut Vec<Output>) {
+        let tick = self.tick;
+        if self
+            .pending_mgmt
+            .iter()
+            .any(|p| p.frame.is_none() && tick < p.holds_slot_until)
+        {
+            return;
+        }
+        let Some(p) = self.pending_mgmt.iter_mut().find(|p| p.frame.is_some()) else {
+            return;
+        };
+        let frame = p.frame.take().expect("found by frame");
+        p.deadline = tick + p.timeout_ticks;
+        if matches!(p.op, OpKind::PairingOpen) {
+            p.holds_slot_until = tick + PAIRING_PICKUP_TICKS;
+        }
+        out.push(Output::SerialSend(frame));
+    }
+
+    /// The serial link dropped: requests still waiting for the slot were never sent and won't be
+    /// (the serial thread drops frames while the port is down), so fail them now. Sent ones wait
+    /// out their deadline; the reconnect resync re-issues what the engine needs.
+    fn fail_unsent_mgmt(&mut self, out: &mut Vec<Output>) {
+        let (unsent, sent): (Vec<PendingMgmt>, Vec<PendingMgmt>) = std::mem::take(&mut self.pending_mgmt)
+            .into_iter()
+            .partition(|p| p.frame.is_some());
+        self.pending_mgmt = sent;
+        for p in unsent {
+            self.fail_op(out, p.op, p.rpc.as_ref(), "gateway serial link is down");
         }
     }
 
@@ -2172,6 +2231,16 @@ mod tests {
         }))
     }
 
+    /// The requests waiting for the dongle's request slot, decoded, oldest first.
+    fn queued_ops(e: &Engine) -> Vec<String> {
+        e.pending_mgmt
+            .iter()
+            .filter_map(|p| p.frame.clone())
+            .filter_map(|f| sent_op(&Output::SerialSend(f)))
+            .map(|(_, op)| op)
+            .collect()
+    }
+
     fn node_entry_record(id: u32, name: &str, flags: u8) -> Vec<u8> {
         postcard::to_stdvec(&NodeEntry {
             addr: id,
@@ -2185,13 +2254,18 @@ mod tests {
         .unwrap()
     }
 
-    /// Install one node into the engine mirror via a NodeList round-trip.
+    /// Install one node into the engine mirror via a NodeList round-trip, then answer the
+    /// startup queue sync (sent once the NodeList answer frees the request slot) with an empty
+    /// queue, so the slot is free for the test's own requests.
     fn with_node(e: &mut Engine, id: u32, name: &str, flags: u8) {
         let start = e.start();
         let (req_id, op) = start.iter().find_map(sent_op).expect("start issues NodeList");
         assert!(op.contains("NodeList"));
         let out = reply(e, req_id, MGMT_OK, &node_entry_record(id, name, flags));
         assert!(!publishes(&out, &format!("tower/nodes/{}", topics::node_hex(id))).is_empty());
+        let (sync, op) = out.iter().find_map(sent_op).expect("then the queue sync");
+        assert!(op.contains("QueueList"), "{op}");
+        let _ = reply(e, sync, MGMT_OK, &[]);
     }
 
     #[test]
@@ -2418,7 +2492,10 @@ mod tests {
         assert!(rsp.error.is_some(), "the lost queue item fails loudly");
         let ops: Vec<String> = out.iter().filter_map(sent_op).map(|(_, op)| op).collect();
         assert!(ops.iter().any(|o| o.contains("Describe")));
-        assert!(ops.iter().any(|o| o.contains("NodeList")));
+        assert!(
+            queued_ops(&e).iter().any(|o| o.contains("NodeList")),
+            "next in line"
+        );
         // The same session again (a console restart without a reboot) is benign…
         let out = e.handle(Input::SerialFrame(SerialMsg::Hello {
             firmware_name: "radio_dongle_gateway".into(),
@@ -2427,15 +2504,16 @@ mod tests {
         }));
         assert!(out.iter().find_map(sent_op).is_none(), "no resync");
         // …a new one is the next reboot.
-        let out = e.handle(Input::SerialFrame(SerialMsg::Hello {
+        let queued = queued_ops(&e).len();
+        let _ = e.handle(Input::SerialFrame(SerialMsg::Hello {
             firmware_name: "radio_dongle_gateway".into(),
             firmware_version: "v0.1.0".into(),
             session_id: 9,
         }));
+        let ops = queued_ops(&e);
         assert!(
-            out.iter()
-                .filter_map(sent_op)
-                .any(|(_, op)| op.contains("NodeList"))
+            ops.len() > queued && ops.last().unwrap().contains("NodeList"),
+            "{ops:?}"
         );
     }
 
@@ -2780,9 +2858,7 @@ mod tests {
         assert_eq!(p.joined.as_deref(), Some("0x0000cd34"));
         assert_eq!(p.sas.as_deref(), Some("000007"));
         assert!(
-            out.iter()
-                .filter_map(sent_op)
-                .any(|(_, op)| op.contains("NodeList")),
+            e.pending_mgmt.iter().any(|p| matches!(p.op, OpKind::NodeList)),
             "the registry mirror is refreshed"
         );
         assert!(e.nodes.iter().any(|n| n.entry.addr == 0xCD34), "mirrored at once");
@@ -3054,8 +3130,14 @@ mod tests {
         let mut e = engine();
         let start = e.start();
         let ops: Vec<(u16, String)> = start.iter().filter_map(sent_op).collect();
-        assert!(ops[1].1.contains("QueueList"), "{ops:?}");
-        let _ = reply(&mut e, ops[0].0, MGMT_OK, &node_entry_record(0xAB12, "k", 0));
+        assert_eq!(ops.len(), 1, "one request at a time: {ops:?}");
+        let out = reply(&mut e, ops[0].0, MGMT_OK, &node_entry_record(0xAB12, "k", 0));
+        let sync = out
+            .iter()
+            .find_map(sent_op)
+            .expect("the queue sync follows the NodeList");
+        assert!(sync.1.contains("QueueList"), "{sync:?}");
+        let ops = [ops[0].clone(), sync];
         // The device still holds item 5 for 0xAB12 from a previous `tower gateway`.
         let stale = postcard::to_stdvec(&QueueEntry {
             node_addr: 0xAB12,
@@ -3083,6 +3165,10 @@ mod tests {
             error: "unplugged".into(),
         });
         let out = e.handle(Input::SerialUp);
+        let (probe, op) = out.iter().find_map(sent_op).expect("SerialUp probes the dongle");
+        assert!(op.contains("Describe"), "{op}");
+        // Its answer frees the request slot for the queue sync.
+        let out = reply(&mut e, probe, MGMT_OK, &[]);
         let sync = out
             .iter()
             .filter_map(sent_op)
@@ -3295,11 +3381,73 @@ mod tests {
             lqi: 30,
             data: env[..n].to_vec(),
         }));
-        let op = out.iter().find_map(sent_op).expect("auto-name NodeUpdate");
+        // Queued behind the registry refresh the join triggered (one request at a time).
         assert!(
-            op.1.contains("NodeUpdate") && op.1.contains("push-button:0"),
-            "{}",
-            op.1
+            out.iter().find_map(sent_op).is_none(),
+            "the refresh holds the slot"
+        );
+        let op = queued_ops(&e)
+            .into_iter()
+            .find(|o| o.contains("NodeUpdate"))
+            .expect("auto-name NodeUpdate");
+        assert!(op.contains("push-button:0"), "{op}");
+    }
+
+    /// The dongle takes management requests through a one-deep inbox, so the engine sends one
+    /// at a time: the next goes out when the previous is answered or times out, a `PairingOpen`
+    /// (answered only when its window ends) frees the slot after `PAIRING_PICKUP_TICKS`, and a
+    /// serial drop fails what never went out.
+    #[test]
+    fn management_requests_go_out_one_at_a_time() {
+        let mut e = engine();
+        let start = e.start();
+        let sent: Vec<(u16, String)> = start.iter().filter_map(sent_op).collect();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let rpc = e.handle(mqtt_in("tower/gateway/cmd", br#"{"id":"u-q","op":"describe"}"#));
+        assert!(rpc.iter().find_map(sent_op).is_none());
+        // The rest wait in issue order and leave one by one, on answers or timeouts.
+        let waiting = queued_ops(&e).len();
+        assert_eq!(waiting, 2, "{:?}", queued_ops(&e));
+        let out = reply(&mut e, sent[0].0, MGMT_OK, &[]);
+        assert_eq!(out.iter().filter_map(sent_op).count(), 1);
+        assert_eq!(queued_ops(&e).len(), waiting - 1);
+        for _ in 0..MGMT_TIMEOUT_TICKS {
+            let _ = e.handle(Input::Tick);
+        }
+        assert_eq!(queued_ops(&e).len(), waiting - 2, "a timeout frees the slot too");
+        // Drain the rest, then a PairingOpen holds the slot only for its pickup time.
+        while let Some(p) = e.pending_mgmt.iter().find(|p| p.frame.is_none()) {
+            let req = p.req_id;
+            let _ = reply(&mut e, req, MGMT_OK, &[]);
+        }
+        let _ = open_ota(&mut e, 30);
+        let list = e.handle(mqtt_in("tower/gateway/cmd", br#"{"id":"u-l","op":"node_list"}"#));
+        assert!(list.iter().find_map(sent_op).is_none(), "waits for the pickup");
+        let mut sent_after = None;
+        for t in 1..=PAIRING_PICKUP_TICKS {
+            let out = e.handle(Input::Tick);
+            if out
+                .iter()
+                .filter_map(sent_op)
+                .any(|(_, op)| op.contains("NodeList"))
+            {
+                sent_after = Some(t);
+                break;
+            }
+        }
+        assert_eq!(sent_after, Some(PAIRING_PICKUP_TICKS));
+        // A serial drop fails the requests that never went out, at once.
+        let rpc = e.handle(mqtt_in("tower/gateway/cmd", br#"{"id":"u-d","op":"describe"}"#));
+        assert!(
+            rpc.iter().find_map(sent_op).is_none(),
+            "queued behind the NodeList"
+        );
+        let out = e.handle(Input::SerialDown {
+            error: "unplugged".into(),
+        });
+        assert!(
+            !rpc_rsp(&out, "u-d").ok,
+            "failed at the drop, not after a timeout"
         );
     }
 
