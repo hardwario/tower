@@ -171,7 +171,9 @@ it. Details: `crates/protocol/AGENTS.md`, "Changing the wire".
   tokens are read-only by default (`permissions: contents: read`; write only in the release
   `publish` job); checkouts use `persist-credentials: false`; every cargo call is `--locked`;
   `cargo-audit` checks both lockfiles (vulnerabilities fail, unmaintained warnings don't).
-  Security reports go through GitHub private vulnerability reporting (`SECURITY.md`).
+  Security reports go through GitHub private vulnerability reporting (`SECURITY.md`). The threat
+  model, mechanisms and residual risks are in `docs/security-model.md`: update it with any change
+  to keys, counters, pairing, the MQTT access policy or readout protection.
 
 ## Writing style
 

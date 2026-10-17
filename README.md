@@ -91,7 +91,8 @@ Open it here and run `/bootstrap`; `AGENTS.md` gives it the whole-stack context.
 
 - Develop straight on `main`. A wire-format change is one commit across `crates/protocol` and
   its callers; see the runbook in [`AGENTS.md`](AGENTS.md).
-- Security issues: see [`SECURITY.md`](SECURITY.md) (private vulnerability reporting).
+- Security issues: see [`SECURITY.md`](SECURITY.md) (private vulnerability reporting). What the stack
+  protects, against whom and its known limits: [`docs/security-model.md`](docs/security-model.md).
 - No em or en dashes in code, comments, docs, UI texts or commit messages.
 
 ## License
