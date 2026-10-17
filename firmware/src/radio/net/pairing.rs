@@ -337,7 +337,9 @@ impl Net {
                 bulk_index: None,
             };
             Timer::after(ACK_TURNAROUND).await;
-            self.tx_pair(&JOIN_FRAME_KEY, &resp_hdr, &resp).await;
+            if !self.tx_pair(&JOIN_FRAME_KEY, &resp_hdr, &resp).await {
+                continue; // duty-limited / radio error: no answer went out, no confirm to wait for
+            }
 
             // Wait out the whole confirm window (the joiner computes its shared secret first): a
             // foreign frame, or one that does not open under the new link key, must not end it.
@@ -458,7 +460,12 @@ impl Net {
                     bulk_index: None,
                 };
                 Timer::after(ACK_TURNAROUND).await;
-                self.tx_pair(session.link_key(), &conf_hdr, &conf).await;
+                if !self.tx_pair(session.link_key(), &conf_hdr, &conf).await {
+                    // The host commits only on this confirm: committing without it would leave
+                    // the node holding a key its gateway never installed. Start a new attempt.
+                    log::warn!(target: "net", "pairing: JOIN_CONFIRM not sent (duty-limited or radio error)");
+                    break;
+                }
                 log::info!(target: "net", "pairing: SAS {:06}", session.sas());
                 return Some((hdr.src, *session.link_key()));
             }
