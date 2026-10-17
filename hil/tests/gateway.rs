@@ -72,7 +72,11 @@ fn gateway_bridges_push_button_end_to_end() {
     assert_eq!(node_role, DeviceRole::Node);
 
     // --- cable pairing: host-minted key, gateway-first registration, then Provision ---
-    let key: [u8; 16] = *b"HIL-TEST-KEY-01!";
+    // Fresh for every run, exactly like `tower nodes add --port`: the bench re-provisions the
+    // same node, often after an EEPROM wipe, and a fixed key would restart the node's TX counter
+    // under it each time (the same `(key, src, counter)` nonces sealed over different payloads).
+    let mut key = [0u8; 16];
+    getrandom::fill(&mut key).expect("no entropy source for the bench node key");
     let (result, _) = gw
         .mgmt_roundtrip(
             2,
@@ -218,6 +222,9 @@ fn gateway_stack_high_water_within_budget() {
 
     // Fill the registry across all three buckets (6 records each): 14 > 2 buckets, so the bucket
     // pack/unpack codec runs repeatedly and the KV store fills enough to flip.
+    // A fixed key is fine here: these addresses never transmit, so nothing is ever sealed under
+    // it (the gateway answers only uplinks, and the queued items wait for an uplink that never
+    // comes).
     let key = [0x5Au8; 16];
     let n = 14u32;
     let mut req = 10u16;

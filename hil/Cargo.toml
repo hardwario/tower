@@ -32,6 +32,12 @@ tower-flasher.workspace = true
 toml = "1"
 serde = { workspace = true, features = ["std"] }
 
+[dev-dependencies]
+# The gateway group mints a fresh node key per run, like `tower nodes add --port` (a fixed key
+# re-provisioned onto a board whose store was wiped would restart its counter under that key:
+# CCM nonce reuse). The same crate and version the CLI mints with (no new lockfile entry).
+getrandom = { version = "0.4", features = ["std"] }
+
 [features]
 default = []
 # Gate the current-measurement tests. They need the PPK2 sidecar (ppk2d.py) + a PPK2-powered Core
