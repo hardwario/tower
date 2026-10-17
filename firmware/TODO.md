@@ -33,3 +33,36 @@ uplinks and remote-shell downlinks with FHSS locked; `fhss_compliance` evidence 
 channels, max per-channel dwell ≪ 0.4 s / 20 s) recorded for the product images; RAM budget
 guard still OK; `docs/radio.md` + `docs/gateway.md` updated and the bench-only warning above
 removed.
+
+## Provisioned ATSHA204A as a secure element (manufacturing)
+
+**Why.** Every Core Module carries an ATSHA204A (I2C 0x64), which the SDK today only puts to
+sleep (`board::atsha_sleep`, the `AtshaGuard` bus wrapper). Provisioned in production, it would
+give the radio network two things the MCU alone can't:
+- **Device attestation**: during the keyed join (E4, `docs/radio.md`), the gateway sends a
+  random challenge and the node answers with the ATSHA's HMAC-SHA256 over it under a secret slot
+  key that never leaves the chip, so the host knows it is talking to a genuine, provisioned
+  board and not to a clone holding a copied link key.
+- **Keys at rest**: the link keys (today plain records in the data EEPROM, protected only by the
+  flash readout protection) stored in, or wrapped by, an ATSHA slot, so an EEPROM dump no longer
+  yields them.
+
+**What's needed.**
+- A manufacturing step that writes a per-device secret into a slot (random per device, or
+  diversified from a factory master key and the device identity) and records it host-side for
+  the attestation check, then **locks the config zone and the data zone** (one-time, irreversible:
+  slot policies must be final before the first production run).
+- An SDK driver: wake / command / sleep over the shared I2C2 bus (the wake and sleep handling in
+  `board.rs` already exists), the HMAC and nonce commands, CRC-16 framing.
+- A keyed-join extension carrying the challenge and the HMAC answer, a host-side verifier, and a
+  policy for unprovisioned boards (development kits).
+- A power check on the PPK2: every ATSHA command wakes the chip (hundreds of µA while awake).
+
+**Decided (2026-10-17).** The ATSHA204A's 72-bit serial number is **not** used as an identity:
+anyone with the board can read it and it proves nothing without a provisioned secret. The device
+identity is the MCU's factory unique ID (`board::unique_id`, shown as `uid:` in `/system resource
+print`).
+
+**Done when.** A provisioned board keyed-joins with a verified attestation and an unprovisioned
+or cloned one is refused (logged), the link keys survive a reboot without being readable from
+the EEPROM, and the manufacturing procedure (provision, lock, record) is documented.
