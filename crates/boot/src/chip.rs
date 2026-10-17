@@ -1,7 +1,7 @@
 //! Read-only chip identification over the ROM bootloader: the product id
 //! (`Get ID`), its STM32L0 family name, the bootloader's protocol version and
 //! command set (`Get`), and whether readout protection (RDP level 1) is active (the
-//! probe in [`crate::rdp`]). This is what `tower chip` prints (formerly `jolt info`).
+//! probe in [`crate::rdp`]). This is what `tower chip` prints.
 
 use crate::bootloader::{Bootloader, Transport};
 use crate::error::Result;

@@ -11,10 +11,9 @@ readout protection (RDP level 1) of production units, and the NRST/BOOT0 reset p
 AN3155 / AN2606 facts with citations), `target` (STM32L0 constants). User-facing docs are in
 `README.md`.
 
-It was the `jolt` flasher (library + `jolt` binary) until the monorepo. The binary is gone: its
-commands live in the `tower` CLI (`tower flash` / `erase` / `reset` / `chip` / `devices`; the
-raw serial `monitor` was dropped in favour of `tower monitor --hex`; `tower protect` /
-`unprotect` are new). The `jolt-v*` tags are history.
+Its front end is the `tower` CLI (`tower flash` / `erase` / `reset` / `chip` / `protect` /
+`unprotect` / `devices`). It was the standalone `jolt` flasher before the monorepo; the `jolt-v*`
+tags are its history.
 
 ## Consumers
 

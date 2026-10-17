@@ -2,9 +2,9 @@
 //! bootloader (AN3155): flash / erase / verify, chip info, and the NRST/BOOT0
 //! reset pulses.
 //!
-//! A UI-free library (it was the `jolt` flasher before the monorepo; the binary is
-//! gone, the engine is unchanged). The `tower` CLI (`tower flash` / `erase` /
-//! `reset` / `chip`) and the HIL harness drive it directly:
+//! A UI-free library (it was the standalone `jolt` flasher before the monorepo).
+//! The `tower` CLI (`tower flash` / `erase` / `reset` / `chip`) and the HIL
+//! harness drive it directly:
 //!
 //! ```no_run
 //! use tower_boot::flash::{self, FlashOptions, Progress};

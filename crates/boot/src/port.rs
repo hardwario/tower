@@ -200,8 +200,7 @@ impl Port {
     /// Like [`reset_into_app`](Self::reset_into_app) but returns as soon as
     /// RESET is released, with no post-boot settle. Use when the caller manages
     /// the wait itself (e.g. it immediately starts streaming the app's output
-    /// and wants the boot banner). This is the reason tower-cli previously
-    /// forked the reset sequence.
+    /// and wants the boot banner).
     pub fn reset_into_app_no_settle(&mut self) -> Result<()> {
         self.reset_into_app_settle(Duration::ZERO)
     }

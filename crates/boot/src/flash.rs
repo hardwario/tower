@@ -21,8 +21,8 @@ const CONNECT_ATTEMPTS: u32 = 5;
 pub enum Progress {
     /// Starting bootloader-entry attempt `attempt` of `of`.
     Connecting { attempt: u32, of: u32 },
-    /// A bootloader-entry attempt failed (surfaces the per-attempt error that
-    /// `--verbose` used to print). The engine retries until `of` is reached.
+    /// A bootloader-entry attempt failed, with its error (a front end may show it,
+    /// e.g. under `--verbose`). The engine retries until `of` is reached.
     ConnectError { attempt: u32, of: u32, error: String },
     /// The chip reported product id `id` (via `Get ID`).
     ChipIdentified { id: u16 },

@@ -7,9 +7,8 @@ protection** (RDP level 1) of production units, and the NRST/BOOT0 reset pulses 
 bootloader or restart the application.
 
 It is a **library only** (`crates/boot` in the [hardwario/tower](https://github.com/hardwario/tower)
-monorepo). Until the monorepo it was the `jolt` flasher, a library plus a `jolt` binary; the
-engine is unchanged, the binary is gone, and its commands live in the `tower` CLI. The `jolt-v*`
-tags in this repository are that history.
+monorepo); its front end is the `tower` CLI. It was the standalone `jolt` flasher before the
+monorepo (the `jolt-v*` tags in this repository are that history).
 
 The engine can enter the bootloader **automatically** (no buttons) on boards whose USB-UART
 bridge drives the MCU's NRST and BOOT0 pins, which is how it is used on the **TOWER Radio
@@ -19,17 +18,13 @@ Dongle** and the **TOWER Core Module**. On other boards, enter the bootloader ma
 Flash size is not assumed: a full-chip erase adapts to the connected part's density, so the
 whole STM32L0 range (16-192 KiB) is supported.
 
-## From `jolt` to `tower`
+## Front end
 
-| Former `jolt` command | Now |
-|---|---|
-| `jolt devices` | `tower devices` |
-| `jolt flash <bin> [--no-erase] [--no-verify] [--no-run] [--go]` | `tower flash <bin>` (same flags, plus `-v`) |
-| `jolt erase` | `tower erase` |
-| `jolt reset --app` / `--bootloader` | `tower reset` / `tower reset --bootloader` |
-| `jolt info` | `tower chip` (chip id + family, readout protection, bootloader version, supported commands; read-only, the app is restored afterwards) |
-| `jolt monitor` | dropped: `tower monitor --hex` dumps the raw bytes |
-| (none) | `tower protect` / `tower unprotect`: RDP level 1 on and off (see [Readout protection](#readout-protection)) |
+The `tower` CLI drives the engine: `tower flash <bin> [--no-erase] [--no-verify] [--no-run]
+[--go]`, `tower erase`, `tower reset [--bootloader]`, `tower chip` (chip id + family, readout
+protection, bootloader version, supported commands; read-only, the app is restored afterwards)
+and `tower protect` / `tower unprotect` (RDP level 1 on and off, see
+[Readout protection](#readout-protection)); `tower monitor --hex` dumps the raw serial bytes.
 
 Every `tower` command takes `-d/--device`, or auto-detects the port when exactly one USB serial
 device is present (see `cli/`). Install the CLI from the repo root with
@@ -80,7 +75,7 @@ nothing in the library prints. For callers that already hold an open serial hand
 tuned NRST/BOOT0 sequence without re-implementing it (the `tower` CLI and the HIL harness reuse
 them for the console reset).
 
-Notes that carry over from the CLI days:
+Operating notes:
 
 - The bootloader runs at **115200 baud, 8-E-1** (`target::BAUD`); 115200 is the maximum baud
   rate ST specifies for the USART bootloader.
