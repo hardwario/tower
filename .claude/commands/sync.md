@@ -55,7 +55,7 @@ Then evaluate and report:
   the tag the others reference.
 
 Do not edit any `Cargo.toml` here — fixing a lockstep break is a deliberate change
-the user drives (and the protocol repo's own `CLAUDE.md` has the bump runbook).
+the user drives (and the protocol repo's own `AGENTS.md` has the bump runbook).
 Surface the exact lines that would need to change and ask before touching them.
 
 ## 2b. Check the jolt pin (informational, not a gate)

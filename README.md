@@ -16,7 +16,8 @@ tower/                ← you are here (the control plane)
 ├── cli/              → github.com/hardwario/tower-cli         (the host tool)
 ├── jolt/             → github.com/hardwario/jolt              (UART flasher, used by cli + hil)
 ├── hil/              → github.com/hardwario/tower-hil         (bench harness)
-├── CLAUDE.md         the operating manual for Claude across all five
+├── AGENTS.md         the operating manual for coding agents across all five
+├── CLAUDE.md         `@AGENTS.md` import, so Claude Code loads the same manual
 └── .claude/commands/ /bootstrap · /build · /sync · /lockstep · /pin
 ```
 
@@ -90,7 +91,7 @@ the new known-good combination.
 
 Beyond the commands, just talk to Claude: *"add a new shell command to the CLI and the
 matching handler in the firmware"*, *"bump the protocol to add a humidity event"*, or
-*"why does the console show garbage?"* — `CLAUDE.md` gives it the cross-repo context to
+*"why does the console show garbage?"* — `AGENTS.md` gives it the cross-repo context to
 do it correctly.
 
 ## Working on a child repo
@@ -117,7 +118,7 @@ cargo test --manifest-path hil/Cargo.toml --no-run
 
 Firmware flashing and the console require the `tower` CLI on your `PATH` and a
 physical Core Module. Bench runs (`just hil` inside `hil/`) flash real hardware —
-see `hil/README.md`. See each child's own `README.md`/`CLAUDE.md` for depth.
+see `hil/README.md`. See each child's own `README.md`/`AGENTS.md` for depth.
 
 > **Note:** `jolt` is pinned by git tag (`v1.4.0`) by both `cli` and `hil`, just like
 > `tower-protocol`. But because they link it as a Rust **library**, a tag mismatch is
@@ -129,7 +130,8 @@ see `hil/README.md`. See each child's own `README.md`/`CLAUDE.md` for depth.
 ```
 tower/
 ├── README.md                 this file
-├── CLAUDE.md                 cross-repo operating manual for Claude
+├── AGENTS.md                 cross-repo operating manual for coding agents
+├── CLAUDE.md                 `@AGENTS.md` import (Claude Code entry point)
 ├── .gitmodules               submodule definitions (HTTPS URLs, cloneable by anyone)
 ├── .claude/commands/         /bootstrap, /build, /sync, /lockstep, /pin
 ├── tools/check_lockstep.py   the /lockstep implementation
@@ -151,7 +153,7 @@ working trees up to upstream before you pin.
   upstream — never `git add` a child's files from this root. This repo only records
   the resulting SHAs (that's `/pin`).
 - A wire-format change is a coordinated change-set across `protocol`, `firmware`,
-  `cli`, and `hil` — see the runbook in [`CLAUDE.md`](./CLAUDE.md).
+  `cli`, and `hil` — see the runbook in [`AGENTS.md`](./AGENTS.md).
 - Licensed **MIT** (© 2026 HARDWARIO a.s.), consistent with the child repos.
 
 ## License

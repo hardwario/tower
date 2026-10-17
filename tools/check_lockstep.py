@@ -3,7 +3,7 @@
 
 The wire format (`tower-protocol`) is postcard, which is NOT self-describing: consumers that
 pin different protocol tags do not error — they silently mis-decode bytes. This is the golden
-rule of the TOWER ecosystem (see CLAUDE.md), and this script is its deterministic check,
+rule of the TOWER ecosystem (see AGENTS.md), and this script is its deterministic check,
 run against the working trees actually checked out here (what `/pin` would freeze):
 
     manifests (tag pins):       firmware/Cargo.toml, firmware/crates/tower-kv/Cargo.toml,
@@ -94,7 +94,7 @@ def main() -> None:
         sys.exit(
             f"ERROR: tower-protocol tag MISMATCH across consumers ({sorted(set(tags.values()))}). "
             "postcard is not self-describing — a mismatch silently mis-decodes the wire. "
-            "Bump every consumer in the same change-set (see the CLAUDE.md runbook)."
+            "Bump every consumer in the same change-set (see the AGENTS.md runbook)."
         )
     tag = tags[MANIFESTS[0]]
     print(f"tower-protocol pin: {tag} (all {len(MANIFESTS)} manifests agree)")

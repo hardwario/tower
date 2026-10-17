@@ -1,5 +1,5 @@
 # Local cargo `paths` override for side-by-side protocol co-development.
-# Keep this UNCOMMITTED so the pinned tags stay the source of truth (see CLAUDE.md).
+# Keep this UNCOMMITTED so the pinned tags stay the source of truth (see AGENTS.md).
 /.cargo/config.toml
 /.cargo/config
 

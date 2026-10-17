@@ -34,13 +34,13 @@ git -C protocol describe --tags --always
 ```
 
 - If both ends pin an older tag than the latest protocol release, note the available upgrade
-  (it must be applied to **all** consumers together — the CLAUDE.md runbook).
+  (it must be applied to **all** consumers together — the AGENTS.md runbook).
 - If the `protocol` submodule's checked-out commit is not the pinned tag's commit, say so.
 
 ## 3. Report
 
 One short table: manifest | pinned tag , then lock | resolved SHA , then the verdict
 (✅ lockstep holds / ⚠️ BREAK — with the exact manifests that disagree). On a break, do **not**
-edit any manifest yourself — fixing it is the coordinated bump runbook in `CLAUDE.md`, driven
+edit any manifest yourself — fixing it is the coordinated bump runbook in `AGENTS.md`, driven
 by the user. The firmware-repo CI runs the push-time half of this gate
 (`firmware/tools/protocol_pin_check.py`, fetching the tower-cli + tower-hil pins from GitHub).
