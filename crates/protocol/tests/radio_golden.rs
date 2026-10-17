@@ -1,9 +1,9 @@
-//! Golden vectors for the **radio application schema** (`src/radio.rs`) — the same
+//! Golden vectors for the **radio application schema** (`src/radio.rs`): the same
 //! anti-drift role `tests/golden.rs` plays for the console framing, but guarded by
 //! `RADIO_SCHEMA_VERSION` instead of `PROTOCOL_VERSION` (the schema rides opaquely
 //! through the gateway; only node firmware + the host CLI must agree on it).
 //!
-//! ⚠️ If a change makes these vectors need updating, the radio schema changed — you
+//! ⚠️ If a change makes these vectors need updating, the radio schema changed: you
 //! MUST bump `RADIO_SCHEMA_VERSION` in `src/radio.rs` (and the crate version + tag)
 //! and re-pin node firmware + tower-cli. `tools/check_wire_bump.py` enforces this
 //! mechanically. Do not "just fix the bytes".
@@ -83,28 +83,73 @@ fn golden_node_cmd_shell() {
     );
 }
 
+// --- full field-layout coverage (1.5.1) ------------------------------------------
+//
+// Distinct-value companions to the vectors above (which stay byte-identical): every field
+// differs from its siblings, so a field swap changes the bytes.
+
+/// `golden_node_shell` uses `result: 0, chunk: 0`; swapping them leaves its bytes unchanged.
+/// Here every field differs (and `last` is false).
+#[test]
+fn golden_node_shell_distinct_fields() {
+    let got = enc_msg(&NodeMsg::Shell(NodeShellChunk {
+        cmd_id: 300,
+        result: 4,
+        chunk: 2,
+        last: false,
+        text: "hi",
+    }));
+    assert_eq!(got, [0x02, 0x04, 0xac, 0x02, 0x04, 0x02, 0x00, 0x02, 0x68, 0x69]);
+}
+
+/// `NodeInfo` with the `Some` arm of `battery_mv` (reserved today, as firmware encodes `None`,
+/// but the layout is the wire either way) and `sleeping: false`.
+#[test]
+fn golden_node_info_with_battery() {
+    let got = enc_msg(&NodeMsg::Info(NodeInfo {
+        firmware_name: "radio_climate",
+        firmware_version: "v1.2.3",
+        session_id: 77,
+        sleeping: false,
+        battery_mv: Some(3010),
+    }));
+    assert_eq!(
+        got,
+        [
+            0x02, 0x00, 0x0d, 0x72, 0x61, 0x64, 0x69, 0x6f, 0x5f, 0x63, 0x6c, 0x69, 0x6d, 0x61,
+            0x74, 0x65, 0x06, 0x76, 0x31, 0x2e, 0x32, 0x2e, 0x33, 0x4d, 0x00, 0x01, 0xc2, 0x17
+        ]
+    );
+}
+
 // --- variant-order pins ----------------------------------------------------------
+//
+// Expected indices are HEX LITERALS paired with their variant (never `i as u8`), so the
+// wire-bump guard's per-golden fingerprint (literals + `Type::Variant` paths) changes when an
+// enum is reordered and this table "fixed" either way (see tests/golden.rs).
 
 #[test]
 fn button_kind_variant_order_is_stable() {
-    for (i, kind) in [ButtonKind::Press, ButtonKind::Release, ButtonKind::Click, ButtonKind::Hold]
-        .into_iter()
-        .enumerate()
-    {
+    let pins: [(ButtonKind, u8); 4] = [
+        (ButtonKind::Press, 0x00),
+        (ButtonKind::Release, 0x01),
+        (ButtonKind::Click, 0x02),
+        (ButtonKind::Hold, 0x03),
+    ];
+    for (kind, byte) in pins {
         let mut buf = [0u8; 4];
-        let n = postcard::to_slice(&kind, &mut buf).unwrap().len();
-        assert_eq!(n, 1);
-        assert_eq!(buf[0], i as u8, "ButtonKind variant order changed — schema break");
+        let used = postcard::to_slice(&kind, &mut buf).unwrap();
+        assert_eq!(used, [byte], "ButtonKind variant order changed: schema break");
     }
 }
 
 #[test]
 fn accel_kind_variant_order_is_stable() {
-    for (i, kind) in [AccelKind::Motion, AccelKind::Orientation].into_iter().enumerate() {
+    let pins: [(AccelKind, u8); 2] = [(AccelKind::Motion, 0x00), (AccelKind::Orientation, 0x01)];
+    for (kind, byte) in pins {
         let mut buf = [0u8; 4];
-        let n = postcard::to_slice(&kind, &mut buf).unwrap().len();
-        assert_eq!(n, 1);
-        assert_eq!(buf[0], i as u8, "AccelKind variant order changed — schema break");
+        let used = postcard::to_slice(&kind, &mut buf).unwrap();
+        assert_eq!(used, [byte], "AccelKind variant order changed: schema break");
     }
 }
 
@@ -112,26 +157,28 @@ fn accel_kind_variant_order_is_stable() {
 /// (byte 0 is `RADIO_SCHEMA_VERSION`).
 #[test]
 fn node_msg_variant_order_is_stable() {
-    let msgs: [NodeMsg; 5] = [
-        NodeMsg::Info(NodeInfo {
-            firmware_name: "n",
-            firmware_version: "v",
-            session_id: 1,
-            sleeping: false,
-            battery_mv: None,
-        }),
-        NodeMsg::Button { kind: ButtonKind::Press, count: 1 },
-        NodeMsg::Temperature { millic: 0 },
-        NodeMsg::Accel { kind: AccelKind::Motion, face: 0 },
-        NodeMsg::Shell(NodeShellChunk { cmd_id: 0, result: 0, chunk: 0, last: true, text: "" }),
+    let pins: [(NodeMsg, u8); 5] = [
+        (
+            NodeMsg::Info(NodeInfo {
+                firmware_name: "n",
+                firmware_version: "v",
+                session_id: 1,
+                sleeping: false,
+                battery_mv: None,
+            }),
+            0x00,
+        ),
+        (NodeMsg::Button { kind: ButtonKind::Press, count: 1 }, 0x01),
+        (NodeMsg::Temperature { millic: 0 }, 0x02),
+        (NodeMsg::Accel { kind: AccelKind::Motion, face: 0 }, 0x03),
+        (NodeMsg::Shell(NodeShellChunk { cmd_id: 0, result: 0, chunk: 0, last: true, text: "" }), 0x04),
     ];
-    for (i, m) in msgs.iter().enumerate() {
+    for (m, byte) in &pins {
         let bytes = enc_msg(m);
-        assert_eq!(bytes[0], RADIO_SCHEMA_VERSION);
-        assert_eq!(bytes[1], i as u8, "NodeMsg variant order changed — schema break");
+        assert_eq!(bytes[..2], [RADIO_SCHEMA_VERSION, *byte], "NodeMsg variant order changed: schema break");
     }
     let cmd = enc_cmd(&NodeCmd::Shell { epoch: 0, cmd_id: 0, line: "" });
-    assert_eq!(cmd[1], 0, "NodeCmd variant order changed — schema break");
+    assert_eq!(cmd[..2], [RADIO_SCHEMA_VERSION, 0x00], "NodeCmd variant order changed: schema break");
 }
 
 // --- capacity: everything fits the radio MTU -------------------------------------
@@ -178,7 +225,7 @@ fn max_node_info_fits_the_mtu() {
 
 // --- envelope guards --------------------------------------------------------------
 
-/// A schema-version mismatch surfaces as `BadVersion { got }` — never a mis-decode.
+/// A schema-version mismatch surfaces as `BadVersion { got }`, never a mis-decode.
 #[test]
 fn wrong_schema_version_is_rejected() {
     let mut bytes = enc_msg(&NodeMsg::Temperature { millic: 1 });
@@ -190,7 +237,24 @@ fn wrong_schema_version_is_rejected() {
     assert_eq!(decode_node_msg(&[]), Err(tower_protocol::Error::TooShort));
 }
 
-/// An oversize encode is rejected, not truncated — even into a roomier buffer.
+/// Trailing bytes after a valid body are `Malformed` (since 1.5.1) for both directions:
+/// postcard's `from_bytes` would silently ignore them, half-reading a node whose schema grew
+/// without a `RADIO_SCHEMA_VERSION` bump. The net layer delivers the exact payload length, so
+/// a legitimate envelope never has a tail.
+#[test]
+fn trailing_bytes_are_malformed() {
+    let mut msg = enc_msg(&NodeMsg::Button { kind: ButtonKind::Hold, count: 7 });
+    assert!(decode_node_msg(&msg).is_ok());
+    msg.push(0);
+    assert_eq!(decode_node_msg(&msg), Err(tower_protocol::Error::Malformed));
+
+    let mut cmd = enc_cmd(&NodeCmd::Shell { epoch: 42, cmd_id: 3, line: "/led on" });
+    assert!(decode_node_cmd(&cmd).is_ok());
+    cmd.push(0);
+    assert_eq!(decode_node_cmd(&cmd), Err(tower_protocol::Error::Malformed));
+}
+
+/// An oversize encode is rejected, not truncated, even into a roomier buffer.
 #[test]
 fn over_mtu_encode_is_rejected() {
     let text: String = "z".repeat(MAX_RADIO_PAYLOAD); // envelope overhead pushes it past

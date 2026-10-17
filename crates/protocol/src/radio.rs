@@ -1,9 +1,9 @@
-//! Radio application schema — what node apps put **inside** their encrypted radio
+//! Radio application schema: what node apps put **inside** their encrypted radio
 //! frames, and what the host decodes back out of a forwarded
 //! [`Uplink`](crate::msg::Uplink).
 //!
 //! The gateway is a *transparent bridge*: it authenticates/decrypts the radio frame
-//! (net layer) and forwards the payload verbatim — it never decodes this schema. Only
+//! (net layer) and forwards the payload verbatim; it never decodes this schema. Only
 //! the **node firmware** and the **host CLI** must agree on it, which is why it is
 //! versioned independently of the console framing: [`RADIO_SCHEMA_VERSION`] is the
 //! leading byte of every envelope, and a schema change re-pins node firmware + CLI
@@ -20,13 +20,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Error;
+use crate::{Error, from_bytes_exact};
 
 /// Leading byte of every radio application envelope.
 pub const RADIO_SCHEMA_VERSION: u8 = 2;
 
 /// Max envelope size = the radio MTU (net-layer `MAX_PAYLOAD`). One `NodeMsg` /
-/// `NodeCmd` always fits a single radio frame — there is no radio-level chunking;
+/// `NodeCmd` always fits a single radio frame: there is no radio-level chunking;
 /// [`NodeShellChunk`] chunks *content* instead.
 pub const MAX_RADIO_PAYLOAD: usize = 74;
 
@@ -81,12 +81,12 @@ pub struct NodeShellChunk<'a> {
     pub text: &'a str,
 }
 
-/// Node → host application messages. Variant order is the wire — never reorder.
+/// Node → host application messages. Variant order is the wire; never reorder.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub enum NodeMsg<'a> {
     #[serde(borrow)]
     Info(NodeInfo<'a>),
-    /// One button event with the per-kind running count since boot (RAM-only —
+    /// One button event with the per-kind running count since boot (RAM-only:
     /// a reset means the node rebooted; see [`NodeInfo::session_id`]).
     Button { kind: ButtonKind, count: u32 },
     /// Temperature in millidegrees Celsius.
@@ -98,7 +98,7 @@ pub enum NodeMsg<'a> {
 }
 
 /// Host → node application messages, delivered from the gateway's downlink queue
-/// on the node's next uplink. Variant order is the wire — never reorder.
+/// on the node's next uplink. Variant order is the wire; never reorder.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub enum NodeCmd<'a> {
     /// Run `line` in the node's shell dispatcher; respond with [`NodeMsg::Shell`]
@@ -106,7 +106,7 @@ pub enum NodeCmd<'a> {
     /// node de-duplicates the gateway's at-least-once re-deliveries on `(epoch,
     /// cmd_id)`, so a fresh host that reuses a low `cmd_id` can never be mistaken for
     /// a re-delivery a node already ran (the "empty checkmark" bug). The reply chunks
-    /// carry only `cmd_id` — correlation is within one host process.
+    /// carry only `cmd_id`; correlation is within one host process.
     Shell { epoch: u32, cmd_id: u16, line: &'a str },
 }
 
@@ -121,7 +121,7 @@ fn encode_envelope<T: Serialize>(payload: &T, out: &mut [u8]) -> Result<usize, E
     let total = 1 + used;
     if total > MAX_RADIO_PAYLOAD {
         // Reject rather than hand the net layer an over-MTU payload it would refuse
-        // anyway — the error should point at the message, not the radio.
+        // anyway; the error should point at the message, not the radio.
         return Err(Error::Encode);
     }
     Ok(total)
@@ -129,6 +129,10 @@ fn encode_envelope<T: Serialize>(payload: &T, out: &mut [u8]) -> Result<usize, E
 
 fn split_envelope(data: &[u8]) -> Result<&[u8], Error> {
     let (&ver, body) = data.split_first().ok_or(Error::TooShort)?;
+    // No integrity check to order this against (unlike the console's CRC-before-version in
+    // `decode_frame`): the envelope carries no CRC of its own because it is carved out of a
+    // net-layer payload that AES-CCM already authenticated, so this byte is never line noise,
+    // and a mismatch here is always a real schema mismatch.
     if ver != RADIO_SCHEMA_VERSION {
         // Same shape as the console framing's version guard: the host can report
         // "node speaks radio schema vN, this build speaks vRADIO_SCHEMA_VERSION"
@@ -144,9 +148,11 @@ pub fn encode_node_msg(msg: &NodeMsg<'_>, out: &mut [u8]) -> Result<usize, Error
     encode_envelope(msg, out)
 }
 
-/// Decode a [`NodeMsg`] envelope (e.g. the `data` of a forwarded `Uplink`).
+/// Decode a [`NodeMsg`] envelope (e.g. the `data` of a forwarded `Uplink`). A body that
+/// fails to parse **or carries trailing bytes** is [`Error::Malformed`] (the net layer hands
+/// over the exact payload length, so a tail means a schema the node grew without a bump).
 pub fn decode_node_msg(data: &[u8]) -> Result<NodeMsg<'_>, Error> {
-    postcard::from_bytes(split_envelope(data)?).map_err(|_| Error::Malformed)
+    from_bytes_exact(split_envelope(data)?)
 }
 
 /// Encode a [`NodeCmd`] envelope into `out` (the bytes a host hands to the
@@ -155,7 +161,8 @@ pub fn encode_node_cmd(cmd: &NodeCmd<'_>, out: &mut [u8]) -> Result<usize, Error
     encode_envelope(cmd, out)
 }
 
-/// Decode a [`NodeCmd`] envelope (what a node receives in its downlink window).
+/// Decode a [`NodeCmd`] envelope (what a node receives in its downlink window). A body that
+/// fails to parse or carries trailing bytes is [`Error::Malformed`].
 pub fn decode_node_cmd(data: &[u8]) -> Result<NodeCmd<'_>, Error> {
-    postcard::from_bytes(split_envelope(data)?).map_err(|_| Error::Malformed)
+    from_bytes_exact(split_envelope(data)?)
 }

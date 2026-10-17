@@ -153,7 +153,7 @@ fn version_mismatch_is_rejected() {
     let inner: Vec<u8> = (0..n).find_map(|i| dec.push(out[i]).map(|s| s.to_vec())).unwrap();
     // Forge a wrong version in ver_type, then fix CRC so only the version check fires. Derive the
     // forged version from PROTOCOL_VERSION (not a hardcoded 2) so this stays a *mismatch* the day
-    // the constant is bumped — otherwise it would become the current version and the test breaks
+    // the constant is bumped; otherwise it would become the current version and the test breaks
     // during exactly the highest-stakes cross-repo operation.
     let forged = (PROTOCOL_VERSION + 1) & 0x07;
     assert_ne!(forged, PROTOCOL_VERSION);
@@ -163,6 +163,94 @@ fn version_mismatch_is_rejected() {
     let crc = tower_protocol::crc::crc32_ieee(&bad[..body]);
     bad[body..].copy_from_slice(&crc.to_le_bytes());
     assert_eq!(decode_frame(&bad), Err(Error::BadVersion { got: forged }));
+}
+
+// ---- check order: CRC before version/type (1.5.1) ----------------------------
+
+/// Build a deframed inner buffer by hand: `ver_type ‖ seq ‖ payload ‖ crc` with a CORRECT CRC,
+/// so a test can forge any header/body and have only the forged field fail.
+fn forge_inner(ver_type: u8, seq: u16, payload: &[u8]) -> Vec<u8> {
+    let mut inner = vec![ver_type];
+    inner.extend_from_slice(&seq.to_le_bytes());
+    inner.extend_from_slice(payload);
+    let crc = tower_protocol::crc::crc32_ieee(&inner);
+    inner.extend_from_slice(&crc.to_le_bytes());
+    inner
+}
+
+/// The deframed inner bytes of a well-formed `Hello` frame.
+fn hello_inner() -> Vec<u8> {
+    let h = Hello { protocol_version: PROTOCOL_VERSION, firmware_name: "a", firmware_version: "x", session_id: 1 };
+    let mut out = [0u8; MAX_WIRE];
+    let n = encode_frame(MsgType::Hello, 1, &h, &mut out).unwrap();
+    let mut dec = FrameDecoder::new();
+    (0..n).find_map(|i| dec.push(out[i]).map(|s| s.to_vec())).unwrap()
+}
+
+/// A corrupt frame is `BadCrc` whatever its header bits claim. Before 1.5.1 the version was
+/// checked first, so line noise / a torn frame whose byte 0 didn't read `PROTOCOL_VERSION`
+/// surfaced as `BadVersion`, and consumers treat ONE `BadVersion` as a lockstep mismatch (the
+/// CLI's banner / exit code). Forge every other version WITHOUT re-stamping the CRC.
+#[test]
+fn corrupt_header_is_bad_crc_not_bad_version() {
+    let inner = hello_inner();
+    for v in (0..8u8).filter(|&v| v != PROTOCOL_VERSION) {
+        let mut bad = inner.clone();
+        bad[0] = (v << 5) | (bad[0] & 0x1F);
+        assert_eq!(decode_frame(&bad), Err(Error::BadCrc), "forged v{v} with a stale CRC");
+        assert!(matches!(decode_msg(&bad), Err(Error::BadCrc)), "decode_msg, forged v{v}");
+    }
+    // One flipped version bit: the realistic line-noise case.
+    let mut bad = inner.clone();
+    bad[0] ^= 1 << 7;
+    assert_eq!(decode_frame(&bad), Err(Error::BadCrc));
+    // An unknown type with a stale CRC is BadCrc too (type is also checked after the CRC).
+    let mut bad = inner.clone();
+    bad[0] = (PROTOCOL_VERSION << 5) | 15;
+    assert_eq!(decode_frame(&bad), Err(Error::BadCrc));
+    // A torn / partial frame (tail lost before a resync 0x00).
+    assert_eq!(decode_frame(&inner[..inner.len() - 1]), Err(Error::BadCrc));
+    assert_eq!(decode_frame(&inner[1..]), Err(Error::BadCrc));
+}
+
+/// The other half of the contract: a CRC-VALID frame from any other version is a genuine
+/// `BadVersion { got }`, the one error a consumer may act on as a lockstep mismatch.
+#[test]
+fn crc_valid_foreign_version_is_bad_version() {
+    let inner = hello_inner();
+    let payload = &inner[3..inner.len() - 4];
+    for v in (0..8u8).filter(|&v| v != PROTOCOL_VERSION) {
+        let bad = forge_inner((v << 5) | MsgType::Hello as u8, 1, payload);
+        assert_eq!(decode_frame(&bad), Err(Error::BadVersion { got: v }));
+        assert!(matches!(decode_msg(&bad), Err(Error::BadVersion { got }) if got == v));
+    }
+    // Sanity: the same forge with the CURRENT version decodes, so only the version differed.
+    let good = forge_inner((PROTOCOL_VERSION << 5) | MsgType::Hello as u8, 1, payload);
+    assert_eq!(good, inner);
+    assert!(decode_msg(&good).is_ok());
+}
+
+// ---- trailing bytes (1.5.1) -----------------------------------------------------
+
+/// A CRC-valid body that deserializes but leaves a tail must be `Malformed` from `decode_msg`.
+/// Bare `postcard::from_bytes` accepts it (shown below); that silent half-read of a producer
+/// whose schema grew is exactly what the exact-length decode closes.
+#[test]
+fn crc_valid_body_with_trailing_bytes_is_malformed() {
+    // Dropped { count: 300 } encodes as [0xac, 0x02]; one stray byte rides behind it.
+    let exact = forge_inner((PROTOCOL_VERSION << 5) | MsgType::Dropped as u8, 7, &[0xac, 0x02]);
+    let tailed = forge_inner((PROTOCOL_VERSION << 5) | MsgType::Dropped as u8, 7, &[0xac, 0x02, 0x05]);
+    assert!(matches!(decode_msg(&exact), Ok((7, Msg::Dropped(Dropped { count: 300 })))));
+    let (_, _, body) = decode_frame(&tailed).unwrap(); // framing is fine …
+    assert_eq!(postcard::from_bytes::<Dropped>(body).unwrap().count, 300); // … from_bytes ignores the tail …
+    assert!(matches!(decode_msg(&tailed), Err(Error::Malformed))); // … decode_msg does not.
+
+    // Same for a borrowed type: a real Hello body plus one byte.
+    let inner = hello_inner();
+    let mut payload = inner[3..inner.len() - 4].to_vec();
+    payload.push(0);
+    let tailed = forge_inner((PROTOCOL_VERSION << 5) | MsgType::Hello as u8, 1, &payload);
+    assert!(matches!(decode_msg(&tailed), Err(Error::Malformed)));
 }
 
 #[test]
@@ -190,7 +278,7 @@ fn resync_after_garbage() {
 
 // ---- boundary sizes & the inner-frame budget --------------------------------
 
-/// Bytes a payload may occupy — since 1.2.0 exported as [`MAX_PAYLOAD`]; keep the
+/// Bytes a payload may occupy; since 1.2.0 exported as [`MAX_PAYLOAD`]; keep the
 /// independent arithmetic here so a drive-by change to the exported const fails a test.
 const PAYLOAD_BUDGET: usize = MAX_FRAME - 3 - 4;
 
@@ -200,7 +288,7 @@ fn exported_payload_budget_matches_the_frame_layout() {
 }
 
 /// The largest `Log` the firmware can produce (192-char message, 24-char module,
-/// worst-case uptime) must encode and round-trip — guards the firmware's MAX_MSG.
+/// worst-case uptime) must encode and round-trip; guards the firmware's MAX_MSG.
 #[test]
 fn max_log_fits_and_roundtrips() {
     let message: String = "x".repeat(192);
@@ -219,7 +307,7 @@ fn max_log_fits_and_roundtrips() {
     assert_eq!(l2.module.len(), 24);
 }
 
-/// A payload past the budget must return `Err(Encode)` — never a silently
+/// A payload past the budget must return `Err(Encode)`, never a silently
 /// truncated (and thus corrupt) frame.
 #[test]
 fn oversize_payload_is_rejected_not_truncated() {
@@ -337,7 +425,7 @@ fn cobs_output_has_only_the_trailing_zero() {
 
 // ---- deterministic fuzzing --------------------------------------------------
 
-/// A tiny LCG — deterministic across runs, no `rand` dependency.
+/// A tiny LCG: deterministic across runs, no `rand` dependency.
 struct Lcg(u64);
 impl Lcg {
     fn next_u32(&mut self) -> u32 {
@@ -374,7 +462,7 @@ fn fuzz_roundtrip_exact() {
 }
 
 /// A frame that passes version + CRC but whose postcard body does not deserialize into
-/// the type for its `MsgType` must surface as `Error::Malformed` from `decode_msg` — the
+/// the type for its `MsgType` must surface as `Error::Malformed` from `decode_msg`: the
 /// one `Error` variant no other test exercises. Built by hand: a `Hello` payload cut to a
 /// single byte (`protocol_version` parses; the `firmware_name` string is missing).
 #[test]
@@ -396,22 +484,27 @@ fn crc_valid_but_undeserializable_body_is_malformed() {
 
 /// Decoder-under-attack: feed pure random bytes (arbitrary content, arbitrary lengths,
 /// generous zero density so frames complete often) through the full FrameDecoder +
-/// decode_msg path. The assertion is implicit — no panic, no out-of-bounds — plus a
+/// decode_msg path. The assertion is implicit (no panic, no out-of-bounds), plus a
 /// sanity count that some byte-salads DO complete frames (so the path is exercised).
 #[test]
 fn fuzz_arbitrary_bytes_never_panic_the_decoder() {
     let mut rng = Lcg(0x5EED_5EED_5EED_5EED);
     let mut dec = FrameDecoder::new();
-    let mut frames = 0u64;
+    let (mut frames, mut bad_version) = (0u64, 0u64);
     for _ in 0..200_000 {
         // ~1/32 zeros keeps frame boundaries frequent without starving content bytes.
         let b = if rng.next_u32().is_multiple_of(32) { 0 } else { (rng.next_u32() >> 8) as u8 };
         if let Some(inner) = dec.push(b) {
             frames += 1;
-            let _ = decode_msg(inner); // any Err is fine; a panic/OOB is the failure
+            // Any Err is fine; a panic/OOB is the failure, EXCEPT BadVersion: noise must never
+            // read as a lockstep mismatch (CRC is checked first; a 2^-32 collision is the only way).
+            if let Err(Error::BadVersion { .. }) = decode_msg(inner) {
+                bad_version += 1;
+            }
         }
     }
-    assert!(frames > 0, "the byte-salad never completed a frame — fuzz not exercising decode");
+    assert!(frames > 0, "the byte-salad never completed a frame; fuzz not exercising decode");
+    assert_eq!(bad_version, 0, "line noise surfaced as BadVersion; CRC must be checked first");
 }
 
 /// Any single-bit corruption (outside the trailing delimiter) must be detected:

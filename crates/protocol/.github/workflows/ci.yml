@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: every job is read-only unless it says otherwise (only `release` writes).
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same ref (e.g. rapid pushes to a PR branch).
 concurrency:
   group: ci-${{ github.ref }}
@@ -13,77 +17,127 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # MUST equal `channel` in rust-toolchain.toml (the `audit` job enforces it), so CI builds with
+  # exactly the toolchain a local checkout uses. Bump both together.
+  RUST_TOOLCHAIN: "1.99.1"
 
+# Every action is pinned to a full commit SHA (the comment names the release); Dependabot
+# (.github/dependabot.yml) keeps the pins current.
 jobs:
   test:
     name: Test & lint (host)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: clippy
+          persist-credentials: false
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Install Rust (rust-toolchain.toml pin)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: thumbv6m-none-eabi
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # The crate is a no_std library; the tests run on the host.
       - name: Clippy (incl. tests)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
   embedded:
     name: Build (thumbv6m, no_std)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust (+ Cortex-M0+ target)
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          targets: thumbv6m-none-eabi
+          persist-credentials: false
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Install Rust (rust-toolchain.toml pin + Cortex-M0+ target)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: thumbv6m-none-eabi
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Guarantee the crate stays no_std / embedded-buildable (the firmware links it on the MCU).
       - name: Build
-        run: cargo build --target thumbv6m-none-eabi
+        run: cargo build --locked --target thumbv6m-none-eabi
 
   # The golden vectors are the byte-level wire definition; the `test` job pins them to the
   # code. This job pins them to PROTOCOL_VERSION: goldens that changed since the latest tag
-  # without a version bump fail the build — the "wire change => bump" rule made mechanical.
+  # without a version bump fail the build: the "wire change => bump" rule made mechanical.
   wire-bump-guard:
     name: Wire-bump guard (goldens vs PROTOCOL_VERSION)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # the guard diffs against the latest v* tag
+          persist-credentials: false
 
       - name: Golden vectors changed => PROTOCOL_VERSION bumped
         run: python3 tools/check_wire_bump.py
 
+      # The guard guards the wire; this guards the guard (synthetic repos, expected verdicts).
+      - name: Wire-bump guard self-test
+        run: python3 tools/check_wire_bump.py --self-test
+
+  # RustSec advisories. Vulnerabilities fail the job; informational warnings (unmaintained /
+  # unsound / yanked) are printed but do not.
+  audit:
+    name: cargo audit (RustSec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: CI toolchain == rust-toolchain.toml
+        run: |
+          want="$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' rust-toolchain.toml)"
+          if [ "$want" != "$RUST_TOOLCHAIN" ]; then
+            echo "::error::rust-toolchain.toml pins '$want' but the workflows use RUST_TOOLCHAIN='$RUST_TOOLCHAIN'; bump both together"
+            exit 1
+          fi
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-audit@0.22.2
+
+      # Invoked as `cargo-audit audit` (not `cargo audit`): it only reads Cargo.lock, so this job
+      # needs no Rust toolchain (the `cargo` proxy would otherwise resolve rust-toolchain.toml).
+      - name: cargo audit
+        run: cargo-audit audit
+
   # Single-source the version from Cargo.toml: when a push to main carries a version the repo
-  # isn't tagged for yet, create the matching `vX.Y.Z` tag + a GitHub Release. Idempotent (skips
-  # if the tag already exists), and only after CI is green — so a forgotten `git tag` can never
-  # leave consumers (tower-firmware, tower-cli, tower-hil) pinning a version that has no tag
-  # to fetch.
+  # isn't tagged for yet, create the matching `vX.Y.Z` tag; and make sure that tag has a GitHub
+  # Release. Both halves are idempotent (an existing tag / release is left alone; re-runs and
+  # later pushes are no-ops), and run only after CI is green, so a forgotten `git tag` can
+  # never leave consumers (tower-firmware, tower-cli, tower-hil) pinning a version that has no
+  # tag to fetch. (Previously the job exited as soon as the tag existed, so a manually pushed
+  # tag (the documented runbook) never got its Release.)
   release:
     name: Tag + release on version bump
-    needs: [test, embedded, wire-bump-guard]
+    needs: [test, embedded, wire-bump-guard, audit]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write   # push the tag + create the Release (the only writing job)
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # Deliberately persisted: this job pushes the tag with the job token.
+          persist-credentials: true
 
-      - name: Create tag + release if Cargo.toml version is new
+      - name: Create tag + release if missing
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -91,12 +145,17 @@ jobs:
           if [ -z "$version" ]; then echo "::error::could not read version from Cargo.toml"; exit 1; fi
           tag="v${version}"
           if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "Tag ${tag} already on origin — nothing to release."
-            exit 0
+            echo "Tag ${tag} already on origin, not re-tagging."
+          else
+            echo "Tagging ${tag}"
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "${tag}" -m "tower-protocol ${version}"
+            git push origin "refs/tags/${tag}"
           fi
-          echo "Releasing ${tag}"
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${tag}" -m "tower-protocol ${version}"
-          git push origin "${tag}"
-          gh release create "${tag}" --title "${tag}" --generate-notes
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists; nothing to do."
+          else
+            echo "Creating release ${tag}"
+            gh release create "${tag}" --verify-tag --title "${tag}" --generate-notes
+          fi

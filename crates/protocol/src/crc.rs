@@ -1,4 +1,4 @@
-//! CRC-32/IEEE (reflected, poly `0xEDB8_8320`) — the single integrity primitive
+//! CRC-32/IEEE (reflected, poly `0xEDB8_8320`): the single integrity primitive
 //! shared by the console frame and the EEPROM key-value store.
 //!
 //! [`crc32_update`] is the raw running update (no init, no final XOR): fold one or
@@ -6,12 +6,12 @@
 //! `0xFFFF_FFFF`, finalize `!`) used for a single contiguous buffer.
 //!
 //! `storage.rs`'s `entry_crc` folds two slices (`hdr ‖ value`) through
-//! [`crc32_update`] with that same init/XOR — so moving the primitive here is
+//! [`crc32_update`] with that same init/XOR, so moving the primitive here is
 //! **byte-for-byte identical** to the firmware's previous private copy, and
 //! existing EEPROM records stay valid.
 
 /// One bitwise CRC-32 pass over `data`, continuing from `crc` (no table).
-/// This is the raw update — apply the `0xFFFF_FFFF` init and final `!` yourself
+/// This is the raw update: apply the `0xFFFF_FFFF` init and final `!` yourself
 /// (or use [`crc32_ieee`] for a one-shot).
 pub fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
     for &byte in data {
@@ -36,7 +36,7 @@ mod tests {
 
     /// The canonical CRC-32/ISO-HDLC ("IEEE") check value: the CRC of the ASCII string
     /// "123456789" is 0xCBF43926. Pins the polynomial + reflection + init/XOR against the
-    /// standard — a self-consistent round-trip test would pass for the *wrong* CRC too, so this
+    /// standard. A self-consistent round-trip test would pass for the *wrong* CRC too, so this
     /// reference vector is the guard that the primitive is exactly CRC-32/IEEE. `tower-kv`'s
     /// deployed EEPROM records depend on this being byte-for-byte stable.
     #[test]
@@ -51,7 +51,7 @@ mod tests {
     }
 
     /// Folding two slices through `crc32_update` (then finalizing) must equal the one-shot over
-    /// the concatenation — the exact contract `storage.rs`'s `entry_crc` relies on to CRC
+    /// the concatenation: the exact contract `storage.rs`'s `entry_crc` relies on to CRC
     /// `hdr ‖ value` as two calls.
     #[test]
     fn multi_slice_fold_matches_contiguous() {

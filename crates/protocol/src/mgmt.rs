@@ -1,10 +1,10 @@
-//! Management schema — the typed op/reply contract of the gateway link (wire v3).
+//! Management schema: the typed op/reply contract of the gateway link (wire v3).
 //!
 //! A host drives a device with [`MgmtRequest`](crate::msg::MgmtRequest) frames
 //! (`{ req_id, op: MgmtOp }`; requests always fit a single frame). The device answers
 //! with one or more [`MgmtResponse`](crate::msg::MgmtResponse) chunks carrying the same
 //! `req_id`. The `data` fields of all chunks concatenate into a stream of postcard
-//! records whose type depends on the op — reassemble, then decode with repeated
+//! records whose type depends on the op; reassemble, then decode with repeated
 //! `postcard::take_from_bytes`. `result` is authoritative only on the `last` chunk;
 //! a non-[`MGMT_OK`] result carries no records.
 //!
@@ -16,7 +16,7 @@
 //! | [`MgmtOp::NodeRemove`]    | gateway   | none                |
 //! | [`MgmtOp::NodeUpdate`]    | gateway   | none                |
 //! | [`MgmtOp::NodeRevealKey`] | gateway   | one [`NodeKey`]     |
-//! | [`MgmtOp::PairingOpen`]   | gateway   | one [`Paired`] (delayed — see below) |
+//! | [`MgmtOp::PairingOpen`]   | gateway   | one [`Paired`] (delayed; see below) |
 //! | [`MgmtOp::PairingCancel`] | gateway   | none                |
 //! | [`MgmtOp::QueuePush`]     | gateway   | one [`QueueId`]     |
 //! | [`MgmtOp::QueueList`]     | gateway   | [`QueueEntry`] × N (chunked) |
@@ -31,16 +31,16 @@
 //! out). This is stronger than matching `Hello.firmware_name`, which is display-only.
 //!
 //! **Delayed responses.** `PairingOpen` / `JoinOpen` reply when their radio window
-//! *resolves* — a join commits, the window expires ([`MGMT_TIMEOUT`]), or it is
-//! cancelled — which may be up to `window` seconds after the request. The `req_id`
+//! *resolves*: a join commits, the window expires ([`MGMT_TIMEOUT`]), or it is
+//! cancelled. That may be up to `window` seconds after the request. The `req_id`
 //! correlation makes this safe; a second open while one runs answers [`MGMT_BUSY`].
 //!
 //! **Who mints AES keys: the host.** Device PRNGs here are deterministic and
 //! explicitly non-cryptographic, so the key travels host→device in `PairingOpen`
-//! (OTA) and `NodeAdd`/`Provision` (over-the-cable) — never the other way, except
+//! (OTA) and `NodeAdd`/`Provision` (over-the-cable), never the other way, except
 //! for the deliberate, explicit [`MgmtOp::NodeRevealKey`].
 //!
-//! This enum set is **exhaustive and part of wire v3** — postcard encodes variants
+//! This enum set is **exhaustive and part of wire v3**: postcard encodes variants
 //! by index, so appending an op later is a wire change (bump
 //! [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION)). It is designed complete now.
 
@@ -103,7 +103,7 @@ pub const MAX_NODE_NAME: usize = 16;
 // --- ops -------------------------------------------------------------------------
 
 /// One management operation. Variant order is the wire format (postcard encodes by
-/// variant index) — never reorder; appending is a wire change.
+/// variant index). Never reorder; appending is a wire change.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub enum MgmtOp<'a> {
     /// Identify the device: role, radio schema, network parameters. Both roles.
@@ -118,8 +118,8 @@ pub enum MgmtOp<'a> {
     NodeRemove { addr: u32 },
     /// Update mutable metadata; `None` keeps the current value. Gateway.
     NodeUpdate { addr: u32, name: Option<&'a str>, flags: Option<u8> },
-    /// Return the node's AES key as a [`NodeKey`] record — the only path that ever
-    /// discloses a stored key. Gateway.
+    /// Return the node's AES key as a [`NodeKey`] record (the only path that ever
+    /// discloses a stored key). Gateway.
     NodeRevealKey { addr: u32 },
     /// Open the OTA pairing window for `window` seconds with the host-minted key
     /// to hand out. Replies (delayed) [`Paired`] or [`MGMT_TIMEOUT`]. Gateway.
@@ -137,7 +137,7 @@ pub enum MgmtOp<'a> {
     /// of the persisted `stats-period` setting. Gateway.
     StatsConfig { channel_period_ms: u32 },
     /// Over-the-cable provisioning: persist the network credentials on a node.
-    /// Node (served only while on USB — which is exactly the cable-pairing case).
+    /// Node (served only while on USB, which is exactly the cable-pairing case).
     Provision(Provision),
     /// Ask a node to run its OTA join for `window` seconds. Replies (delayed)
     /// [`Joined`] or [`MGMT_TIMEOUT`]. Node.
@@ -184,7 +184,7 @@ pub struct DeviceInfo<'a> {
     pub firmware_name: &'a str,
 }
 
-/// Reply record for [`MgmtOp::NodeList`] — one registered node.
+/// Reply record for [`MgmtOp::NodeList`]: one registered node.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct NodeEntry<'a> {
     pub addr: u32,
@@ -210,20 +210,20 @@ pub struct NodeKey {
     pub key: [u8; 16],
 }
 
-/// Delayed reply record for [`MgmtOp::PairingOpen`] — a node joined the window.
+/// Delayed reply record for [`MgmtOp::PairingOpen`]: a node joined the window.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Paired {
     pub addr: u32,
 }
 
-/// Reply record for [`MgmtOp::QueuePush`] — the handle for `QueueDrop` and the
+/// Reply record for [`MgmtOp::QueuePush`]: the handle for `QueueDrop` and the
 /// `item` echoed in `RadioStat::Tx` reports. Monotonic from 1 per gateway boot.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct QueueId {
     pub item: u16,
 }
 
-/// Reply record for [`MgmtOp::QueueList`] — one pending downlink.
+/// Reply record for [`MgmtOp::QueueList`]: one pending downlink.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct QueueEntry<'a> {
     pub node_addr: u32,
@@ -233,13 +233,13 @@ pub struct QueueEntry<'a> {
     pub data: &'a [u8],
 }
 
-/// Reply record for [`MgmtOp::Provision`] — the node's effective radio address.
+/// Reply record for [`MgmtOp::Provision`]: the node's effective radio address.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ProvisionAck {
     pub addr: u32,
 }
 
-/// Delayed reply record for [`MgmtOp::JoinOpen`] — the node joined a gateway.
+/// Delayed reply record for [`MgmtOp::JoinOpen`]: the node joined a gateway.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Joined {
     pub gw_addr: u32,

@@ -1,6 +1,6 @@
 //! Message payloads (the postcard schema). Borrowed (`&str`) so they serialize
 //! no-alloc on the target and decode zero-copy on the host. Both ends share these
-//! exact definitions — postcard is not self-describing, so field order and variant
+//! exact definitions; postcard is not self-describing, so field order and variant
 //! order are load-bearing (postcard encodes enums by variant **index**).
 
 use heapless::Vec;
@@ -24,7 +24,7 @@ pub enum Level {
 /// counter) so the host can tell a device **reboot** from a continuous link.
 ///
 /// Field order is load-bearing (postcard encodes positionally); changing it is a wire
-/// break — bump [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION).
+/// break, so bump [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION).
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Hello<'a> {
     pub protocol_version: u8,
@@ -69,7 +69,7 @@ pub struct ShellResponse<'a> {
     pub text: &'a str,
 }
 
-/// What a completion candidate is — drives host coloring + the auto-insert separator.
+/// What a completion candidate is; drives host coloring + the auto-insert separator.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CandidateKind {
     Menu,
@@ -97,14 +97,14 @@ pub struct ShellCompletions<'a> {
     pub more: bool,
 }
 
-/// Target → host: overflow marker — `count` log/print frames were dropped.
+/// Target → host: overflow marker; `count` log/print frames were dropped.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Dropped {
     pub count: u32,
 }
 
 /// Target → host: one decrypted, authenticated radio uplink, forwarded verbatim by
-/// the gateway. The gateway does NOT interpret `data` — it is a radio-application
+/// the gateway. The gateway does NOT interpret `data`: it is a radio-application
 /// envelope (see the [`radio`](crate::radio) module) the **host** decodes; new node
 /// app types therefore never require a gateway firmware change. `counter` is the
 /// net-layer frame counter (dedup/diagnostics); `rssi`/`lqi` are the reception
@@ -119,8 +119,8 @@ pub struct Uplink<'a> {
     pub data: &'a [u8],
 }
 
-/// Target → host: one chunk of a management reply — see the [`mgmt`](crate::mgmt)
-/// module for the op/record contract. Mirrors [`ShellResponse`]'s discipline:
+/// Target → host: one chunk of a management reply (see the [`mgmt`](crate::mgmt)
+/// module for the op/record contract). Mirrors [`ShellResponse`]'s discipline:
 /// `result` is authoritative only on the `last` chunk, `chunk` indexes detect a
 /// CRC-dropped chunk mid-reply. The `data` of all chunks concatenate into a stream
 /// of postcard records typed per-op.
@@ -135,7 +135,7 @@ pub struct MgmtResponse<'a> {
 }
 
 /// Target → host: one sample of the radio-diagnostics stream feeding the host's
-/// running channel graph. Variant order is the wire — never reorder.
+/// running channel graph. Variant order is the wire; never reorder.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RadioStat {
     /// Ambient RSSI of the current receive channel, sampled at the cadence set by
@@ -154,8 +154,8 @@ pub struct ShellCommand<'a> {
     pub line: &'a str,
 }
 
-/// Host → target: one management operation — see the [`mgmt`](crate::mgmt) module
-/// for the op set and reply contract. Requests always fit a single frame; `req_id`
+/// Host → target: one management operation (see the [`mgmt`](crate::mgmt) module
+/// for the op set and reply contract). Requests always fit a single frame; `req_id`
 /// correlates the (possibly chunked, possibly delayed) [`MgmtResponse`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MgmtRequest<'a> {
