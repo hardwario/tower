@@ -171,10 +171,6 @@ struct Cli {
     // The field stays `port` since it holds a serial-port path; the user-facing flag is `--device`.
     #[arg(short = 'd', long = "device", value_name = "DEVICE", global = true)]
     port: Option<String>,
-    /// Don't auto-reconnect on the streaming commands (`logs`/`events`):
-    /// exit when the link drops instead of retrying. (The first open is always fatal.)
-    #[arg(long, global = true)]
-    no_reconnect: bool,
     /// No subcommand opens the console TUI (the documented bare-`tower` UX).
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -201,6 +197,9 @@ enum Cmd {
         /// With --reset and --send: extra ms to settle after the boot Hello (or fallback wait if none).
         #[arg(long, value_name = "MS", requires = "reset")]
         delay: Option<u64>,
+        /// Exit when the link drops instead of reconnecting. (The first open is always fatal.)
+        #[arg(long)]
+        no_reconnect: bool,
     },
     /// Stream device events (structured key=value) to stdout.
     Events {
@@ -213,6 +212,9 @@ enum Cmd {
         /// Reboot the application on connect (NRST pulse) so you see it come up from the start.
         #[arg(long)]
         reset: bool,
+        /// Exit when the link drops instead of reconnecting. (The first open is always fatal.)
+        #[arg(long)]
+        no_reconnect: bool,
     },
     /// Open an interactive shell (commands start with `/`).
     Shell {
@@ -383,7 +385,6 @@ fn permission_denied(e: &anyhow::Error) -> bool {
 /// Dispatch a parsed command. Returns the process exit code (see the exit-code contract
 /// above); an `Err` here becomes `EXIT_ERROR`. A bare `tower` (no subcommand) opens the TUI.
 fn run(cli: Cli) -> Result<u8> {
-    let reconnect = !cli.no_reconnect;
     match cli.cmd.unwrap_or(Cmd::Console { reset: false }) {
         Cmd::Devices => devices().map(|()| EXIT_OK),
         Cmd::Logs {
@@ -392,6 +393,7 @@ fn run(cli: Cli) -> Result<u8> {
             send,
             reset,
             delay,
+            no_reconnect,
         } => stream(
             cli.port,
             output_mode(color, json),
@@ -399,17 +401,22 @@ fn run(cli: Cli) -> Result<u8> {
             send,
             reset,
             delay,
-            reconnect,
+            !no_reconnect,
         )
         .map(|()| EXIT_OK),
-        Cmd::Events { color, json, reset } => stream(
+        Cmd::Events {
+            color,
+            json,
+            reset,
+            no_reconnect,
+        } => stream(
             cli.port,
             output_mode(color, json),
             View::Events,
             None,
             reset,
             None,
-            reconnect,
+            !no_reconnect,
         )
         .map(|()| EXIT_OK),
         Cmd::Shell {

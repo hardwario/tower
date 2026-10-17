@@ -36,7 +36,11 @@ shasum -a 256 -c tower-cli-vX.Y.Z-<target>.tar.gz.sha256
 gh attestation verify tower-cli-vX.Y.Z-<target>.tar.gz --repo hardwario/tower
 ```
 
-On Windows, extract the `.zip` and put `tower.exe` on your `PATH`.
+On Windows, extract the `.zip` and put `tower.exe` on your `PATH`. The TOWER boards' USB serial
+bridge is an FTDI chip: Windows Update usually installs its driver, otherwise take the VCP
+driver from FTDI. On macOS, an archive downloaded with a browser is quarantined; clear it with
+`xattr -d com.apple.quarantine /usr/local/bin/tower` (archives fetched with `curl` or `gh` are
+not).
 
 On Linux, the serial ports belong to the `dialout` group (`uucp` on Arch). Join it once and log
 out and back in, or every open fails with "Permission denied":
@@ -90,6 +94,8 @@ tower shell                       # line-based interactive shell (commands start
 tower shell --reset --timeout 3000
 tower complete "/sys"             # ask the target to complete a partial command line
 ```
+
+Both TUIs (the console and `tower gateway`) list their keys in the footer; F10 or Ctrl+C quits.
 
 And for transport debugging:
 

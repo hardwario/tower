@@ -55,7 +55,10 @@ pub(crate) fn pick_port(explicit: Option<String>) -> Result<String> {
     let ports = usb_ports()?;
     match ports.len() {
         1 => Ok(ports.into_iter().next().unwrap()),
-        0 => bail!("no USB serial device found; pass --device"),
+        0 => bail!(
+            "no USB serial device found: plug in the board (with a data cable) or pass -d/--device \
+             (`tower devices` lists every port)"
+        ),
         _ => bail!(
             "multiple USB serial devices; pass --device (one of: {})",
             ports.join(", ")
