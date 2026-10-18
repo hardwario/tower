@@ -8,16 +8,21 @@
 //!   `init` must format empty), or a store built through the codec and then corrupted byte-wise;
 //! * operations: `set` / `delete` / `compact` (plain and the `_with` variants that share an
 //!   incremental-flip plan), `maintain` slices, `wipe`, reads, clean reboots, EEPROM corruption,
-//!   and **power cuts**: an armed cut makes the Nth EEPROM write from now land only a prefix of its
-//!   bytes (optionally with one garbage byte, a torn word), fail, and every later write fail too,
-//!   until the simulated reboot (RAM state dropped, `init` re-run, as the firmware boots).
+//!   and **power cuts**, at the STM32L0 data EEPROM's real granularity: it programs (and keeps
+//!   ECC) per aligned 32-bit word, and the firmware's backend (embassy-stm32
+//!   `eeprom_write_slice`) splits a write into byte programs for an unaligned head and tail and
+//!   word programs between, each an erase plus a program of its WHOLE word. An armed cut makes
+//!   the Nth EEPROM write from now die inside one of its programs: the programs before it land,
+//!   the whole word of the torn one reads erased or garbled (bytes the write never addressed
+//!   included), the write fails, and every later write fails too, until the simulated reboot (RAM
+//!   state dropped, `init` re-run, as the firmware boots).
 //!
 //! The oracle is an independent reader of the documented on-EEPROM format (superblocks with
 //! `magic ‖ generation ‖ crc`, the highest valid generation is active, records
-//! `[tag | len | crc | value]` scanned up to the first blank or corrupt one, latest record per key
-//! wins, a zero-length record is a delete tombstone, an uninitialized region holds nothing: `init`
-//! formats it empty). Before and after every operation the harness reads the image with it and
-//! asserts the transition the API documents:
+//! `[tag | len | crc | value | pad]` padded to whole words and scanned up to the first blank or
+//! corrupt one, latest record per key wins, a zero-length record is a delete tombstone, an
+//! uninitialized region holds nothing: `init` formats it empty). Before and after every operation
+//! the harness reads the image with it and asserts the transition the API documents:
 //!
 //! * a completed `set(k, v)` changes exactly `k` to `v` (a tombstone for an empty `v`), a completed
 //!   `delete(k)` removes exactly `k`, `compact` / `maintain` / `init` / a reboot change nothing,
@@ -28,7 +33,8 @@
 //! * the codec's own reads (`get_bytes`, `free_bytes`, `live_bytes`, `generation`,
 //!   `dead_half_blank`) agree with the reference reader, and it never addresses past `capacity`;
 //! * wear rules: deleting an absent key writes nothing, a `maintain` slice that does not commit a
-//!   flip programs at most its word budget;
+//!   flip programs at most its word budget, and every write is whole words at a word-aligned
+//!   offset (so the backend never byte-programs a word that holds committed data);
 //! * on a store that started blank and was never corrupted (where the documented capacity limits
 //!   are exact), `Full` / `TooManyKeys` are only returned when the live set really does not fit or
 //!   the half really holds more than `MAX_KEYS` distinct keys, and the generation (the wear gauge)
@@ -47,7 +53,7 @@ const CAP_6K: u32 = 6144;
 /// A small region (two 244-byte halves) so that one input crosses many flips.
 const CAP_SMALL: u32 = 512;
 const SUPER_LEN: u32 = 12;
-const SUPER_MAGIC: &[u8; 4] = b"TKV1";
+const SUPER_MAGIC: &[u8; 4] = b"TKV2";
 /// Largest number of operations one input runs (bounds the per-input time).
 const MAX_OPS: usize = 96;
 
@@ -59,14 +65,26 @@ enum Fault {
     PowerLost,
 }
 
+/// How a power cut leaves the whole aligned word of the program it interrupts.
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum Tear {
+    /// The power died before the program began: the word keeps its old contents.
+    Untouched,
+    /// The erase finished, the program did not: the word reads erased (zero).
+    Erased,
+    /// Undefined: every byte of the word as the program meant to leave it, XOR this (0: the
+    /// program landed whole just before the power died).
+    Garbled(u8),
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Cut {
     /// Index (over the whole run) of the write call that tears.
     at: usize,
-    /// Bytes of that write that reach the cells before the power dies.
+    /// Programs of that write that complete before the power dies (modulo its program count, so
+    /// the torn program is always one of its own).
     landed: usize,
-    /// The cell after the landed prefix is left holding this (a torn word), if set.
-    garbage: Option<u8>,
+    tear: Tear,
 }
 
 struct Ram {
@@ -100,16 +118,42 @@ impl Eeprom for Ram {
             "codec wrote past capacity: {off}+{}",
             data.len()
         );
+        assert!(
+            s % 4 == 0 && data.len() % 4 == 0,
+            "codec write not whole aligned words: {off}+{}",
+            data.len()
+        );
         if self.dead {
             return Err(Fault::PowerLost);
         }
         let n = self.writes;
         self.writes += 1;
-        if let Some(c) = self.cut.filter(|c| c.at == n) {
-            let landed = c.landed.min(data.len());
-            self.buf[s..s + landed].copy_from_slice(&data[..landed]);
-            if let Some(g) = c.garbage.filter(|_| landed < data.len()) {
-                self.buf[s + landed] = g;
+        // The backend's programs: (offset, length) of a byte (unaligned head and tail) or a word.
+        let head = if s % 4 == 0 {
+            0
+        } else {
+            (4 - s % 4).min(data.len())
+        };
+        let body = (data.len() - head) / 4 * 4;
+        let programs: Vec<(usize, usize)> = (0..head)
+            .map(|i| (i, 1))
+            .chain((head..head + body).step_by(4).map(|k| (k, 4)))
+            .chain((head + body..data.len()).map(|i| (i, 1)))
+            .collect();
+        if let Some(c) = self.cut.filter(|c| c.at == n && !programs.is_empty()) {
+            let torn = c.landed % programs.len();
+            for &(i, len) in &programs[..torn] {
+                self.buf[s + i..s + i + len].copy_from_slice(&data[i..i + len]);
+            }
+            let (i, len) = programs[torn];
+            let w = (s + i) & !3;
+            match c.tear {
+                Tear::Untouched => {}
+                Tear::Erased => self.buf[w..w + 4].fill(0),
+                Tear::Garbled(g) => {
+                    self.buf[s + i..s + i + len].copy_from_slice(&data[i..i + len]);
+                    self.buf[w..w + 4].iter_mut().for_each(|b| *b ^= g);
+                }
             }
             self.cut = None;
             self.dead = true;
@@ -126,8 +170,15 @@ impl Eeprom for Ram {
 
 type View = BTreeMap<u16, Vec<u8>>;
 
+/// Each half is whole words (both capacities used here are, and so is everything in them).
 fn half_len(cap: u32) -> u32 {
-    (cap - 2 * SUPER_LEN) / 2
+    (cap - 2 * SUPER_LEN) / 2 / 4 * 4
+}
+
+/// The bytes a record with a `len`-byte value occupies: the header, the value, zero padding up to
+/// a whole word (outside the CRC).
+fn padded(len: u32) -> u32 {
+    KV_HEADER as u32 + len.next_multiple_of(4)
 }
 
 fn superblock(buf: &[u8], cap: u32, h: u8) -> Option<u32> {
@@ -149,7 +200,8 @@ fn active(buf: &[u8], cap: u32) -> Option<(u8, u32)> {
 }
 
 /// Records of the log at `[base, base + area)`, up to the first blank (tag 0), oversized,
-/// overrunning or CRC-failing record. Returns the records and the log end (relative).
+/// overrunning or CRC-failing record; each advances by its padded size. Returns the records and
+/// the log end (relative).
 fn scan(buf: &[u8], base: u32, area: u32) -> (Vec<(u16, Vec<u8>)>, u32) {
     let mut out = Vec::new();
     let mut o = 0u32;
@@ -159,7 +211,7 @@ fn scan(buf: &[u8], base: u32, area: u32) -> (Vec<(u16, Vec<u8>)>, u32) {
         let tag = u16::from_le_bytes([hdr[0], hdr[1]]);
         let len = u16::from_le_bytes([hdr[2], hdr[3]]) as u32;
         let crc = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
-        if tag == 0 || len as usize > MAX_VALUE || o + KV_HEADER as u32 + len > area {
+        if tag == 0 || len as usize > MAX_VALUE || o + padded(len) > area {
             break;
         }
         let value = &buf[at + KV_HEADER..at + KV_HEADER + len as usize];
@@ -169,7 +221,7 @@ fn scan(buf: &[u8], base: u32, area: u32) -> (Vec<(u16, Vec<u8>)>, u32) {
             break;
         }
         out.push((tag, value.to_vec()));
-        o += KV_HEADER as u32 + len;
+        o += padded(len);
     }
     (out, o)
 }
@@ -222,7 +274,7 @@ fn snapshot(buf: &[u8], cap: u32) -> Snapshot {
 
 /// Packed size of a live set: what a compaction flip leaves in the fresh half.
 fn live(view: &View) -> u32 {
-    view.values().map(|v| (KV_HEADER + v.len()) as u32).sum()
+    view.values().map(|v| padded(v.len() as u32)).sum()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -313,11 +365,11 @@ enum Op {
         threshold: u16,
         slices: u8,
     },
-    /// Arm a power cut at the `after`-th write call from now.
+    /// Arm a power cut inside the `after`-th write call from now (its `landed`-th program).
     Arm {
         after: u8,
         landed: u16,
-        garbage: Option<u8>,
+        tear: Tear,
     },
     Reboot,
     /// EEPROM corruption (a byte changed in place), noticed at the next boot.
@@ -345,7 +397,7 @@ struct Input<'a> {
     small: bool,
     start: Start<'a>,
     /// A power cut armed before the first boot's `init` (e.g. mid format).
-    boot_cut: Option<(u8, u16, Option<u8>)>,
+    boot_cut: Option<(u8, u16, Tear)>,
     ops: Vec<Op>,
 }
 
@@ -443,7 +495,7 @@ impl Harness {
                 assert_eq!(r, Ok(()));
                 assert_eq!(self.ram.writes, w0, "init of an initialized store must not write");
             } else {
-                // The format: the 2-byte head tag (one word) and the 12-byte superblock (three).
+                // The format: the head tag's word (one) and the 12-byte superblock (three).
                 assert!(
                     self.ram.words - words0 <= 4,
                     "the format programmed more than it needs"
@@ -562,7 +614,7 @@ impl Harness {
                 } else {
                     done.insert(k, v.clone());
                 }
-                let needed = (KV_HEADER + v.len()) as u32;
+                let needed = padded(v.len() as u32);
                 let go = self.settle("set", r, &before, Effect::To(done), needed);
                 if go && !self.ram.dead {
                     let s = self.snap();
@@ -662,15 +714,11 @@ impl Harness {
                 }
                 self.settle("maintain", r, &before, Effect::Nothing, 0)
             }
-            Op::Arm {
-                after,
-                landed,
-                garbage,
-            } => {
+            Op::Arm { after, landed, tear } => {
                 self.ram.cut = Some(Cut {
                     at: self.ram.writes + *after as usize,
                     landed: *landed as usize,
-                    garbage: *garbage,
+                    tear: *tear,
                 });
                 true
             }
@@ -735,11 +783,11 @@ fuzz_target!(|input: Input<'_>| {
         max_gen: 0,
         keys: BTreeSet::new(),
     };
-    if let Some((after, landed, garbage)) = input.boot_cut {
+    if let Some((after, landed, tear)) = input.boot_cut {
         h.ram.cut = Some(Cut {
             at: after as usize,
             landed: landed as usize,
-            garbage,
+            tear,
         });
     }
     h.boot();

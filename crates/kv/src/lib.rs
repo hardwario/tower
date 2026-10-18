@@ -24,15 +24,19 @@
 //!
 //! - The **active** half is the one whose superblock is valid and has the highest generation.
 //! - **Updates are append-only** within the active half: a torn write only ever corrupts the
-//!   *tail* record, so `scan` stops there and every committed record before it survives.
+//!   *tail* record, so `scan` stops there and every committed record before it survives. That
+//!   holds because no write ever touches a word that holds committed bytes (next section).
 //! - **Compaction is a flip:** blank the inactive half, write the live set packed into it, then
 //!   write *its* superblock at `generation + 1`. That single CRC'd superblock write is the atomic
 //!   commit: torn before it, the old half is still active (no data lost); torn during it, the
 //!   superblock fails its CRC and the old half still wins.
 //!
-//! A record inside a half is `[tag(2) | len(2) | crc(4) | value]`, little-endian, CRC over
-//! `tag‖len‖value`. A region that holds no valid superblock (a blank part, or bytes in any other
-//! layout) is formatted empty by [`init`]; there is no migration of other layouts.
+//! A record inside a half is `[tag(2) | len(2) | crc(4) | value | pad]`, little-endian, CRC over
+//! `tag‖len‖value`: `len` is the true value length, and `pad` is 0 to 3 zero bytes (outside the
+//! CRC) that round the record up to whole 32-bit words, so it occupies `8 + round_up(len, 4)`
+//! bytes. A region that holds no valid superblock (a blank part, or bytes in any other layout,
+//! including the unpadded `TKV1` layout before this one) is formatted empty by [`init`]; there
+//! is no migration of other layouts.
 //!
 //! **Deletion** rides the same append-only log: [`delete`] writes a **tombstone** (a zero-length
 //! record, `len == 0`), so the key reads back absent ([`get_bytes`]), and the next flip drops any
@@ -42,6 +46,34 @@
 //! **Factory reset** ([`wipe`]) is a flip to an *empty* live set (blank the dead half, commit
 //! its superblock, then scrub the old half), so it is as power-loss-safe as any flip and keeps
 //! the generation (the wear gauge) counting.
+//!
+//! # Whole words only
+//!
+//! The STM32L0 data EEPROM programs, and keeps its ECC, per aligned 32-bit word: a byte or
+//! half-word program is an erase plus a program of the **whole** word that holds it, so a power
+//! cut during one can leave that whole word erased or undefined, including the bytes *before*
+//! the written offset. The firmware's backend (embassy-stm32 `eeprom_write_slice`) programs an
+//! unaligned head and tail of a write as single-byte programs. So the codec issues **only
+//! whole-word writes at word-aligned offsets**: records are padded to whole words, the halves
+//! and the superblocks start on word boundaries (`half_len` is rounded down to whole words),
+//! and the log-end terminator (`append_end`) is a whole zero word. A cut then damages only the
+//! word being programmed, and that word never holds a byte of a committed record or of the
+//! active superblock. The unpadded layout broke this: an append's first byte programs rewrote
+//! the word holding the previous record's last bytes, so a cut there failed that record's CRC
+//! and its key read an older value (a TX-counter watermark rollback, i.e. CCM nonce reuse) or
+//! vanished; and every boundary word was erased and reprogrammed up to four times per pass
+//! through its half instead of once (the wear the firmware's `FLIP_BUDGET` rests on).
+//!
+//! The order of an append's writes matters as much, because a torn word may hold anything, and
+//! a cut between two programs leaves the next word as it was: `append_end` first clears the log
+//! end if it holds an unreadable record (so nothing later written into its remains can revive
+//! it), then zeroes the word past the new record, then writes the record's body, and its header
+//! word (`tag | len`) **last**. Until that word lands the scan stops where it did, so a cut
+//! anywhere in an append leaves the state before it, whatever the cells under the new record
+//! held (even an old record with the same tag and length at the same offset). The host tests
+//! cut the power inside every single word program of every path, with the word left as it
+//! was, erased or garbled, and check that every key reads its value from before or after the
+//! interrupted operation.
 //!
 //! # Incremental maintenance
 //!
@@ -60,14 +92,35 @@
 pub const MAX_VALUE: usize = 256;
 /// Maximum number of distinct keys [`compact`] can track in one pass.
 pub const MAX_KEYS: usize = 64;
-/// Record header: tag(2) + value-len(2) + crc32(4). Value bytes follow.
+/// Record header: tag(2) + value-len(2) + crc32(4). Value bytes follow, padded with zeros to
+/// whole words (see [`record_size`]).
 pub const KV_HEADER: usize = 8;
 
+/// The program (and ECC) granularity of the STM32L0 data EEPROM: one aligned 32-bit word. Every
+/// codec write is a whole number of these at a multiple of it (module docs, "Whole words only").
+const WORD: u32 = 4;
+
 /// Superblock magic: with the CRC, what tells an initialized double-buffered region from a blank
-/// part or bytes in any other layout (formatted empty by [`init`]).
-const SUPER_MAGIC: [u8; 4] = *b"TKV1";
+/// part or bytes in any other layout (formatted empty by [`init`]). `TKV2` is the word-padded
+/// record layout; a `TKV1` store (unpadded records) is another layout, formatted empty.
+const SUPER_MAGIC: [u8; 4] = *b"TKV2";
 /// Superblock size: magic(4) + generation(4 LE) + crc(4 LE, over magic‖generation).
 const SUPER_LEN: u32 = 12;
+
+// Everything the codec writes is whole words: the header, every padded record (MAX_VALUE is
+// whole words, so a maximal record needs no padding and fits `KV_HEADER + MAX_VALUE` buffers),
+// the superblock, and the halves of the firmware's 6 KiB region.
+const _: () = assert!((KV_HEADER as u32).is_multiple_of(WORD));
+const _: () = assert!((MAX_VALUE as u32).is_multiple_of(WORD));
+const _: () = assert!(SUPER_LEN.is_multiple_of(WORD));
+const _: () = assert!(half_len(6144) == 3060 && half_len(6144).is_multiple_of(WORD));
+
+/// Bytes a record with a `len`-byte value occupies in a half: the header plus the value rounded
+/// up to whole words. The pad (0 to 3 zero bytes) is outside the CRC; `len` stays the true length.
+#[must_use]
+pub const fn record_size(len: usize) -> u32 {
+    KV_HEADER as u32 + (len as u32).next_multiple_of(WORD)
+}
 
 /// A byte-addressable store the codec reads and writes. The firmware implements it over the
 /// STM32L0 data EEPROM; host tests implement it over a RAM array. All offsets are bounded by the
@@ -124,10 +177,17 @@ pub fn entry_crc(hdr4: &[u8], value: &[u8]) -> u32 {
 
 // --- layout -------------------------------------------------------------------------------------
 
+/// The whole-word part of the region: an unaligned `capacity` leaves its top 1 to 3 bytes unused,
+/// so the superblocks below its top stay word-aligned (the firmware's 6144 is whole words).
+const fn region(capacity: u32) -> u32 {
+    capacity / WORD * WORD
+}
+
 /// Record-area size of one half, given the total region `capacity`. The two superblocks sit in the
-/// top `2 * SUPER_LEN` bytes; the rest splits evenly into the two halves.
-fn half_len(capacity: u32) -> u32 {
-    capacity.saturating_sub(2 * SUPER_LEN) / 2
+/// top `2 * SUPER_LEN` bytes; the rest splits evenly into the two halves, each rounded down to
+/// whole words so half 1 (and every record in it) starts on a word boundary.
+const fn half_len(capacity: u32) -> u32 {
+    region(capacity).saturating_sub(2 * SUPER_LEN) / 2 / WORD * WORD
 }
 
 /// Record-area base offset of half `h` (0 or 1).
@@ -137,7 +197,7 @@ fn half_base(capacity: u32, h: u8) -> u32 {
 
 /// Offset of half `h`'s superblock (top of the region).
 fn super_off(capacity: u32, h: u8) -> u32 {
-    capacity - 2 * SUPER_LEN + h as u32 * SUPER_LEN
+    region(capacity) - 2 * SUPER_LEN + h as u32 * SUPER_LEN
 }
 
 /// Read half `h`'s superblock generation, or `None` if it is absent / corrupt (bad magic or CRC).
@@ -198,7 +258,8 @@ type HalfScan = (u32, Option<(u32, u16)>);
 
 /// Scan one half's record area `[base, base + area)`: returns `(free_rel, latest(rel,len))`. Stops
 /// at the first blank (`tag == 0`) or corrupt record: the end of a clean log, and where a torn
-/// (tail) append would sit.
+/// (tail) append would sit. Records advance by their padded [`record_size`], so every offset it
+/// visits (and the `free_rel` it returns) is word-aligned.
 fn scan_half<S: Eeprom>(store: &S, base: u32, area: u32, target: u16) -> Result<HalfScan, KvError<S::Error>> {
     let mut o = 0u32;
     let mut found = None;
@@ -215,7 +276,7 @@ fn scan_half<S: Eeprom>(store: &S, base: u32, area: u32, target: u16) -> Result<
         }
         let len = u16::from_le_bytes([hdr[2], hdr[3]]);
         let crc = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
-        if len as usize > MAX_VALUE || o + KV_HEADER as u32 + len as u32 > area {
+        if len as usize > MAX_VALUE || o + record_size(len as usize) > area {
             break;
         }
         store
@@ -227,12 +288,18 @@ fn scan_half<S: Eeprom>(store: &S, base: u32, area: u32, target: u16) -> Result<
         if tag == target {
             found = Some((o, len));
         }
-        o += KV_HEADER as u32 + len as u32;
+        o += record_size(len as usize);
     }
     Ok((o, found))
 }
 
-/// Append one `[tag|len|crc|value]` record at absolute offset `at`.
+/// Write one `[tag|len|crc|value|pad]` record at absolute (word-aligned) offset `at`, whose header
+/// word reads zero (see [`append_end`]): the body (`crc | value | pad`, the pad zero) first, then
+/// the header word (`tag | len`) LAST, as the record's own commit. Until that one word lands, the
+/// scan still stops at `at`, so a cut anywhere in the body leaves no record at all, whatever the
+/// cells under it held before. With the header first, a cut right after it left the old CRC and
+/// value behind it, and an old record at the same offset with the same tag and length (the old
+/// layout's first record, under the first append after a format) read back.
 fn append<S: Eeprom>(store: &mut S, at: u32, key: u16, value: &[u8]) -> Result<(), KvError<S::Error>> {
     let len = value.len() as u16;
     let mut buf = [0u8; KV_HEADER + MAX_VALUE];
@@ -241,26 +308,51 @@ fn append<S: Eeprom>(store: &mut S, at: u32, key: u16, value: &[u8]) -> Result<(
     let crc = entry_crc(&buf[0..4], value);
     buf[4..8].copy_from_slice(&crc.to_le_bytes());
     buf[8..8 + value.len()].copy_from_slice(value);
+    let w = WORD as usize;
     store
-        .write(at, &buf[..KV_HEADER + value.len()])
-        .map_err(KvError::Backend)
+        .write(at + WORD, &buf[w..record_size(value.len()) as usize])
+        .map_err(KvError::Backend)?;
+    store.write(at, &buf[..w]).map_err(KvError::Backend)
+}
+
+/// Zero the word at absolute offset `at`, read-first: no program (and no wear) when it is zero.
+fn clear_word<S: Eeprom>(store: &mut S, at: u32) -> Result<(), KvError<S::Error>> {
+    let mut word = [0u8; WORD as usize];
+    store.read(at, &mut word).map_err(KvError::Backend)?;
+    if word != [0; WORD as usize] {
+        store.write(at, &[0; WORD as usize]).map_err(KvError::Backend)?;
+    }
+    Ok(())
 }
 
 /// Append one record at the log end `free` (relative) of the half at `base` with record area
-/// `area`, first making sure the scan will **stop right after it**.
+/// `area`, in an order that keeps a power cut at any point on the near side of the append (the
+/// state before it), until the header word (written last by [`append`]) commits the record.
 ///
-/// The scan ends the log at the first blank or unreadable record, and appends land exactly there.
-/// In a healthy half that spot is followed by blank cells, but not after a torn append (power
-/// loss: only a prefix landed) or a corrupted mid-log record: there, a new record SHORTER than the
-/// bad one leaves the bad one's remaining bytes right behind it, and a same-sized one lands
-/// exactly on the intact records that followed it. Either way the next scan walked on past the new
-/// record into those leftovers: a superseded value resurrected over the one just written (a
-/// TX-counter watermark rollback, i.e. CCM nonce reuse), or bytes from inside a value surfaced as a
-/// phantom key. So the tag slot just past the new record is zeroed FIRST (read-first: a 2-byte read
-/// and no write in the normal, already-blank case). Power loss between the two writes is harmless:
-/// the zeroed bytes lie beyond the log end, and a torn append is cut at its CRC as before. By
-/// induction, every completed append is followed by a scan stop. Where no header fits after the
-/// record the scan stops on its own, so there is nothing to zero.
+/// 1. **Clear the log end.** The scan ends the log at the first blank or unreadable record, and
+///    appends land exactly there. Normally that is a zero word (the terminator of step 2, or the
+///    one [`init`] writes); after a torn write or EEPROM corruption it is an unreadable record.
+///    That record's header word is zeroed first (read-first: a 4-byte read and no write in the
+///    normal case), so nothing later written into its remains can make it readable again: a
+///    torn word can hold any bytes, and one that happened to restore a corrupted record would
+///    have revived it and the stale records behind it.
+/// 2. **Terminate past the new record.** In a healthy half the log end is followed by blank cells,
+///    but not after a torn append or a corrupted mid-log record: there, a new record SHORTER than
+///    the bad one leaves the bad one's remaining bytes right behind it, and a same-sized one lands
+///    exactly on the intact records that followed it. Either way the next scan walked on past the
+///    new record into those leftovers: a superseded value resurrected over the one just written
+///    (a TX-counter watermark rollback, i.e. CCM nonce reuse), or bytes from inside a value
+///    surfaced as a phantom key. So the tag slot just past the new record is zeroed before the
+///    record is written (read-first again). It is zeroed as the **whole word** that holds it
+///    (tag + len), never as a 2-byte write: on the STM32L0 a partial program is an erase plus a
+///    program of the whole word, so a cut in it could take neighbouring bytes with it (module
+///    docs, "Whole words only"); with padded records that word lies wholly past the new record.
+///    By induction, every completed append is followed by a scan stop. Where no header fits after
+///    the record the scan stops on its own, so there is nothing to zero.
+/// 3. **The record**, header word last ([`append`]).
+///
+/// Every write here lies at or past the log end, in words that hold no committed byte, so a cut
+/// in any of them leaves every committed record intact.
 fn append_end<S: Eeprom>(
     store: &mut S,
     base: u32,
@@ -269,13 +361,10 @@ fn append_end<S: Eeprom>(
     key: u16,
     value: &[u8],
 ) -> Result<(), KvError<S::Error>> {
-    let next = free + KV_HEADER as u32 + value.len() as u32;
+    clear_word(store, base + free)?;
+    let next = free + record_size(value.len());
     if next + KV_HEADER as u32 <= area {
-        let mut tag = [0u8; 2];
-        store.read(base + next, &mut tag).map_err(KvError::Backend)?;
-        if tag != [0, 0] {
-            store.write(base + next, &[0, 0]).map_err(KvError::Backend)?;
-        }
+        clear_word(store, base + next)?;
     }
     append(store, base + free, key, value)
 }
@@ -294,7 +383,8 @@ fn blank<S: Eeprom>(store: &mut S, at: u32, len: u32) -> Result<(), KvError<S::E
 /// Read-first blanking of `[base+from, base+len)`, programming at most `budget` zero-words
 /// (already-zero words are skipped with reads only; idempotent, wear-free on re-runs).
 /// Returns the new progress offset; `len` means the span is fully blank. The workhorse of
-/// [`blank`] (unbounded) and [`blank_dead_step`]/[`flip_step`] (budgeted).
+/// [`blank`] (unbounded) and [`blank_dead_step`]/[`flip_step`] (budgeted). Every span it is given
+/// (a half, a superblock) is word-aligned and whole words long, so each program is one whole word.
 fn blank_step_span<S: Eeprom>(
     store: &mut S,
     base: u32,
@@ -334,25 +424,22 @@ fn blank_step_span<S: Eeprom>(
 /// in any other layout, is **formatted empty**: nothing in it is adopted, migrated or kept. Call
 /// once before first use (the firmware's `Kv::new` does, best-effort).
 ///
-/// The format is two writes: the tag slot at the head of half 0 is cleared, so its record scan
-/// stops at offset 0 (an empty log), then half 0's superblock is committed at generation 1. The
-/// rest of the region is left as it is (no seconds of NVM stall on the first boot): whatever
-/// sits further in half 0 can never be read as records, because every append first clears the
-/// tag slot just past the record it writes (`append_end`), so the scan always stops at the log
-/// end, and a flip blanks its destination half before writing it. Power loss before the commit
-/// leaves the region unformatted, and the next `init` formats it again; a torn commit fails its
-/// CRC the same way.
+/// The format is two writes: the word holding the tag slot at the head of half 0 is cleared, so
+/// its record scan stops at offset 0 (an empty log), then half 0's superblock is committed at
+/// generation 1. The rest of the region is left as it is (no seconds of NVM stall on the first
+/// boot): whatever sits further in half 0 can never be read as records, because every append
+/// first clears the word holding the tag slot just past the record it writes and writes its own
+/// header word last (`append_end`), so the scan always stops at the log end, even under a torn
+/// append over an old record with the same header, and a flip blanks its destination half before
+/// writing it. Power loss before the commit leaves the region unformatted, and the next `init`
+/// formats it again; a torn commit fails its CRC the same way (the magic is part of it, so an old
+/// layout's superblock under a torn one never validates).
 pub fn init<S: Eeprom>(store: &mut S, capacity: u32) -> Result<(), KvError<S::Error>> {
     if active(store, capacity)?.is_some() {
         return Ok(()); // already double-buffered
     }
     if KV_HEADER as u32 <= half_len(capacity) {
-        let at = half_base(capacity, 0);
-        let mut tag = [0u8; 2];
-        store.read(at, &mut tag).map_err(KvError::Backend)?;
-        if tag != [0, 0] {
-            store.write(at, &[0, 0]).map_err(KvError::Backend)?;
-        }
+        clear_word(store, half_base(capacity, 0))?;
     }
     write_gen(store, capacity, 0, 1)
 }
@@ -400,7 +487,7 @@ pub fn set_bytes_with<S: Eeprom>(
         }
     };
     let half = half_len(capacity);
-    let needed = KV_HEADER as u32 + value.len() as u32;
+    let needed = record_size(value.len());
 
     let base = half_base(capacity, h);
     let (free, _) = scan_half(store, base, half, key)?;
@@ -628,7 +715,7 @@ fn flip<S: Eeprom>(store: &mut S, capacity: u32, src_h: u8, src_gen: u32) -> Res
             break;
         }
         let len = u16::from_le_bytes([hdr[2], hdr[3]]);
-        let size = KV_HEADER as u32 + len as u32;
+        let size = record_size(len as usize);
         // Copy a record only if it is the latest for its tag AND not a delete tombstone
         // (`len == 0`): a tombstoned key is dropped here, reclaiming both its value and the
         // tombstone. Superseded records (older than the latest) fall through uncopied as before.
@@ -673,7 +760,7 @@ fn walk_latest<S: Eeprom>(
         }
         let len = u16::from_le_bytes([hdr[2], hdr[3]]);
         let crc = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
-        if len as usize > MAX_VALUE || o + KV_HEADER as u32 + len as u32 > area {
+        if len as usize > MAX_VALUE || o + record_size(len as usize) > area {
             break;
         }
         store
@@ -692,7 +779,7 @@ fn walk_latest<S: Eeprom>(
                 *nkeys += 1;
             }
         }
-        o += KV_HEADER as u32 + len as u32;
+        o += record_size(len as usize);
     }
     Ok(o)
 }
@@ -713,7 +800,8 @@ fn walk_latest<S: Eeprom>(
 ///
 /// Rationale: appends during an incremental flip keep landing in the *source* half, so the
 /// trigger must leave room for the writes that arrive between crossing the threshold and the
-/// commit. Two worst-case records (`2 × (KV_HEADER + MAX_VALUE)` = 528 B) cover the append that
+/// commit. Two worst-case records (`2 × (KV_HEADER + MAX_VALUE)` = 528 B; `MAX_VALUE` is whole
+/// words, so that is also the padded [`record_size`] of a maximal record) cover the append that
 /// crossed the threshold plus a maximal burst record during the drain. That is generous, given the
 /// maintenance task is woken by that very write and drains the flip in back-to-back slices,
 /// while real SDK records are 4-8 byte scalars. And the guarantee is soft by design: if a
@@ -722,13 +810,11 @@ fn walk_latest<S: Eeprom>(
 pub const FLIP_THRESHOLD: u32 = 2 * (KV_HEADER + MAX_VALUE) as u32;
 
 /// Cost of writing `len` bytes, in EEPROM word-programs: the unit of every maintenance budget
-/// (each word program stalls the STM32L0 ~3.4 ms). Exact for word-aligned spans (the blank
-/// passes). An **unaligned** span costs more: the HAL (`eeprom_write_slice`) programs its
-/// unaligned head and tail as up to **3 single-byte programs each** (each as slow as a word
-/// program), so one write call can cost up to 4 programs over this estimate, e.g. 6 bytes at
-/// `offset % 4 == 1` = 3 + 3 byte programs vs `words(6)` = 2. Record copies land at arbitrary
-/// offsets, so a copy slice that touches several records can overshoot its budget by a few
-/// programs per record (tens of ms, never seconds).
+/// (each word program stalls the STM32L0 ~3.4 ms). **Exact** for every codec write: all of them
+/// are whole words at word-aligned offsets (module docs, "Whole words only"), so the HAL
+/// (`eeprom_write_slice`) programs each as `len / 4` word programs and never splits off the
+/// single-byte head/tail programs an unaligned span costs (up to 3 each, each as slow as a word
+/// program, and each an erase of the whole word holding it).
 fn words(len: u32) -> u32 {
     len.div_ceil(4)
 }
@@ -767,7 +853,7 @@ pub fn live_bytes<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S:
         // A tombstoned key (latest len 0) leaves nothing behind after a flip; exclude it so
         // this stays an exact "packed size a flip would leave".
         if len != 0 {
-            total += KV_HEADER as u32 + len as u32;
+            total += record_size(len as usize);
         }
     }
     Ok(total)
@@ -929,7 +1015,8 @@ pub fn flip_step<S: Eeprom>(
 
     // Phase B: copy the planned records forward, packed; resumable mid-record, so one step
     // never programs more than the budget even for a MAX_VALUE record. A partially-copied
-    // record is harmless: the destination is uncommitted until `flip_commit`.
+    // record is harmless: the destination is uncommitted until `flip_commit`. Records (padded)
+    // and chunks (`budget * 4`) are whole words, so every slice is aligned word programs.
     let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
     while st.read_off < st.src_end {
         let mut hdr = [0u8; KV_HEADER];
@@ -941,7 +1028,7 @@ pub fn flip_step<S: Eeprom>(
             break; // defensive: walk_latest validated [0, src_end)
         }
         let len = u16::from_le_bytes([hdr[2], hdr[3]]);
-        let size = KV_HEADER as u32 + len as u32;
+        let size = record_size(len as usize);
         let planned = st.latest[..st.nkeys]
             .iter()
             .any(|&(t, off)| t == tag && off == st.read_off);
@@ -1011,17 +1098,18 @@ pub fn flip_commit<S: Eeprom>(
         }
         let len = u16::from_le_bytes([tmp[2], tmp[3]]);
         let crc = u32::from_le_bytes([tmp[4], tmp[5], tmp[6], tmp[7]]);
-        if len as usize > MAX_VALUE || o + KV_HEADER as u32 + len as u32 > half {
+        if len as usize > MAX_VALUE || o + record_size(len as usize) > half {
             break;
         }
-        let size = KV_HEADER as u32 + len as u32;
+        // The whole padded record is copied (value + pad), the CRC checked over the value only.
+        let size = record_size(len as usize);
         store
             .read(
                 src_base + o + KV_HEADER as u32,
                 &mut tmp[KV_HEADER..size as usize],
             )
             .map_err(KvError::Backend)?;
-        if entry_crc(&tmp[0..4], &tmp[KV_HEADER..size as usize]) != crc {
+        if entry_crc(&tmp[0..4], &tmp[KV_HEADER..KV_HEADER + len as usize]) != crc {
             break; // torn tail append: end of the clean log, drop it as scan would
         }
         if st.write_off + size > half {
@@ -1123,32 +1211,118 @@ mod tests {
 
     const CAP: u32 = 512; // small enough to force flips quickly in tests
 
-    /// RAM-backed [`Eeprom`]; `write` programs bytes verbatim (byte-addressable, like the L0 data
-    /// EEPROM). `torn_write` simulates a power-loss mid-program (only a prefix lands).
-    /// `words_written` mirrors the codec's own budget accounting (`words()` per write call), so
-    /// the maintenance tests can assert budgets and skip-if-zero wear-freedom.
+    /// How a power cut leaves the word whose program it interrupts. The STM32L0 data EEPROM
+    /// programs (and keeps ECC) per aligned 32-bit word, so either way the WHOLE word is lost,
+    /// including bytes of it the write never addressed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Tear {
+        /// The power died before the program began: the word keeps its old contents (a cut
+        /// between two programs).
+        Untouched,
+        /// The erase phase finished, the program did not: the word reads erased (all zero).
+        Erased,
+        /// Undefined contents: here the word as the program meant to leave it, with the low bit
+        /// of every byte flipped, so a tag or length in it stays plausible and only a CRC (or a
+        /// superblock magic) catches it.
+        Garbled,
+    }
+
+    /// RAM-backed [`Eeprom`] that programs like the firmware's backend (embassy-stm32
+    /// `eeprom_write_slice` over the STM32L0 data EEPROM): a write's word-aligned middle as word
+    /// programs, an unaligned head and tail as single-byte programs, each of which is an erase plus
+    /// a program of the whole aligned word holding it. Without a cut armed it simply programs the
+    /// bytes. With `cut` armed, the power dies inside the program with that index (`programs`
+    /// clock): the programs before it landed, the whole word of the torn one is erased or
+    /// garbled ([`Tear`]), and every later write fails without effect until [`Ram::revive`]
+    /// (the reboot). `torn_write` is the older, byte-granular model (only a prefix lands), kept
+    /// for the tests that hand-place a torn record.
+    ///
+    /// Bookkeeping: `words_written` mirrors the codec's own budget accounting (`words()` per
+    /// write call), so the maintenance tests can assert budgets and skip-if-zero wear-freedom;
+    /// `cycles` counts erase/write cycles per word (a program over a word that is not already
+    /// erased auto-erases it first, the endurance the firmware's `FLIP_BUDGET` is about);
+    /// `unaligned` counts write calls that were not whole words at a word-aligned offset;
+    /// `trace` is the word address of every program, in order.
     struct Ram {
         buf: Vec<u8>,
         words_written: usize,
+        programs: usize,
+        cut: Option<(usize, Tear)>,
+        dead: bool,
+        cycles: Vec<u32>,
+        unaligned: usize,
+        trace: Vec<usize>,
     }
     impl Ram {
         fn new(cap: usize) -> Self {
             Self {
                 buf: vec![0u8; cap],
                 words_written: 0,
+                programs: 0,
+                cut: None,
+                dead: false,
+                cycles: vec![0; cap.div_ceil(4)],
+                unaligned: 0,
+                trace: Vec::new(),
             }
+        }
+        /// Arm a power cut `after` programs from now.
+        fn arm(&mut self, after: usize, tear: Tear) {
+            self.cut = Some((self.programs + after, tear));
+        }
+        /// The reboot: power is back, nothing armed. What reached the cells is all that survives.
+        fn revive(&mut self) {
+            self.dead = false;
+            self.cut = None;
         }
         /// Simulate a torn write: only the first `landed` bytes of `data` are programmed.
         fn torn_write(&mut self, off: u32, data: &[u8], landed: usize) {
             let n = landed.min(data.len());
             self.buf[off as usize..off as usize + n].copy_from_slice(&data[..n]);
         }
-        /// Write a well-formed record at absolute `off` with no superblock anywhere, returning the
-        /// next offset: bytes in another layout (e.g. the old single-region log) for the format
-        /// tests, which must never be read back as records.
+        /// Write a well-formed record of the old, unpadded layout at absolute `off` with no
+        /// superblock anywhere, returning the next offset: bytes in another layout (e.g. the old
+        /// single-region log) for the format tests, which must never be read back as records.
+        /// Placed straight into the cells (it is a fixture, not a codec write).
         fn raw_put(&mut self, off: u32, key: u16, value: &[u8]) -> u32 {
-            append(self, off, key, value).unwrap();
-            off + KV_HEADER as u32 + value.len() as u32
+            let mut rec = key.to_le_bytes().to_vec();
+            rec.extend_from_slice(&(value.len() as u16).to_le_bytes());
+            let crc = entry_crc(&rec, value);
+            rec.extend_from_slice(&crc.to_le_bytes());
+            rec.extend_from_slice(value);
+            self.buf[off as usize..off as usize + rec.len()].copy_from_slice(&rec);
+            off + rec.len() as u32
+        }
+        /// One HAL program of `bytes` (a whole aligned word, or one byte) at `at`.
+        fn program(&mut self, at: usize, bytes: &[u8]) -> Result<(), ()> {
+            if self.dead {
+                return Err(());
+            }
+            let w = at & !3;
+            let n = self.programs;
+            self.programs += 1;
+            self.trace.push(w);
+            if let Some((_, tear)) = self.cut.filter(|&(c, _)| c == n) {
+                let word = &mut self.buf[w..w + 4];
+                match tear {
+                    Tear::Untouched => {}
+                    Tear::Erased => word.fill(0),
+                    Tear::Garbled => {
+                        let mut meant = [word[0], word[1], word[2], word[3]];
+                        meant[at - w..at - w + bytes.len()].copy_from_slice(bytes);
+                        for (cell, m) in word.iter_mut().zip(meant) {
+                            *cell = m ^ 0x01;
+                        }
+                    }
+                }
+                self.dead = true;
+                return Err(());
+            }
+            if self.buf[w..w + 4].iter().any(|&b| b != 0) {
+                self.cycles[w / 4] += 1;
+            }
+            self.buf[at..at + bytes.len()].copy_from_slice(bytes);
+            Ok(())
         }
     }
     impl Eeprom for Ram {
@@ -1159,10 +1333,29 @@ mod tests {
         }
         fn write(&mut self, off: u32, data: &[u8]) -> Result<(), ()> {
             let s = off as usize;
-            self.buf
-                .get_mut(s..s + data.len())
-                .ok_or(())?
-                .copy_from_slice(data);
+            if s + data.len() > self.buf.len() {
+                return Err(());
+            }
+            if !s.is_multiple_of(4) || !data.len().is_multiple_of(4) {
+                self.unaligned += 1;
+            }
+            // The embassy-stm32 `eeprom_write_slice` split: byte programs up to the first word
+            // boundary, word programs, byte programs for the tail.
+            let head = if s.is_multiple_of(4) {
+                0
+            } else {
+                (4 - s % 4).min(data.len())
+            };
+            let body = (data.len() - head) / 4 * 4;
+            for i in 0..head {
+                self.program(s + i, &data[i..i + 1])?;
+            }
+            for k in (head..head + body).step_by(4) {
+                self.program(s + k, &data[k..k + 4])?;
+            }
+            for i in head + body..data.len() {
+                self.program(s + i, &data[i..i + 1])?;
+            }
             self.words_written += data.len().div_ceil(4);
             Ok(())
         }
@@ -1319,12 +1512,16 @@ mod tests {
 
     /// A region holding valid-looking records but no superblock (the old single-region layout).
     fn foreign_region() -> Ram {
-        let mut ram = Ram::new(CAP as usize);
+        foreign_region_at(CAP)
+    }
+
+    fn foreign_region_at(cap: u32) -> Ram {
+        let mut ram = Ram::new(cap as usize);
         let mut o = 0u32;
         o = ram.raw_put(o, 0x5201, &7u32.to_le_bytes()); // e.g. an old TX-counter watermark
         o = ram.raw_put(o, 0x5202, &3u32.to_le_bytes());
         let mut n = 0u32;
-        while o + (KV_HEADER as u32 + 4) <= CAP - 2 * SUPER_LEN {
+        while o + (KV_HEADER as u32 + 4) <= cap - 2 * SUPER_LEN {
             n += 1;
             o = ram.raw_put(o, 0x5300, &n.to_le_bytes()); // through both halves
         }
@@ -1391,9 +1588,9 @@ mod tests {
                 // Replay init's writes by hand, tearing the `cut`-th one.
                 let head = half_base(CAP, 0);
                 if cut == 0 {
-                    ram.torn_write(head, &[0, 0], landed.min(1));
+                    ram.torn_write(head, &[0; 4], landed.min(3));
                 } else {
-                    ram.buf[head as usize..head as usize + 2].copy_from_slice(&[0, 0]);
+                    ram.buf[head as usize..head as usize + 4].copy_from_slice(&[0; 4]);
                     let mut sb = [0u8; SUPER_LEN as usize];
                     sb[0..4].copy_from_slice(&SUPER_MAGIC);
                     sb[4..8].copy_from_slice(&1u32.to_le_bytes());
@@ -1645,22 +1842,22 @@ mod tests {
         let mut ram = build();
         let (_, g0) = active(&ram, CAP).unwrap().unwrap();
         let mut pending = flip_start(&ram, CAP).unwrap(); // plan: key 1 (100 B)
-        set_bytes_with(&mut ram, CAP, 2, &[2u8; 14], &mut pending).unwrap(); // tail: 22 B
-        set_bytes_with(&mut ram, CAP, 2, &[3u8; 14], &mut pending).unwrap(); // tail: 44 B, full
-        // Live is 100 + 22 = 122 B, so a 108-byte record fits one fresh flip (230 <= 244), while
-        // the finished flip alone holds plan + tail = 144 B (only 100 B free).
+        set_bytes_with(&mut ram, CAP, 2, &[2u8; 12], &mut pending).unwrap(); // tail: 20 B
+        set_bytes_with(&mut ram, CAP, 2, &[3u8; 12], &mut pending).unwrap(); // tail: 40 B, full
+        // Live is 100 + 20 = 120 B, so a 108-byte record fits one fresh flip (228 <= 244), while
+        // the finished flip alone holds plan + tail = 140 B (only 104 B free).
         set_bytes_with(&mut ram, CAP, 3, &[4u8; 100], &mut pending).unwrap();
         assert!(pending.is_none());
         assert_eq!(get_vec(&ram, 1).unwrap(), [1u8; 92]);
-        assert_eq!(get_vec(&ram, 2).unwrap(), [3u8; 14]);
+        assert_eq!(get_vec(&ram, 2).unwrap(), [3u8; 12]);
         assert_eq!(get_vec(&ram, 3).unwrap(), [4u8; 100]);
         let (_, g1) = active(&ram, CAP).unwrap().unwrap();
         assert_eq!(g1, g0 + 2, "the finished flip plus exactly one re-flip");
 
         // Plain set_bytes on the same history agrees (one flip).
         let mut ram = build();
-        set(&mut ram, 2, &[2u8; 14]).unwrap();
-        set(&mut ram, 2, &[3u8; 14]).unwrap();
+        set(&mut ram, 2, &[2u8; 12]).unwrap();
+        set(&mut ram, 2, &[3u8; 12]).unwrap();
         set(&mut ram, 3, &[4u8; 100]).unwrap();
         assert_eq!(get_vec(&ram, 3).unwrap(), [4u8; 100]);
     }
@@ -1672,16 +1869,26 @@ mod tests {
         let half = half_len(CAP);
         assert_eq!(free_bytes(&ram, CAP).unwrap(), half);
         assert_eq!(live_bytes(&ram, CAP).unwrap(), 0);
-        // Each record is KV_HEADER + len; live counts only the latest per key.
+        // Each record is KV_HEADER + len rounded up to whole words; live counts only the latest
+        // per key.
         set(&mut ram, 1, &[1, 2, 3, 4]).unwrap(); // 12 B
         assert_eq!(free_bytes(&ram, CAP).unwrap(), half - 12);
         assert_eq!(live_bytes(&ram, CAP).unwrap(), 12);
         set(&mut ram, 1, &[5, 6, 7, 8]).unwrap(); // supersedes: used 24, live still 12
         assert_eq!(free_bytes(&ram, CAP).unwrap(), half - 24);
         assert_eq!(live_bytes(&ram, CAP).unwrap(), 12);
-        set(&mut ram, 2, &[9u8; 6]).unwrap(); // 14 B
-        assert_eq!(free_bytes(&ram, CAP).unwrap(), half - 38);
-        assert_eq!(live_bytes(&ram, CAP).unwrap(), 26);
+        set(&mut ram, 2, &[9u8; 6]).unwrap(); // 8 + 6 + 2 pad = 16 B
+        assert_eq!(free_bytes(&ram, CAP).unwrap(), half - 40);
+        assert_eq!(live_bytes(&ram, CAP).unwrap(), 28);
+        set(&mut ram, 3, &[9u8; 1]).unwrap(); // 8 + 1 + 3 pad = 12 B
+        assert_eq!(free_bytes(&ram, CAP).unwrap(), half - 52);
+        assert_eq!(live_bytes(&ram, CAP).unwrap(), 40);
+        assert_eq!(
+            get_vec(&ram, 2).unwrap(),
+            [9u8; 6],
+            "the pad is not part of the value"
+        );
+        assert_eq!(get_vec(&ram, 3).unwrap(), [9u8; 1]);
         assert!(dead_half_blank(&ram, CAP).unwrap());
     }
 
@@ -2030,6 +2237,776 @@ mod tests {
                 }
             }
             assert!(saw_old && saw_empty, "the sweep must cover both outcomes");
+        }
+    }
+
+    // --- whole words: the word-granular tear model ---------------------------------------------
+    //
+    // The STM32L0 data EEPROM programs and ECC-protects per aligned 32-bit word, and the firmware's
+    // backend splits an unaligned write into byte programs, each an erase + program of its whole
+    // word ([`Ram`]). With the unpadded `TKV1` layout an append's first byte programs rewrote the
+    // word holding the previous record's tail, so a cut there corrupted a COMMITTED record. These
+    // tests cut power inside every single program of the real code paths and require that the
+    // codec only ever programs whole aligned words, and that no cut reaches committed data.
+
+    const TEARS: [Tear; 3] = [Tear::Untouched, Tear::Erased, Tear::Garbled];
+
+    /// The provisioning record of the radio apps (`NS_APP`), postcard-encoded: odd lengths.
+    const PROV: u16 = 0x6001;
+    /// The radio TX-counter watermark (`NS_NET`): a u32, the CCM nonce's anti-reuse guarantee.
+    const WM: u16 = 0x5200;
+    /// The per-boot session counter (`NS_SYS`): one small append per boot.
+    const SESSION: u16 = 0x5300;
+    const CAP6K: u32 = 6144;
+
+    fn get_at(ram: &Ram, cap: u32, key: u16) -> Option<Vec<u8>> {
+        let mut out = [0u8; MAX_VALUE];
+        get_bytes(ram, cap, key, &mut out)
+            .unwrap()
+            .map(|n| out[..n].to_vec())
+    }
+
+    #[test]
+    fn layout_is_whole_words_for_any_capacity() {
+        for cap in [64u32, 512, 513, 514, 515, 1000, 1002, 6143, 6144, 6146] {
+            let half = half_len(cap);
+            assert_eq!(half % WORD, 0, "cap {cap}: half length");
+            for h in 0..2 {
+                assert_eq!(half_base(cap, h) % WORD, 0, "cap {cap}: half {h} base");
+                assert_eq!(super_off(cap, h) % WORD, 0, "cap {cap}: superblock {h}");
+            }
+            assert!(
+                2 * half <= super_off(cap, 0),
+                "cap {cap}: halves overlap a superblock"
+            );
+            assert!(
+                super_off(cap, 1) + SUPER_LEN <= cap,
+                "cap {cap}: superblock past the top"
+            );
+        }
+        for len in 0..=MAX_VALUE {
+            assert_eq!(record_size(len) % WORD, 0);
+            assert!(record_size(len) as usize - KV_HEADER - len < WORD as usize);
+        }
+        assert_eq!(record_size(MAX_VALUE), (KV_HEADER + MAX_VALUE) as u32);
+    }
+
+    /// Every write the codec issues, over every path (all value lengths, tombstones, in-line and
+    /// incremental flips with appends during them, maintenance, compaction, wipe, the format of a
+    /// foreign region), is whole words at a word-aligned offset: the HAL never byte-programs.
+    #[test]
+    fn every_codec_write_is_whole_aligned_words() {
+        for cap in [CAP, CAP6K] {
+            let mut ram = foreign_region_at(cap);
+            init(&mut ram, cap).unwrap();
+            let mut m = MaintState::new();
+            // Five keys of up to `max` bytes always fit a half (the 512 B one: 24 B values).
+            let max = if cap == CAP { 24 } else { MAX_VALUE };
+            for len in 0..=max {
+                let key = 1 + (len % 5) as u16;
+                set_bytes_with(&mut ram, cap, key, &vec![len as u8 | 1; len], m.pending()).unwrap();
+                if len % 7 == 0 {
+                    delete_with(&mut ram, cap, key, m.pending()).unwrap();
+                }
+                if len % 3 == 0 {
+                    maintain(&mut ram, cap, &mut m, 3, 64).unwrap();
+                }
+                if len % 50 == 0 {
+                    compact_with(&mut ram, cap, m.pending()).unwrap();
+                }
+            }
+            while maintain(&mut ram, cap, &mut m, 5, 64).unwrap() {}
+            wipe(&mut ram, cap).unwrap();
+            set_bytes(&mut ram, cap, 1, b"after").unwrap();
+            assert!(
+                generation(&ram, cap).unwrap() > 3,
+                "the workload must have flipped"
+            );
+            assert_eq!(
+                ram.unaligned, 0,
+                "cap {cap}: a codec write was not whole aligned words"
+            );
+        }
+    }
+
+    /// The finding, as the review reproduced it (the 6 KiB firmware region): boot N committed the
+    /// TX watermark 2049 after a 23-byte provisioning record; on boot N+1 the session-counter
+    /// append is cut in its very first program. In the unpadded layout that program rewrote the
+    /// word holding the watermark's last byte, the watermark failed its CRC and the store read the
+    /// superseded 1025 back: the next boot resumed below counters already sent (CCM nonce reuse).
+    #[test]
+    fn word_tear_never_rolls_back_the_tx_watermark() {
+        for tear in TEARS {
+            let mut ram = Ram::new(CAP6K as usize);
+            init(&mut ram, CAP6K).unwrap();
+            set_bytes(&mut ram, CAP6K, PROV, &[0x5A; 15]).unwrap();
+            set_bytes(&mut ram, CAP6K, WM, &1025u32.to_le_bytes()).unwrap(); // boot N-1
+            set_bytes(&mut ram, CAP6K, WM, &2049u32.to_le_bytes()).unwrap(); // boot N
+            ram.arm(0, tear); // boot N+1: the session append dies in its first program
+            assert!(set_bytes(&mut ram, CAP6K, SESSION, &7u32.to_le_bytes()).is_err());
+            ram.revive();
+            init(&mut ram, CAP6K).unwrap();
+            assert_eq!(
+                get_at(&ram, CAP6K, WM).unwrap(),
+                2049u32.to_le_bytes(),
+                "a torn append of ANOTHER key rolled the committed TX watermark back ({tear:?})"
+            );
+            assert_eq!(get_at(&ram, CAP6K, PROV).unwrap(), [0x5A; 15]);
+        }
+    }
+
+    /// The other face of the finding: a flip packs the live set back to back, so the first append
+    /// after it shared a word with the last packed record, and a cut there lost that key outright
+    /// (here the pairing/provisioning record).
+    #[test]
+    fn word_tear_after_flip_never_loses_an_unrelated_key() {
+        for tear in TEARS {
+            let mut ram = Ram::new(CAP6K as usize);
+            init(&mut ram, CAP6K).unwrap();
+            set_bytes(&mut ram, CAP6K, WM, &5121u32.to_le_bytes()).unwrap();
+            set_bytes(&mut ram, CAP6K, PROV, &[0x5A; 14]).unwrap();
+            compact(&mut ram, CAP6K).unwrap();
+            ram.arm(0, tear);
+            assert!(set_bytes(&mut ram, CAP6K, SESSION, &1u32.to_le_bytes()).is_err());
+            ram.revive();
+            init(&mut ram, CAP6K).unwrap();
+            assert_eq!(
+                get_at(&ram, CAP6K, PROV),
+                Some(vec![0x5A; 14]),
+                "pairing record lost"
+            );
+            assert_eq!(get_at(&ram, CAP6K, WM).unwrap(), 5121u32.to_le_bytes());
+        }
+    }
+
+    /// A cut anywhere in the append of key B never changes key A, whatever offset A's record
+    /// ended at in the unpadded layout: A (the TX watermark, an older value of it earlier in the
+    /// log) follows a provisioning record of 12 to 15 bytes and is itself 1 to 8 bytes long, so
+    /// its record ended at every offset mod 4. B's append is cut at each of its programs (the
+    /// log-end terminator, then the record) with the word erased or garbled.
+    #[test]
+    fn torn_append_never_changes_an_earlier_key() {
+        let mut cuts = 0;
+        for plen in 12..=15usize {
+            for alen in 1..=8usize {
+                let build = || {
+                    let mut ram = Ram::new(CAP as usize);
+                    init(&mut ram, CAP).unwrap();
+                    set(&mut ram, PROV, &vec![0x5A; plen]).unwrap();
+                    set(&mut ram, WM, &vec![0x11; alen]).unwrap(); // the superseded watermark
+                    set(&mut ram, WM, &vec![0x22; alen]).unwrap(); // the committed one
+                    ram
+                };
+                let mut probe = build();
+                let p0 = probe.programs;
+                set(&mut probe, SESSION, &7u32.to_le_bytes()).unwrap();
+                let programs = probe.programs - p0;
+                assert!(programs >= 3, "B's record is three words");
+                for cut in 0..programs {
+                    for tear in TEARS {
+                        let what = format!("P {plen} B, A {alen} B, cut {cut} ({tear:?})");
+                        let mut ram = build();
+                        ram.arm(cut, tear);
+                        assert!(set(&mut ram, SESSION, &7u32.to_le_bytes()).is_err(), "{what}");
+                        ram.revive();
+                        init(&mut ram, CAP).unwrap();
+                        assert_eq!(get_vec(&ram, WM), Some(vec![0x22; alen]), "{what}: A changed");
+                        assert_eq!(get_vec(&ram, PROV), Some(vec![0x5A; plen]), "{what}: P changed");
+                        let b = get_vec(&ram, SESSION);
+                        assert!(b.is_none() || b == Some(7u32.to_le_bytes().to_vec()), "{what}: B");
+                        // Life goes on: the retried append lands, and still changes nothing else.
+                        set(&mut ram, SESSION, &8u32.to_le_bytes()).unwrap();
+                        assert_eq!(get_vec(&ram, SESSION).unwrap(), 8u32.to_le_bytes(), "{what}");
+                        assert_eq!(get_vec(&ram, WM), Some(vec![0x22; alen]), "{what}: A changed");
+                        assert_eq!(get_vec(&ram, PROV), Some(vec![0x5A; plen]), "{what}: P changed");
+                        cuts += 1;
+                    }
+                }
+            }
+        }
+        assert!(cuts >= 4 * 8 * 3 * 2);
+    }
+
+    // --- the exhaustive cut sweep ----------------------------------------------------------------
+
+    type View = std::collections::BTreeMap<u16, Vec<u8>>;
+
+    /// One operation of a sweep scenario, over the real public API.
+    #[derive(Clone, Debug)]
+    enum Step {
+        Set(u16, Vec<u8>),
+        SetWith(u16, Vec<u8>),
+        Delete(u16),
+        DeleteWith(u16),
+        /// Begin an incremental flip in the shared [`MaintState`] slot.
+        FlipStart,
+        /// One [`flip_step`] slice of the pending flip (none pending, or stale: dropped, no-op).
+        FlipSlice(u32),
+        /// [`flip_commit`] the pending flip (none pending, or stale: no-op).
+        FlipCommit,
+        Compact,
+        CompactWith,
+        /// One [`maintain`] slice.
+        Maintain {
+            budget: u32,
+            threshold: u32,
+        },
+        Wipe,
+        Init,
+    }
+
+    impl Step {
+        /// The content after the step completes, from the content before it.
+        fn effect(&self, before: &View) -> View {
+            let mut v = before.clone();
+            match self {
+                Step::Set(k, val) | Step::SetWith(k, val) if !val.is_empty() => {
+                    v.insert(*k, val.clone());
+                }
+                Step::Set(k, _) | Step::SetWith(k, _) | Step::Delete(k) | Step::DeleteWith(k) => {
+                    v.remove(k);
+                }
+                Step::Wipe => v.clear(),
+                _ => {}
+            }
+            v
+        }
+
+        fn run(&self, ram: &mut Ram, cap: u32, m: &mut MaintState) -> Result<(), KvError<()>> {
+            match self {
+                Step::Set(k, v) => set_bytes(ram, cap, *k, v),
+                Step::SetWith(k, v) => set_bytes_with(ram, cap, *k, v, m.pending()),
+                Step::Delete(k) => delete(ram, cap, *k),
+                Step::DeleteWith(k) => delete_with(ram, cap, *k, m.pending()),
+                Step::FlipStart => {
+                    m.flip = flip_start(ram, cap)?;
+                    Ok(())
+                }
+                Step::FlipSlice(budget) => match m.flip.as_mut().map(|st| flip_step(ram, cap, st, *budget)) {
+                    Some(Err(KvError::Stale)) => {
+                        m.flip = None;
+                        Ok(())
+                    }
+                    Some(r) => r.map(|_| ()),
+                    None => Ok(()),
+                },
+                Step::FlipCommit => match m.flip.take().map(|mut st| flip_commit(ram, cap, &mut st)) {
+                    Some(Err(KvError::Stale)) | None => Ok(()),
+                    Some(r) => r,
+                },
+                Step::Compact => compact(ram, cap),
+                Step::CompactWith => compact_with(ram, cap, m.pending()),
+                Step::Maintain { budget, threshold } => {
+                    maintain(ram, cap, m, *budget, *threshold).map(|_| ())
+                }
+                Step::Wipe => wipe(ram, cap),
+                Step::Init => init(ram, cap),
+            }
+        }
+    }
+
+    /// Run `step` after a reboot, where the content may differ from the scenario's clean run (a
+    /// cut left the state before an earlier step): it must succeed, or, for a write, fail `Full`
+    /// with nothing changed when the live set plus its record really does not fit a half.
+    /// Returns the content it must leave (the caller checks it).
+    fn run_after(
+        step: &Step,
+        ram: &mut Ram,
+        cap: u32,
+        m: &mut MaintState,
+        watch: &[u16],
+        model: View,
+        what: &str,
+    ) -> View {
+        let needed = match step {
+            Step::Set(_, v) | Step::SetWith(_, v) => record_size(v.len()),
+            _ => KV_HEADER as u32,
+        };
+        match step.run(ram, cap, m) {
+            Ok(()) => step.effect(&model),
+            Err(KvError::Full) => {
+                let live: u32 = model.values().map(|v| record_size(v.len())).sum();
+                assert!(
+                    live + needed > half_len(cap),
+                    "{what}: {step:?} Full, but it fits"
+                );
+                assert_holds(ram, cap, watch, &model, || format!("{what}: {step:?} refused"));
+                model
+            }
+            Err(e) => panic!("{what}: {step:?} failed: {e:?}"),
+        }
+    }
+
+    fn view_of(ram: &Ram, cap: u32, watch: &[u16]) -> View {
+        watch
+            .iter()
+            .filter_map(|&k| get_at(ram, cap, k).map(|v| (k, v)))
+            .collect()
+    }
+
+    /// The content reads exactly `model`: every watched key, and (through `live_bytes`, which
+    /// sums the live set of EVERY tag) no phantom key outside the watch list either. `what` names
+    /// the check (built only on a failure: the sweeps run this hundreds of thousands of times).
+    fn assert_holds(ram: &Ram, cap: u32, watch: &[u16], model: &View, what: impl Fn() -> String) {
+        let got = view_of(ram, cap, watch);
+        assert!(&got == model, "{}:\n got  {got:?}\n want {model:?}", what());
+        let live: u32 = model.values().map(|v| record_size(v.len())).sum();
+        let read = live_bytes(ram, cap).unwrap();
+        assert!(
+            read == live,
+            "{}: {read} B live, want {live} B (a phantom key)",
+            what()
+        );
+    }
+
+    /// What one sweep covered.
+    #[derive(Debug, Default)]
+    struct Swept {
+        /// Cut points (program index x tear mode).
+        cuts: usize,
+        /// Cuts that left the state before the interrupted step / after it (a step that changes
+        /// no content counts as neither). An append's record is its last write, so a cut inside
+        /// it always leaves the state before; "after" needs writes past the commit (a wipe's
+        /// scrub).
+        before: usize,
+        after: usize,
+        /// The scenario's programs on a clean run, and the flips it committed.
+        programs: usize,
+        flips: u32,
+    }
+
+    /// Cut the power inside EVERY program the scenario `steps` makes (from the store `setup`
+    /// builds), with the word erased and garbled, then reboot (`init`, RAM state lost) and check:
+    /// the content is exactly the one before the interrupted step or the one after it (every key
+    /// at once: no unrelated key changes, nothing resurfaces, no phantom), `init` keeps it, and
+    /// life goes on: the rest of the scenario and then a churn of `CHURN` through several more
+    /// flips each have exactly their effect. Also checks the scenario's clean run and that every
+    /// codec write was whole aligned words.
+    fn sweep(cap: u32, setup: &dyn Fn() -> Ram, steps: &[Step], watch: &[u16]) -> Swept {
+        const CHURN: u16 = 0x7E;
+        let mut watch = watch.to_vec();
+        watch.push(CHURN);
+        let watch = &watch[..];
+        let start = view_of(&setup(), cap, watch);
+
+        // Clean run: the expected content before each step, the program count, the flips.
+        let mut ram = setup();
+        let (p0, g0) = (ram.programs, generation(&ram, cap).unwrap());
+        let mut m = MaintState::new();
+        let mut model = start.clone();
+        for s in steps {
+            s.run(&mut ram, cap, &mut m)
+                .unwrap_or_else(|e| panic!("{s:?} failed on a clean run: {e:?}"));
+            model = s.effect(&model);
+            assert_holds(&ram, cap, watch, &model, || format!("{s:?} on a clean run"));
+        }
+        assert_eq!(ram.unaligned, 0, "a codec write was not whole aligned words");
+        let mut swept = Swept {
+            programs: ram.programs - p0,
+            flips: generation(&ram, cap).unwrap().wrapping_sub(g0),
+            ..Swept::default()
+        };
+
+        for cut in 0..swept.programs {
+            for tear in TEARS {
+                let mut ram = setup();
+                ram.arm(cut, tear);
+                let mut m = MaintState::new();
+                let mut model = start.clone();
+                let mut i = 0;
+                let done = loop {
+                    let s = &steps[i];
+                    let done = s.effect(&model);
+                    let r = s.run(&mut ram, cap, &mut m);
+                    if ram.dead {
+                        assert_eq!(r, Err(KvError::Backend(())), "a lost write must surface");
+                        break done;
+                    }
+                    r.unwrap_or_else(|e| panic!("{s:?} failed before the cut: {e:?}"));
+                    model = done;
+                    i += 1;
+                };
+                let what = format!("cut at program {cut} ({tear:?}) in step {i} {:?}", steps[i]);
+
+                // The reboot: only what reached the cells survives.
+                ram.revive();
+                let got = view_of(&ram, cap, watch);
+                assert!(
+                    got == model || got == done,
+                    "{what}: neither the state before nor after it\n before {model:?}\n after  \
+                     {done:?}\n got    {got:?}"
+                );
+                if model != done {
+                    if got == model {
+                        swept.before += 1;
+                    } else {
+                        swept.after += 1;
+                    }
+                }
+                init(&mut ram, cap).unwrap();
+                assert_holds(&ram, cap, watch, &got, || {
+                    format!("{what}: init after the reboot")
+                });
+
+                // Life goes on: the rest of the scenario, then a churn through several flips.
+                let mut model = got;
+                let mut m = MaintState::new();
+                for s in &steps[i + 1..] {
+                    model = run_after(s, &mut ram, cap, &mut m, watch, model, &what);
+                    assert_holds(&ram, cap, watch, &model, || format!("{what}: later {s:?}"));
+                }
+                let g = generation(&ram, cap).unwrap();
+                for j in 0..48u16 {
+                    let v: Vec<u8> = (0..1 + j % 9).map(|b| (j as u8) ^ (b as u8) | 0x80).collect();
+                    model = run_after(
+                        &Step::SetWith(CHURN, v),
+                        &mut ram,
+                        cap,
+                        &mut m,
+                        watch,
+                        model,
+                        &what,
+                    );
+                    if j % 4 == 3 {
+                        assert_holds(&ram, cap, watch, &model, || format!("{what}: churn {j}"));
+                        maintain(&mut ram, cap, &mut m, 4, 64).unwrap();
+                    }
+                }
+                assert!(generation(&ram, cap).unwrap() > g, "{what}: the churn must flip");
+                assert_holds(&ram, cap, watch, &model, || format!("{what}: after the churn"));
+                swept.cuts += 1;
+            }
+        }
+        println!("{swept:?}");
+        swept
+    }
+
+    /// A value of `len` bytes, distinct per `seed`, never all zero.
+    fn val(seed: usize, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|j| (seed as u8).wrapping_mul(31).wrapping_add(j as u8) | 0x40)
+            .collect()
+    }
+
+    fn blank_store() -> Ram {
+        let mut ram = Ram::new(CAP as usize);
+        init(&mut ram, CAP).unwrap();
+        ram
+    }
+
+    /// `set_bytes` (appends of every length mod 4, and appends that fill the half and flip in
+    /// line), `delete` and `delete_with` (tombstones, one of which fills the half and flips).
+    #[test]
+    fn word_tear_sweep_set_and_delete() {
+        let lens = [15, 4, 4, 7, 13, 1, 2, 3, 9, 6, 5, 11];
+        let mut steps = Vec::new();
+        for i in 0..30 {
+            let k = 1 + (i % 5) as u16;
+            match i % 7 {
+                5 => steps.push(Step::Delete(k)),
+                6 => steps.push(Step::DeleteWith(k)),
+                _ => steps.push(Step::Set(k, val(i, lens[i % lens.len()]))),
+            }
+        }
+        // Then fill the half to within a tombstone of full with two values of key 6 (the first
+        // superseded, so the flip frees room), and delete it: the tombstone has to flip to land.
+        steps.push(Step::Compact);
+        let mut probe = blank_store();
+        let mut m = MaintState::new();
+        for st in &steps {
+            st.run(&mut probe, CAP, &mut m).unwrap();
+        }
+        let live = live_bytes(&probe, CAP).unwrap();
+        let rec = (half_len(CAP) - live) / 2 / WORD * WORD; // live + 2 rec within 4 B of full
+        let n = rec as usize - KV_HEADER - 3; // an odd length, padded to `rec`
+        assert_eq!(record_size(n), rec);
+        steps.push(Step::Set(6, val(90, n)));
+        steps.push(Step::Set(6, val(91, n)));
+        steps.push(Step::Delete(6));
+        let s = sweep(CAP, &blank_store, &steps, &[1, 2, 3, 4, 5, 6]);
+        assert!(s.flips >= 4, "{s:?}");
+        assert!(s.before > 0, "{s:?}");
+        // The last step really is a delete that flips: on a clean run it commits one.
+        let mut ram = blank_store();
+        let mut m = MaintState::new();
+        for st in &steps[..steps.len() - 1] {
+            st.run(&mut ram, CAP, &mut m).unwrap();
+        }
+        let g = generation(&ram, CAP).unwrap();
+        delete(&mut ram, CAP, 6).unwrap();
+        assert_eq!(
+            generation(&ram, CAP).unwrap(),
+            g + 1,
+            "the tombstone must flip to land"
+        );
+    }
+
+    /// The incremental flip by hand: `flip_start` / `flip_step` slices with `set_bytes_with`,
+    /// `delete_with` and a plain `set_bytes` landing in the source tail meanwhile, `flip_commit`
+    /// (tail catch-up + commit), a source that fills mid-flip (`set_bytes_with` finishes the
+    /// pending flip, then has to re-flip it), `compact_with` on a pending flip, and `compact`.
+    #[test]
+    fn word_tear_sweep_incremental_flip() {
+        let setup = || {
+            let mut ram = blank_store();
+            set(&mut ram, 1, &[0u8; 92]).unwrap();
+            set(&mut ram, 1, &[1u8; 92]).unwrap(); // 200 of 244 B used, 100 B live
+            ram
+        };
+        let steps = vec![
+            // The `set_with_pending_flip_never_fails_where_plain_set_fits` path: finish + re-flip.
+            Step::FlipStart,
+            Step::SetWith(2, val(1, 12)),
+            Step::SetWith(2, val(2, 12)),
+            Step::SetWith(3, val(3, 100)),
+            Step::Delete(3),
+            Step::Compact,
+            // Slices with appends of every kind in the source tail meanwhile, then the commit.
+            Step::Set(4, val(4, 7)),
+            Step::FlipStart,
+            Step::FlipSlice(1),
+            Step::FlipSlice(2),
+            Step::SetWith(4, val(5, 5)),
+            Step::FlipSlice(3),
+            Step::DeleteWith(2),
+            Step::Set(5, val(6, 13)),
+            Step::FlipSlice(u32::MAX),
+            Step::SetWith(5, val(7, 2)),
+            Step::FlipCommit,
+            // A source that fills while a flip is pending: the write finishes it.
+            Step::FlipStart,
+            Step::FlipSlice(2),
+            Step::SetWith(1, val(8, 90)),
+            Step::SetWith(2, val(9, 9)),
+            // compact_with on a pending flip finishes that flip.
+            Step::FlipStart,
+            Step::FlipSlice(4),
+            Step::CompactWith,
+            Step::Delete(4),
+            Step::Compact,
+        ];
+        let s = sweep(CAP, &setup, &steps, &[1, 2, 3, 4, 5]);
+        assert!(s.flips >= 6, "{s:?}");
+        assert!(s.before > 0, "{s:?}");
+    }
+
+    /// `maintain` as the firmware drives it (between writes, a few word programs per slice): the
+    /// proactive incremental flip below the threshold, its commit slice, and pre-blanking.
+    #[test]
+    fn word_tear_sweep_maintain() {
+        let mut steps = Vec::new();
+        for i in 0..26 {
+            steps.push(Step::SetWith(1 + (i % 4) as u16, val(i, [5, 15, 4, 10][i % 4])));
+            for _ in 0..4 {
+                steps.push(Step::Maintain {
+                    budget: 4,
+                    threshold: 64,
+                });
+            }
+        }
+        let s = sweep(CAP, &blank_store, &steps, &[1, 2, 3, 4]);
+        assert!(s.flips >= 2, "{s:?}");
+        assert!(s.before > 0, "{s:?}");
+    }
+
+    /// `wipe` over a dirty dead half and over a pre-blanked one, then writes after it: all or
+    /// nothing at every cut.
+    #[test]
+    fn word_tear_sweep_wipe() {
+        let steps = vec![
+            Step::Wipe,
+            Step::Set(1, val(1, 3)),
+            Step::Set(2, val(2, 14)),
+            Step::Compact,
+            Step::Set(3, val(3, 5)),
+            Step::Maintain {
+                budget: 200,
+                threshold: 0,
+            },
+            Step::Wipe,
+            Step::Set(4, val(4, 1)),
+        ];
+        let s = sweep(CAP, &flip_fixture, &steps, &[1, 2, 3, 4]);
+        assert!(s.before > 0 && s.after > 0, "{s:?}");
+    }
+
+    /// `init` (the format) over a blank part, a foreign region and an old-layout `TKV1` store,
+    /// then the first writes: a cut anywhere leaves it unformatted or formatted empty, and the
+    /// old bytes never surface as keys (`assert_holds` also counts every live tag).
+    #[test]
+    fn word_tear_sweep_init() {
+        let steps = vec![
+            Step::Init,
+            Step::Set(1, val(1, 3)),
+            Step::Set(0x5201, val(2, 4)),
+            Step::Set(2, val(3, 9)),
+        ];
+        let watch = [1, 2, 0x5201, 0x5202, 0x5300];
+        let setups: [&dyn Fn() -> Ram; 3] = [&|| Ram::new(CAP as usize), &|| foreign_region_at(CAP), &|| {
+            tkv1_store(CAP)
+        }];
+        for setup in setups {
+            assert!(
+                active(&setup(), CAP).unwrap().is_none(),
+                "the setup must be unformatted"
+            );
+            let s = sweep(CAP, setup, &steps, &watch);
+            assert!(s.cuts > 0 && s.before > 0, "{s:?}");
+        }
+    }
+
+    /// A store in the unpadded `TKV1` layout (valid magic and CRC of its own): another layout, so
+    /// `init` formats it empty instead of misreading its unpadded records.
+    fn tkv1_store(cap: u32) -> Ram {
+        let mut ram = foreign_region_at(cap);
+        let mut sb = [0u8; SUPER_LEN as usize];
+        sb[0..4].copy_from_slice(b"TKV1");
+        sb[4..8].copy_from_slice(&5u32.to_le_bytes());
+        let crc = super_crc(&sb[0..8]);
+        sb[8..12].copy_from_slice(&crc.to_le_bytes());
+        let at = super_off(cap, 0) as usize;
+        ram.buf[at..at + SUPER_LEN as usize].copy_from_slice(&sb);
+        ram
+    }
+
+    /// The first append after a format lands where the old layout's first record still sits. If
+    /// it has the same tag and length (the same key written first again, e.g. after a firmware
+    /// update over a `TKV1` store), a cut right after the header word lands leaves the old CRC and
+    /// value behind it: the old record would read back, a value the formatted store never held.
+    /// The header word is therefore written last.
+    #[test]
+    fn torn_first_append_never_adopts_an_old_record() {
+        for old in [foreign_region_at(CAP), tkv1_store(CAP)] {
+            let build = || {
+                let mut ram = Ram::new(CAP as usize);
+                ram.buf.copy_from_slice(&old.buf);
+                init(&mut ram, CAP).unwrap();
+                ram
+            };
+            let mut probe = build();
+            let p0 = probe.programs;
+            set(&mut probe, 0x5201, &9u32.to_le_bytes()).unwrap(); // the old record: 7u32
+            for cut in 0..probe.programs - p0 {
+                for tear in TEARS {
+                    let mut ram = build();
+                    ram.arm(cut, tear);
+                    assert!(set(&mut ram, 0x5201, &9u32.to_le_bytes()).is_err());
+                    ram.revive();
+                    init(&mut ram, CAP).unwrap();
+                    let got = get_vec(&ram, 0x5201);
+                    assert!(
+                        got.is_none() || got == Some(9u32.to_le_bytes().to_vec()),
+                        "cut {cut} ({tear:?}): the old record read back: {got:?}"
+                    );
+                    assert_eq!(
+                        live_bytes(&ram, CAP).unwrap(),
+                        got.map_or(0, |v| record_size(v.len()))
+                    );
+                }
+            }
+        }
+    }
+
+    /// Found by the `kv_store` fuzz target once it tore whole words: a bit flip ends the log at
+    /// record A (its CRC fails) with record B intact past it. The next append's terminator lands
+    /// inside A, and a torn word there can hold any bytes, A's original ones included: that
+    /// revived A, and B with it, values the store no longer held. The log end's header word is
+    /// therefore cleared before anything is written into the record it begins.
+    #[test]
+    fn torn_word_in_a_corrupt_log_end_never_revives_it() {
+        let build = || {
+            let mut ram = blank_store();
+            set(&mut ram, 1, &[0x11; 40]).unwrap();
+            set(&mut ram, 2, &[0x22; 8]).unwrap();
+            ram.buf[KV_HEADER + 2] ^= 0x80; // half 0, A's value (word 8): A fails its CRC
+            ram
+        };
+        assert_eq!((get_vec(&build(), 1), get_vec(&build(), 2)), (None, None));
+        // A tombstone (8 B) for another key: its terminator is the word holding the bad byte.
+        let mut probe = build();
+        let p0 = probe.programs;
+        set(&mut probe, 3, &[]).unwrap();
+        let into_a = p0 + probe.trace[p0..].iter().position(|&w| w == KV_HEADER).unwrap();
+        for cut in 0..probe.programs - p0 {
+            for tear in TEARS {
+                let mut ram = build();
+                ram.arm(cut, tear);
+                assert!(set(&mut ram, 3, &[]).is_err());
+                ram.revive();
+                if p0 + cut >= into_a {
+                    // The worst a torn (or later) program of that word can leave: A's own bytes.
+                    ram.buf[KV_HEADER..KV_HEADER + 4].copy_from_slice(&[0x11; 4]);
+                }
+                init(&mut ram, CAP).unwrap();
+                let what = format!("cut {cut} ({tear:?})");
+                assert_eq!(get_vec(&ram, 1), None, "{what}: A revived");
+                assert_eq!(get_vec(&ram, 2), None, "{what}: B revived");
+                assert_eq!(live_bytes(&ram, CAP).unwrap(), 0, "{what}");
+            }
+        }
+    }
+
+    #[test]
+    fn init_formats_an_old_layout_store_empty() {
+        let mut ram = tkv1_store(CAP);
+        assert!(
+            active(&ram, CAP).unwrap().is_none(),
+            "a TKV1 superblock is not ours"
+        );
+        init(&mut ram, CAP).unwrap();
+        assert_eq!(active(&ram, CAP).unwrap(), Some((0, 1)));
+        for key in [0x5201, 0x5202, 0x5300] {
+            assert_eq!(get_vec(&ram, key), None, "key {key:#x} adopted");
+        }
+        assert_eq!(live_bytes(&ram, CAP).unwrap(), 0);
+        assert_eq!(free_bytes(&ram, CAP).unwrap(), half_len(CAP));
+    }
+
+    // --- wear -------------------------------------------------------------------------------------
+
+    /// Erase/write cycles of the most-cycled word over a run, against the flips it committed: the
+    /// figure the firmware's `FLIP_BUDGET` rests on. Each word of a half is erased once per pass
+    /// through that half (blanked before the half is written again) and programmed once on the
+    /// erased word; each superblock once per flip into its half. The halves alternate, so no word
+    /// may cycle more than once every other flip: at most `ceil(flips / 2)`, i.e. 0.5 cycle per
+    /// flip (the pre-blanking runs right after a flip, one flip ahead of the next pass, hence the
+    /// rounding up). The unpadded layout cycled its record-boundary words ~2 times per flip. The
+    /// workload is the SDK's (docs/storage.md, "What the SDK writes"): an odd-length provisioning
+    /// record, the u32 TX watermark, 12-byte replay lanes, the per-boot session counter and a
+    /// 7-byte setting, with and without the background maintenance task (in-line flips only).
+    #[test]
+    fn wear_is_one_cycle_per_word_every_other_flip() {
+        for background in [true, false] {
+            let mut ram = Ram::new(CAP6K as usize);
+            init(&mut ram, CAP6K).unwrap();
+            let mut m = MaintState::new();
+            set_bytes(&mut ram, CAP6K, PROV, &[0x5A; 15]).unwrap();
+            for i in 0..9000u32 {
+                let (key, v) = match i % 8 {
+                    0 | 4 => (WM, i.to_le_bytes().to_vec()),
+                    1 | 3 | 5 => (0x5210 + (i % 3) as u16, val(i as usize, 12)),
+                    2 | 6 => (SESSION, (i / 8).to_le_bytes().to_vec()),
+                    _ => (0x5501, val(i as usize, 7)),
+                };
+                set_bytes_with(&mut ram, CAP6K, key, &v, m.pending()).unwrap();
+                if background {
+                    while maintain(&mut ram, CAP6K, &mut m, 4, FLIP_THRESHOLD).unwrap() {}
+                }
+            }
+            let flips = generation(&ram, CAP6K).unwrap() - 1;
+            let worst = *ram.cycles.iter().max().unwrap();
+            let at = ram.cycles.iter().position(|&c| c == worst).unwrap() * 4;
+            println!(
+                "background maintenance {background}: {flips} flips, worst word (byte {at}) {worst} \
+                 cycles = {:.3} per flip",
+                worst as f64 / flips as f64
+            );
+            assert!(flips >= 30, "the workload must flip often enough to measure");
+            assert!(
+                2 * worst <= flips + 1,
+                "a word cycled {worst} times in {flips} flips: more than once every other flip"
+            );
+            assert_eq!(ram.unaligned, 0);
         }
     }
 }

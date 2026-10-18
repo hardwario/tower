@@ -217,12 +217,26 @@ registered address by design (an authenticated host action: the re-provision pat
 ### 4.5 Storage (`crates/kv`, `firmware/src/storage.rs`)
 
 - Append-only key-value log in two EEPROM halves with a compaction flip; every record is
-  CRC-protected; a torn write at the tail is ignored; the 2-byte tag after a new record is cleared
-  before appending, so stale bytes can never be read back as records (a fuzz finding: without it,
-  an old TX watermark could resurface after corruption, a nonce-reuse path).
+  CRC-protected; a torn write at the tail is ignored; the word holding the tag after a new record
+  is cleared before appending, so stale bytes can never be read back as records (a fuzz finding:
+  without it, an old TX watermark could resurface after corruption, a nonce-reuse path).
+- Power loss is modelled at the EEPROM's real granularity: the STM32L0 data EEPROM programs and
+  keeps ECC per aligned 32-bit word, and a byte program (the HAL's for an unaligned head or tail)
+  erases and reprograms the whole word, so a cut can lose the whole word, bytes before the
+  written offset included. Records are therefore padded to whole words and every write is whole
+  words at a word-aligned offset, so a torn word never holds a committed byte; an append clears
+  an unreadable log end first and writes its header word last, so a cut anywhere leaves the state
+  before it. (A review finding: with unpadded records, a cut in the next append's first byte
+  programs failed the previous record's CRC, so the TX watermark read an older value, a
+  nonce-reuse path, or a key vanished. The layout change formats an older store empty.)
 - Factory reset (`system eeprom wipe confirm`) is a power-loss-safe flip to an empty store,
   freezes the store until reboot and keeps the wear counter.
-- Fuzzed with power cuts at every write against an independent model (`fuzz/kv_store`).
+- Host tests cut the power inside every word program of every store path (append, delete, the
+  in-line and incremental flips, maintenance, wipe, format), with the torn word left as it was,
+  erased or garbled, and require every key to read its value from before or after the
+  interrupted operation; the fuzz target (`fuzz/kv_store`) tears whole words the same way at
+  random points against an independent model. A torn word that forges a valid CRC-32 is out of
+  scope (a 2^-32 event).
 
 ### 4.6 Physical access (`crates/flasher`, `tower protect`)
 

@@ -16,8 +16,12 @@ rules an app should follow so the EEPROM lasts the product's life.
 - One store over the whole data EEPROM, namespaced so subsystems can't collide: `NS_NET`
   (radio), `NS_SYS` (console session), `NS_SHELL` (settings), `NS_APP` (yours). Take a
   scoped view with `b.kv.scope(NS_APP)`; every get/set is then keyed by an 8-bit local.
-- Records are `[tag(2) | len(2) | crc(4) | value]`; values up to `MAX_VALUE` (256 B).
-- Power-loss-safe: a torn write never corrupts a prior key (see the `tower-kv` module docs).
+- Records are `[tag(2) | len(2) | crc(4) | value | pad]`; values up to `MAX_VALUE` (256 B). The
+  pad (0 to 3 zero bytes, outside the CRC) rounds every record up to whole 32-bit words, so a
+  record costs `8 + len` rounded up to a multiple of 4: 12 B for a u32, 16 B for a 5-byte value.
+- Power-loss-safe at the EEPROM's real granularity: a torn write never corrupts a prior key,
+  because the store only ever programs whole words that hold no committed byte (*Whole words,
+  header last* below; the `tower-kv` module docs).
 - **Delete** with `kv.delete(key)`: it appends a zero-length **tombstone** record (`len == 0`),
   so the key reads back absent (`get` → `None`) and the next compaction flip drops both the value
   and the tombstone, so the live set can **shrink**, not only grow. Append-only and power-loss-safe
@@ -25,33 +29,53 @@ rules an app should follow so the EEPROM lasts the product's life.
   reserved as the tombstone marker: no key stores a genuinely empty value.)
 - **Mount or format** (`tower_kv::init`, run by `Kv::new` on every boot). A region with a valid
   superblock mounts as it is, untouched. Anything else, a blank part or bytes in any other layout
-  (such as the single-region log of older firmware), is **formatted empty**: nothing is adopted,
-  migrated or kept. The format is two writes: the tag slot at the head of half 0 is cleared, then
-  half 0's superblock is committed at generation 1. The rest of the region is not scrubbed (no
-  multi-second stall on the first boot; the next point is why its old bytes stay unreadable). A
-  power loss before the commit leaves the region unformatted, and the next boot formats it again.
-  A board flashed over a store in another layout therefore starts empty: re-pair or re-provision
-  it.
-- **Every log end is terminated.** An append first clears the 2-byte tag slot just past the
-  record it is about to write (read-first: no write when the slot is already blank), then writes
-  the record. Stale bytes past the log end (what a torn append left, the tail of a corrupted
+  (such as the single-region log of older firmware, or the unpadded `TKV1` store of firmware
+  before the word-aligned layout), is **formatted empty**: nothing is adopted, migrated or kept.
+  The format is two writes: the word holding the tag slot at the head of half 0 is cleared, then
+  half 0's superblock (magic `TKV2`) is committed at generation 1. The rest of the region is not
+  scrubbed (no multi-second stall on the first boot; the next two points are why its old bytes
+  stay unreadable, even under a torn first append). A power loss before the commit leaves the
+  region unformatted, and the next boot formats it again. A board flashed over a store in another
+  layout therefore starts empty: re-pair or re-provision it.
+- **Every log end is terminated.** An append first clears the word holding the tag slot just
+  past the record it is about to write (read-first: no write when it is already blank), then
+  writes the record. Stale bytes past the log end (what a torn append left, the tail of a corrupted
   mid-log record, the untouched rest of a freshly formatted half) can therefore never be scanned
   as records. Without it, a new record shorter than a torn or corrupted one left that one's
   remaining bytes right behind it, and the next scan read on into them: a superseded TX-counter
   watermark resurrected over the one just written (CCM nonce reuse) or bytes from inside a value
   surfaced as a phantom key (found by the `kv_store` fuzz target, host-tested by
   `torn_tail_then_shorter_append_exposes_no_phantom` and
-  `corrupt_mid_log_record_never_resurrects_the_tail`). A power loss between the two writes is
-  harmless: the cleared slot lies beyond the log end, and a torn append is cut at its CRC as
-  before.
+  `corrupt_mid_log_record_never_resurrects_the_tail`). A power loss between the writes is
+  harmless: the cleared word lies beyond the log end, and a torn append never becomes a record
+  (next point).
+- **Whole words, header last.** The STM32L0 data EEPROM programs, and keeps ECC, per aligned
+  32-bit word, and the HAL (embassy-stm32 `eeprom_write_slice`) byte-programs the unaligned head
+  and tail of a write, each byte program an erase plus a program of its whole word: a power cut
+  during one can leave the whole word erased or undefined, including bytes before the written
+  offset. With unpadded records the next append's first byte programs rewrote the word holding
+  the previous record's last bytes, so a cut there failed that record's CRC: the key read an
+  older value (the TX-counter watermark rolled back, CCM nonce reuse) or vanished. Now records
+  are padded to whole words, the halves and superblocks are word-aligned, and every codec write
+  is whole words at a word-aligned offset, so a torn word never holds a committed byte. Within an
+  append the log end is cleared first if it holds an unreadable record (after a torn write or
+  corruption, so nothing written into its remains later can revive it), then the terminator,
+  then the record's body, and its header word (`tag | len`) last: until that word lands the scan
+  stops where it did, so a cut anywhere in an append leaves the state before it. Host-tested by
+  cutting the power inside every word program of every path (`set`, `delete`, the in-line and
+  incremental flips, maintenance, wipe, format), with the word left as it was, erased or
+  garbled; the `kv_store` fuzz target tears whole words the same way.
 
 ## How it wears: it wear-levels
 
 The 6144 bytes are **two 3060-byte halves** plus two 12-byte superblocks at the top.
 
-- Writes **append** to the active half (each record at a fresh, advancing offset; no cell is
-  rewritten in place). The free offset is derived by scanning, so an append touches **only**
-  the record it writes.
+- Writes **append** to the active half (each record at a fresh, advancing, word-aligned
+  offset). Records start and end on word boundaries, so no word is shared by two records and
+  none is rewritten in place (the unpadded layout shared a word between neighbouring records and
+  erased it up to four times per pass through its half). The free offset is derived by scanning,
+  so an append programs **only** the record it writes (plus the word past it, which in steady
+  state is already blank: a read, no program).
 - When the active half fills, `compact` **flips**: it packs the live set (latest record per
   key) into the *other* half and commits by writing that half's superblock with an incremented
   **generation**. The two halves alternate as active, so wear spreads across the whole region.
@@ -129,21 +153,27 @@ The STM32L083CZ data EEPROM endurance is **100,000 erase/write cycles per cell**
 (`EEPROM_ENDURANCE_CYCLES`, datasheet-confirmed). One "cycle" is one erase plus one program of a
 cell; every figure here scales with it.
 
-Each compaction flip erases and reprograms the store's most-written cells: the re-packed
-live-set prefix at each half's start, and the committed superblock. The gauge is kept
-**conservative**: it charges one full erase/write cycle of the worst cell *per flip*, so
+Every word of a half goes through one erase/write cycle per pass through that half: it is
+blanked (erased) before the half is written again, then programmed once on the erased word by
+the flip's copy or an append. The superblock of a half is rewritten once per flip into it. The
+halves alternate, so no word cycles more than once every *other* flip: **0.5 cycle per flip**
+(host-tested by `tower-kv`'s `wear_is_one_cycle_per_word_every_other_flip` on the SDK's write
+mix: 29 cycles of the worst word in 57 flips with background maintenance, 23 in 47 without).
+The gauge is kept **conservative**: it charges one full erase/write cycle of the worst word *per
+flip*, so
 
 ```
 FLIP_BUDGET = endurance = 100,000 flips
 ```
 
-In reality the store alternates two halves, so any given cell is the flip target only every
-*other* flip; true life is closer to ~200,000 flips. The gauge therefore reports **more** wear
-than real, never less. Either way a flip absorbs roughly one half (~3 KB) of appends, so total
-write capacity is on the order of:
+True life is therefore closer to ~200,000 flips; the gauge reports **more** wear than real,
+never less. (That margin needs the word-aligned layout: with unpadded records the words shared
+by neighbouring records cycled ~2 times per flip, 4× the figure, and the gauge under-reported.)
+Either way a flip absorbs roughly one half (~3 KB) of appends, so total write capacity is on the
+order of:
 
 ```
-100,000 flips × ~3 KB ≈ 3 × 10⁸ bytes ≈ tens of millions of small records
+100,000 flips × ~3 KB ≈ 3 × 10⁸ bytes ≈ 2 × 10⁷ small (12 to 16 B) records
 ```
 
 Treat **~10⁷ writes** as the working budget. `system eeprom print` reports the live flip count

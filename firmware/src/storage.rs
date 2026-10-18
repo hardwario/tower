@@ -1,15 +1,20 @@
 //! Non-volatile storage in the STM32L0 **data EEPROM**.
 //!
-//! The L0 has true byte-addressable EEPROM (6 KB on the Core Module, ~100k+ write
-//! endurance): no page erase, no wear-leveling needed. Two layers:
+//! The L0 has a byte-addressable data EEPROM (6 KB on the Core Module, 100k erase/write
+//! cycles): no page erase. It is byte-addressable, not byte-granular, though: it programs and
+//! keeps ECC per aligned 32-bit word, so writing one byte erases and reprograms the whole word
+//! holding it, and a power cut during that can lose the whole word, including bytes the write
+//! never addressed. Two layers:
 //!
 //!   * [`Storage`]: the raw area; [`read`](Storage::read) / [`write`](Storage::write)
-//!     at any byte offset, [`len`](Storage::len) the total size. You own the layout.
+//!     at any byte offset, [`len`](Storage::len) the total size. You own the layout (and, for
+//!     power-loss safety, the word granularity above).
 //!   * [`Kv`]: a small **key-value store** over that area, **power-loss-safe**: it survives a
 //!     reset mid-write (the codec is double-buffered; see [`tower_kv`]). Each value lives under
-//!     a `u16` key as a `{tag, len, crc}`-framed record; updates **append** (a torn write only
-//!     ever loses the in-flight record, never committed data) and compaction reclaims superseded
-//!     records via an atomic half-flip. Add a key to *evolve* stored data rather than growing a
+//!     a `u16` key as a `{tag, len, crc}`-framed record padded to whole words; updates **append**
+//!     (only ever in whole words that hold no committed byte, so a torn write only ever loses the
+//!     in-flight record, never committed data) and compaction reclaims superseded records via an
+//!     atomic half-flip. Add a key to *evolve* stored data rather than growing a
 //!     struct. Values can be stored as **raw bytes** ([`set_bytes`](Kv::set_bytes)) for scalars,
 //!     or **postcard** ([`set`](Kv::set)) for any `#[derive(Serialize, Deserialize)]` type.
 //!     Double-buffering halves usable space (~3 KB of the 6 KB region; the rest is the flip
@@ -49,12 +54,17 @@ pub use tower_kv::{MAX_KEYS, MAX_VALUE};
 /// STM32L083CZ data-EEPROM endurance: **100,000 erase/write cycles** (datasheet-confirmed).
 /// Every wear figure below scales linearly with it.
 pub const EEPROM_ENDURANCE_CYCLES: u32 = 100_000;
-/// Lifetime compaction-flip budget for the wear gauge, kept **deliberately conservative**. Each
-/// flip erases + reprograms the store's most-written cells (the re-packed live-set prefix and the
-/// committed superblock); charging one full erase/write cycle of the worst cell per flip caps the
-/// store at `endurance` flips. The store wear-levels across two alternating halves, so a given
-/// cell is really the flip target only every *other* flip (true life is ~2× this), meaning the
-/// gauge errs toward reporting *more* wear, never less. See `docs/storage.md`.
+/// Lifetime compaction-flip budget for the wear gauge, kept **deliberately conservative**: it
+/// charges one full erase/write cycle of the most-cycled word per flip, which caps the store at
+/// `endurance` flips. The codec writes only whole, word-aligned words, and each word of a half
+/// is erased once per pass through that half (blanked before the half is reused) and then
+/// programmed once on the erased word; the superblock of a half is rewritten once per flip into
+/// it. The two halves alternate, so no word cycles more than once every *other* flip (0.5 cycle
+/// per flip; host-tested by `tower-kv`'s `wear_is_one_cycle_per_word_every_other_flip` on the
+/// SDK's write mix), true life is ~2× this, and the gauge errs toward reporting *more* wear,
+/// never less. (The earlier unpadded record layout broke that margin: appends byte-programmed
+/// the words shared by neighbouring records, ~2 cycles per flip on those words, 4× the figure.)
+/// See `docs/storage.md`.
 pub const FLIP_BUDGET: u32 = EEPROM_ENDURANCE_CYCLES;
 
 /// A non-volatile storage error.
@@ -148,6 +158,12 @@ impl<'d> Storage<'d> {
 /// [`watchdog::pet_during_stall`](crate::watchdog::pet_during_stall), which refuses once the
 /// app's liveness check-ins are stale or the stall outlasts any legitimate EEPROM operation, so
 /// a genuine hang still resets. One register write per program; a no-op with no watchdog armed.
+///
+/// **Whole words.** `eeprom_write_slice` programs a word-aligned middle as word programs and an
+/// unaligned head or tail as single-byte programs, each an erase plus a program of the whole word
+/// holding the byte. The codec only ever writes whole words at word-aligned offsets (its padded
+/// layout), so every write lands as word programs and no program touches a word holding
+/// committed data; see [`tower_kv`] ("Whole words only").
 impl Eeprom for Storage<'_> {
     type Error = embassy_stm32::flash::Error;
     fn read(&self, off: u32, buf: &mut [u8]) -> Result<(), Self::Error> {
@@ -202,8 +218,9 @@ pub const fn key(ns: Ns, local: u8) -> u16 {
 
 /// A key-value store over the EEPROM. Keys are `u16` (1..=65535; `0` is reserved).
 ///
-/// **Power-loss-safe**, double-buffered (see [`tower_kv`]): every `set` appends and compaction
-/// commits via a single superblock write, so a reset mid-write never corrupts committed data.
+/// **Power-loss-safe**, double-buffered (see [`tower_kv`]): every `set` appends in whole words
+/// past the committed log (its header word last) and compaction commits via a single superblock
+/// write, so a reset mid-write never corrupts committed data.
 /// [`get`](Self::get) returns the latest valid record for a key. Usable capacity is ~half the
 /// EEPROM region (the other half is the compaction buffer).
 pub struct Kv<'d> {
@@ -546,10 +563,10 @@ impl Scoped {
 /// stalls the whole CPU ~3.4 ms (NVM stall: instruction fetch and thus ISRs freeze), so 4 words
 /// ≈ **14 ms** of stall per slice, comfortably under the radio's ACK window (200 ms) and the
 /// console's tolerance, where the old synchronous flip froze the chip for seconds
-/// (docs/storage.md). A copy slice can overshoot by a few programs per record it touches (the
-/// HAL programs an unaligned head/tail as up to 3 single-byte programs each; see `tower_kv`'s
-/// `words`), and the one commit slice per flip adds the tail catch-up + a 12-byte superblock
-/// (still tens of ms).
+/// (docs/storage.md). The budget is exact: every codec write is whole words at a word-aligned
+/// offset, so the HAL never adds the single-byte head/tail programs an unaligned span costs (see
+/// `tower_kv`'s `words`). Only the one commit slice per flip goes over, by the tail catch-up + a
+/// 12-byte superblock (still tens of ms).
 pub const MAINT_BUDGET_WORDS: u32 = 4;
 
 /// Wakes [`maintenance`]: signaled by every [`Nv`] write (and once at boot by the task itself
