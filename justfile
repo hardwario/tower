@@ -96,7 +96,7 @@ install-cli:
 fw *args:
     {{just}} -f firmware/justfile {{args}}
 
-# e.g. `just hil check`. The `hil`, `hil-power` and `hil-full` recipes FLASH the bench.
+# e.g. `just hil check`. The `bench`, `bench-power` and `bench-full` recipes FLASH the bench.
 # Run a hil/justfile recipe (inside hil/).
 hil *args:
     {{just}} -f hil/justfile {{args}}

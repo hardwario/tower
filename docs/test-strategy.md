@@ -15,8 +15,8 @@ it passes. The per-test catalogue of the firmware stays in
 | Fuzzing of the pure kernels (frames, radio envelopes, KV store, radio and shell kernels) | `fuzz/`, `just fuzz` | CI, weekly (nightly toolchain) |
 | Firmware gates: MCU build, RAM budget, clippy over the role variants, rustdoc | `just fw ci` | CI, every push |
 | Supply chain: `cargo audit` on every lockfile, pinned actions | `.github/workflows` | CI |
-| HIL bench: smoke, KATs, two-board radio and network, gateway end to end, stack high-water | `just hil hil` | by hand |
-| HIL power group (PPK2 + J-Link) | `just hil hil-power` | by hand |
+| HIL bench: smoke, KATs, two-board radio and network, gateway end to end, stack high-water | `just hil bench` | by hand |
+| HIL power group (PPK2 + J-Link) | `just hil bench-power` | by hand |
 | Manual product checks and the remaining examples | `firmware/docs/test-plan.md`, `tools/hwtest` | by hand |
 
 The weak spot is the last three rows: everything that needs hardware runs only when someone
@@ -31,7 +31,7 @@ auto-naming, summary verdicts lost to the console queue, a join refusal logged e
 `\x0d` in remote shell output) was found only because the bench was run by hand.
 **Setup.** A self-hosted GitHub Actions runner on the bench machine, the bench left cabled
 (`hil/hil.toml` pins the ports).
-**Automate.** `just hil hil` nightly on `main` and on demand; results attached to the run.
+**Automate.** `just hil bench` nightly on `main` and on demand; results attached to the run.
 **Passes when.** The suite is green for a week of nights with no retries.
 
 ### 2. Long soak with failure accounting
@@ -61,7 +61,7 @@ the supply down to check brown-out reset, radio and EEPROM behavior at low batte
 
 **Why.** The STOP floor alone misses an energy regression such as a retry storm or a timer that
 wakes too often.
-**Setup.** The PPK2 bench (`just hil hil-power`).
+**Setup.** The PPK2 bench (`just hil bench-power`).
 **Automate.** Energy of a click uplink, a temperature report, a heartbeat, a failed uplink with
 its retries and a pairing; a battery-life projection from them; fail the run when a figure gets
 more than 10 % worse than its recorded baseline.

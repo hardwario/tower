@@ -1,7 +1,7 @@
 # The HIL bench: inventory, cabling, and setup
 
 This is the in-repo source of truth for physically assembling and configuring the bench that
-`just hil` / `just hil-power` / `just hil-full` drive. The *test catalogue* (what each firmware
+`just bench` / `just bench-power` / `just bench-full` drive. The *test catalogue* (what each firmware
 example asserts, the full example×role matrix) lives in the firmware's
 [`docs/test-plan.md`](../../firmware/docs/test-plan.md); this file is what that plan assumes you
 already have on the desk.
@@ -65,7 +65,7 @@ USB: the supported setup is a **data-only** FTDI adapter (no VBUS line), which m
   comparable, and keeps dark any board/adapter consumer with an LED-like ~2 V knee (an earlier
   rig read ~+200 µA at 3 V from one).
 - **No VBUS on the Core's USB.** The supported power topology is a PPK2-powered Core whose FTDI
-  adapter is **data-only** (no VBUS line): it may stay plugged during `just hil-power` (its port
+  adapter is **data-only** (no VBUS line): it may stay plugged during `just bench-power` (its port
   can be in the roster; the power test doesn't use it). A **VBUS-carrying** USB invalidates the
   run: VBUS back-feeds VDD through the board's LDO above the PPK2's rail (the PPK2 then sources
   ~0 and reads **~0.3 µA**, a reading that would pass any upper bound), and VBUS-sense high
@@ -125,9 +125,9 @@ to re-enumeration, to break a tie, or to vouch for a board on a third-party adap
 ## Running
 
 ```sh
-just hil          # smoke + radio + extended: two boards on FTDI, no J-Link/PPK2 needed
-just hil-power    # STOP-floor measurement: Core on J-Link + PPK2, PPK2-powered (data-only FTDI)
-just hil-full     # everything, fully-cabled bench
+just bench        # smoke + radio + extended: two boards on FTDI, no J-Link/PPK2 needed
+just bench-power  # STOP-floor measurement: Core on J-Link + PPK2, PPK2-powered (data-only FTDI)
+just bench-full   # everything, fully-cabled bench
 ```
 
 `--test-threads=1` is baked into the recipes and load-bearing: the ports are exclusive.

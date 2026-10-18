@@ -104,8 +104,8 @@ advisory DB.
 Firmware day to day (`just fw` lists everything): `just fw examples`, `just fw build example
 blinky`, `just fw flash example blinky` and `just fw run app radio_push_button` (these two need
 the `tower` CLI on `PATH` and a board), `just fw test` (host tests of the shared crates the
-firmware builds on). HIL: `just hil check` compiles the harness; `just hil hil`,
-`hil-power`, `hil-full` FLASH the bench: only when the user asks and the bench is cabled.
+firmware builds on). HIL: `just hil check` compiles the harness; `just hil bench`,
+`bench-power`, `bench-full` FLASH the bench: only when the user asks and the bench is cabled.
 
 Plain cargo works for the host workspace from the root: `cargo test -p tower-protocol`,
 `cargo build --release -p tower-cli` (binary `target/release/tower`). Linux needs
@@ -211,7 +211,7 @@ No em or en dashes. This applies everywhere: code, comments, docs, UI texts and 
   firmware).
 - Don't build the firmware with a bare `cargo build` from the root or with `--manifest-path
   firmware/...`; run cargo inside `firmware/` (`just fw <recipe>`).
-- Don't run `hil`'s bench recipes (`just hil hil*`), which flash hardware, unless the user asks.
+- Don't run `hil`'s bench recipes (`just hil bench*`), which flash hardware, unless the user asks.
 - Don't reference a GitHub Action by tag or branch, or widen a workflow's `permissions:`; pin
   the full commit SHA (with its `# vX.Y.Z` comment) and grant write only to the job that needs it.
 - Don't commit, tag or push anything unless the user asked.

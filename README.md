@@ -79,7 +79,7 @@ tower exec "system resource print"  # one shell command, its reply, exit
 The radio products (a push button node, a Radio Dongle gateway, MQTT) are described in
 [`firmware/docs/gateway.md`](firmware/docs/gateway.md).
 
-Bench runs (`just hil hil`, `hil-power`, `hil-full`) flash real hardware; see
+Bench runs (`just hil bench`, `bench-power`, `bench-full`) flash real hardware; see
 [`hil/README.md`](hil/README.md). Working with [Claude Code](https://claude.com/claude-code)?
 Open it here and run `/bootstrap`; `AGENTS.md` gives it the whole-stack context.
 

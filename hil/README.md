@@ -20,7 +20,7 @@ sibling **`../firmware`** in this repository (`firmware_dir()` in `src/lib.rs`),
 directory's own `just build` recipes. To test images from another checkout:
 
 ```sh
-TOWER_FIRMWARE_DIR=/path/to/tower/firmware just hil
+TOWER_FIRMWARE_DIR=/path/to/tower/firmware just bench
 ```
 
 ## Running
@@ -32,9 +32,9 @@ just check        # no hardware: compiles EVERY bench group incl. the feature-ga
 cargo test        # no hardware: runs only host unit tests; compiles the #[ignore]d smoke/radio/
                   # extended/gateway groups, but NOT power (that needs `--features power`);
                   # from the repo root: cargo test -p tower-hil
-just hil          # bench: smoke + radio + extended + gateway groups (Dongle + Core over UART bootloader)
-just hil-power    # bench: STOP-floor current measurement (J-Link + PPK2, no USB power; see below)
-just hil-full     # bench: everything, on the fully-cabled bench
+just bench        # bench: smoke + radio + extended + gateway groups (Dongle + Core over UART bootloader)
+just bench-power  # bench: STOP-floor current measurement (J-Link + PPK2, no USB power; see below)
+just bench-full   # bench: everything, on the fully-cabled bench
 ```
 
 Prerequisites: the [`tower` CLI](../cli) (`just install-cli` at the repo root) and

@@ -449,7 +449,7 @@ just size  app radio_dongle_gateway   # on-chip footprint (watch the RAM budget)
 The end-to-end product path is covered by the HIL bench group `hil/tests/gateway.rs` (two boards,
 `#[ignore]`d): cable-provision the node, bridge a simulated `button simulate 100` click, run a
 remote shell command through the downlink queue, and assert the `RadioStat` stream. The group is
-driven from the HIL harness (`hil/`) with `just hil` there (or `just hil hil` from the repo root);
+driven from the HIL harness (`hil/`) with `just bench` there (or `just hil bench` from the repo root);
 it flashes real hardware.
 
 ## See also

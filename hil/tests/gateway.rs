@@ -9,7 +9,7 @@
 //! press does (a 100 ms press = a click: > debounce, < click-timeout).
 //!
 //! Sequential flash, sequential per-step captures. `#[ignore]`d: needs the bench +
-//! two boards in RF range; run with `just hil` (`--test-threads=1`, exclusive ports).
+//! two boards in RF range; run with `just bench` (`--test-threads=1`, exclusive ports).
 
 use std::time::Duration;
 

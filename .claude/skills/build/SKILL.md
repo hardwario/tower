@@ -53,8 +53,8 @@ If a step fails, report the exact command and the compiler / tool error. If `cra
 fails to build, say so plainly: the firmware, the CLI and the HIL harness all depend on it, so
 their failures are downstream.
 
-Never run `just fw flash` / `just fw run` or the hil bench recipes (`just hil hil`, `hil-power`,
-`hil-full`): they flash real hardware. Missing tools (`flip-link`, `cargo-binutils`,
+Never run `just fw flash` / `just fw run` or the hil bench recipes (`just hil bench`, `bench-power`,
+`bench-full`): they flash real hardware. Missing tools (`flip-link`, `cargo-binutils`,
 `cargo-audit`, `just`): point at `/bootstrap`.
 
 ## Report

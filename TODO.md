@@ -28,7 +28,7 @@ range); nothing that needs a node and a gateway on air was.
 - Replay: reboot the dongle under a running `tower gateway`; no event is published twice.
 - Key move: `tower nodes show --keys`, wipe the gateway, `node_add` with the floors; the node's
   uplinks and remote-shell downlinks keep working.
-- The HIL gateway group (`just hil hil`), and a PPK2 look at the node's idle floor with the new
+- The HIL gateway group (`just hil bench`), and a PPK2 look at the node's idle floor with the new
   watchdog pet interval (~7.4 s).
 
 **Done when.** Each item passes on the bench and the results are noted in

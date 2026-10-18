@@ -3,14 +3,14 @@
 Std host crate: the HIL bench harness for the TOWER firmware SDK (`hil/` in the hardwario/tower
 monorepo, a member of the root host workspace; read the root `AGENTS.md` first). A plain
 `cargo test` (here, or `cargo test -p tower-hil` at the root) compiles the `#[ignore]`d hardware
-tests and runs only the host unit tests, safe anywhere. The `just hil` / `just hil-power` /
-`just hil-full` recipes (also `just hil <recipe>` from the repo root) opt INTO the bench run and
+tests and runs only the host unit tests, safe anywhere. The `just bench` / `just bench-power` /
+`just bench-full` recipes (also `just hil <recipe>` from the repo root) opt INTO the bench run and
 **flash real hardware**: never run them unless the user asks and the bench is cabled.
 
 ## Load-bearing invariants
 
 - **`--test-threads=1`** in every bench recipe: the serial ports are exclusive.
-- **The `power_` name filter** in `just hil-power`: `--features power` only ADDS power.rs;
+- **The `power_` name filter** in `just bench-power`: `--features power` only ADDS power.rs;
   without the filter the run would also pull in smoke/radio/extended, whose `tower flash` of
   the Core times out on a power bench (it is PPK2-powered behind a data-only FTDI, so it is
   unpowered unless the sidecar sources it).

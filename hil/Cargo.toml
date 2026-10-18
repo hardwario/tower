@@ -9,7 +9,7 @@ description = "Hardware-in-the-loop (HIL) test harness for the HARDWARIO TOWER f
 
 # HOST crate in the monorepo's host workspace, so a plain `cargo test` builds for the native
 # host, no --target juggling. It COMPILES the #[ignore]d hardware tests and runs none; the
-# `just hil*` recipes opt INTO the bench run. The images under test are built from the sibling
+# `just bench*` recipes opt INTO the bench run. The images under test are built from the sibling
 # firmware/ workspace located by `firmware_dir()` (default ../firmware; override with
 # TOWER_FIRMWARE_DIR). NEVER runs against hardware in CI.
 
@@ -43,5 +43,5 @@ default = []
 # Gate the current-measurement tests. They need the PPK2 sidecar (ppk2d.py) + a PPK2-powered Core
 # with NO VBUS on its USB; a data-only FTDI adapter may stay plugged (VBUS back-feeds VDD and
 # inhibits STOP by design; the power test's plausibility floor catches it). Off by default so
-# `just hil` (smoke/radio) never pulls the power path in.
+# `just bench` (smoke/radio) never pulls the power path in.
 power = []

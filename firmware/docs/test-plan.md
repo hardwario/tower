@@ -50,7 +50,7 @@ root: the whole host workspace).
 | `/dev/cu.usbserial-2140` | **TOWER Radio Dongle** | USB-powered (VBUS); flashed via `tower flash` | radio GATEWAY; the **smoke** target (one-shot KAT verdicts) |
 
 Confirm ports with `tower devices`; the automated harness is the HIL crate,
-[`hil/`](../../hil) (run `just hil` / `just hil-power` / `just hil-full` there, or `just hil
+[`hil/`](../../hil) (run `just bench` / `just bench-power` / `just bench-full` there, or `just hil
 <recipe>` from the repo root; it builds images from this directory, its sibling `../firmware`).
 It reads this roster from its `hil.toml` and re-resolves it at startup, failing fast if a board
 is absent. Confirm I2C population by flashing `i2cscan`: with
@@ -68,7 +68,7 @@ Default radio role assignment for two-board tests:
 > The PPK2 supplies the Core at **1.8 V** (the regulator/brown-out knee, not 3 V) after a
 > power-cycle (clears the ~200 µA debug-domain residual a probe leaves); readings are never sampled
 > mid-SWD-flash (the PPK2 CDC can desync and report tens of mA of garbage). The HIL harness's
-> `just hil-power` test enforces all three, and skips with an "unplug the FTDI" message if the
+> `just bench-power` test enforces all three, and skips with an "unplug the FTDI" message if the
 > console still answers.
 
 ## 3. Capture methodology (read this before running)

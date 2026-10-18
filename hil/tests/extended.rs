@@ -8,7 +8,7 @@
 //! J-Link/PPK2 wiring the power group needs is not required here.
 //!
 //! `#[ignore]`d like the other groups: `cargo test` only compiles them; run on the bench with
-//! `just hil ext` (`--test-threads=1`; the serial ports are exclusive).
+//! `just bench ext` (`--test-threads=1`; the serial ports are exclusive).
 
 use std::time::{Duration, Instant};
 

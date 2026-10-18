@@ -19,7 +19,7 @@
 //!
 //! Doubly gated: the whole file is behind `#[cfg(feature = "power")]` AND the test is `#[ignore]`d
 //! (it needs the J-Link + PPK2). `cargo test` compiles nothing here unless `--features power`, and
-//! runs it only under `just hil-power` (`--features power -- --ignored --test-threads=1`).
+//! runs it only under `just bench-power` (`--features power -- --ignored --test-threads=1`).
 
 #![cfg(feature = "power")]
 

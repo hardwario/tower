@@ -4,7 +4,7 @@
 //!
 //! Sequential flash, then concurrent capture (concurrent FTDI flashing is unreliable; see
 //! firmware/tools/hwtest/README.md). `#[ignore]`d: needs the bench + two boards in RF
-//! range; run with `just hil` (`--test-threads=1`, exclusive ports).
+//! range; run with `just bench` (`--test-threads=1`, exclusive ports).
 
 use std::time::{Duration, Instant};
 

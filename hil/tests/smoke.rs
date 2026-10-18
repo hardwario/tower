@@ -4,7 +4,7 @@
 //!
 //! These need the bench, so they are `#[ignore]`d: `cargo test` COMPILES them (proving the
 //! harness API stays in sync) but runs none without `--ignored`. Run on the bench with
-//! `just hil` (which passes `--test-threads=1`; the serial ports are exclusive).
+//! `just bench` (which passes `--test-threads=1`; the serial ports are exclusive).
 
 use std::time::Duration;
 
