@@ -1036,14 +1036,14 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         render_split(f, app, rows[1]);
     }
 
-    // Footer. Toggleable items render as chips: gray when off, yellow with white bold text
-    // when active (fg-yellow-on-gray was unreadable).
+    // Footer. Toggleable items render as chips: gray when off, yellow with black bold text when
+    // active, like the gateway TUI's (yellow on gray, and white on yellow, were unreadable).
     let chip = |label: &str, on: bool| {
         if on {
             Span::styled(
                 format!(" {label} "),
                 Style::new()
-                    .fg(Color::White)
+                    .fg(Color::Black)
                     .bg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             )
