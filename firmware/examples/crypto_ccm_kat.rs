@@ -68,6 +68,10 @@ async fn run(_b: Board) {
         pass = false;
     }
 
+    // The console queue holds 4 frames and a log line that finds it full is dropped, so let the
+    // four lines above leave the wire before the next ones (the summary is what the bench reads).
+    tower::console::flush().await;
+
     // 3) Tamper: flip one ciphertext byte → open() must reject.
     let mut tampered = EXPECT_CT;
     tampered[0] ^= 0x01;
