@@ -296,7 +296,7 @@ pub fn run(port: String, reset: bool) -> Result<()> {
     // reconnect loop behind an empty four-pane UI. Open BEFORE ratatui grabs the terminal so
     // the error prints normally. `--reset` is consumed here, on the initial attach; the
     // reconnect path never re-resets (a flaky link mustn't become a reboot loop).
-    let sp = crate::port::open_console_responsive(&port, reset)?;
+    let sp = open_port(&port, reset)?;
     let mut app = App::new(port, History::load());
     app.sp = Some(sp);
     if reset {
@@ -308,16 +308,45 @@ pub fn run(port: String, reset: bool) -> Result<()> {
     res
 }
 
+/// How long the loop waits for a key between port reads: short while an answer is due (a
+/// completion or a command reply shows as soon as it arrives), longer when idle (device logs
+/// can wait a frame, and the loop sleeps instead of spinning).
+const POLL_WAITING: Duration = Duration::from_millis(5);
+const POLL_IDLE: Duration = Duration::from_millis(33);
+
+/// The console port's read timeout: reads return at once when nothing is there, so draining
+/// the port never stalls the keyboard (the loop's sleep is the key poll above).
+const READ_TIMEOUT: Duration = Duration::from_millis(1);
+
+/// Open the console port for the TUI (see [`READ_TIMEOUT`]).
+fn open_port(port: &str, reset: bool) -> Result<Box<dyn serialport::SerialPort>> {
+    let mut sp = crate::port::open_console_responsive(port, reset)?;
+    let _ = sp.set_timeout(READ_TIMEOUT);
+    Ok(sp)
+}
+
 fn run_loop(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
     while !app.quit {
         ensure_connected(&mut app);
         terminal.draw(|f| ui(f, &mut app))?;
 
-        if event::poll(Duration::from_millis(33))?
-            && let Event::Key(key) = event::read()?
-            && key.kind != KeyEventKind::Release
-        {
-            handle_key(&mut app, key.code, key.modifiers);
+        let wait = if app.pending_req.is_some() || !app.pending.is_empty() {
+            POLL_WAITING
+        } else {
+            POLL_IDLE
+        };
+        // Every key already typed, then the redraw: a burst of typing (or a paste) lands at once.
+        if event::poll(wait)? {
+            loop {
+                if let Event::Key(key) = event::read()?
+                    && key.kind != KeyEventKind::Release
+                {
+                    handle_key(&mut app, key.code, key.modifiers);
+                }
+                if app.quit || !event::poll(Duration::ZERO)? {
+                    break;
+                }
+            }
         }
         drain_serial(&mut app);
         expire_pending(&mut app, Instant::now());
@@ -337,7 +366,7 @@ fn ensure_connected(app: &mut App) {
     // open in `run`, a later failure isn't fatal (we keep retrying), but we no longer drop it
     // on the floor: stash it so the header can show *why* (EBUSY, EACCES, ENOENT, …) next to
     // the reconnect indicator instead of a bare "reconnecting…" with a green-looking UI.
-    match crate::port::open_console_responsive(&app.port_name, false) {
+    match open_port(&app.port_name, false) {
         Ok(sp) => {
             app.sp = Some(sp);
             app.last_open_error = None;
@@ -354,25 +383,35 @@ fn ensure_connected(app: &mut App) {
     }
 }
 
+/// Reads per loop turn at most (a device streaming nonstop must not starve the keyboard).
+const DRAIN_READS: usize = 16;
+
+/// Take everything the port holds (up to [`DRAIN_READS`] reads), so a multi-frame answer shows
+/// in one turn instead of one read per turn.
 fn drain_serial(app: &mut App) {
     let mut buf = [0u8; 512];
-    let Some(mut sp) = app.sp.take() else {
-        return;
-    };
-    // `read_some` folds the idle read timeout and a signal-interrupted poll (a terminal resize
-    // delivers SIGWINCH) into "nothing yet"; only a real port failure drops the link.
-    match read_some(&mut *sp, &mut buf) {
-        Ok(n) => {
-            app.sp = Some(sp);
-            for &b in &buf[..n] {
-                // Copy the deframed bytes out so the `app.dec` borrow ends before we
-                // borrow `app` mutably in `handle_frame`.
-                if let Some(frame) = app.dec.push(b).map(|inner| inner.to_vec()) {
-                    handle_frame(app, &frame);
+    for _ in 0..DRAIN_READS {
+        let Some(mut sp) = app.sp.take() else {
+            return;
+        };
+        // `read_some` folds the idle read timeout and a signal-interrupted poll (a terminal
+        // resize delivers SIGWINCH) into "nothing yet"; only a real port failure drops the link.
+        match read_some(&mut *sp, &mut buf) {
+            Ok(n) => {
+                app.sp = Some(sp);
+                for &b in &buf[..n] {
+                    // Copy the deframed bytes out so the `app.dec` borrow ends before we
+                    // borrow `app` mutably in `handle_frame`.
+                    if let Some(frame) = app.dec.push(b).map(|inner| inner.to_vec()) {
+                        handle_frame(app, &frame);
+                    }
+                }
+                if n == 0 {
+                    return;
                 }
             }
+            Err(_) => return drop_link(app), // `sp` is dropped here → reconnect on the next tick
         }
-        Err(_) => drop_link(app), // `sp` is dropped here → reconnect on the next tick
     }
 }
 
