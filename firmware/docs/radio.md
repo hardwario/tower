@@ -152,8 +152,11 @@ transfer at a time. It is the layer most applications use directly:
 use tower::radio::net::{Net, NetConfig, SendResult};
 use tower::radio::config::Band;
 
-let mut net = Net::new(radio, b.kv,
-    NetConfig { addr: 0x1111_1111, key: KEY, band: Band::Eu868, channel: 0 }).await?;
+// `keys_stored: false`: a compiled-in key; an app that persists its keys passes `true`, so
+// a store that lost its TX watermark fails closed instead of restarting the counter.
+let mut net = Net::new(radio, b.kv, NetConfig {
+    addr: 0x1111_1111, key: KEY, band: Band::Eu868, channel: 0, keys_stored: false,
+}).await?;
 
 // Confirmed send: TX the DATA frame, open a 200 ms ACK window, retransmit the
 // byte-identical frame up to `reps` times on loss (random 0-100 ms backoff).
@@ -360,10 +363,11 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
 - **Ephemerals and nonces: TRNG only, one per request, zeroized.** Each side derives its X25519
   secret and its nonce from 96 bytes of the STM32 hardware TRNG (`board::trng_fill`; 64 bytes
   hashed with SHA-256 into the secret, 32 into the nonce). If the TRNG can't deliver, pairing is
-  **refused** (`net: pairing: hardware TRNG unavailable, refusing to pair ...`), never keyed from
-  the non-cryptographic fallback. The node draws a fresh pair for every JOIN_REQ, the host for
-  every JOIN_REQ it answers (whether or not that handshake completes). Secrets, nonces until they
-  are sent, the shared secret and the HKDF output are zeroized after use.
+  **refused** (`net: pairing: refused, TRNG unavailable (keys never come from the fallback)`),
+  never keyed from the non-cryptographic fallback. The node draws a fresh pair for every
+  JOIN_REQ, the host for every JOIN_REQ it answers (whether or not that handshake completes).
+  Secrets, nonces until they are sent, the shared secret and the HKDF output are zeroized
+  after use.
 - **Timing.** One X25519 scalar multiplication takes **1175 ms** on the Core Module (16 MHz M0+,
   no 32x32→64 multiply; measured by `crypto_x25519_kat`), the handshake's critical path (shared
   secret + key schedule) 1185 ms. Each side computes its own public key ahead (the host when the
@@ -475,10 +479,12 @@ host  JOIN_RESP flags KEYED, src = host, dest = node, payload req counter(4 LE) 
   responder but refuses every keyed join before any CCM work: the gateway calls it from its
   `keyed-join` setting (on by default, since the exchange is mutually authenticated). Every
   refusal is logged on the `net` target, rate-limited to one line per 10 s with a count:
-  `keyed join from XXXXXXXX refused: <reason> (N refusal(s) since last report)`, the reason
-  being one of switched off, not Duty mode, not a registered node, does not open under its
-  registered key, malformed, stale counter, TX locked, duty-cycle limited (a failed response
-  TX is logged as `keyed join from XXXXXXXX: response TX failed`).
+  `keyed join from 0x0000ab12 refused: <reason> (<n> since the last report)`, the reason being
+  one of `keyed joins are switched off`, `radio not in Duty mode`, `not a registered node`,
+  `does not open under its registered key`, `malformed request`, `stale counter ...` (with the
+  counter and the last-seen value), `TX locked (nonce safety)`, `duty-cycle limited`. A
+  response that could not be sent is logged, on the same limit, as `keyed join from 0x0000ab12:
+  response not sent (<n> since the last report)`.
 - The request goes to `dest = 0`, so a device that is not a key holder drops it: an
   unregistered `src` is refused before CCM, and a frame under another key fails CCM.
 - In a P2P mesh any peer holding the joiner's key answers; the joiner then talks to that
@@ -615,7 +621,7 @@ separate ~20 ms deaf window.
 | Header (non-bulk / bulk) / CCM tag | 14 B / 17 B / 8 B |
 | Payload (single / bulk chunk) | ≤ 74 B / 64 B |
 | Nonce | 13 B (`src ‖ counter ‖ bulk_index ‖ 0x0000`) |
-| Time-on-air (max frame / ACK) | ≈ 44.6 ms (96 B) / ≈ 15.8 ms (27 B) |
+| Time-on-air (max frame / ACK) | ≈ 44.6 ms (96 B) / ≈ 16.25 ms (28 B: 14 header + 6 payload + 8 tag; 17 ms in the duty budget, `frame_toa_ms` rounds up) |
 | TX power (default / max) | +11.6 dBm |
 | CSMA RSSI threshold / max backoff | −90 dBm / ~100 ms |
 | ACK window / inter-rep backoff / RX→TX turnaround | 200 ms / random 0-100 ms / ~20 ms |
@@ -626,7 +632,7 @@ separate ~20 ms deaf window.
 | Confirmed latency (N=3 / N=10) | ≈ 1.06 s / ≈ 3.55 s worst case |
 | Replay counter | 32-bit; starts at 1; **saturating** at 2³²−1 (fail-closed, not wrap); re-key well before |
 | Reserve block `RESERVE` / lazy-persist `P` | 1024 / 32 transfers (`P` = 1 on a sleeping node, `set_lane_persist_period`) |
-| Max bulk / chunk index | 16 MiB (streamed) / 24-bit |
+| Max bulk / chunk index | 1 GiB (`MAX_BULK_LEN`: 2²⁴ chunks × 64 B, all a 24-bit index addresses; both ends refuse a longer transfer) / 24-bit |
 | Bulk idle timeout | 30 s |
 | Star nodes / P2P peers | ≤ 16 / ≤ 8 |
 | OTA pairing: window / peer computation budget / host handshake | 60 s (`PAIRING_WINDOW`) / 1.5 s (`PEER_KEX_TIME`) / ≈ 3.9 s (`HOST_HANDSHAKE_TIME`, the least window left to answer a JOIN_REQ) |

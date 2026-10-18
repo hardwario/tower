@@ -19,6 +19,11 @@ use crate::radio::frame::{self, FrameType, Header, MAX_FRAME, flags};
 
 /// Bulk chunk size (docs/radio.md).
 pub const BULK_CHUNK: usize = 64;
+/// Largest transfer: 2^24 chunks, all a frame header's 24-bit `bulk_index` can address (1 GiB).
+/// Past it the index would wrap and a request for chunk 2^24 would fetch chunk 0 again: the same
+/// bytes under the same nonce (no CCM break), but a silently corrupt transfer. Both ends refuse
+/// it; a length is also announced as a u32.
+pub const MAX_BULK_LEN: usize = (1 << 24) * BULK_CHUNK;
 /// Bulk session idle timeout: the sender frees the transfer after this with no progress.
 const BULK_IDLE: Duration = Duration::from_secs(30);
 /// How long the requester waits for a BULK_DATA after a BULK_REQ.
@@ -86,6 +91,9 @@ impl Net {
         }
         let key = self.key_for(dest);
         let total_len = source.total_len();
+        if total_len > MAX_BULK_LEN {
+            return false;
+        }
         let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
         // Both counters are allocated (consumed) up front, before the first await: the
         // announce rides `announce_counter`, every chunk rides `session` (+ its bulk_index). The
@@ -206,8 +214,8 @@ impl Net {
                 break (len, s);
             }
         };
-        if !sink.begin(total_len).await {
-            return None; // sink refused the transfer (e.g. too large for the destination)
+        if total_len > MAX_BULK_LEN || !sink.begin(total_len).await {
+            return None; // past what a chunk index addresses, or the sink refused it
         }
         let n_chunks = total_len.div_ceil(BULK_CHUNK).max(1);
 

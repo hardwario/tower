@@ -149,8 +149,9 @@ mod tests {
                 assert_ne!(nonce_for(7, 42, i), nonce_for(7, 42, j));
             }
         }
-        // The 24-bit truncation boundary: indices ≥ 2^24 alias low ones; the protocol caps the
-        // index at 24 bits (16 MiB), so pin the aliasing as the documented contract.
+        // The 24-bit truncation boundary: indices ≥ 2^24 alias low ones; the bulk layer refuses
+        // a transfer that would need them (`MAX_BULK_LEN`, 2^24 chunks of 64 B = 1 GiB), so pin
+        // the aliasing as the documented contract.
         assert_eq!(nonce_for(7, 42, 0x0100_0005), nonce_for(7, 42, 5));
     }
 }
