@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use tower_hil::{Bench, Console, Frame, Role, bench_or_fail, build_image};
+use tower_hil::{Bench, Console, Frame, Role, bench_or_fail, build_image, frame_text};
 use tower_protocol::mgmt::{self, DeviceInfo, DeviceRole, MgmtOp, Provision, QueueId};
 use tower_protocol::radio::{self, NodeCmd, NodeMsg};
 
@@ -115,7 +115,16 @@ fn gateway_bridges_push_button_end_to_end() {
         .wait_for(Duration::from_secs(12), |f| matches!(f, Frame::Hello { .. }))
         .expect("node console read");
     assert!(hello.is_some(), "node rebooted after provisioning");
-    std::thread::sleep(Duration::from_millis(500));
+    // Wait for the app itself, not a fixed delay: the shell answers during the 3 s boot signature,
+    // but the app's start-up after it holds the executor for ~100 ms, and a 100 ms simulated press
+    // sent before then ends before the button task could debounce it (no event at all). The app
+    // announces itself with its state line once its main loop is about to run.
+    let ready = node
+        .wait_for(Duration::from_secs(8), |f| {
+            frame_text(f).is_some_and(|t| t.contains("paired with gateway"))
+        })
+        .expect("node console read");
+    assert!(ready.is_some(), "node app up and paired after provisioning");
 
     // --- uplink bridge: a simulated click must surface as a typed Uplink on the gateway ---
     node.send_shell(10, "button simulate 100").expect("sim click");
