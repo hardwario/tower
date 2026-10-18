@@ -14,7 +14,8 @@ use rumqttc::{Event as MqttEvent, Incoming, QoS};
 use crate::gateway::engine::PAIRING_SLACK_S;
 use crate::gateway::payload::{Node, PendingEntry, ShellReq, ShellRsp};
 use crate::gateway::topics;
-use crate::term::{sanitize, sanitize_line};
+use crate::render::device_text;
+use crate::term::sanitize_line;
 use crate::{EXIT_DEVICE_TIMEOUT, EXIT_ERROR, EXIT_OK};
 
 use super::{MqttOpts, RpcTimeout, Session, connect};
@@ -314,6 +315,23 @@ fn add_ota(s: &mut Session, window: u16, name: Option<&str>) -> Result<u8> {
     }
 }
 
+/// One remote-shell response chunk made printable: the node's output keeps its newlines and tabs,
+/// its CRLF line ends fold into LF ([`device_text`]) and terminal controls, a bare CR among them,
+/// are escaped. A CR that ends a chunk is held (`held_cr`) for the next one, whose LF may
+/// complete it: the radio's chunking can split a CRLF.
+fn shell_chunk_text(held_cr: &mut bool, text: &str, done: bool) -> String {
+    let mut text = if *held_cr {
+        format!("\r{text}")
+    } else {
+        text.to_string()
+    };
+    *held_cr = !done && text.ends_with('\r');
+    if *held_cr {
+        text.pop();
+    }
+    device_text(&text).into_owned()
+}
+
 fn shell(s: &mut Session, node: &str, line: &str, ttl: u16, timeout: Duration, no_wait: bool) -> Result<u8> {
     let id = s.resolve_node(node)?;
     let req_id = uuid::Uuid::new_v4().to_string();
@@ -345,6 +363,8 @@ fn shell(s: &mut Session, node: &str, line: &str, ttl: u16, timeout: Duration, n
     }
     eprintln!("[tower] sent; waiting for the node to wake (Ctrl-C to stop waiting)…");
     let mut result = 0u8;
+    // The CR that ended the previous chunk: the radio's chunking can split a CRLF.
+    let mut held_cr = false;
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -388,8 +408,7 @@ fn shell(s: &mut Session, node: &str, line: &str, ttl: u16, timeout: Duration, n
                     eprintln!("[tower] {}", sanitize_line(err));
                     return Ok(EXIT_ERROR);
                 }
-                // Node output keeps its newlines/tabs; terminal controls are escaped.
-                print!("{}", sanitize(&rsp.text));
+                print!("{}", shell_chunk_text(&mut held_cr, &rsp.text, rsp.done));
                 if rsp.truncated {
                     eprintln!("[tower] response truncated (chunk lost over the air)");
                     result = result.max(1);
@@ -413,6 +432,24 @@ fn shell(s: &mut Session, node: &str, line: &str, ttl: u16, timeout: Duration, n
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shell_chunks_fold_crlf_even_across_a_chunk_boundary() {
+        let mut held = false;
+        assert_eq!(
+            super::shell_chunk_text(&mut held, "a = 1\r\nb = 2\r", false),
+            "a = 1\nb = 2"
+        );
+        assert!(held);
+        assert_eq!(
+            super::shell_chunk_text(&mut held, "\nc = 3\r\n", true),
+            "\nc = 3\n"
+        );
+        assert!(!held);
+        // A CR that rewinds the line stays visible, held or not.
+        assert_eq!(super::shell_chunk_text(&mut held, "x\r", false), "x");
+        assert_eq!(super::shell_chunk_text(&mut held, "fake", true), "\\x0dfake");
+    }
+
     use super::*;
 
     #[test]
