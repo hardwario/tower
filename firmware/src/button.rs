@@ -29,6 +29,8 @@
 // Reusable SDK driver surface: full event/config API exposed even if the app
 // only uses a subset.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_stm32::exti::ExtiInput;
@@ -91,19 +93,24 @@ impl Default for Config {
     }
 }
 
-/// Depth of the event queue between the task and the [`Button`] handle.
-const QUEUE_DEPTH: usize = 8;
+/// Depth of the event queue between the task and the [`Button`] handle. A tap queues three
+/// events (Press, Release, Click), so 16 holds five taps made while the app is busy (a radio send
+/// with retries takes ~1.5 s).
+const QUEUE_DEPTH: usize = 16;
 
 /// Event mailbox tying a [`Button`] handle to its task. Declare one `static`
 /// per button: `static BTN: ButtonChannel = ButtonChannel::new();`.
 pub struct ButtonChannel {
     inner: Channel<CriticalSectionRawMutex, Event, QUEUE_DEPTH>,
+    /// The debounced state, kept current by the task even when the queue is full.
+    pressed: AtomicBool,
 }
 
 impl ButtonChannel {
     pub const fn new() -> Self {
         Self {
             inner: Channel::new(),
+            pressed: AtomicBool::new(false),
         }
     }
 }
@@ -138,10 +145,16 @@ pub struct Button {
 }
 
 impl Button {
-    /// Await the next debounced event. If the app falls behind, the oldest
-    /// events past the queue depth are dropped.
+    /// Await the next debounced event. If the app falls behind, the newest events past the
+    /// queue depth are dropped: decide anything that depends on the button's state now (a long
+    /// hold) with [`is_pressed`](Self::is_pressed), not from the events alone.
     pub async fn next_event(&self) -> Event {
         self.ch.inner.receive().await
+    }
+
+    /// Whether the button is down now (debounced), whatever the queue holds.
+    pub fn is_pressed(&self) -> bool {
+        self.ch.pressed.load(Ordering::Relaxed)
     }
 
     /// Handle form of [`simulate`]: inject a simulated press of `ms` milliseconds.
@@ -285,6 +298,7 @@ async fn scan_task(mut input: Source, active_high: bool, config: Config, ch: &'s
             if now.saturating_duration_since(since) >= threshold {
                 pressed = raw;
                 candidate_since = None;
+                ch.pressed.store(pressed, Ordering::Relaxed);
                 if pressed {
                     press_instant = now;
                     hold_fired = false;

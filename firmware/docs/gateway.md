@@ -168,10 +168,16 @@ The temperature is measured every `therm-period` and sent when it changed or the
 due. While uplinks go undelivered (the gateway switched off, out of range, the node removed),
 the period doubles per consecutive miss up to `heartbeat`, so an orphaned node no longer spends
 a confirmed uplink with every retransmission and ACK window on every period, forever. A delivery,
-a button press or a new pairing ends the backoff. The accelerometer's interrupt line backs off
-the same way (1 s doubling to 5 min) while it stays high after its source register was read (an
-I²C error, a stuck line), instead of re-reading it in a loop with no await (which starved the
-executor until the watchdog reset the node, a boot loop). A button held past `hold-time`, or
+a button press, a management request on the cable or a new pairing ends the backoff. Motion
+uplinks go out at most once per 10 s: continuous motion (a node carried around) raises about two
+tilt events a second, which emptied the EU duty budget in about 30 minutes and then got every
+button uplink refused; motion inside the 10 s is coalesced and its latest face is sent when they
+end. A duty refusal is logged but does not count toward the "re-pair" hint (nothing went out).
+The accelerometer's interrupt line backs off the same way (1 s doubling to 5 min) when its
+source register cannot be read (an I²C error) or when it stays high through 10 good reads in a
+row that found nothing to report (a stuck line; real motion yields an event at least every 5),
+instead of re-reading it in a loop (which once starved the executor until the watchdog reset
+the node, a boot loop). A button held past `hold-time`, or
 stuck, waits for the release edge instead of polling every 5 ms (the re-pair gesture's 12 s
 clock runs in the main loop, from the Press, so it does not need the polling).
 
@@ -181,12 +187,14 @@ Injects a synthetic press of `<ms>` (1..15000) through the **real** recognition 
 (debounce → click/hold classification) and on into reporting, the console "finger" for testing
 without a physical press. A `100` ms press is a click (> debounce, < click-timeout); a `1500` ms
 press is a hold; on a paired node a `13000` ms press is the re-pair gesture. Used by the HIL
-gateway test.
+gateway test. **Console only:** over the radio it would let anyone who can publish a remote shell
+command inject clicks into the event stream, or start the re-pair gesture on every node.
 
 ### Pairing (node side)
 
-- **OTA**: hold the button ≥ 1 s while unprovisioned: the node pairs (X25519 key agreement
-  with a commitment round, docs/radio.md "OTA pairing") with any gateway that has a window open.
+- **OTA**: hold the button for at least `hold-time` (1 s by default) while unprovisioned: the
+  node pairs (X25519 key agreement with a commitment round, docs/radio.md "OTA pairing") with any
+  gateway that has a window open.
   It logs `net: pairing: SAS 123456` at the end of the handshake; the same SAS on the gateway's
   side (its console, and `tower nodes add --ota`, which prints it) is the man-in-the-middle check
   (compared, it leaves an active attacker a 1 in 10⁶ chance; not compared, none is detected). With
@@ -358,14 +366,14 @@ uplink cycle.
   gateway's address that way: a node provisioned by cable or in the factory finds its gateway
   without a pairing window, and a replacement gateway that imported the node keys (`NodeAdd` of
   each entry of the old registry, read with `NodeRevealKey`, with its floors: *Moving keys*
-  above) is re-joined without re-pairing. The `keyed-join` setting (default
-  `on`) is the operator's switch; a refused keyed join (switched off, unregistered address,
-  wrong key, stale counter, ...) is logged as `net: keyed join from XXXXXXXX refused: <reason>`,
-  at most one line per 10 s. A node re-provisioned with a new key (and a restarted counter)
-  joins fine after its `NodeAdd`. A counter restarted under the unchanged key would show up as
-  `stale counter`, but by then its frames have already reused nonces on air: that is why it must
-  not happen (a fresh key per provision, the fail-closed boot, the floors), not a state to
-  recover from by re-adding.
+  above) is re-joined without re-pairing. The `keyed-join` setting (default `on`) is the
+  operator's switch; a refused keyed join (switched off, unregistered address, wrong key, stale
+  counter, ...) is logged as `net: keyed join from 0x0000ab12 refused: <reason> (<n> since the
+  last report)`, at most one line per 10 s. A node re-provisioned with a new key (and a
+  restarted counter) joins fine after its `NodeAdd`. A counter restarted under the unchanged key
+  would show up as `stale counter`, but by then its frames have already reused nonces on air:
+  that is why it must not happen (a fresh key per provision, the fail-closed boot, the floors),
+  not a state to recover from by re-adding.
 
 ### RAM budget
 
@@ -411,9 +419,9 @@ The full round-trip, node asleep between events:
 2. The gateway holds it; the next uplink's ACK advertises the pending flag.
 3. The node opens a short RX window, decodes the `NodeCmd`, and runs `line` through
    `shell::stream_line` (the same command tree the console uses, but streamed): it re-runs the
-   handler once per output window so an unbounded reply (`export`, `settings print`) is never
-   truncated at a fixed buffer. The reply streams back as `NodeMsg::Shell` chunks (each reply's
-   ACK re-flags pending, chaining the queue).
+   handler once per output window so an unbounded reply (`export`, `system settings print`) is
+   never truncated at a fixed buffer. The reply streams back as `NodeMsg::Shell` chunks (each
+   reply's ACK re-flags pending, chaining the queue).
 4. The gateway forwards the chunks as `Uplink` frames and reports delivery via `RadioStat::Tx`.
 
 No tab completion over the air; completion is a per-transport feature the radio transport
@@ -421,8 +429,8 @@ doesn't offer.
 
 **Console-only commands.** A few commands are refused over the radio with result **5
 (`R_DENIED`)** and run only from the node's USB console: `system eeprom wipe` (a factory reset
-must be physical; it erases the pairing key) and `settings set` of an address setting (re-
-addressing a live node over the air orphans it). `system reboot` still works remotely. Anyone
+must be physical; it erases the pairing key) and `system settings set` of an address setting
+(re-addressing a live node over the air orphans it). `system reboot` still works remotely. Anyone
 who can reach the gateway's MQTT broker can queue remote shell lines, so this is the backstop
 that keeps a broker-level intruder from unpairing the fleet (see the access policy in the
 [CLI README](../../cli/README.md)). App commands opt in with `Entry::cmd_console_only`; see

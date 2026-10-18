@@ -119,8 +119,14 @@ the SAS is compared, so a re-pair needs a `NodeRemove` first); a cable `NodeAdd`
 registered address by design (an authenticated host action: the re-provision path).
 
 1. **Cable provisioning** (`tower nodes add --port`): the host generates the key with the OS
-   CSPRNG and writes it to the node and the gateway over USB. Nothing crosses the air. The key is
-   fresh for every provision (a node's counter restarts with its store).
+   CSPRNG and writes it to the node over the node's USB cable (a typed `Provision` frame, never a
+   shell line). The gateway gets the same key through the MQTT `node_add` RPC, as clear JSON on
+   `gateway/cmd`, and the bridge writes it to the dongle over its own USB link. Nothing crosses
+   the air, but the key does cross the MQTT link, in plain text when that link leaves loopback
+   without TLS (`--broker-allow-plaintext`, or a plain external broker): run the command on the
+   gateway host or over TLS (section 4.4, residual risk 5, and "Key material and counter floors"
+   in [`mqtt-api.md`](mqtt-api.md)). The key is fresh for every provision (a node's counter
+   restarts with its store).
 2. **OTA pairing v3** (`tower nodes add --ota`, an operator-opened window): X25519 key agreement
    with a commitment round modelled on Bluetooth LE Secure Connections numeric comparison:
 
@@ -149,10 +155,11 @@ registered address by design (an authenticated host action: the re-provision pat
    vectors verified on hardware by `crypto_x25519_kat`).
 3. **Keyed join** (E4): a node that already holds its per-node key (cable or factory
    provisioned, or a replacement gateway that imported the node keys with their counter floors,
-   section 4.1) finds its gateway with two
-   frames sealed under that key; both ends prove the key, nothing secret travels, and a recorded
-   request is a replay. The responder is opt-in per device and switchable on the gateway
-   (`keyed-join` setting). Duty-cycle mode only.
+   section 4.1) finds its gateway with two frames sealed under that key; both ends prove the key,
+   nothing secret travels, and a recorded request is a replay. The responder is opt-in per device
+   and switchable on the gateway (`keyed-join` setting). Duty-cycle mode only. Today only the
+   example `firmware/examples/net_keyed_join.rs` initiates one (`Net::join_keyed`): the product
+   push button does not, and the product gateway only answers keyed joins.
 
 ### 4.3 USB console (`crates/protocol`, `firmware/src/console.rs`, `cli/`)
 
@@ -252,7 +259,9 @@ registered address by design (an authenticated host action: the re-provision pat
    logs` running while it pairs). Prefer cable provisioning or keyed join where possible, and
    keep windows short. The node's re-pair gesture (a 12 s hold while paired) opens no extra door:
    it only starts a join, which a gateway answers only inside an operator-opened window and never
-   for an address it still has registered.
+   for an address it still has registered. Only a hand on the node can make it: the push button's
+   `button simulate` (which can hold the button 15 s) is console-only, refused over the radio, so
+   a broker-level intruder can neither start the gesture fleet-wide nor inject clicks.
 2. **No forward secrecy for data.** Link keys are static per node; whoever obtains a key (e.g. a
    board without RDP) can decrypt recorded past traffic of that node and impersonate it until it
    is re-keyed.

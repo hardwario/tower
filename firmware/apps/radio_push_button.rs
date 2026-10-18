@@ -13,7 +13,7 @@
 //! completion over the air: completion is a per-transport feature the radio doesn't offer.
 //!
 //! Pairing:
-//! * **OTA**: hold the button ≥1 s while unprovisioned: the node pairs (an X25519 key
+//! * **OTA**: hold the button for `hold-time` (1 s by default) while unprovisioned: the node pairs (an X25519 key
 //!   agreement, both ends log the same `pairing: SAS`) with any gateway that has a window open.
 //!   The new key is **provisional** until the gateway acknowledges an uplink under it (the
 //!   commit round: the `NodeInfo`, a few attempts over ~15 s); only then is `(gw, key)`
@@ -48,7 +48,7 @@
 //! (ms, applied at boot). The `button simulate <ms>` command injects a synthetic press
 //! of that length through the *real* recognition machine (debounce/click/hold) and on
 //! into reporting: the console "finger" for testing without a physical press, also
-//! used by the HIL bench.
+//! used by the HIL bench (console only: refused over the radio).
 //!
 //!   just build app radio_push_button
 //!   just run   app radio_push_button   (then press the button)
@@ -240,9 +240,16 @@ fn cmd_simulate(ctx: &mut shell::Ctx<'_>, args: &[&str]) -> shell::Outcome {
     }
 }
 
+/// Console-only: over the radio it would let anyone who can publish a remote shell command
+/// inject clicks into the event stream integrations act on, or hold the button 13 s and start the
+/// re-pair gesture on every node of the fleet.
 static BTN_COMMANDS: &[shell::Entry] = &[shell::Entry::menu(
     "button",
-    &[shell::Entry::cmd("simulate", shell::Args::None, cmd_simulate)],
+    &[shell::Entry::cmd_console_only(
+        "simulate",
+        shell::Args::None,
+        cmd_simulate,
+    )],
 )];
 
 // --- LED patterns -------------------------------------------------------------------
@@ -270,6 +277,18 @@ const ACCEL_BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// again), which is no fault; the pause only keeps a line stuck high in hardware from spinning
 /// the loop.
 const ACCEL_REARM: Duration = Duration::from_millis(100);
+/// Good reads in a row that found nothing to report while the line stayed high: a line stuck
+/// high (a wiring fault, a latch the chip never clears), not motion. Real continuous motion yields
+/// an event at least every 5 reads (the driver passes one per 500 ms, read every
+/// [`ACCEL_REARM`]), so this never trips on it; a stuck line backs off like an unreadable one
+/// instead of costing 10 wake-ups and I2C reads a second forever.
+const ACCEL_STUCK_READS: u8 = 10;
+/// Motion uplinks go out at most once per this long. Continuous motion (a node carried around)
+/// raises about two tilt events a second, ~29 ms/s of airtime against the EU duty budget's
+/// 10 ms/s refill (1 %): it emptied the budget in ~30 min, and then every button uplink was
+/// refused. Motion inside the interval is coalesced, and its latest face goes out when the
+/// interval ends, so the last orientation is never lost.
+const ACCEL_UPLINK_MIN: Duration = Duration::from_secs(10);
 
 /// Post-uplink RX window when the gateway's ACK advertises a queued downlink. The
 /// gateway transmits ~20 ms after our uplink with one retry (~450 ms worst); 1 s
@@ -509,6 +528,11 @@ async fn run(b: Board) {
     // The accelerometer interrupt wait resumes at this instant (`None` = at once).
     let mut accel_quiet: Option<Instant> = None;
     let mut accel_backoff = ACCEL_BACKOFF_MIN;
+    let mut accel_empty_highs: u8 = 0;
+    // Motion uplink rate limit (`ACCEL_UPLINK_MIN`): no motion uplink before this instant, and the
+    // face of the motion coalesced meanwhile, sent when it passes.
+    let mut accel_hold: Option<Instant> = None;
+    let mut accel_pending: Option<u8> = None;
 
     loop {
         let repair_due = pressed_at
@@ -517,7 +541,11 @@ async fn run(b: Board) {
         let timer_due = next_temp
             .min(next_heartbeat)
             .min(repair_due.unwrap_or(Instant::MAX))
-            .min(cue_until.unwrap_or(Instant::MAX));
+            .min(cue_until.unwrap_or(Instant::MAX))
+            .min(match accel_pending {
+                Some(_) => accel_hold.unwrap_or(Instant::MIN),
+                None => Instant::MAX,
+            });
         let accel_wait = async {
             if let Some(t) = accel_quiet {
                 Timer::at(t).await;
@@ -612,7 +640,11 @@ async fn run(b: Board) {
             // --- periodic: temperature and/or heartbeat due; the re-pair gesture; the end of the
             // unpaired cue ---
             Either4::Second(()) => {
-                if repair_due.is_some_and(|due| Instant::now() >= due) {
+                if repair_due.is_some() && !btn.is_pressed() {
+                    // Released, but the Release was lost to a full button queue while the loop
+                    // was busy: no gesture, so no re-pair the user never made.
+                    pressed_at = None;
+                } else if repair_due.is_some_and(|due| Instant::now() >= due) {
                     // Held REPAIR_HOLD while paired (no Release seen): pair again. The current
                     // pairing stays in force unless the new one commits.
                     pressed_at = None; // one gesture, one attempt
@@ -667,6 +699,17 @@ async fn run(b: Board) {
                         note(&mut misses, send_info(&mut net, provision).await);
                     }
                 }
+                if accel_hold.is_none_or(|t| Instant::now() >= t)
+                    && let Some(face) = accel_pending.take()
+                {
+                    // The motion coalesced during the last interval: its latest face.
+                    let msg = NodeMsg::Accel {
+                        kind: AccelKind::Motion,
+                        face,
+                    };
+                    note(&mut misses, uplink(&mut net, provision, &msg, 3).await);
+                    accel_hold = Some(Instant::now() + ACCEL_UPLINK_MIN);
+                }
             }
 
             // --- accelerometer tilt interrupt ---
@@ -679,26 +722,41 @@ async fn run(b: Board) {
                 if let Tilt::Event(face) = tilt
                     && provision.is_some()
                 {
-                    let msg = NodeMsg::Accel {
-                        kind: AccelKind::Motion,
-                        face,
-                    };
-                    note(&mut misses, uplink(&mut net, provision, &msg, 3).await);
+                    if accel_hold.is_some_and(|t| Instant::now() < t) {
+                        accel_pending = Some(face); // sent when the interval ends
+                    } else {
+                        let msg = NodeMsg::Accel {
+                            kind: AccelKind::Motion,
+                            face,
+                        };
+                        note(&mut misses, uplink(&mut net, provision, &msg, 3).await);
+                        accel_hold = Some(Instant::now() + ACCEL_UPLINK_MIN);
+                    }
                 }
                 // `wait_for_high` returns at once on a high line, and looping on it without an
                 // await starved the executor until the watchdog reset the node (a boot loop that
                 // rewrote the TX watermark every boot). A failed read leaves the latch set: back
                 // off, growing. After a good read a high line is new motion (the read cleared the
                 // latch): take it after a short pause, no fault.
-                if tilt == Tilt::ReadFailed {
+                let high = accel_int.is_high();
+                accel_empty_highs = match tilt {
+                    Tilt::Nothing if high => accel_empty_highs.saturating_add(1),
+                    _ => 0,
+                };
+                let stuck = accel_empty_highs >= ACCEL_STUCK_READS;
+                if tilt == Tilt::ReadFailed || stuck {
                     if accel_backoff == ACCEL_BACKOFF_MIN {
-                        warn!(target: "accel", "interrupt source unreadable (I2C), backing off");
+                        if stuck {
+                            warn!(target: "accel", "interrupt line stuck high (reads succeed), backing off");
+                        } else {
+                            warn!(target: "accel", "interrupt source unreadable (I2C), backing off");
+                        }
                     }
                     accel_quiet = Some(Instant::now() + accel_backoff);
                     accel_backoff = (accel_backoff * 2).min(ACCEL_BACKOFF_MAX);
                 } else {
                     accel_backoff = ACCEL_BACKOFF_MIN;
-                    if accel_int.is_high() {
+                    if high {
                         accel_quiet = Some(Instant::now() + ACCEL_REARM);
                     }
                 }
@@ -713,6 +771,9 @@ async fn run(b: Board) {
                     continue;
                 };
                 handle_mgmt(req, &mut net, &mut provision, addr, band, channel, kv, &led).await;
+                // Someone is at the cable, as at a press, and a `JoinOpen` may have paired anew:
+                // either ends the backoff, so the next periodic uplink tries promptly.
+                misses = 0;
                 if provision.is_some() {
                     led.set_background(None);
                     cue_until = None;
@@ -1069,9 +1130,13 @@ async fn uplink(net: &mut Net, provision: Option<Provisioned>, msg: &NodeMsg<'_>
         UNACKED.store(0, Ordering::Relaxed);
     } else {
         warn!(target: "node", "uplink {result}");
-        let streak = UNACKED.load(Ordering::Relaxed).saturating_add(1);
+        // Refused by the duty budget: nothing went out, so it says nothing about the gateway.
+        let streak = match result {
+            SendResult::DutyLimited => UNACKED.load(Ordering::Relaxed),
+            _ => UNACKED.load(Ordering::Relaxed).saturating_add(1),
+        };
         UNACKED.store(streak, Ordering::Relaxed);
-        if streak == UNACKED_HINT {
+        if streak == UNACKED_HINT && !matches!(result, SendResult::DutyLimited) {
             // Most likely out of range or switched off; but a gateway that no longer knows this
             // node drops everything it sends, and only a re-pair gets it back.
             warn!(
@@ -1115,8 +1180,11 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
         if remaining.as_ticks() == 0 {
             return false;
         }
+        // `None` is a timeout, but also a frame for another node, a non-DATA frame, a CRC error
+        // or a replay: none of them ends the window early (a busy star would otherwise push our
+        // queued command back to the next uplink, up to a heartbeat away). The check above does.
         let Some(rx) = net.recv(remaining).await else {
-            return false;
+            continue;
         };
         if rx.src != gw_addr {
             continue; // another node's traffic, not our downlink
