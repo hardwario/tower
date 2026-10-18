@@ -56,10 +56,13 @@
 #![no_std]
 #![no_main]
 
+use core::pin::{Pin, pin};
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use embassy_futures::select::{Either4, select4};
+use embassy_futures::select::{Either, Either4, select, select4};
+use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::mode::Async;
 use embassy_time::{Duration, Instant, Timer};
 use log::{info, warn};
 use tower::board::{GuardedI2c, UniqueId};
@@ -533,12 +536,7 @@ async fn run(b: Board) {
         {
             // --- button (real or simulated, same recognition path) ---
             Either4::First(ev) => {
-                let kind = match ev {
-                    button::Event::Press => ButtonKind::Press,
-                    button::Event::Release => ButtonKind::Release,
-                    button::Event::Click => ButtonKind::Click,
-                    button::Event::Hold => ButtonKind::Hold,
-                };
+                let kind = button_kind(ev);
                 let idx = kind as usize;
                 counts[idx] = counts[idx].wrapping_add(1);
                 // The re-pair gesture's clock (every press, whatever the per-event enables).
@@ -552,7 +550,7 @@ async fn run(b: Board) {
                 // paired or not, so the bench sees every press.
                 let enabled = event_enabled(kv, ev);
                 if enabled {
-                    show_button(kind, counts[idx], provision.is_some()).await;
+                    show_button(kind, counts[idx], provision.map_or(Some(UNPAIRED_NOTE), |_| None)).await;
                 }
 
                 // Pairing is a fixed gesture, not a reportable event: while unpaired a
@@ -564,8 +562,18 @@ async fn run(b: Board) {
                     cue_until = Some(Instant::now() + UNPAIRED_CUE);
                     if matches!(ev, button::Event::Hold) {
                         pressed_at = None; // this press is spent on the join
+                        let attempt = pin!(pair(
+                            &mut net,
+                            addr,
+                            band,
+                            channel,
+                            kv,
+                            &led,
+                            PAIRING_WINDOW,
+                            None
+                        ));
                         if let PairOutcome::Paired { rec, .. } =
-                            pair(&mut net, addr, band, channel, kv, &led, PAIRING_WINDOW, None).await
+                            showing_events(attempt, &btn, &mut accel_int, &mut bus, &mut counts, kv).await
                         {
                             provision = Some(rec);
                             cue_until = None;
@@ -611,8 +619,18 @@ async fn run(b: Board) {
                     // pairing stays in force unless the new one commits.
                     pressed_at = None; // one gesture, one attempt
                     info!(target: "button", "re-pair: button held {} s", REPAIR_HOLD.as_secs());
+                    let attempt = pin!(pair(
+                        &mut net,
+                        addr,
+                        band,
+                        channel,
+                        kv,
+                        &led,
+                        PAIRING_WINDOW,
+                        provision
+                    ));
                     if let PairOutcome::Paired { rec, .. } =
-                        pair(&mut net, addr, band, channel, kv, &led, PAIRING_WINDOW, provision).await
+                        showing_events(attempt, &btn, &mut accel_int, &mut bus, &mut counts, kv).await
                     {
                         provision = Some(rec);
                         misses = 0; // a fresh link: no backoff
@@ -658,7 +676,7 @@ async fn run(b: Board) {
                 accel_quiet = None;
                 let tilt = handle_tilt(&mut bus).await;
                 if let Tilt::Event(face) = tilt {
-                    show_motion(face, provision.is_some()).await;
+                    show_motion(face, provision.map_or(Some(UNPAIRED_NOTE), |_| None)).await;
                 }
                 if let Tilt::Event(face) = tilt
                     && provision.is_some()
@@ -868,6 +886,16 @@ async fn measure_temp(bus: &mut AccelBus) -> Option<i32> {
 
 /// Tilt IRQ: clear/validate the latched interrupt, settle, and report the face up
 /// (0 = unknown/moving).
+/// The uplink payload's kind of a recognized button event.
+fn button_kind(ev: button::Event) -> ButtonKind {
+    match ev {
+        button::Event::Press => ButtonKind::Press,
+        button::Event::Release => ButtonKind::Release,
+        button::Event::Click => ButtonKind::Click,
+        button::Event::Hold => ButtonKind::Hold,
+    }
+}
+
 /// The event names of [`ButtonKind`] as the console and the uplink payloads spell them.
 fn button_name(kind: ButtonKind) -> &'static str {
     match kind {
@@ -878,14 +906,17 @@ fn button_name(kind: ButtonKind) -> &'static str {
     }
 }
 
+/// The note on an event the node shows but cannot send: unpaired, or a pairing attempt runs.
+const UNPAIRED_NOTE: &str = "not paired, not sent: hold the button to pair";
+const PAIRING_NOTE: &str = "pairing in progress, not sent";
+
 /// Show a button event on the console: a log line and a structured event (`tower events`).
-/// Unpaired, the line says it went nowhere and how to pair. Dropped while USB is unplugged.
-async fn show_button(kind: ButtonKind, count: u32, paired: bool) {
+/// `note` says why it goes nowhere, if it does. Dropped while USB is unplugged.
+async fn show_button(kind: ButtonKind, count: u32, note: Option<&str>) {
     let name = button_name(kind);
-    if paired {
-        info!(target: "button", "{} #{}", name, count);
-    } else {
-        info!(target: "button", "{} #{} (not paired, not sent: hold the button to pair)", name, count);
+    match note {
+        None => info!(target: "button", "{} #{}", name, count),
+        Some(note) => info!(target: "button", "{} #{} ({})", name, count, note),
     }
     use core::fmt::Write as _;
     let mut n: heapless::String<10> = heapless::String::new();
@@ -894,16 +925,60 @@ async fn show_button(kind: ButtonKind, count: u32, paired: bool) {
 }
 
 /// Show an accelerometer motion event on the console (see [`show_button`]).
-async fn show_motion(face: u8, paired: bool) {
-    if paired {
-        info!(target: "button", "motion, face {}", face);
-    } else {
-        info!(target: "button", "motion, face {} (not paired, not sent)", face);
+async fn show_motion(face: u8, note: Option<&str>) {
+    match note {
+        None => info!(target: "button", "motion, face {}", face),
+        Some(note) => info!(target: "button", "motion, face {} ({})", face, note),
     }
     use core::fmt::Write as _;
     let mut f: heapless::String<3> = heapless::String::new();
     let _ = write!(f, "{face}");
     console::event("accel", &[("kind", "motion"), ("face", f.as_str())]).await;
+}
+
+/// Run a pairing attempt (`attempt`, up to a minute) while still showing the button and the
+/// accelerometer on the console: the main loop is parked in the attempt, and without this the
+/// events of that minute would vanish. They are shown and counted, not sent (the node is
+/// between gateways), and never interrupt the attempt. The attempt comes pinned by the caller:
+/// taken by value, the future would be laid out twice in the caller's state (the argument and
+/// the `select`), over a kilobyte of RAM this part does not have.
+async fn showing_events<F: core::future::Future>(
+    attempt: Pin<&mut F>,
+    btn: &button::Button,
+    accel_int: &mut ExtiInput<'static, Async>,
+    bus: &mut AccelBus,
+    counts: &mut [u32; 4],
+    kv: Nv,
+) -> F::Output {
+    let watch = async {
+        loop {
+            match select(btn.next_event(), accel_int.wait_for_high()).await {
+                Either::First(ev) => {
+                    let kind = button_kind(ev);
+                    let idx = kind as usize;
+                    counts[idx] = counts[idx].wrapping_add(1);
+                    if event_enabled(kv, ev) {
+                        show_button(kind, counts[idx], Some(PAIRING_NOTE)).await;
+                    }
+                }
+                Either::Second(()) => {
+                    // The same pacing as the main loop (see its accelerometer branch).
+                    match handle_tilt(bus).await {
+                        Tilt::Event(face) => show_motion(face, Some(PAIRING_NOTE)).await,
+                        Tilt::ReadFailed => Timer::after(ACCEL_BACKOFF_MIN).await,
+                        Tilt::Nothing => {}
+                    }
+                    if accel_int.is_high() {
+                        Timer::after(ACCEL_REARM).await;
+                    }
+                }
+            }
+        }
+    };
+    match select(attempt, watch).await {
+        Either::First(outcome) => outcome,
+        Either::Second(never) => never,
+    }
 }
 
 /// What one accelerometer interrupt turned out to be ([`handle_tilt`]).
