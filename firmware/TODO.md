@@ -60,7 +60,7 @@ give the radio network two things the MCU alone can't:
 
 **Decided (2026-10-17).** The ATSHA204A's 72-bit serial number is **not** used as an identity:
 anyone with the board can read it and it proves nothing without a provisioned secret. The device
-identity is the MCU's factory unique ID (`board::unique_id`, shown as `uid:` in `/system resource
+identity is the MCU's factory unique ID (`board::unique_id`, shown as `uid:` in `system resource
 print`).
 
 **Done when.** A provisioned board keyed-joins with a verified attestation and an unprovisioned

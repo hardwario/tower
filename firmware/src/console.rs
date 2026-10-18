@@ -88,7 +88,7 @@ const KEY_BOOT_COUNT: u8 = 0x00;
 /// TX queue depth (frames). 4 (was 8): each slot is a ~280 B `Outgoing`, and on the
 /// 20 KB part every slot is stack the gateway/push-button products can't spare (the
 /// bench-measured gateway high-water is 7360 B of a ~9 KB stack region, see docs/gateway.md,
-/// `/system stack print`; the push-button peak is ~6.8 KB). The cost
+/// `system stack print`; the push-button peak is ~6.8 KB). The cost
 /// is honest and accounted: a boot burst deeper than 4 frames drops-newest and is
 /// reported by the writer's [`Dropped`] marker; the async producers ([`event`],
 /// [`uplink`], …) apply backpressure instead of dropping while the console is up.
@@ -869,7 +869,7 @@ pub fn init_session(kv: Nv, spawner: crate::Spawner) {
 
 /// Await the writer draining every queued frame, then a short tail for the last frame to clear
 /// the UART. A caller that resets the MCU right after emitting a final response (the shell's
-/// `/system reboot`) uses this so the reset can't cut the response off mid-frame; the old fixed
+/// `system reboot`) uses this so the reset can't cut the response off mid-frame; the old fixed
 /// 150 ms sleep was shorter than a full `TX_CHANNEL` at 115200 baud (~190 ms). Bounded so an
 /// absent/wedged writer (console down) can't hang the caller.
 pub async fn flush() {
@@ -975,7 +975,7 @@ fn clip_start(s: &str, mut at: usize) -> usize {
 /// service instead of hanging until a battery pull; the breadcrumb re-surfaces the crash on the
 /// next boot ([`emit_crash_report`]), so nothing is lost by rebooting. A crash loop is bounded
 /// by the [`bootguard`](crate::bootguard): after `BOOT_LOOP_THRESHOLD` fast resets the SDK stops
-/// grinding per-boot EEPROM state, and the run length is visible in `/system/eeprom print`.
+/// grinding per-boot EEPROM state, and the run length is visible in `system eeprom print`.
 ///
 /// The record is `<message> @ <short path>:<line>`: message first and **clipped, never dropped**
 /// ([`Clipper`]): a plain `write!` of the whole `PanicInfo` into a bounded `heapless::String`
@@ -1061,7 +1061,7 @@ extern "C" fn tower_hard_fault(pc: u32, lr: u32) -> ! {
 /// Report the previous boot's crash, if the reset-surviving breadcrumb holds one, as one ERROR
 /// frame on the `crash` module, emitted through the normal console queue once the manager is
 /// up. Called by the [`app!`](crate::app) macro right after the boot banner; also caches the
-/// record for `/system/crash print`.
+/// record for `system crash print`.
 pub fn emit_crash_report() {
     if let Some(c) = crate::crashlog::take() {
         log::error!(

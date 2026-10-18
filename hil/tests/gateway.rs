@@ -4,7 +4,7 @@
 //! `Frame::Uplink` with a decodable `radio::NodeMsg`), the downlink queue with the
 //! ACK-pending delivery window (remote shell round-trip), and the RadioStat stream.
 //!
-//! The node's "finger" is its `/button simulate <ms>` shell command; the bench has no
+//! The node's "finger" is its `button simulate <ms>` shell command; the bench has no
 //! actuator, and a simulated press runs the exact recognition + count/radio path a real
 //! press does (a 100 ms press = a click: > debounce, < click-timeout).
 //!
@@ -118,7 +118,7 @@ fn gateway_bridges_push_button_end_to_end() {
     std::thread::sleep(Duration::from_millis(500));
 
     // --- uplink bridge: a simulated click must surface as a typed Uplink on the gateway ---
-    node.send_shell(10, "/button simulate 100").expect("sim click");
+    node.send_shell(10, "button simulate 100").expect("sim click");
     let uplink = gw
         .wait_for(Duration::from_secs(10), |f| {
             matches!(f, Frame::Uplink { src, data, .. }
@@ -134,7 +134,7 @@ fn gateway_bridges_push_button_end_to_end() {
         &NodeCmd::Shell {
             epoch: 0x4849_4C00,
             cmd_id: 77,
-            line: "/system settings get therm-period",
+            line: "system settings get therm-period",
         },
         &mut env,
     )
@@ -156,7 +156,7 @@ fn gateway_bridges_push_button_end_to_end() {
 
     // Wake the node: another simulated click. Its uplink's ACK carries the pending
     // flag; the gateway delivers; the node executes and streams the reply back.
-    node.send_shell(11, "/button simulate 100").expect("sim click #2");
+    node.send_shell(11, "button simulate 100").expect("sim click #2");
     let delivered = gw
         .wait_for(Duration::from_secs(10), |f| {
             matches!(f, Frame::Stat(tower_protocol::msg::RadioStat::Tx { item: i, outcome, .. })
@@ -188,7 +188,7 @@ fn gateway_bridges_push_button_end_to_end() {
     assert_eq!(gw.seq_gaps(), 0, "no frames lost on the gateway console");
 }
 
-/// The byte count from a `/system stack print` line beginning with `prefix` (e.g. `"used:"` in
+/// The byte count from a `system stack print` line beginning with `prefix` (e.g. `"used:"` in
 /// `"used: 7480 B (45.6%) peak high-water"` → `7480`). The number is the token after the prefix.
 fn stack_bytes(text: &str, prefix: &str) -> Option<u32> {
     let line = text.lines().find(|l| l.trim_start().starts_with(prefix))?;
@@ -200,7 +200,7 @@ fn stack_bytes(text: &str, prefix: &str) -> Option<u32> {
 /// across all EEPROM buckets (each `NodeAdd` loads/rewrites one ~270 B bucket stack-local, the
 /// deepest registry-codec path, and can trigger a KV compaction flip), pushes downlink-queue
 /// items, and lists the whole registry (the mgmt-response chunking path over many entries), then
-/// reads `/system stack print` (painted at boot by `stack::paint`) and asserts the peak stays
+/// reads `system stack print` (painted at boot by `stack::paint`) and asserts the peak stays
 /// under the 8 KB budget floor. Single board (the Dongle in the gateway role) so it is
 /// deterministic; the radio-bridge path is separately exercised by
 /// `gateway_bridges_push_button_end_to_end` (which reaches `net.send` on the same firmware).
@@ -274,7 +274,7 @@ fn gateway_stack_high_water_within_budget() {
 
     // Read the measured stack high-water and hold it to the 8 KB budget floor.
     let (result, text) = gw
-        .shell_roundtrip(200, "/system stack print", Duration::from_secs(6))
+        .shell_roundtrip(200, "system stack print", Duration::from_secs(6))
         .expect("stack print reply");
     assert_eq!(result, 0, "stack print result code");
     let used = stack_bytes(&text, "used:").unwrap_or_else(|| panic!("no 'used:' line in:\n{text}"));

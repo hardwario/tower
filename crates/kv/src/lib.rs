@@ -735,7 +735,7 @@ fn words(len: u32) -> u32 {
 
 /// Free (appendable) bytes remaining in the active half, a pure read (one record scan). On an
 /// un-initialized region, reports one full half (what [`init`] would leave). Feeds the
-/// [`maintain`] threshold check and `/system/eeprom print`.
+/// [`maintain`] threshold check and `system eeprom print`.
 pub fn free_bytes<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S::Error>> {
     let half = half_len(capacity);
     match active(store, capacity)? {

@@ -153,7 +153,7 @@ runs before the app's console.)
 
 | Test | Steps | Pass |
 |---|---|---|
-| **A: console up on USB** | USB plugged, `tower logs` | `Hello` then streaming logs; `tower console` shell responds (`/system/resource print`, TAB) |
+| **A: console up on USB** | USB plugged, `tower logs` | `Hello` then streaming logs; `tower console` shell responds (`system resource print`, TAB) |
 | **B: live plug/unplug** | `tower logs` running + current meter on VDD; unplug USB, then re-plug | On unplug: logs stop, **current drops to µA** (~50 ms). On re-plug: reconnects, fresh `Hello`, logs resume |
 | **B (no-reset check)** | across the unplug/replug in B, watch the log **uptime timestamps** | Uptime is **continuous / increasing** (device kept running+sleeping). If it resets to 0 → the device rebooted, i.e. *not* the dynamic path |
 | **C: headless boot → plug** | power board with **no USB** (idles at µA), then plug USB | PA12 EXTI (or the ~500 ms poll fallback) wakes the MCU; console appears in `tower logs` within ~½ s |
@@ -184,13 +184,13 @@ message + location like any other error.
 
 It then **resets** (it does not halt). Before resetting it writes the crash text into a
 reset-surviving `.uninit` RAM breadcrumb (`crashlog`, zero EEPROM wear); the next boot
-re-reports it as a `crash`-module ERROR frame and via `/system/crash print`, so a
+re-reports it as a `crash`-module ERROR frame and via `system crash print`, so a
 battery node that faults **with USB unplugged** still surfaces its crash, after it has
 already recovered. The record is `<message> @ <path>:<line>`: message first and clipped
 (never dropped), and a dependency's long absolute `~/.cargo/registry/...` path cut to its
 last ~48 bytes; a plain bounded `write!` of the whole panic info used to lose the message
 whenever the location alone nearly filled the 192-byte record. Crash loops are bounded by
-the bootguard's EEPROM-write backoff, and the run length shows in `/system/eeprom print`.
+the bootguard's EEPROM-write backoff, and the run length shows in `system eeprom print`.
 
 **HardFaults** follow the same path (record = faulting PC/LR), with one difference: the
 SDK's own `HardFault` entry stub copies PC/LR out of the exception frame and then resets
@@ -211,7 +211,7 @@ Two failures can't run a handler at all, so the breadcrumb is written elsewhere:
   the feeder files a `watchdog` record (*"main loop unresponsive ..."*). It is reported only
   if the reset that followed really was the IWDG, and retracted if the loop recovered first.
 
-`/system/crash print` shows the kind (`panic` / `hardfault` / `stack-overflow` / `watchdog`)
+`system crash print` shows the kind (`panic` / `hardfault` / `stack-overflow` / `watchdog`)
 and the text.
 
 ---
@@ -300,41 +300,42 @@ Drive it from the host interactively or one-shot:
 
 ```sh
 tower shell                              # interactive REPL; TAB completes
-tower exec "/system/resource print"      # run one command, print result, exit (scripts/CI)
-tower complete "/system settings set "   # ask the target what completes here
+tower exec "system resource print"      # run one command, print result, exit (scripts/CI)
+tower complete "system settings set "   # ask the target what completes here
 ```
 
 ### Built-in commands
 
 | Command | Does |
 |---|---|
-| `/system reboot` | flush the reply, then `SCB::sys_reset()` |
-| `/system/resource print` | firmware name + version, session id, `wire: console 0xXXXX radio 0xXXXX` (the schema tags this image was built with: every console frame carries the first, every radio envelope the second), uptime, `mcu:` (part, clock, LSE RTC, flash / RAM / EEPROM), `uid: XXXXXXXX-XXXXXXXX-XXXXXXXX` (the MCU's 96-bit factory unique ID, `tower::board::unique_id`), `rng:` source (`TRNG` / `SW fallback`) |
-| `/system/stack print` | measured stack high-water (boot-painted): used/free/total vs the budget, plus the previous boot's peak after a software/IWDG reset |
-| `/system/eeprom print` | wear gauge: compaction flips vs budget, live/free bytes, resets |
-| `/system/eeprom wipe confirm` | factory reset: an atomic flip to an empty store (power-loss-safe; the store is frozen until the reboot that follows, also on failure). **Console-only** |
-| `/system/crash print` | the last crash recovered at this boot (from the breadcrumb): panic, HardFault, stack overflow, or watchdog wedge |
-| `/system settings print` | list every setting and its value |
-| `/system settings set <name>=<value>` | validate by kind + persist |
-| `/system settings get <name>` | show value + constraints + default |
-| `/export` | dump all settings as `settings set` lines (reproducible config) |
+| `system reboot` | flush the reply, then `SCB::sys_reset()` |
+| `system resource print` | firmware name + version, session id, `wire: console 0xXXXX radio 0xXXXX` (the schema tags this image was built with: every console frame carries the first, every radio envelope the second), uptime, `mcu:` (part, clock, LSE RTC, flash / RAM / EEPROM), `uid: XXXXXXXX-XXXXXXXX-XXXXXXXX` (the MCU's 96-bit factory unique ID, `tower::board::unique_id`), `rng:` source (`TRNG` / `SW fallback`) |
+| `system stack print` | measured stack high-water (boot-painted): used/free/total vs the budget, plus the previous boot's peak after a software/IWDG reset |
+| `system eeprom print` | wear gauge: compaction flips vs budget, live/free bytes, resets |
+| `system eeprom wipe confirm` | factory reset: an atomic flip to an empty store (power-loss-safe; the store is frozen until the reboot that follows, also on failure). **Console-only** |
+| `system crash print` | the last crash recovered at this boot (from the breadcrumb): panic, HardFault, stack overflow, or watchdog wedge |
+| `system settings print` | list every setting and its value |
+| `system settings set <name>=<value>` | validate by kind + persist |
+| `system settings get <name>` | show value + constraints + default |
+| `export` | dump all settings as `settings set` lines (reproducible config) |
 
-Unknown commands return result code 1. Tokens split on `/`, space, and tab, so
-`/system settings set` and `/system/settings/set` are equivalent.
+Unknown commands return result code 1. Words are separated by spaces (or tabs): the path into
+the tree, the command and its arguments, `system settings set name=value`; there is no leading
+`/`, and a value may contain one (`identity=lab/room-1`).
 
 **Console-only commands.** The same command tree also serves the **radio remote shell**
 (`shell::stream_line`, e.g. a gateway-queued `NodeCmd::Shell`: anything that can publish a
 downlink over MQTT). Operations that are destructive or cut the radio link therefore refuse
 remote lines with result **5 (`R_DENIED`)** and run only from the USB console:
-`/system/eeprom wipe` (built with `Entry::cmd_console_only`) and `settings set` of an
-address setting (`Kind::Addr`, i.e. `addr`). Everything else (including `/system reboot`,
-`settings print/get`, `/export`, and setting non-address values) works over the radio.
+`system eeprom wipe` (built with `Entry::cmd_console_only`) and `settings set` of an
+address setting (`Kind::Addr`, i.e. `addr`). Everything else (including `system reboot`,
+`settings print/get`, `export`, and setting non-address values) works over the radio.
 App commands opt in with `Entry::cmd_console_only(..)`; a handler that is only partly
 sensitive checks `ctx.is_remote()` itself.
 
 A response of any length reaches the host whole: the shell pages it out 256 bytes per handler
 run (`shell::RESP_CAP`, the handler re-run with an advancing window, the same on the console and
-over the radio) as 192-byte `chunk`/`last` frames that the host reassembles; `/export` and
+over the radio) as 192-byte `chunk`/`last` frames that the host reassembles; `export` and
 `settings print` are the long ones.
 
 ---
@@ -373,18 +374,18 @@ static SETTINGS: &[Setting] = &[
 - **Ranges/choices are enforced on `set`**; an invalid value returns result 2 and
   prints the constraint:
   ```
-  > /system settings set interval=99999
+  > system settings set interval=99999
   invalid value for interval (uint 1..=3600)
   ```
 - **`get` shows the derived metadata:**
   ```
-  > /system settings get tx_power
+  > system settings get tx_power
   tx_power = -10  [int -30..=20, default 14]
   ```
 - **Completion is value-aware:** completing after `=` offers the `Enum` choices or
   `Bool` true/false:
   ```
-  > /system settings set mode=⇥     →  p2p  star  mesh
+  > system settings set mode=⇥     →  p2p  star  mesh
   ```
   A completion reply is always **one frame**: the target stops adding candidates before the
   encoded reply would exceed the ~249-byte payload (or 16 entries) and sets `more`, so many
@@ -397,7 +398,7 @@ static SETTINGS: &[Setting] = &[
 unit's **32-bit radio address** (the frame-header src/dest, i.e. the net-layer `addr`). `auto`
 resolves to the chip-UID-derived address; `random` mints a fresh non-zero one from the
 STM32L0 hardware TRNG (`board::rand_u32`); the reply names the source (`ok (0x…, TRNG)`;
-`SW fallback` if the TRNG failed to start, also shown as `rng:` in `/system/resource print`).
+`SW fallback` if the TRNG failed to start, also shown as `rng:` in `system resource print`).
 `get` shows the *effective* address, so it never lies about what the radio uses. It is
 boot-applied (reboot to re-address a live node) and **console-only** (`R_DENIED` over the
 radio remote shell: re-addressing would cut the link the command arrived on).
@@ -409,7 +410,7 @@ radio remote shell: re-addressing would cut the link the command arrived on).
 `serve_ext` lets an app add its **own commands and settings**. App commands
 **deep-merge** with the SDK tree at *every* level, so you can drop a command into an
 existing menu *or* grow your own nested subtree. App settings join the same
-`/system settings` table.
+`system settings` table.
 
 ```rust
 use core::fmt::Write;
@@ -422,11 +423,11 @@ fn cmd_status(ctx: &mut Ctx, _args: &[&str]) -> Outcome {
 }
 
 static APP_COMMANDS: &[Entry] = &[
-    Entry::cmd("uptime", Args::None, cmd_status),               // → /uptime  (top level)
-    Entry::menu("system", &[Entry::cmd("hello", Args::None, cmd_status)]),  // → /system hello  (into SDK menu)
-    Entry::menu("radio", &[                                     // → /radio …  (new subtree)
+    Entry::cmd("uptime", Args::None, cmd_status),               // → uptime   (top level)
+    Entry::menu("system", &[Entry::cmd("hello", Args::None, cmd_status)]),  // → system hello  (into SDK menu)
+    Entry::menu("radio", &[                                     // → radio …  (new subtree)
         Entry::cmd("status", Args::None, cmd_status),
-        Entry::menu("test", &[Entry::cmd("ping", Args::None, cmd_status)]),  // → /radio test ping
+        Entry::menu("test", &[Entry::cmd("ping", Args::None, cmd_status)]),  // → radio test ping
     ]),
 ];
 
@@ -489,9 +490,9 @@ on one serial drain (35/65 split):
 │12:01 measurement temp=23.5 ││12:01 [  64.030] INFO  app: heartbeat 32    │
 │                            ││12:01 [  66.031] WARN  app: link flaky      │
 ┌Interactive Shell──────────┐│                                            │
-│> /system settings print    ││                                            │
+│> system settings print    ││                                            │
 │identity = node-7           ││                                            │
-│> /system/eeprom print      ││                                            │
+│> system eeprom print      ││                                            │
 │flips: 3 / 100000 (0.0%)    ││                                            │
 │> _                         ││                                            │
 └────────────────────────────┘└────────────────────────────────────────────┘
@@ -573,7 +574,7 @@ The lockstep check is the tag in the `Hello`'s (and every) frame header: a host 
 another checkout refuses the frame (`tower` prints its mismatch banner, naming the firmware read
 best effort from that `Hello`, and exits with code 125). The gateway and push-button apps also
 return `firmware_version` in their `Describe` reply (`DeviceInfo`), for hosts that attach after
-the boot `Hello`. `/system/resource print` shows the tags this image was built with on its
+the boot `Hello`. `system resource print` shows the tags this image was built with on its
 `wire:` line (`wire: console 0xXXXX radio 0xXXXX`). A stream in which every frame fails its CRC
 is a framing difference the tags can't see; `tower` reports that pattern once.
 
@@ -661,7 +662,7 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
   `Hello`; the firmware announces it on boot and on each USB plug-in (when the dynamic
   console rebuilds), not on host connect. The TUI
   header otherwise shows the **`tower` CLI** version; the firmware version is in
-  `/system/resource print`.
+  `system resource print`.
 - **`VBUS_SENSE` (PA12):** the dynamic console gates on PA12 reading logic-high when USB
   is plugged. PA12 is driven by the FT231X's **CBUS3** pin (a push-pull ~3.3 V logic
   output configured in the FTDI EEPROM, e.g. `DRIVE1` on the Core Module, `SLEEP#` on the
@@ -681,5 +682,5 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
   another schema tag and are refused (`SchemaMismatch`).
 - **A handler whose output can exceed one 256-byte window runs once per window**: the shell
   pages long responses by re-running the handler, so such a handler must be deterministic and
-  free of side effects (the SDK's long ones, `/export`, `settings print`, `resource print`, are
+  free of side effects (the SDK's long ones, `export`, `settings print`, `resource print`, are
   read-only; commands that change state print a few bytes and run once).

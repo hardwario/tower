@@ -58,7 +58,7 @@ pub use embassy_executor::Spawner;
 /// async fn run(mut b: Board) {
 ///     // use b.spawner, b.tmp112, b.led, b.button, b.accel_int, b.kv, b.strip_* …
 /// }
-/// app!(run);                                    // base shell (/system/resource, settings, …)
+/// app!(run);                                    // base shell (system resource, settings, …)
 /// // app!(run, commands: CMDS, settings: SETS); // + an app command tree / settings
 /// // app!(run, no_shell);                       // opt out (app owns console RX, or stays minimal)
 /// ```
@@ -100,7 +100,7 @@ macro_rules! app {
         )]
         async fn __tower_app(spawner: $crate::Spawner) {
             // Paint the free stack from the shallow boot frame (before any deep call), so
-            // `/system stack print` can later report a measured high-water mark. Cheap (one
+            // `system stack print` can later report a measured high-water mark. Cheap (one
             // sentinel fill of unused RAM) and the first thing that runs so it covers everything.
             // It first reads the PREVIOUS boot's paint (RAM survives a warm reset): an IWDG reset
             // with the paint consumed to the bottom files a `stack-overflow` crash record, the
@@ -119,7 +119,7 @@ macro_rules! app {
             // Uniform startup banner, naming this example/app (the `just flash <name>` target).
             $crate::console::boot_banner(option_env!("CARGO_BIN_NAME").unwrap_or("app"));
             // If the previous boot ended in a panic/HardFault, the reset-surviving breadcrumb
-            // holds it; report it now (one ERROR frame) and cache it for /system/crash print.
+            // holds it; report it now (one ERROR frame) and cache it for system crash print.
             $crate::console::emit_crash_report();
             let __setup = $setup;
             __setup(&board);

@@ -6,7 +6,7 @@
 //! record** (the [`bootguard`](crate::bootguard) pattern: retained across a warm reset, never
 //! persisted, so zero EEPROM wear) and reset. The next boot picks the record up
 //! ([`take`], called via `console::emit_crash_report` from the [`app!`](crate::app) macro),
-//! logs it as an error frame, and caches it for `/system/crash print`, so the crash is
+//! logs it as an error frame, and caches it for `system crash print`, so the crash is
 //! visible on the wire after the unit has already recovered, and on demand for the rest of
 //! the power-on.
 //!
@@ -101,7 +101,7 @@ static mut RECORD: Record = Record {
     msg: [0; MSG_CAP],
 };
 
-/// The record [`take`] recovered on this boot, kept for `/system/crash print`. Written once
+/// The record [`take`] recovered on this boot, kept for `system crash print`. Written once
 /// at start-up (before the shell serves), read-only afterwards.
 static LAST: Mutex<RefCell<Option<Crash>>> = Mutex::new(RefCell::new(None));
 
@@ -207,7 +207,7 @@ pub fn take() -> Option<Crash> {
     Some(crash)
 }
 
-/// The crash recovered at this boot, if any: what `/system/crash print` reports. `None` after
+/// The crash recovered at this boot, if any: what `system crash print` reports. `None` after
 /// a clean boot (or a brown-out that lost RAM retention).
 pub fn last() -> Option<Crash> {
     critical_section::with(|cs| LAST.borrow(cs).borrow().clone())

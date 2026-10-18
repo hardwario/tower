@@ -3,15 +3,15 @@
 //!
 //! Drive with `tower shell` (TAB completes, incl. enum/bool values after `=`) or
 //! `tower exec "<line>"`:
-//!   /system settings print
-//!   /system settings set identity=node-7         (Str)
-//!   /system settings set interval=60             (Uint, range 1..=3600)
-//!   /system settings set mode=mesh               (Enum: p2p|star|mesh)
-//!   /system settings set tx_power=-10            (Int, range -30..=20)
-//!   /system settings get tx_power                (shows value + constraints)
-//!   /system hello                                (app command merged into /system)
-//!   /radio status        /radio test ping        (app's own nested subtree)
-//!   /export
+//!   system settings print
+//!   system settings set identity=node-7         (Str)
+//!   system settings set interval=60             (Uint, range 1..=3600)
+//!   system settings set mode=mesh               (Enum: p2p|star|mesh)
+//!   system settings set tx_power=-10            (Int, range -30..=20)
+//!   system settings get tx_power                (shows value + constraints)
+//!   system hello                                (app command merged into system)
+//!   radio status        radio test ping        (app's own nested subtree)
+//!   export
 
 #![no_std]
 #![no_main]
@@ -23,32 +23,32 @@ use log::info;
 use tower::shell::{Args, Ctx, Entry, Kind, Outcome, Setting};
 use tower::{app, board::Board};
 
-/// App command `/uptime` (top-level).
+/// App command `uptime` (top-level).
 fn cmd_uptime(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let s = Instant::now().as_micros() / 1_000_000;
     let _ = write!(ctx, "up {} h {} m {} s", s / 3600, (s % 3600) / 60, s % 60);
     Outcome::ok()
 }
 
-/// App command merged **into the SDK's `/system` menu** → `/system hello`.
+/// App command merged **into the SDK's `system` menu** → `system hello`.
 fn cmd_hello(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
-    let _ = write!(ctx, "hello: an app command living under the SDK's /system menu");
+    let _ = write!(ctx, "hello: an app command living under the SDK's system menu");
     Outcome::ok()
 }
 
-/// App command in the app's **own nested subtree** → `/radio status`.
+/// App command in the app's **own nested subtree** → `radio status`.
 fn cmd_radio_status(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let _ = write!(ctx, "radio: idle, last RSSI -71 dBm");
     Outcome::ok()
 }
 
-/// Deeper still → `/radio test ping`.
+/// Deeper still → `radio test ping`.
 fn cmd_radio_ping(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let _ = write!(ctx, "ping → pong (loopback)");
     Outcome::ok()
 }
 
-/// App commands. They deep-merge with the SDK tree: `system` joins the SDK's `/system`
+/// App commands. They deep-merge with the SDK tree: `system` joins the SDK's `system`
 /// menu; `radio` is a brand-new top-level subtree.
 static APP_COMMANDS: &[Entry] = &[
     Entry::cmd("uptime", Args::None, cmd_uptime),
@@ -93,7 +93,7 @@ static APP_SETTINGS: &[Setting] = &[
 
 async fn run(_b: Board) {
     // The shell (with this app's APP_COMMANDS + APP_SETTINGS) is served by `app!` below.
-    info!("shell ready: try `/system settings print` via `tower shell`");
+    info!("shell ready: try `system settings print` via `tower shell`");
 
     // Logs keep flowing alongside the shell on the same framed link.
     let mut n: u32 = 0;

@@ -11,54 +11,66 @@ const COL_KEY: Color = Color::Magenta;
 const COL_VAL: Color = Color::Green;
 const COL_PUNCT: Color = Color::DarkGray;
 
-/// Highlight a shell command line: `/system/eeprom print level=3` →
-/// path segments cyan, `/` separators dim, bare words yellow, `key=value` magenta/green.
+/// A word of the command tree (a menu, a command or a setting name): lowercase letters,
+/// digits and hyphens, starting with a letter.
+fn is_word(w: &str) -> bool {
+    w.starts_with(|c: char| c.is_ascii_lowercase())
+        && w.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A `key=value` argument (both sides non-empty).
+fn is_assignment(w: &str) -> bool {
+    w.split_once('=')
+        .is_some_and(|(k, v)| !k.is_empty() && !v.is_empty())
+}
+
+/// Highlight a shell command line: `system settings set addr=random` → the leading words
+/// (the path into the tree) cyan, the last of them (the command) yellow, `key=value`
+/// magenta/green, any other argument green.
 pub(crate) fn command(line: &str) -> Vec<Span<'static>> {
+    let words: Vec<&str> = line.split(' ').collect();
+    let path_len = words.iter().take_while(|w| is_word(w)).count();
     let mut spans = Vec::new();
-    for (i, tok) in line.split_inclusive(' ').enumerate() {
-        let (word, trail) = match tok.strip_suffix(' ') {
-            Some(w) => (w, " "),
-            None => (tok, ""),
-        };
+    for (i, word) in words.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
         if word.is_empty() {
-            // collapsed runs of spaces
-        } else if word.contains('=') {
+            // a run of spaces
+        } else if is_assignment(word) {
             let (k, v) = word.split_once('=').unwrap();
             spans.push(Span::styled(k.to_string(), Style::new().fg(COL_KEY)));
             spans.push(Span::styled("=".to_string(), Style::new().fg(COL_PUNCT)));
             spans.push(Span::styled(v.to_string(), Style::new().fg(COL_VAL)));
-        } else if word.contains('/') {
-            for part in word.split_inclusive('/') {
-                let (seg, sep) = match part.strip_suffix('/') {
-                    Some(sg) => (sg, "/"),
-                    None => (part, ""),
-                };
-                if !seg.is_empty() {
-                    spans.push(Span::styled(seg.to_string(), Style::new().fg(COL_PATH)));
-                }
-                if !sep.is_empty() {
-                    spans.push(Span::styled(sep.to_string(), Style::new().fg(COL_PUNCT)));
-                }
-            }
-        } else if i == 0 {
-            // First token without a slash: still an address into the tree.
-            spans.push(Span::styled(word.to_string(), Style::new().fg(COL_PATH)));
         } else {
-            spans.push(Span::styled(word.to_string(), Style::new().fg(COL_CMD)));
-        }
-        if !trail.is_empty() {
-            spans.push(Span::raw(" "));
+            let col = match i + 1 {
+                n if n < path_len => COL_PATH,
+                n if n == path_len => COL_CMD,
+                _ => COL_VAL,
+            };
+            spans.push(Span::styled(word.to_string(), Style::new().fg(col)));
         }
     }
     spans
 }
 
-/// Highlight a shell-response line: command-syntax lines (starting with `/`, e.g. `/export`
-/// output) reuse [`command`]; `key: value` / `key = value` lines split into a magenta key,
-/// dim separator, and green value; anything else renders raw.
+/// Whether a response line reads as a command (an `export` line): a `key=value` argument
+/// after nothing but tree words.
+fn looks_like_command(line: &str) -> bool {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    match words.iter().position(|w| is_assignment(w)) {
+        Some(at) => at > 0 && words[..at].iter().all(|w| is_word(w)),
+        None => false,
+    }
+}
+
+/// Highlight a shell-response line: command-syntax lines (`export` output) reuse [`command`];
+/// `key: value` / `key = value` lines split into a magenta key, dim separator, and green value;
+/// anything else renders raw.
 pub(crate) fn response(line: &str) -> Line<'static> {
     let l = line;
-    if l.starts_with('/') {
+    if looks_like_command(l) {
         return Line::from(command(l));
     }
     if l.starts_with('>') {
@@ -86,14 +98,52 @@ pub(crate) fn response(line: &str) -> Line<'static> {
 mod tests {
     use super::*;
 
+    /// The color of each non-space span of `line` as `command` paints it.
+    fn colors(line: &str) -> Vec<(String, Option<Color>)> {
+        command(line)
+            .into_iter()
+            .filter(|s| !s.content.trim().is_empty())
+            .map(|s| (s.content.to_string(), s.style.fg))
+            .collect()
+    }
+
     #[test]
-    fn command_paints_path_and_kv() {
-        let spans = command("/system/settings set addr=random");
-        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(joined, "/system/settings set addr=random");
-        // The key/value split produced distinct spans.
-        assert!(spans.iter().any(|s| s.content.as_ref() == "addr"));
-        assert!(spans.iter().any(|s| s.content.as_ref() == "random"));
+    fn command_paints_path_command_and_arguments() {
+        let joined: String = command("system settings set addr=random")
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(
+            joined, "system settings set addr=random",
+            "text survives verbatim"
+        );
+        let c = |s: &str, col| (s.to_string(), Some(col));
+        assert_eq!(
+            colors("system settings set addr=random"),
+            [
+                c("system", COL_PATH),
+                c("settings", COL_PATH),
+                c("set", COL_CMD),
+                c("addr", COL_KEY),
+                c("=", COL_PUNCT),
+                c("random", COL_VAL)
+            ]
+        );
+        assert_eq!(
+            colors("button simulate 1500"),
+            [c("button", COL_PATH), c("simulate", COL_CMD), c("1500", COL_VAL)]
+        );
+        assert_eq!(colors("export"), [c("export", COL_CMD)]);
+    }
+
+    /// `export` output reads as commands; prose and `key: value` lines don't.
+    #[test]
+    fn response_spots_command_lines() {
+        assert!(looks_like_command("system settings set identity=tower"));
+        assert!(!looks_like_command("rebooting"));
+        assert!(!looks_like_command("therm-period = 60"));
+        assert!(!looks_like_command("uid: 01473930-36353931-00340027"));
+        assert!(!looks_like_command("x=1"), "a bare assignment is no command");
     }
 
     #[test]

@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn window_paginates_ascii_without_loss() {
-        // "/export"-shaped output split across many small windows.
+        // "export"-shaped output split across many small windows.
         let pieces = &[
             "identity = tower\r\n",
             "addr = 0x88a4e90d\r\n",

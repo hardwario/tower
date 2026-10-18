@@ -83,7 +83,7 @@ Operating notes:
   corrupts the affected 64-bit words, so skip the erase only when the target pages are already
   blank.
 - Erase wipes **main flash only**; the data EEPROM (6 KiB on the L083: radio keys, TX counters)
-  survives. Use the firmware's EEPROM wipe (`/system eeprom wipe confirm` in the TOWER shell) to
+  survives. Use the firmware's EEPROM wipe (`system eeprom wipe confirm` in the TOWER shell) to
   clear it. (The one library path that clears it is `rdp::unprotect` on a protected chip.)
 - Writes are bounded to main flash in the protocol engine itself (`Bootloader::write_block`
   refuses any other address), so the option bytes and the data EEPROM are out of reach.

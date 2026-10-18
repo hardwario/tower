@@ -73,7 +73,7 @@ just fw examples                   # firmware example names
 just fw flash example blinky       # build + flash over the UART bootloader (board attached)
 tower logs                         # decoded console
 tower                              # the console TUI: events, shell and logs
-tower exec "/system/resource print"  # one shell command, its reply, exit
+tower exec "system resource print"  # one shell command, its reply, exit
 ```
 
 The radio products (a push button node, a Radio Dongle gateway, MQTT) are described in

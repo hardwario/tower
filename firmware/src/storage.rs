@@ -259,7 +259,7 @@ impl<'d> Kv<'d> {
     /// The store is then **frozen**: every write fails with [`Error::Frozen`], also when the
     /// wipe itself failed part-way (the store is still consistent: old or empty), so no subsystem
     /// can re-populate it from RAM state derived from the pre-wipe contents. The caller **must
-    /// reboot** (the shell's `/system/eeprom wipe confirm` does, on success and on failure).
+    /// reboot** (the shell's `system eeprom wipe confirm` does, on success and on failure).
     /// Per-key removal is [`delete`](Self::delete); this is the whole-device reset.
     pub fn wipe(&mut self) -> Result<(), Error> {
         self.frozen = true;

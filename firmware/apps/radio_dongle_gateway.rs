@@ -24,7 +24,7 @@
 //! the stats tick.
 //!
 //! **RAM budget** (20 KB part, ~9 KB stack region; bench-measured gateway high-water 7360 B
-//! (2026-07-12, `/system stack print`); see the stack-overflow history): everything this app keeps resident beyond the SDK
+//! (2026-07-12, `system stack print`); see the stack-overflow history): everything this app keeps resident beyond the SDK
 //! baseline must fit in ~2 KB, or the stack loses the difference. Hence: registry on
 //! EEPROM (transient ~270 B bucket locals on the stack), a 4-item downlink queue,
 //! and 12-byte packed link stats. Check `just size app radio_dongle_gateway` after
@@ -134,7 +134,7 @@ static GW_COMMANDS: &[shell::Entry] = &[shell::Entry::menu(
     &[shell::Entry::cmd("status", shell::Args::None, cmd_status)],
 )];
 
-// Live counters for `/gateway status` (shell handlers are plain fns with no app-state
+// Live counters for `gateway status` (shell handlers are plain fns with no app-state
 // access; M0+ atomics are load/store only, which is all these need).
 static STAT_ID: AtomicU32 = AtomicU32::new(0);
 static STAT_NODES: AtomicU32 = AtomicU32::new(0);
@@ -170,7 +170,7 @@ const DOWNLINK_TURNAROUND: Duration = Duration::from_millis(20);
 const DOWNLINK_REPS: u8 = 2;
 /// Default downlink TTL when the host passes `ttl == 0`.
 const DEFAULT_TTL_S: u16 = 3600;
-/// How often the main loop re-reads the `keyed-join` setting, so `/system settings set
+/// How often the main loop re-reads the `keyed-join` setting, so `system settings set
 /// keyed-join=off` takes effect without a reboot. Not every iteration: a KV lookup scans (and
 /// CRC-checks) the active EEPROM half, a few ms of CPU on this part.
 const POLICY_REFRESH: Duration = Duration::from_secs(2);

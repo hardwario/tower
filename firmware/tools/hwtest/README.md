@@ -43,8 +43,8 @@ tools/hwtest/build.sh net_secure_ping /tmp/nsp_d.bin
 tools/hwtest/tb.sh /tmp/nsp_n.bin "$P1" /tmp/nsp_d.bin "$P2" 9 /tmp/n.txt /tmp/g.txt
 
 # interactive shell, headless
-tower -d "$P1" exec "/system/settings print"
-tower -d "$P1" complete "/system settings set m"
+tower -d "$P1" exec "system settings print"
+tower -d "$P1" complete "system settings set m"
 ```
 
 ## Notes

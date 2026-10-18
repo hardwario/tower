@@ -20,8 +20,8 @@
 //!
 //! ## Extending it (apps)
 //! App commands merge into the SDK tree **at every level**: drop a command into an
-//! existing menu (`/system/hello`) or grow your own nested subtree (`/radio/test/ping`).
-//! App settings join the same `/system settings` table and complete their values.
+//! existing menu (`system hello`) or grow your own nested subtree (`radio test ping`).
+//! App settings join the same `system settings` table and complete their values.
 //! ```ignore
 //! fn cmd_hi(ctx: &mut shell::Ctx, _args: &[&str]) -> shell::Outcome {
 //!     let _ = write!(ctx, "hello");        // Ctx: core::fmt::Write
@@ -29,7 +29,7 @@
 //! }
 //! use shell::{Args, Entry, Kind, Setting};
 //! static CMDS: &[Entry] = &[
-//!     Entry::menu("system", &[Entry::cmd("hello", Args::None, cmd_hi)]), // into /system
+//!     Entry::menu("system", &[Entry::cmd("hello", Args::None, cmd_hi)]), // into system
 //!     Entry::menu("radio", &[Entry::cmd("status", Args::None, cmd_hi)]), // new subtree
 //! ];
 //! static SETS: &[Setting] = &[
@@ -97,8 +97,8 @@ pub enum Kind {
     Addr,
 }
 
-/// A persisted, named setting. The shell derives `/system settings print|set|get`
-/// and `/export` from the table; no per-setting code.
+/// A persisted, named setting. The shell derives `system settings print|set|get`
+/// and `export` from the table; no per-setting code.
 pub struct Setting {
     /// Local key within the shell namespace (`NS_SHELL`); the shell prefixes it, so a setting can
     /// never collide with another subsystem's keys. **`0x00..=0x0F` is reserved for the SDK base
@@ -356,11 +356,12 @@ static BASE_ROOT: &[Entry] = &[
 
 // ---- tree walk (shared by dispatch + completion) ----------------------------
 
-/// Tokenize on `/` and whitespace (both separate path/command tokens). Capped at [`MAX_TOKENS`];
-/// the `ShellCommand` handler rejects a line with more tokens rather than reaching this cap.
+/// Tokenize on whitespace (words separate the path, the command and its arguments). Capped at
+/// [`MAX_TOKENS`]; the `ShellCommand` handler rejects a line with more tokens rather than
+/// reaching this cap.
 fn tokenize(line: &str) -> Vec<&str, MAX_TOKENS> {
     let mut v = Vec::new();
-    for t in line.split(['/', ' ', '\t']).filter(|s| !s.is_empty()) {
+    for t in line.split_whitespace() {
         let _ = v.push(t);
     }
     v
@@ -532,7 +533,7 @@ async fn dispatch(kv: Scoped, app: &'static [Entry], settings: SettingsTable, cm
     }
 }
 
-/// An async sink for a **streamed** shell response, so a large reply (`/export`, `settings
+/// An async sink for a **streamed** shell response, so a large reply (`export`, `settings
 /// print`) is never truncated at [`RESP_CAP`]: the console's `ConsoleSink` and the radio
 /// remote shell's sink (in the product apps) both implement it. The producer
 /// calls [`push`](ShellSink::push) for body text of any length and [`done`](ShellSink::done)
@@ -554,7 +555,7 @@ pub trait ShellSink {
 /// uniformly by **windowed re-run**: run the handler capturing one `RESP_CAP`-wide output
 /// [`Window`], push it, and if the handler wrote more, re-run with `skip` advanced to the next
 /// window, until the whole response has been paged out. A terse response (the common case)
-/// fits one window and runs exactly once; a big dump (`/export`, `settings print` with many app
+/// fits one window and runs exactly once; a big dump (`export`, `settings print` with many app
 /// settings) re-executes a handful of times, which is fine; those commands are rare.
 ///
 /// **Purity contract:** a handler whose output can exceed one window MUST be deterministic and
@@ -567,8 +568,8 @@ pub trait ShellSink {
 /// final chunk (the response must be on the air before a reset).
 ///
 /// This is the **remote** (radio) transport: [console-only](Entry::cmd_console_only) commands
-/// (`/system/eeprom wipe`) and `settings set` of an address setting (`addr`) are refused with
-/// [`R_DENIED`]; everything else (including `/system reboot`) runs as on the console.
+/// (`system eeprom wipe`) and `settings set` of an address setting (`addr`) are refused with
+/// [`R_DENIED`]; everything else (including `system reboot`) runs as on the console.
 pub async fn stream_line<S: ShellSink>(line: &str, sink: &mut S) -> (u8, bool) {
     let Some((kv, app_commands, app_settings)) = critical_section::with(|cs| SHELL_PARAMS.borrow(cs).get())
     else {
@@ -640,7 +641,7 @@ async fn stream_with<S: ShellSink>(
         sink.done(R_BAD_ARG).await;
         return (R_BAD_ARG, false);
     }
-    if line.split(['/', ' ', '\t']).filter(|s| !s.is_empty()).count() > MAX_TOKENS {
+    if line.split_whitespace().count() > MAX_TOKENS {
         sink.push("too many arguments").await;
         sink.done(R_BAD_ARG).await;
         return (R_BAD_ARG, false);
@@ -815,7 +816,7 @@ fn cmd_eeprom_wipe(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
     if args != ["confirm"] {
         let _ = write!(
             ctx,
-            "usage: /system/eeprom wipe confirm
+            "usage: system eeprom wipe confirm
 erases the WHOLE store (keys, peers, settings) and reboots"
         );
         return Outcome::code(R_BAD_ARG);
@@ -843,7 +844,7 @@ erases the WHOLE store (keys, peers, settings) and reboots"
     }
 }
 
-/// One setting's line for `print` (`name = value`) or `export` (`/system settings
+/// One setting's line for `print` (`name = value`) or `export` (`system settings
 /// set name=value`), trailing CRLF included. Shared by the sync handlers below and the
 /// streaming path ([`stream_line`]) so the two formats can never drift.
 fn write_setting(kv: Scoped, s: &Setting, export: bool, out: &mut impl Write) {
@@ -858,7 +859,7 @@ fn write_setting(kv: Scoped, s: &Setting, export: bool, out: &mut impl Write) {
         read_value(kv, s, &mut val);
     }
     if export {
-        let _ = write!(out, "/system settings set {}={}\r\n", s.name, val);
+        let _ = write!(out, "system settings set {}={}\r\n", s.name, val);
     } else {
         let _ = write!(out, "{} = {}\r\n", s.name, val);
     }
@@ -916,16 +917,16 @@ fn settings_set(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
         let _ = write!(ctx, "usage: set <name>=<value>");
         return Outcome::code(R_BAD_ARG);
     };
-    // The tokenizer splits on `/`, space, and tab, so a value containing one arrives
-    // as EXTRA tokens (`identity=a/b` → ["identity=a", "b"]). Storing just the first
-    // piece and answering `ok` would be silent truncation; reject instead.
+    // The tokenizer splits on whitespace, so a value containing a space or tab arrives as
+    // EXTRA tokens (`identity=a b` → ["identity=a", "b"]). Storing just the first piece and
+    // answering `ok` would be silent truncation; reject instead.
     let consumed = if args.first().is_some_and(|a| a.contains('=')) {
         1
     } else {
         2
     };
     if args.len() > consumed {
-        let _ = write!(ctx, "value must not contain '/', space, or tab");
+        let _ = write!(ctx, "value must not contain a space or tab");
         return Outcome::code(R_BAD_ARG);
     }
     let table = ctx.settings;
@@ -1151,7 +1152,7 @@ fn complete(
     let upto = &line[..cur];
     // The token being completed = from the last separator to the cursor (empty if the
     // cursor sits right after a separator → "list everything here").
-    let partial_start = upto.rfind(['/', ' ', '\t']).map(|i| i + 1).unwrap_or(0);
+    let partial_start = upto.rfind([' ', '\t']).map(|i| i + 1).unwrap_or(0);
     let partial = &upto[partial_start..];
     let prefix_toks = tokenize(&upto[..partial_start]);
 

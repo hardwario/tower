@@ -423,13 +423,13 @@ mod tests {
         let f = TempFile::new();
         let mut a = History::from_file(f.0.clone());
         assert!(a.entries().is_empty(), "no file yet: empty");
-        a.push("/system resource print");
-        a.push("  /export  ");
-        a.push("/export"); // the same as the previous one: once
+        a.push("system resource print");
+        a.push("  export  ");
+        a.push("export"); // the same as the previous one: once
         a.push("");
         a.push("/bad\u{1b}[2J"); // not a line of text
         let b = History::from_file(f.0.clone());
-        assert_eq!(b.entries(), ["/system resource print", "/export"]);
+        assert_eq!(b.entries(), ["system resource print", "export"]);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -511,42 +511,42 @@ mod tests {
     #[test]
     fn search_finds_by_all_words_newest_first() {
         let hist = h(&[
-            "/system settings set therm-period=60",
-            "/system resource print",
-            "/system settings set accel=medium",
-            "/system resource print",
-            "/export",
+            "system settings set therm-period=60",
+            "system resource print",
+            "system settings set accel=medium",
+            "system resource print",
+            "export",
         ]);
         let mut s = Search::new("/ty", 3);
         assert_eq!(s.hit(&hist), None, "no query, no hit");
         for c in "SET sys".chars() {
             s.push_char(&hist, c);
         }
-        assert_eq!(s.hit(&hist), Some("/system settings set accel=medium"));
+        assert_eq!(s.hit(&hist), Some("system settings set accel=medium"));
         s.older(&hist);
-        assert_eq!(s.hit(&hist), Some("/system settings set therm-period=60"));
+        assert_eq!(s.hit(&hist), Some("system settings set therm-period=60"));
         s.older(&hist);
         assert_eq!(
             s.hit(&hist),
-            Some("/system settings set therm-period=60"),
+            Some("system settings set therm-period=60"),
             "the oldest stays"
         );
         s.newer();
-        assert_eq!(s.hit(&hist), Some("/system settings set accel=medium"));
+        assert_eq!(s.hit(&hist), Some("system settings set accel=medium"));
         // `print` matches one distinct command twice: offered once.
         let mut p = Search::new("", 0);
         for c in "print".chars() {
             p.push_char(&hist, c);
         }
-        assert_eq!(p.hit(&hist), Some("/system resource print"));
+        assert_eq!(p.hit(&hist), Some("system resource print"));
         p.older(&hist);
-        assert_eq!(p.hit(&hist), Some("/system resource print"));
+        assert_eq!(p.hit(&hist), Some("system resource print"));
         assert!(p.trail.is_empty(), "no older distinct match");
         // Backspace re-searches; a query that matches nothing has no hit.
         p.push_char(&hist, 'z');
         assert_eq!(p.hit(&hist), None);
         p.pop_char(&hist);
-        assert_eq!(p.hit(&hist), Some("/system resource print"));
+        assert_eq!(p.hit(&hist), Some("system resource print"));
         assert_eq!((s.original.as_str(), s.original_cursor), ("/ty", 3));
     }
 
@@ -582,9 +582,9 @@ mod tests {
 
     #[test]
     fn highlights_cover_each_word() {
-        let e = "/system settings set accel=medium";
-        assert_eq!(highlights(e, "SET acc"), vec![8..11, 21..24]);
-        assert_eq!(highlights(e, "sett set"), vec![8..12], "overlaps merge");
+        let e = "system settings set accel=medium";
+        assert_eq!(highlights(e, "SET acc"), vec![7..10, 20..23]);
+        assert_eq!(highlights(e, "sett set"), vec![7..11], "overlaps merge");
         assert!(highlights(e, "zzz").is_empty());
         assert_eq!(find_ci("č/a", "/A"), Some(2), "boundaries stay on chars");
     }

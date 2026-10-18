@@ -21,7 +21,7 @@
 //! stack), the sentinels get overwritten. [`used`] then scans from the bottom for the first
 //! surviving sentinel: the lowest address the stack ever reached. Because `used = _stack_start −
 //! low_water`, the never-painted top region (live at paint time) is still counted, so there is no
-//! systematic undercount. Read it over the console with `/system stack print` after driving the
+//! systematic undercount. Read it over the console with `system stack print` after driving the
 //! deepest paths (the HIL gateway stack test does exactly that).
 //!
 //! **Overflow forensics.** A flip-link overflow never reaches a handler: SP is below the RAM
@@ -30,7 +30,7 @@
 //! retained across that reset, so before re-painting, [`paint`] looks at the *previous* boot's
 //! paint: if the deepest reach got within [`OVERFLOW_MARGIN`] of the bottom and the reset was the
 //! IWDG, it files a `stack-overflow` [`crashlog`](crate::crashlog) record, which the boot reporter
-//! then surfaces like any panic (`/system/crash print`).
+//! then surfaces like any panic (`system crash print`).
 
 use core::ptr::{self, addr_of_mut};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -186,7 +186,7 @@ pub fn free() -> usize {
 }
 
 /// The **previous** boot's peak stack use in bytes, read from its paint at this boot's [`paint`]
-/// (RAM survives a warm reset). Known only after a software (`/system reboot`, panic, HardFault)
+/// (RAM survives a warm reset). Known only after a software (`system reboot`, panic, HardFault)
 /// or IWDG reset; `None` after a cold boot / brown-out / pin reset (possibly a bootloader
 /// session), or when the previous image had a different stack layout. Lets a field unit report
 /// the high-water of the run that just ended (e.g. the one an IWDG reset cut short).
@@ -199,7 +199,7 @@ pub fn previous_used() -> Option<usize> {
 }
 
 /// Whether the stack lies below the statics (flip-link) rather than above them (default
-/// cortex-m-rt layout); reported by `/system stack print`.
+/// cortex-m-rt layout); reported by `system stack print`.
 #[must_use]
 pub fn flip_link_layout() -> bool {
     below_statics()

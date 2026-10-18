@@ -33,7 +33,7 @@ pub(crate) struct Status {
     pub serial_up: bool,
 }
 
-/// This build's schema tags as `Status.wire` shows them (and `/system resource print` on a
+/// This build's schema tags as `Status.wire` shows them (and `system resource print` on a
 /// device): `console 0xXXXX radio 0xXXXX`.
 pub(crate) fn wire_tags() -> String {
     format!(
@@ -635,17 +635,17 @@ mod tests {
         let e = PendingEntry {
             r#ref: 9,
             id: "u-1".into(),
-            line: "/led on".into(),
+            line: "led on".into(),
         };
         assert_eq!(
             serde_json::to_string(&e).unwrap(),
-            r#"{"ref":9,"id":"u-1","line":"/led on"}"#
+            r#"{"ref":9,"id":"u-1","line":"led on"}"#
         );
     }
 
     #[test]
     fn shell_req_defaults() {
-        let r: ShellReq = serde_json::from_str(r#"{"id":"x","line":"/led on"}"#).unwrap();
+        let r: ShellReq = serde_json::from_str(r#"{"id":"x","line":"led on"}"#).unwrap();
         assert_eq!(r.ttl, 0, "absent ttl defaults to 0 (gateway default)");
     }
 
@@ -698,7 +698,7 @@ mod tests {
         assert!(s.contains(r#""key" : "<redacted>" }"#), "{s}");
         assert!(serde_json::from_str::<serde_json::Value>(s).is_ok(), "stays JSON");
         // A value that merely EQUALS "key" (not an object key) is not a secret.
-        let plain = br#"{"name":"key","line":"/x key"}"#;
+        let plain = br#"{"name":"key","line":"x key"}"#;
         assert!(matches!(redact_secrets(plain), std::borrow::Cow::Borrowed(_)));
     }
 

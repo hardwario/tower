@@ -406,7 +406,7 @@ impl Net {
     /// recorded frames replay into it as fresh. `1` closes that window at one small EEPROM
     /// record per accepted frame: what a **sleeping node** wants (it hears a handful of
     /// downlinks per boot, so a lazy lane would never be persisted at all and a recorded
-    /// `/system reboot` downlink could be replayed after every reboot). A gateway keeps the
+    /// `system reboot` downlink could be replayed after every reboot). A gateway keeps the
     /// default: its lanes see every uplink, and per-frame writes would wear the part
     /// (docs/storage.md); its host drops replayed uplinks by counter instead.
     pub fn set_lane_persist_period(&mut self, period: u8) {

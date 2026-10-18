@@ -1,7 +1,7 @@
 //! kv_wipe: factory-reset the data-EEPROM key-value store: drop every key, leaving an empty
 //! store the next firmware boots on.
 //!
-//! The normal reset is the shell command `/system/eeprom wipe confirm` (console-only); per-key
+//! The normal reset is the shell command `system eeprom wipe confirm` (console-only); per-key
 //! removal is `Nv::delete` (tombstones, so the live set can shrink). This example is the fallback
 //! for a device whose shell is unreachable (e.g. a crash-looping app, or a `no_shell` build):
 //!
@@ -12,7 +12,7 @@
 //! empty store**: blank the dead half, commit its superblock, then scrub the old half. A power
 //! loss at any point leaves either the complete old store or an empty one (never a half-zeroed
 //! log whose tail could resurface), both record halves end up physically zero, and the wear
-//! gauge (the superblock generation, `/system/eeprom print` `flips:`) keeps counting rather
+//! gauge (the superblock generation, `system eeprom print` `flips:`) keeps counting rather
 //! than resetting (the wipe costs one flip).
 //!
 //! ⚠️ Erases EVERYTHING the store holds: pairing keys, peer tables, replay lanes, the TX

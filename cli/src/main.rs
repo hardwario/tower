@@ -218,7 +218,7 @@ enum Cmd {
         #[arg(long)]
         no_reconnect: bool,
     },
-    /// Open an interactive shell (commands start with `/`).
+    /// Open an interactive shell (TAB completes commands).
     Shell {
         /// Reboot the application before the shell opens, waiting for it to come up.
         #[arg(long)]
@@ -232,7 +232,7 @@ enum Cmd {
     },
     /// Run one shell command and print its response, then exit (for scripts / CI).
     Exec {
-        /// The command line, e.g. "/system/resource print".
+        /// The command line, e.g. "system resource print".
         line: String,
         /// Reboot the application first, waiting for it to come up before sending (clean CI state).
         #[arg(long)]
@@ -613,8 +613,7 @@ impl Completer for ShellHelper {
                     .into_iter()
                     .map(|(text, kind)| {
                         let sep = match kind {
-                            CandidateKind::Menu => "/",
-                            CandidateKind::Command => " ",
+                            CandidateKind::Menu | CandidateKind::Command => " ",
                             CandidateKind::Arg => "=",
                             CandidateKind::Value => "",
                         };
@@ -647,7 +646,7 @@ impl Helper for ShellHelper {}
 fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duration) -> Result<u8> {
     let port = pick_port(port)?;
     let mut sp = open_console(&port, reset)?;
-    eprintln!("[tower] shell on {port}: TAB completes; commands start with '/'; 'exit' to quit");
+    eprintln!("[tower] shell on {port}: TAB completes (an empty line lists everything); 'exit' to quit");
 
     let mut dec = FrameDecoder::new();
     if reset {
@@ -2052,9 +2051,9 @@ mod tests {
 
     #[test]
     fn completion_start_rejects_unusable_token_starts() {
-        assert_eq!(completion_start("/sys", 4, 1), Some(1));
-        assert_eq!(completion_start("/sys", 4, 4), Some(4)); // empty token at the cursor
-        assert_eq!(completion_start("/sys", 2, 3), None); // past the cursor
+        assert_eq!(completion_start("system s", 8, 7), Some(7));
+        assert_eq!(completion_start("system ", 7, 7), Some(7)); // empty token at the cursor
+        assert_eq!(completion_start("sys", 2, 3), None); // past the cursor
         assert_eq!(completion_start("/π", 3, 2), None); // inside a UTF-8 scalar
         assert_eq!(completion_start("ab", 2, 9), None); // past the end of the line
     }

@@ -116,7 +116,7 @@ host that reuses a low `cmd_id` from being mistaken for a re-delivery (the "empt
 A sleeping node. Every enabled button event sends a secured `NodeMsg::Button` with that kind's
 running count; temperature is measured on a period and sent on-change or at latest every
 heartbeat; the accelerometer's tilt interrupt wakes the node for `NodeMsg::Accel` events. All
-of it is remote-shell reconfigurable (`/system settings set …`).
+of it is remote-shell reconfigurable (`system settings set …`).
 
 ### Settings
 
@@ -175,7 +175,7 @@ executor until the watchdog reset the node, a boot loop). A button held past `ho
 stuck, waits for the release edge instead of polling every 5 ms (the re-pair gesture's 12 s
 clock runs in the main loop, from the Press, so it does not need the polling).
 
-### `/button simulate <ms>`
+### `button simulate <ms>`
 
 Injects a synthetic press of `<ms>` (1..15000) through the **real** recognition machine
 (debounce → click/hold classification) and on into reporting, the console "finger" for testing
@@ -393,7 +393,7 @@ Re-check `just size app radio_dongle_gateway` after growing anything resident; i
 needs more, raise the floor *and re-measure the high-water mark on hardware*, don't just nudge it.
 
 **Measured high-water:** the boot painter (`stack::paint`) fills the free stack with a sentinel
-and `/system stack print` reports how much was overwritten. The HIL test
+and `system stack print` reports how much was overwritten. The HIL test
 `gateway_stack_high_water_within_budget` drives the deepest console-reachable paths (fill the
 registry across all EEPROM buckets → the ~270 B bucket-codec local + a KV flip, push queue items,
 list the whole registry → mgmt chunking) and reads it back: **7360 B of 8960 B** on the bench
@@ -411,7 +411,7 @@ The full round-trip, node asleep between events:
 2. The gateway holds it; the next uplink's ACK advertises the pending flag.
 3. The node opens a short RX window, decodes the `NodeCmd`, and runs `line` through
    `shell::stream_line` (the same command tree the console uses, but streamed): it re-runs the
-   handler once per output window so an unbounded reply (`/export`, `settings print`) is never
+   handler once per output window so an unbounded reply (`export`, `settings print`) is never
    truncated at a fixed buffer. The reply streams back as `NodeMsg::Shell` chunks (each reply's
    ACK re-flags pending, chaining the queue).
 4. The gateway forwards the chunks as `Uplink` frames and reports delivery via `RadioStat::Tx`.
@@ -420,9 +420,9 @@ No tab completion over the air; completion is a per-transport feature the radio 
 doesn't offer.
 
 **Console-only commands.** A few commands are refused over the radio with result **5
-(`R_DENIED`)** and run only from the node's USB console: `/system/eeprom wipe` (a factory reset
+(`R_DENIED`)** and run only from the node's USB console: `system eeprom wipe` (a factory reset
 must be physical; it erases the pairing key) and `settings set` of an address setting (re-
-addressing a live node over the air orphans it). `/system reboot` still works remotely. Anyone
+addressing a live node over the air orphans it). `system reboot` still works remotely. Anyone
 who can reach the gateway's MQTT broker can queue remote shell lines, so this is the backstop
 that keeps a broker-level intruder from unpairing the fleet (see the access policy in the
 [CLI README](../../cli/README.md)). App commands opt in with `Entry::cmd_console_only`; see
@@ -439,7 +439,7 @@ just size  app radio_dongle_gateway   # on-chip footprint (watch the RAM budget)
 ```
 
 The end-to-end product path is covered by the HIL bench group `hil/tests/gateway.rs` (two boards,
-`#[ignore]`d): cable-provision the node, bridge a simulated `/button simulate 100` click, run a
+`#[ignore]`d): cable-provision the node, bridge a simulated `button simulate 100` click, run a
 remote shell command through the downlink queue, and assert the `RadioStat` stream. The group is
 driven from the HIL harness (`hil/`) with `just hil` there (or `just hil hil` from the repo root);
 it flashes real hardware.

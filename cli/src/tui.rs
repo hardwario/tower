@@ -635,8 +635,7 @@ fn apply_completion(app: &mut App, c: &ShellCompletions) {
     if c.candidates.len() == 1 {
         let cand = &c.candidates[0];
         let sep = match cand.kind {
-            tower_protocol::msg::CandidateKind::Menu => "/",
-            tower_protocol::msg::CandidateKind::Command => " ",
+            tower_protocol::msg::CandidateKind::Menu | tower_protocol::msg::CandidateKind::Command => " ",
             tower_protocol::msg::CandidateKind::Arg => "=",
             tower_protocol::msg::CandidateKind::Value => "",
         };
@@ -1289,7 +1288,7 @@ fn render_shell(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         Line::from(vec![
             prompt,
             Span::styled(
-                "Enter your command here… (starts with \"/\"; supports <TAB> completions)",
+                "Enter a command here… (<TAB> completes; on an empty line it lists them all)",
                 Style::new().fg(Color::DarkGray),
             ),
         ])
@@ -1480,7 +1479,7 @@ mod tests {
             ("boot ok".to_string(), String::new(), Color::Green),
         );
         push_cap(&mut app.events, "sensor temp=21".to_string());
-        push_cap(&mut app.responses, "> /help".to_string());
+        push_cap(&mut app.responses, "> help".to_string());
         let text = render_to_text(&mut app);
         assert!(text.contains("Device Logs"));
         assert!(text.contains("Device Events"));
@@ -1532,7 +1531,7 @@ mod tests {
     fn ui_empty_input_shows_placeholder() {
         let mut app = test_app();
         let text = render_to_text_sized(&mut app, 140, 24);
-        assert!(text.contains("Enter your command here"));
+        assert!(text.contains("Enter a command here"));
     }
 
     #[test]
@@ -1617,11 +1616,11 @@ mod tests {
     #[test]
     fn ctrl_u_and_ctrl_w_edit_the_line() {
         let mut app = test_app();
-        for ch in "/system radio".chars() {
+        for ch in "system radio".chars() {
             handle_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
         }
         handle_key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL); // kill "radio"
-        assert_eq!(app.input, "/system ");
+        assert_eq!(app.input, "system ");
         handle_key(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL); // kill to start
         assert_eq!(app.input, "");
         assert_eq!(app.cursor, 0);
@@ -1677,11 +1676,11 @@ mod tests {
     #[test]
     fn single_completion_is_inserted_with_separator() {
         let mut app = test_app();
-        app.input = "/sys".to_string();
+        app.input = "sys".to_string();
         app.cursor = app.input.len();
-        let c = completions(1, "system", &[("system", CandidateKind::Menu)]);
+        let c = completions(0, "system", &[("system", CandidateKind::Menu)]);
         apply_completion(&mut app, &c);
-        assert_eq!(app.input, "/system/"); // Menu kind appends '/'
+        assert_eq!(app.input, "system "); // a menu, like a command, is followed by a space
         assert_eq!(app.cursor, app.input.len());
     }
 
@@ -2058,10 +2057,10 @@ mod tests {
         // With no connection the send fails; the typed line must survive (for retry), no
         // reassembly is armed, nothing is echoed, cmd_id doesn't advance, and a hint explains.
         let mut app = test_app(); // sp = None
-        app.input = "/system radio".to_string();
+        app.input = "system radio".to_string();
         app.cursor = app.input.len();
         send_command(&mut app);
-        assert_eq!(app.input, "/system radio");
+        assert_eq!(app.input, "system radio");
         assert!(app.pending.is_empty());
         assert!(app.responses.is_empty());
         assert_eq!(app.cmd_id, 1);
@@ -2075,13 +2074,13 @@ mod tests {
     fn command_history_and_search() {
         let mut app = App::new(
             "/dev/mock".to_string(),
-            History::in_memory(vec!["/export".into(), "/system resource print".into()]),
+            History::in_memory(vec!["export".into(), "system resource print".into()]),
         );
         for c in "/sy".chars() {
             handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
         }
         handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(app.input, "/system resource print");
+        assert_eq!(app.input, "system resource print");
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         assert_eq!((app.input.as_str(), app.cursor), ("/sy", 3), "the draft is back");
 
@@ -2090,7 +2089,7 @@ mod tests {
             handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
         }
         let text = render_to_text_sized(&mut app, 100, 18);
-        assert!(text.contains("search: exp") && text.contains("/export"), "{text}");
+        assert!(text.contains("search: exp") && text.contains("export"), "{text}");
         assert_eq!(app.input, "/sy", "the line is untouched while searching");
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!((app.input.as_str(), app.cursor), ("/sy", 3));
@@ -2101,7 +2100,7 @@ mod tests {
             handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
         }
         handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
-        assert_eq!(app.input, "/system resource print", "taken into the line");
+        assert_eq!(app.input, "system resource print", "taken into the line");
         assert_eq!(app.cursor, app.input.len() - 1, "and the Left applied");
         assert!(app.search.is_none());
     }

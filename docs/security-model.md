@@ -99,7 +99,7 @@ STM32L0 AES engine, attacks requiring decapping the chip.
 - **Replay across a reboot.** A lane record lags the live lane by up to its persist period, and
   that many recorded frames replay into a rebooted receiver. The period is per device: a node
   persists its gateway's lane on **every** accepted frame (it hears a few downlinks per boot; with
-  the lazy period of 32 its lane was never written, and a recorded `/system reboot` downlink could
+  the lazy period of 32 its lane was never written, and a recorded `system reboot` downlink could
   be replayed after every reboot of the node, repeatedly, since the remote-shell dedup is
   RAM-only). The gateway keeps 32 (wear), so after a gateway reboot up to 31 recorded uplinks per
   node are accepted again; the host bridge drops every uplink whose counter is not above the
@@ -161,8 +161,8 @@ registered address by design (an authenticated host action: the re-provision pat
 - Every frame carries a 16-bit schema tag folded from a structural hash of the message schema;
   a peer built from another source tree is rejected on its first frame (this is mismatch
   detection, not a security control).
-- Destructive device commands (`/system/eeprom wipe`, address changes) are refused over the radio
-  remote shell (`R_DENIED`); they run only from the USB console. `/system reboot` is allowed
+- Destructive device commands (`system eeprom wipe`, address changes) are refused over the radio
+  remote shell (`R_DENIED`); they run only from the USB console. `system reboot` is allowed
   remotely.
 - The host CLI escapes control characters from device and MQTT text on every plain output path
   (no terminal escape injection); the TUI is immune by construction.
@@ -211,7 +211,7 @@ registered address by design (an authenticated host action: the re-provision pat
   CRC-protected; a torn write at the tail is ignored; the 2-byte tag after a new record is cleared
   before appending, so stale bytes can never be read back as records (a fuzz finding: without it,
   an old TX watermark could resurface after corruption, a nonce-reuse path).
-- Factory reset (`/system/eeprom wipe confirm`) is a power-loss-safe flip to an empty store,
+- Factory reset (`system eeprom wipe confirm`) is a power-loss-safe flip to an empty store,
   freezes the store until reboot and keeps the wear counter.
 - Fuzzed with power cuts at every write against an independent model (`fuzz/kv_store`).
 
@@ -290,7 +290,7 @@ registered address by design (an authenticated host action: the re-provision pat
     together with the dongle publishes up to 31 recorded uplinks per node as new once (until the
     node's next genuine uplink). The gateway queue is at-least-once: if every ACK of a delivered
     downlink is lost, the gateway delivers it again under a fresh counter, and a node that
-    rebooted in between (a `/system reboot`) runs it again, bounded by the item's TTL. A failed
+    rebooted in between (a `system reboot`) runs it again, bounded by the item's TTL. A failed
     lane write on a node (EEPROM fault) leaves its persisted lane behind the live one.
 
 ## 6. Questions for the reviewer

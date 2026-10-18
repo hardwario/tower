@@ -187,7 +187,7 @@ higher counter than it has seen from that sender and lazy-persists the last-seen
 every `P=32` accepts (replay window ≤ P across a receiver reboot), or on every accept after
 `net.set_lane_persist_period(1)`: what a sleeping node does (the push-button), since it hears a
 handful of downlinks per boot and a lazy lane would never be written at all (a recorded
-`/system reboot` downlink then replayed after every reboot). The gateway keeps `P`: its lanes see
+`system reboot` downlink then replayed after every reboot). The gateway keeps `P`: its lanes see
 every uplink, and its host drops a replayed uplink by counter instead (docs/gateway.md). CCM
 verify happens *before* the replay comparison, so a forged frame can't poison the state.
 

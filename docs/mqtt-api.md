@@ -318,7 +318,7 @@ there are none; cleared (empty payload) when the node is removed. Republished on
 | `line` | string | The command line |
 
 ```json
-[{"ref":9,"id":"u-1","line":"/led on"}]
+[{"ref":9,"id":"u-1","line":"led on"}]
 ```
 
 ### `radio/rssi`
@@ -716,7 +716,7 @@ QoS 1, **not retained**:
 | `ttl` | number | `0` | Queue lifetime in seconds, `1..=65535`; `0` or absent = 3600 (one hour) |
 
 ```json
-{"id":"8b0f2c9a-1d2e-4c3b-9a8f-7e6d5c4b3a21","line":"/system settings set therm-period=30","ttl":1800}
+{"id":"8b0f2c9a-1d2e-4c3b-9a8f-7e6d5c4b3a21","line":"system settings set therm-period=30","ttl":1800}
 ```
 
 **3. Queued.** The bridge checks the node and the line and enqueues it on the dongle. Success
@@ -771,8 +771,8 @@ last chunk or one of these terminal errors:
 ```
 
 A request whose `id` is invalid or repeated, that does not parse (e.g. a `ttl` over 65535), or
-whose topic does not hold a canonical address, gets no response. Remote commands that would orphan a node (`/system/eeprom wipe`, changing its
-address setting) are refused with `result` `5`; `/system reboot` works. The queue may deliver a
+whose topic does not hold a canonical address, gets no response. Remote commands that would orphan a node (`system eeprom wipe`, changing its
+address setting) are refused with `result` `5`; `system reboot` works. The queue may deliver a
 line more than once; the node recognizes a re-delivery and does not run it again.
 
 ## 6. Pairing over MQTT
@@ -852,8 +852,8 @@ mosquitto_sub -h 127.0.0.1 -q 1 -v \
   -t "tower/nodes/$node/shell/rsp" -t "tower/nodes/$node/shell/pending" &
 sleep 0.5
 mosquitto_pub -h 127.0.0.1 -q 1 -t "tower/nodes/$node/shell/req" \
-  -m "{\"id\":\"$id\",\"line\":\"/system settings set therm-period=30\"}"
-# tower/nodes/0x0000ab12/shell/pending [{"ref":3,"id":"<id>","line":"/system settings set therm-period=30"}]
+  -m "{\"id\":\"$id\",\"line\":\"system settings set therm-period=30\"}"
+# tower/nodes/0x0000ab12/shell/pending [{"ref":3,"id":"<id>","line":"system settings set therm-period=30"}]
 # ... the node wakes ...
 # tower/nodes/0x0000ab12/shell/rsp {"id":"<id>","chunk":0,"text":"...","done":true,"result":0,"truncated":false}
 # tower/nodes/0x0000ab12/shell/pending []

@@ -327,7 +327,7 @@ pub fn unique_id() -> [u8; 12] {
 }
 
 /// Displays the unique ID as `XXXXXXXX-XXXXXXXX-XXXXXXXX`: the three words of
-/// [`unique_id_words`] in hex, `U_ID[31:0]` first (the `uid:` line of `/system resource print` and
+/// [`unique_id_words`] in hex, `U_ID[31:0]` first (the `uid:` line of `system resource print` and
 /// the push button's pairing log line).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct UniqueId(pub [u32; 3]);
@@ -368,7 +368,7 @@ pub enum RandSource {
 }
 
 impl RandSource {
-    /// Short label (`/system/resource print` `rng:` line, the `addr=random` reply).
+    /// Short label (`system resource print` `rng:` line, the `addr=random` reply).
     pub fn as_str(self) -> &'static str {
         match self {
             RandSource::Trng => "TRNG",
@@ -382,7 +382,7 @@ impl RandSource {
 static RAND_SOURCE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 /// Which source the most recent [`rand_u32`] used, probing once (one discarded draw) if nothing
-/// has drawn yet. Lets a bench check prove the TRNG actually runs (`/system/resource print` →
+/// has drawn yet. Lets a bench check prove the TRNG actually runs (`system resource print` →
 /// `rng: TRNG`) instead of silently living on the fallback.
 pub fn rand_source() -> RandSource {
     use core::sync::atomic::Ordering::Relaxed;

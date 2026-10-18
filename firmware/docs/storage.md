@@ -7,7 +7,7 @@ covers the layout, how it wears, what the SDK writes and how often, the tuning k
 rules an app should follow so the EEPROM lasts the product's life.
 
 > **Status: implemented and hardware-verified.** The store, the wear telemetry
-> (`/system/eeprom print`), and the boot-loop backoff all run on the Core Module. The
+> (`system eeprom print`), and the boot-loop backoff all run on the Core Module. The
 > background maintenance task (incremental compaction, below) is implemented and host-tested;
 > its stall-slicing numbers are datasheet/bench-derived but not yet re-verified on the bench.
 
@@ -101,7 +101,7 @@ Residual stall budget:
 | Steady state (default `app!`: maintenance task running) | ~14 ms slices; commit slice ~tens of ms |
 | Sync fallback, dead half pre-blanked (store filled mid-flip / no proactive room) | ≤ ~2.6 s (copy pass only; the blank pass reads-and-skips) |
 | Sync fallback, maintenance never ran (custom entry without the task) | ~5.2 s (blank + copy), as before |
-| Factory wipe (`/system/eeprom wipe confirm`, `examples/kv_wipe.rs`) | ~2.6 s (dead half pre-blanked) / ~5.2 s |
+| Factory wipe (`system eeprom wipe confirm`, `examples/kv_wipe.rs`) | ~2.6 s (dead half pre-blanked) / ~5.2 s |
 
 **Watchdog across a stall.** The executor (and with it the IWDG feeder task) is frozen for
 the whole of a synchronous run, so the storage layer reloads an armed IWDG after every EEPROM
@@ -146,7 +146,7 @@ write capacity is on the order of:
 100,000 flips × ~3 KB ≈ 3 × 10⁸ bytes ≈ tens of millions of small records
 ```
 
-Treat **~10⁷ writes** as the working budget. `/system/eeprom print` reports the live flip count
+Treat **~10⁷ writes** as the working budget. `system eeprom print` reports the live flip count
 against `FLIP_BUDGET`.
 
 ## What the SDK writes, and how often
@@ -187,7 +187,7 @@ stamped once on a fresh store, not on every boot).
 
 ## Wear telemetry
 
-`/system/eeprom print` (or `Nv::flip_generation()` / `free_bytes()` / `live_bytes()` /
+`system eeprom print` (or `Nv::flip_generation()` / `free_bytes()` / `live_bytes()` /
 `dead_half_blank()`):
 
 ```
@@ -210,7 +210,7 @@ run (see below). Reading it is a pure EEPROM **read**; polling telemetry adds no
 
 ## Factory reset (wipe)
 
-`/system/eeprom wipe confirm` (USB console only; refused over the radio remote shell with
+`system eeprom wipe confirm` (USB console only; refused over the radio remote shell with
 `R_DENIED`) and the `kv_wipe` example drop **every** key: pairing keys, peer tables, replay
 lanes, the TX watermark, settings, the session counter. (To remove one key, use
 `kv.delete(key)`; the wipe is the whole-device reset.)
@@ -262,4 +262,4 @@ The store is for configuration and slowly-changing state, not a scratchpad or a 
   ~3 KB half size forces a flip on nearly every write (a flip storm). A handful of small keys
   leaves hundreds of appends between flips.
 - **Batch related fields** into one record rather than writing several keys in a burst.
-- Check `/system/eeprom print` during development to see how fast a workload is spending flips.
+- Check `system eeprom print` during development to see how fast a workload is spending flips.

@@ -6,7 +6,7 @@
 //! loop body with `loop {}` (a hang): the feeder stops and the MCU resets after ~8 s.
 //!
 //! An 8 s timeout is shorter than the worst synchronous EEPROM stall plus a feed interval
-//! (a `/system/eeprom wipe` or an in-line compaction flip freezes the executor ~2.6-5.2 s). That
+//! (a `system eeprom wipe` or an in-line compaction flip freezes the executor ~2.6-5.2 s). That
 //! is safe because the storage layer reloads an armed IWDG between EEPROM programs
 //! (`watchdog::pet_during_stall`, bounded so a real hang still resets). Products use 26 s anyway.
 //!

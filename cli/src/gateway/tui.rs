@@ -2042,7 +2042,7 @@ mod tests {
                 .map(|i| super::super::payload::PendingEntry {
                     r#ref: i as u16 + 1,
                     id: format!("u-{i}"),
-                    line: "/led on".into(),
+                    line: "led on".into(),
                 })
                 .collect(),
         }
@@ -2075,20 +2075,20 @@ mod tests {
         let (mut app, _etx, irx) = test_app();
         app.on_event(Event::Registry(vec![node(0xAB12, "kitchen", 0)]));
         app.focus = Pane::Shell;
-        for c in "/led on".chars() {
+        for c in "led on".chars() {
             handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
         }
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         match irx.try_recv() {
             Ok(Input::Frontend(FrontendCmd::Shell { node, req })) => {
                 assert_eq!(node, 0xAB12);
-                assert_eq!(req.line, "/led on");
+                assert_eq!(req.line, "led on");
                 assert!(req.id.starts_with("tui-"));
             }
             other => panic!("expected a shell FrontendCmd, got {other:?}"),
         }
         let grid = render(&mut app);
-        assert!(grid.contains("/led on"), "echoed into the dialog");
+        assert!(grid.contains("led on"), "echoed into the dialog");
     }
 
     /// The shell pane's history: Up recalls the commands of earlier sessions, Ctrl-R finds one
@@ -2096,16 +2096,16 @@ mod tests {
     #[test]
     fn shell_history_and_search() {
         let (mut app, _etx, irx) = test_app();
-        app.history = History::in_memory(vec!["/led on".into(), "/system settings print".into()]);
+        app.history = History::in_memory(vec!["led on".into(), "system settings print".into()]);
         app.on_event(Event::Registry(vec![node(0xAB12, "kitchen", 0)]));
         app.focus = Pane::Shell;
         handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(
-            app.line, "/system settings print",
+            app.line, "system settings print",
             "the newest of an earlier session"
         );
         handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(app.line, "/led on");
+        assert_eq!(app.line, "led on");
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(app.line, "", "past the newest: the (empty) line being typed");
@@ -2118,7 +2118,7 @@ mod tests {
             handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
         }
         let grid = render(&mut app);
-        assert!(grid.contains("search: led") && grid.contains("/led on"), "{grid}");
+        assert!(grid.contains("search: led") && grid.contains("led on"), "{grid}");
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!((app.line.as_str(), app.cursor), ("/x", 2));
         // Ctrl-R again and Enter: the match runs and lands in the history.
@@ -2130,20 +2130,20 @@ mod tests {
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         match irx.try_recv() {
             Ok(Input::Frontend(FrontendCmd::Shell { req, .. })) => {
-                assert_eq!(req.line, "/system settings print");
+                assert_eq!(req.line, "system settings print");
             }
             other => panic!("expected a shell FrontendCmd, got {other:?}"),
         }
         assert!(app.search.is_none() && app.line.is_empty());
-        assert_eq!(app.history.entries().last().unwrap(), "/system settings print");
+        assert_eq!(app.history.entries().last().unwrap(), "system settings print");
     }
 
     /// The prompt draws its cursor on the character at the cursor, not always at the end.
     #[test]
     fn prompt_cursor_follows_the_cursor() {
-        let spans = prompt_line("/led on", 4).spans;
+        let spans = prompt_line("led on", 3).spans;
         let texts: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(texts, ["> ", "/led", " ", "on"]);
+        assert_eq!(texts, ["> ", "led", " ", "on"]);
         assert!(spans[2].style.add_modifier.contains(Modifier::REVERSED));
         let at_end: Vec<String> = prompt_line("/a", 2)
             .spans

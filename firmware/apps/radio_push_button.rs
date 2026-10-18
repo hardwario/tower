@@ -9,7 +9,7 @@
 //! queue: each confirmed uplink's ACK carries a *pending* flag, and when set the node
 //! holds a short RX window, executes the delivered remote-shell line in the standard
 //! shell dispatcher ([`shell::stream_line`]) and streams the response back chunk-by-chunk
-//! (`RadioSink`), so a full `/export` is never truncated at a fixed buffer. No tab
+//! (`RadioSink`), so a full `export` is never truncated at a fixed buffer. No tab
 //! completion over the air: completion is a per-transport feature the radio doesn't offer.
 //!
 //! Pairing:
@@ -41,11 +41,11 @@
 //! 500 ms off, [`Board::boot_indicator`](tower::board::Board::boot_indicator)); this
 //! app's own behaviour begins after that.
 //!
-//! Settings (remote-shell reconfigurable, `/system settings set …`): `therm-period`,
+//! Settings (remote-shell reconfigurable, `system settings set …`): `therm-period`,
 //! `therm-delta` (centi-°C, 0 = always send), `accel` (off/low/medium/high, applied at
 //! boot), `heartbeat`; per-event `{press,release,click,hold}` (on/off master enable);
 //! button timing `debounce-press`, `debounce-release`, `click-timeout`, `hold-time`
-//! (ms, applied at boot). The `/button simulate <ms>` command injects a synthetic press
+//! (ms, applied at boot). The `button simulate <ms>` command injects a synthetic press
 //! of that length through the *real* recognition machine (debounce/click/hold) and on
 //! into reporting: the console "finger" for testing without a physical press, also
 //! used by the HIL bench.
@@ -213,11 +213,11 @@ static BTN_SETTINGS: &[shell::Setting] = &[
 
 // --- synthetic button press (the console "finger" / HIL bench) ---------------------
 
-/// Longest press `/button simulate` will inject (15 s: past any hold-time and past
+/// Longest press `button simulate` will inject (15 s: past any hold-time and past
 /// [`REPAIR_HOLD`], so the bench can drive the re-pair gesture too).
 const SIM_MAX_MS: u32 = 15_000;
 
-/// `/button simulate <ms>`: inject a synthetic press held `<ms>` milliseconds into the
+/// `button simulate <ms>`: inject a synthetic press held `<ms>` milliseconds into the
 /// button driver, which derives the event(s) through the *real* recognition machine
 /// (debounce / click-timeout / hold-time). So a short press debounces away, a tap
 /// yields a click, a long press yields a hold: the same path a physical press takes,
@@ -231,7 +231,7 @@ fn cmd_simulate(ctx: &mut shell::Ctx<'_>, args: &[&str]) -> shell::Outcome {
             shell::Outcome::ok()
         }
         _ => {
-            let _ = write!(ctx, "usage: /button simulate <ms> (1..={SIM_MAX_MS})");
+            let _ = write!(ctx, "usage: button simulate <ms> (1..={SIM_MAX_MS})");
             shell::Outcome::code(shell::R_BAD_ARG)
         }
     }
@@ -458,7 +458,7 @@ async fn run(b: Board) {
     net.set_default_lane(false);
     // Persist the gateway's replay lane on every accepted downlink. A sleeping node hears a
     // handful per boot, so the lazy default (every 32 accepts) never wrote it at all, and a
-    // recorded downlink (a `/system reboot`) replayed as fresh after every reboot, while the
+    // recorded downlink (a `system reboot`) replayed as fresh after every reboot, while the
     // remote-shell dedup is RAM-only. Downlinks are rare: the wear is negligible.
     net.set_lane_persist_period(1);
     if let Some(p) = provision
@@ -1024,7 +1024,7 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
                 }
                 info!(target: "button", "remote shell: {}", line);
                 // Stream the response chunk-by-chunk: no fixed response buffer, so a full
-                // `/export` or `settings print` is never truncated (the dispatcher owns the
+                // `export` or `settings print` is never truncated (the dispatcher owns the
                 // unbounded producers; `RadioSink` owns the radio framing).
                 let (result, reboot) = shell::stream_line(line, &mut sink).await;
                 // Epoch first, then the valid-flagged CMD word: a reader that sees the
@@ -1060,7 +1060,7 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
 /// Streams a remote-shell response back as `NodeShellChunk` uplinks (≤ RADIO_SHELL_CHUNK
 /// text bytes each, confirmed). Owns chunk numbering + the `last` flag, so the shell
 /// dispatcher ([`shell::stream_line`]) can emit an unbounded response through a single
-/// [`RADIO_SHELL_CHUNK`]-sized buffer: no `RESP_CAP` ceiling on `/export` & friends.
+/// [`RADIO_SHELL_CHUNK`]-sized buffer: no `RESP_CAP` ceiling on `export` & friends.
 struct RadioSink<'a> {
     net: &'a mut Net,
     gw_addr: u32,

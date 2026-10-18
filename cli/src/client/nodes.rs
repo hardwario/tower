@@ -60,7 +60,7 @@ pub(crate) enum NodesCmd {
     /// Run a remote shell command on a node (queued until it wakes).
     Shell {
         node: String,
-        /// The command line, e.g. "/system settings set therm-period=30".
+        /// The command line, e.g. "system settings set therm-period=30".
         line: String,
         /// Queue TTL in seconds (0 = gateway default, 1 h).
         #[arg(long, value_name = "S", default_value_t = 0)]

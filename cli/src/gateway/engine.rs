@@ -2465,7 +2465,7 @@ mod tests {
             topic: "tower/nodes/0x0000ab12/shell/req".into(),
             payload: serde_json::to_vec(&payload::ShellReq {
                 id: "u-1".into(),
-                line: "/led on".into(),
+                line: "led on".into(),
                 ttl: 0,
             })
             .unwrap(),
@@ -2481,7 +2481,7 @@ mod tests {
         let entries: Vec<payload::PendingEntry> = serde_json::from_slice(pend[0]).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].r#ref, 9);
-        assert_eq!(entries[0].line, "/led on");
+        assert_eq!(entries[0].line, "led on");
         // 3. The node's reply chunks → shell/rsp; done clears pending.
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let n = radio::encode_node_msg(
@@ -3138,7 +3138,7 @@ mod tests {
         for topic in ["tower/gateway/cmd", "tower/nodes/0x0000ab12/shell/req"] {
             let out = e.handle(Input::MqttIn {
                 topic: topic.into(),
-                payload: br#"{"id":"u-r","op":"node_remove","line":"/x","params":{"addr":"0x0000ab12"}}"#
+                payload: br#"{"id":"u-r","op":"node_remove","line":"x","params":{"addr":"0x0000ab12"}}"#
                     .to_vec(),
                 retain: true,
             });
@@ -3171,7 +3171,7 @@ mod tests {
                 !out.iter().any(|o| matches!(o, Output::Publish { .. })),
                 "no response topic can be built from {id:?}"
             );
-            let sh = format!(r#"{{"id":"{id}","line":"/x"}}"#);
+            let sh = format!(r#"{{"id":"{id}","line":"x"}}"#);
             let out = e.handle(mqtt_in("tower/nodes/0x0000ab12/shell/req", sh.as_bytes()));
             assert!(out.iter().find_map(sent_op).is_none());
             assert!(!out.iter().any(|o| matches!(o, Output::Publish { .. })));
@@ -3193,7 +3193,7 @@ mod tests {
         // QoS-1 is at-least-once: a redelivered request must not run twice.
         let mut e = engine();
         with_node(&mut e, 0xAB12, "kitchen", 0);
-        let req = br#"{"id":"u-dup","line":"/led on"}"#;
+        let req = br#"{"id":"u-dup","line":"led on"}"#;
         let out = e.handle(mqtt_in("tower/nodes/0x0000ab12/shell/req", req));
         assert!(out.iter().find_map(sent_op).is_some());
         let out = e.handle(mqtt_in("tower/nodes/0x0000ab12/shell/req", req));
@@ -3231,7 +3231,7 @@ mod tests {
         with_node(&mut e, 0xAB12, "kitchen", 0);
         let out = e.handle(mqtt_in(
             "tower/nodes/0x0000ab12/shell/req",
-            br#"{"id":"u-q","line":"/x"}"#,
+            br#"{"id":"u-q","line":"x"}"#,
         ));
         assert!(out.iter().find_map(sent_op).is_some());
         let mut failed = None;
@@ -3259,7 +3259,7 @@ mod tests {
         });
         let out = e.handle(mqtt_in(
             "tower/nodes/0x0000ab12/shell/req",
-            br#"{"id":"u-s","line":"/x"}"#,
+            br#"{"id":"u-s","line":"x"}"#,
         ));
         assert!(
             !out.iter().any(|o| matches!(o, Output::SerialSend(_))),
@@ -3342,7 +3342,7 @@ mod tests {
         with_node(&mut e, 0xAB12, "kitchen", NODE_FLAG_SLEEPING);
         let out = e.handle(mqtt_in(
             "tower/nodes/0x0000ab12/shell/req",
-            br#"{"id":"u-t","line":"/x","ttl":5}"#,
+            br#"{"id":"u-t","line":"x","ttl":5}"#,
         ));
         let (req_id, _) = out.iter().find_map(sent_op).unwrap();
         let _ = reply(

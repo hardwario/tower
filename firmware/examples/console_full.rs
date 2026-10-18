@@ -3,7 +3,7 @@
 //! (Device Events / Interactive Shell / Device Logs) have content.
 //!
 //! Drive it with:  `tower console`
-//!   try `/system identity print`, `/system/resource print`, TAB completion,
+//!   try `system identity print`, `system resource print`, TAB completion,
 //!   F3 zoom, Shift-Tab to move focus, F5 pause, F10 quit.
 
 #![no_std]
@@ -17,7 +17,7 @@ use tower::{app, board::Board, console, println};
 
 async fn run(_b: Board) {
     // The shell is served automatically by `app!` (Responses/Command panes), over the shared KV.
-    info!("console_full ready: drive the shell, e.g. `/system identity print`");
+    info!("console_full ready: drive the shell, e.g. `system identity print`");
 
     let mut n: u32 = 0;
     loop {

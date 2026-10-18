@@ -4,7 +4,7 @@
 //!
 //! Since the reset-on-fault policy: after that error frame the unit RESETS (it does not
 //! halt), so expect the boot banner again plus a `crash` module ERROR frame re-reporting
-//! the panic from the reset-surviving breadcrumb (also: `/system/crash print`). The
+//! the panic from the reset-surviving breadcrumb (also: `system crash print`). The
 //! countdown then restarts. This example crash-loops by design; the bootguard backoff
 //! kicks in after 8 fast resets.
 

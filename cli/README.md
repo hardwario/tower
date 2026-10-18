@@ -79,8 +79,8 @@ The streaming commands render the framed link to stdout:
 tower logs                        # decoded logs + print! output
 tower logs --color never          # force plain output (--color auto|always|never)
 tower events                      # structured key=value events
-tower exec "/system/resource print"   # run one shell command, print its reply, exit
-tower exec "/slow/op" --timeout 30000  # widen the idle timeout (ms, default 7000)
+tower exec "system resource print"   # run one shell command, print its reply, exit
+tower exec "slow op" --timeout 30000   # widen the idle timeout (ms, default 7000)
 tower logs --no-reconnect         # exit when the link drops instead of retrying
 ```
 
@@ -92,7 +92,7 @@ tower console                     # full-screen TUI: logs + events + shell in on
 tower console --reset             # NRST-pulse the device on connect to see it boot
 tower shell                       # line-based interactive shell (commands start with /)
 tower shell --reset --timeout 3000
-tower complete "/sys"             # ask the target to complete a partial command line
+tower complete "sys"             # ask the target to complete a partial command line
 ```
 
 Both TUIs (the console and `tower gateway`) list their keys in the footer; F10 or Ctrl+C quits.
@@ -348,7 +348,7 @@ device's firmware name and version, read best effort from its `Hello`), exit cod
 `exec`, `shell --reset`, `complete`, `tower gateway` and `nodes add --port`, and no
 interpretation of the device's frames: `logs`/`events` and the TUI count them as undecodable
 until frames with this build's tag arrive (the device reflashed from this checkout). The
-`hello:` line `tower logs` prints shows the schema tag, `/system/resource print` shows both tags
+`hello:` line `tower logs` prints shows the schema tag, `system resource print` shows both tags
 on the device side (`wire: console 0x… radio 0x…`), and `tower net status` the bridge's.
 
 A change of the **framing** itself (header layout, COBS, CRC) is not covered by the tags: such a
@@ -424,7 +424,7 @@ state back in a new bootloader session and print it as the `Readout :` line (std
 
 ```sh
 tower flash app.bin                  # erase, write, read-back verify, start
-tower exec "/system/resource print"  # the unit's functional check
+tower exec "system resource print"  # the unit's functional check
 tower nodes add --port <SERIAL>      # pair it with the gateway (or: --ota)
 tower protect                        # RDP level 1, read back: "Readout : protected (RDP level 1)"
 # power-cycle the unit once (unplug USB): after RDP level 1 is set through the bootloader the
