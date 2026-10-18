@@ -548,6 +548,13 @@ async fn run(b: Board) {
                     _ => {}
                 }
 
+                // What the node reports (the per-event enables), it also shows on the console,
+                // paired or not, so the bench sees every press.
+                let enabled = event_enabled(kv, ev);
+                if enabled {
+                    show_button(kind, counts[idx], provision.is_some()).await;
+                }
+
                 // Pairing is a fixed gesture, not a reportable event: while unpaired a
                 // long hold always starts the OTA join, regardless of the per-event
                 // enables (which govern normal reporting once paired).
@@ -579,7 +586,7 @@ async fn run(b: Board) {
 
                 // The per-event enable is the master switch: a disabled event is
                 // ignored entirely: no LED, no radio.
-                if !event_enabled(kv, ev) {
+                if !enabled {
                     continue;
                 }
                 led_feedback(&led, ev); // immediate local feedback (fixed shape)
@@ -650,6 +657,9 @@ async fn run(b: Board) {
             Either4::Third(()) => {
                 accel_quiet = None;
                 let tilt = handle_tilt(&mut bus).await;
+                if let Tilt::Event(face) = tilt {
+                    show_motion(face, provision.is_some()).await;
+                }
                 if let Tilt::Event(face) = tilt
                     && provision.is_some()
                 {
@@ -858,6 +868,44 @@ async fn measure_temp(bus: &mut AccelBus) -> Option<i32> {
 
 /// Tilt IRQ: clear/validate the latched interrupt, settle, and report the face up
 /// (0 = unknown/moving).
+/// The event names of [`ButtonKind`] as the console and the uplink payloads spell them.
+fn button_name(kind: ButtonKind) -> &'static str {
+    match kind {
+        ButtonKind::Press => "press",
+        ButtonKind::Release => "release",
+        ButtonKind::Click => "click",
+        ButtonKind::Hold => "hold",
+    }
+}
+
+/// Show a button event on the console: a log line and a structured event (`tower events`).
+/// Unpaired, the line says it went nowhere and how to pair. Dropped while USB is unplugged.
+async fn show_button(kind: ButtonKind, count: u32, paired: bool) {
+    let name = button_name(kind);
+    if paired {
+        info!(target: "button", "{} #{}", name, count);
+    } else {
+        info!(target: "button", "{} #{} (not paired, not sent: hold the button to pair)", name, count);
+    }
+    use core::fmt::Write as _;
+    let mut n: heapless::String<10> = heapless::String::new();
+    let _ = write!(n, "{count}");
+    console::event("button", &[("kind", name), ("count", n.as_str())]).await;
+}
+
+/// Show an accelerometer motion event on the console (see [`show_button`]).
+async fn show_motion(face: u8, paired: bool) {
+    if paired {
+        info!(target: "button", "motion, face {}", face);
+    } else {
+        info!(target: "button", "motion, face {} (not paired, not sent)", face);
+    }
+    use core::fmt::Write as _;
+    let mut f: heapless::String<3> = heapless::String::new();
+    let _ = write!(f, "{face}");
+    console::event("accel", &[("kind", "motion"), ("face", f.as_str())]).await;
+}
+
 /// What one accelerometer interrupt turned out to be ([`handle_tilt`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tilt {
