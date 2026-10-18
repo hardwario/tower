@@ -258,11 +258,15 @@ static JOINING: led::Pattern = &[led::Step::on(100), led::Step::off(150)];
 /// that may sit unpaired in a drawer for months); any button press shows it again for as long.
 const UNPAIRED_CUE: Duration = Duration::from_secs(180);
 
-/// Backoff of the accelerometer interrupt wait when its line stays high after the source
-/// register was read (an I²C error left the latch set, or a stuck line): first 1 s, doubling
-/// to 5 min.
+/// Backoff of the accelerometer interrupt wait after its source register could not be read (an
+/// I²C error leaves the latch set, so the line stays high): first 1 s, doubling to 5 min.
 const ACCEL_BACKOFF_MIN: Duration = Duration::from_secs(1);
 const ACCEL_BACKOFF_MAX: Duration = Duration::from_secs(300);
+/// The pause before the next interrupt is taken when the line is high again right after a
+/// successful read: the board is still moving (the read cleared the latch, new motion set it
+/// again), which is no fault; the pause only keeps a line stuck high in hardware from spinning
+/// the loop.
+const ACCEL_REARM: Duration = Duration::from_millis(100);
 
 /// Post-uplink RX window when the gateway's ACK advertises a queued downlink. The
 /// gateway transmits ~20 ms after our uplink with one retry (~450 ms worst); 1 s
@@ -645,7 +649,8 @@ async fn run(b: Board) {
             // --- accelerometer tilt interrupt ---
             Either4::Third(()) => {
                 accel_quiet = None;
-                if let Some(face) = handle_tilt(&mut bus).await
+                let tilt = handle_tilt(&mut bus).await;
+                if let Tilt::Event(face) = tilt
                     && provision.is_some()
                 {
                     let msg = NodeMsg::Accel {
@@ -654,19 +659,22 @@ async fn run(b: Board) {
                     };
                     note(&mut misses, uplink(&mut net, provision, &msg, 3).await);
                 }
-                // Reading the source register clears the latch, so a line still high here is no
-                // fresh event: the read failed (an I²C error) or the line is stuck. Back off
-                // before waiting on it again: `wait_for_high` returns at once on a high line,
-                // and looping on it without an await starved the executor until the watchdog
-                // reset the node, a boot loop that rewrote the TX watermark every boot.
-                if accel_int.is_high() {
+                // `wait_for_high` returns at once on a high line, and looping on it without an
+                // await starved the executor until the watchdog reset the node (a boot loop that
+                // rewrote the TX watermark every boot). A failed read leaves the latch set: back
+                // off, growing. After a good read a high line is new motion (the read cleared the
+                // latch): take it after a short pause, no fault.
+                if tilt == Tilt::ReadFailed {
                     if accel_backoff == ACCEL_BACKOFF_MIN {
-                        warn!(target: "button", "accel interrupt stuck high (I2C error?), backing off");
+                        warn!(target: "button", "accel interrupt source unreadable (I2C), backing off");
                     }
                     accel_quiet = Some(Instant::now() + accel_backoff);
                     accel_backoff = (accel_backoff * 2).min(ACCEL_BACKOFF_MAX);
                 } else {
                     accel_backoff = ACCEL_BACKOFF_MIN;
+                    if accel_int.is_high() {
+                        accel_quiet = Some(Instant::now() + ACCEL_REARM);
+                    }
                 }
             }
 
@@ -850,23 +858,30 @@ async fn measure_temp(bus: &mut AccelBus) -> Option<i32> {
 
 /// Tilt IRQ: clear/validate the latched interrupt, settle, and report the face up
 /// (0 = unknown/moving).
-async fn handle_tilt(bus: &mut AccelBus) -> Option<u8> {
+/// What one accelerometer interrupt turned out to be ([`handle_tilt`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tilt {
+    /// Motion to report; the face up after it settled (0 = unknown).
+    Event(u8),
+    /// Nothing to report: a spurious edge, or rate-limited by the driver's `min_interval`.
+    Nothing,
+    /// The interrupt source could not be read (I²C): the latch is still set.
+    ReadFailed,
+}
+
+async fn handle_tilt(bus: &mut AccelBus) -> Tilt {
     let Some(accel) = bus else {
-        return None; // bus mid-swap (can't happen: swaps are scoped to measure_temp)
+        return Tilt::Nothing; // bus mid-swap (can't happen: swaps are scoped to measure_temp)
     };
     match accel.tilt_triggered() {
         Ok(true) => {}
-        Ok(false) => return None, // spurious edge / rate-limited by the driver's min_interval
-        Err(_) => {
-            // The latch stays set: the caller backs off on the still-high line.
-            warn!(target: "button", "accel interrupt source read failed (I2C)");
-            return None;
-        }
+        Ok(false) => return Tilt::Nothing,
+        Err(_) => return Tilt::ReadFailed,
     }
     // Let the unit settle, then read which face is up for the event's context.
     Timer::after_millis(300).await;
     let face = accel.read().ok().and_then(|s| s.dice()).unwrap_or(0);
-    Some(face)
+    Tilt::Event(face)
 }
 
 /// Encode this node's identity/heartbeat `Info` into `buf`; its length.
