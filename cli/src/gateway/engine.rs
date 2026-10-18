@@ -222,7 +222,11 @@ enum OpKind {
     NodeRemove {
         id: u32,
     },
-    NodeUpdate,
+    /// A rename or a flags change of node `id`, mirrored when it is issued (`merge_registry`
+    /// keeps that over a listing answered before it).
+    NodeUpdate {
+        id: u32,
+    },
     RevealKey {
         id: u32,
     },
@@ -845,14 +849,17 @@ impl Engine {
                 name: Some(name.as_str()),
                 flags: Some(flags),
             };
-            self.issue(out, OpKind::NodeUpdate, op, None);
+            self.issue(out, OpKind::NodeUpdate { id: src }, op, None);
+            self.nodes[i].entry.name = name;
+            self.nodes[i].entry.flags = flags;
         } else if flags != self.nodes[i].entry.flags {
             let op = MgmtOp::NodeUpdate {
                 addr: src,
                 name: None,
                 flags: Some(flags),
             };
-            self.issue(out, OpKind::NodeUpdate, op, None);
+            self.issue(out, OpKind::NodeUpdate { id: src }, op, None);
+            self.nodes[i].entry.flags = flags;
         }
         self.publish_node(out, i);
     }
@@ -1086,7 +1093,7 @@ impl Engine {
                 self.emit_registry(out);
                 self.rpc_ok(out, &p, serde_json::Value::Null);
             }
-            (OpKind::NodeUpdate, None) => {
+            (OpKind::NodeUpdate { .. }, None) => {
                 self.rpc_ok(out, &p, serde_json::Value::Null);
                 self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
             }
@@ -1230,6 +1237,12 @@ impl Engine {
             (OpKind::QueueSync, Some(e)) => out.push(Output::Event(Event::Log(format!(
                 "queue resync refused by the gateway: {e}"
             )))),
+            (OpKind::NodeUpdate { .. }, Some(e)) => {
+                // The mirror took the new name when the update was sent: restore it from the
+                // device.
+                self.rpc_err(out, &p, e);
+                self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+            }
             (_, Some(e)) => self.rpc_err(out, &p, e),
         }
         if p.truncated {
@@ -1524,7 +1537,13 @@ impl Engine {
                     name: Some(name),
                     flags,
                 };
-                self.issue(out, OpKind::NodeUpdate, op, rpc);
+                self.issue(out, OpKind::NodeUpdate { id }, op, rpc);
+                // Mirror the name now: the node's next `NodeInfo` may land before the gateway
+                // answers, and an unnamed mirror would auto-name it over the operator's choice.
+                if let Some(n) = self.nodes.iter_mut().find(|n| n.entry.addr == id) {
+                    n.entry.name = name.to_string();
+                    n.entry.flags &= !mgmt::NODE_FLAG_UNNAMED;
+                }
             }
             "reveal_key" => match node_param() {
                 Some(id) => self.issue(
@@ -1831,6 +1850,11 @@ impl Engine {
                 });
                 out.push(Output::Event(Event::Shell { node, rsp }));
             }
+            // The mirror took the new name when the update was sent: restore it from the
+            // device (a link that is down resyncs on reconnect instead).
+            OpKind::NodeUpdate { .. } if self.serial_up => {
+                self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+            }
             _ => {}
         }
         if let Some(r) = rpc {
@@ -1997,12 +2021,29 @@ impl Engine {
     /// Merge a fresh `NodeList` into the mirror: keep host-side enrichment (kind,
     /// session, pendings) for surviving nodes, publish adds/changes, clear removals.
     fn merge_registry(&mut self, fresh: Vec<NodeEntryOwned>, out: &mut Vec<Output>) {
+        // A rename or flags change still waiting for its answer was mirrored when it was issued,
+        // and a listing answered before it predates it: keep the mirror's name and flags, or the
+        // node's next `NodeInfo` would see it unnamed again and auto-name over the rename.
+        let updating: Vec<u32> = self
+            .pending_mgmt
+            .iter()
+            .filter_map(|p| match p.op {
+                OpKind::NodeUpdate { id } => Some(id),
+                _ => None,
+            })
+            .collect();
         let mut next: Vec<NodeMirror> = Vec::with_capacity(fresh.len());
-        for entry in fresh {
+        for mut entry in fresh {
             let old = self.nodes.iter_mut().find(|n| n.entry.addr == entry.addr);
             match old {
                 Some(o) => next.push(NodeMirror {
-                    entry,
+                    entry: {
+                        if updating.contains(&entry.addr) {
+                            entry.name = std::mem::take(&mut o.entry.name);
+                            entry.flags = o.entry.flags;
+                        }
+                        entry
+                    },
                     kind: o.kind.clone(),
                     session_id: o.session_id,
                     pending: std::mem::take(&mut o.pending),
@@ -3542,6 +3583,98 @@ mod tests {
             .find(|o| o.contains("NodeUpdate"))
             .expect("auto-name NodeUpdate");
         assert!(op.contains("push-button:0"), "{op}");
+    }
+
+    /// `nodes add --ota --name` renames the node right after the join, while the join's registry
+    /// refresh (which still lists it unnamed) is in flight; the node's first `NodeInfo` then
+    /// lands before the rename is answered. Found on the bench: the auto-name went out after
+    /// the rename and overwrote it.
+    #[test]
+    fn a_rename_right_after_the_join_is_not_auto_named_over() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-ota","op":"node_add_ota","params":{"window":5}}"#,
+        ));
+        let (req_id, _) = out.iter().find_map(sent_op).unwrap();
+        let joined = postcard::to_stdvec(&Paired {
+            addr: 0xCD34,
+            sas: 123_456,
+        })
+        .unwrap();
+        let out = reply(&mut e, req_id, MGMT_OK, &joined);
+        let (list_id, op) = out.iter().find_map(sent_op).expect("the join's registry refresh");
+        assert!(op.contains("NodeList"), "{op}");
+        let _ = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-ren","op":"node_rename","params":{"addr":"0x0000cd34","name":"porch"}}"#,
+        ));
+        // The refresh answers with the registry as it was before the rename.
+        let mut registry = node_entry_record(0xAB12, "kitchen", 0);
+        registry.extend(node_entry_record(0xCD34, "", NODE_FLAG_UNNAMED));
+        let out = reply(&mut e, list_id, MGMT_OK, &registry);
+        let (update_id, op) = out.iter().find_map(sent_op).expect("the rename goes out");
+        assert!(op.contains("NodeUpdate") && op.contains("porch"), "{op}");
+
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(
+            &NodeMsg::Info(radio::NodeInfo {
+                firmware_name: "radio_push_button",
+                firmware_version: "v0.1.0",
+                session_id: 1,
+                sleeping: true,
+            }),
+            &mut env,
+        )
+        .unwrap();
+        let _ = e.handle(Input::SerialFrame(SerialMsg::Uplink {
+            src: 0xCD34,
+            counter: 1,
+            rssi: -60,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        }));
+        assert!(
+            !queued_ops(&e).iter().any(|o| o.contains("push-button")),
+            "no auto-name behind the rename: {:?}",
+            queued_ops(&e)
+        );
+        // Answer everything that goes out from here (the rename, the flags update the info
+        // queued, their refreshes) as the device would; nothing may auto-name the node.
+        let mut out = reply(&mut e, update_id, MGMT_OK, &[]);
+        assert!(rpc_rsp(&out, "u-ren").ok);
+        let mut registry = node_entry_record(0xAB12, "kitchen", 0);
+        registry.extend(node_entry_record(0xCD34, "porch", NODE_FLAG_SLEEPING));
+        for _ in 0..8 {
+            let Some((id, op)) = out.iter().find_map(sent_op) else {
+                break;
+            };
+            assert!(!op.contains("push-button"), "auto-named over the rename: {op}");
+            out = reply(
+                &mut e,
+                id,
+                MGMT_OK,
+                if op.contains("NodeList") { &registry } else { &[] },
+            );
+        }
+        let _ = e.handle(Input::SerialFrame(SerialMsg::Uplink {
+            src: 0xCD34,
+            counter: 2,
+            rssi: -60,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        }));
+        assert!(queued_ops(&e).is_empty(), "{:?}", queued_ops(&e));
+        assert_eq!(
+            e.nodes
+                .iter()
+                .find(|n| n.entry.addr == 0xCD34)
+                .unwrap()
+                .entry
+                .name,
+            "porch"
+        );
     }
 
     /// `queue_list` lists every node's queue without an `addr`, and refuses one that names no

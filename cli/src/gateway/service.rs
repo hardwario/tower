@@ -22,6 +22,9 @@ fn line(msg: &str) {
 
 pub(crate) fn run(events: Receiver<Event>) {
     line("gateway service up (Ctrl-C to stop)");
+    // The engine republishes an open pairing window every second (the TUI's countdown): the
+    // log states its opening and its outcome once each.
+    let mut pairing_open = false;
     while let Ok(ev) = events.recv() {
         match ev {
             Event::Log(l) => line(&l),
@@ -71,17 +74,19 @@ pub(crate) fn run(events: Receiver<Event>) {
             // The mirrored MQTT stream is TUI feed food; a service operator can
             // watch the broker directly (`mosquitto_sub -t 'tower/#'`).
             Event::Mqtt(_) => {}
-            Event::Pairing(p) => match p.remaining {
-                Some(s) if p.state == "open" => line(&format!("pairing window open ({s}s left)")),
-                _ => {
-                    if let Some(j) = p.joined {
-                        match p.sas {
-                            Some(sas) => line(&format!("paired {j} (SAS {sas})")),
-                            None => line(&format!("paired {j}")),
-                        }
-                    }
+            Event::Pairing(p) => {
+                let open = p.state == "open";
+                if open && !pairing_open {
+                    line(&format!("pairing window open ({}s)", p.remaining.unwrap_or(0)));
                 }
-            },
+                match (p.joined, p.sas) {
+                    (Some(j), Some(sas)) => line(&format!("paired {j} (SAS {sas})")),
+                    (Some(j), None) => line(&format!("paired {j}")),
+                    (None, _) if !open && pairing_open => line("pairing window closed"),
+                    (None, _) => {}
+                }
+                pairing_open = open;
+            }
         }
     }
 }
