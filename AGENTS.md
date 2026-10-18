@@ -37,7 +37,7 @@ prefixed packages; the Rust crate name is `tower_X`).
 | `crates/shell` | `tower-shell` | Pure kernels behind the device shell (`addr` parser + PRNG, pagination window, TAB completion). Not the shell itself (`tower::shell`). |
 | `crates/flasher` | `tower-flasher` | The flasher, around the STM32 ROM UART bootloader (AN3155): flash / erase / verify, chip info, readout protection, NRST/BOOT0 reset pulses. Library only; its front end is `tower`. |
 | `firmware/` | `tower-sdk` (lib `tower`) | Embassy firmware SDK for the Core Module, `examples/` (demos) and `apps/` (TOWER IoT Kit products). Its **own Cargo workspace** (thumbv6m + flip-link). |
-| `cli/` | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip, the `tower gateway` radio-to-MQTT bridge, `tower nodes` / `tower net`. Version 1.0.0. |
+| `cli/` | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip, the `tower gateway` radio-to-MQTT bridge, `tower nodes` / `tower net`. Version 1.1.0. |
 | `hil/` | `tower-hil` | Hardware-in-the-loop bench harness: builds images from `../firmware`, flashes real boards, decodes the console natively, measures power (PPK2). |
 
 Two Cargo workspaces:
@@ -46,7 +46,7 @@ Two Cargo workspaces:
   `Cargo.lock`, `[workspace.package]` (edition 2024, `rust-version` 1.99.1, MIT, repository)
   inherited by every member, shared versions in `[workspace.dependencies]`. The internal library
   crates (`crates/*`) are `version = "0.0.0"`, `publish = false`; `tower-cli` keeps its release
-  version (1.0.0) and the firmware SDK its own (shown to humans in the boot `Hello`).
+  version (1.1.0) and the firmware SDK its own (shown to humans in the boot `Hello`).
 - **Firmware workspace** (`firmware/`, excluded from the host workspace): only the SDK package,
   with `firmware/.cargo/config.toml` (target `thumbv6m-none-eabi`, linker `flip-link`), the
   size-tuned profiles and its own `firmware/Cargo.lock`. It depends on `../crates/*` by path.
