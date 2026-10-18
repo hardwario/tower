@@ -113,6 +113,11 @@ const JOIN_STEP_WINDOW: Duration = Duration::from_millis(300);
 /// every pairing (the answer lands after the wait closed), too long only slows a retry. Re-tune
 /// from the KAT's `timing:` line if a toolchain or crate change moves it.
 pub const PEER_KEX_TIME: Duration = Duration::from_millis(1500);
+/// The joiner's pace: one JOIN_REQ per this period while no host answers. The request, the
+/// [`JOIN_STEP_WINDOW`] for an answer, then an idle wait (radio off, the executor free for
+/// the button and the console) to the next one: the air time and the duty cycle the join used
+/// when each attempt still drew its own ephemeral (~1.2 s of curve arithmetic).
+const JOIN_ATTEMPT_PERIOD: Duration = Duration::from_millis(1500);
 /// One listen slice of the host's pairing window between JOIN_REQ polls.
 const PAIR_RX_SLICE: Duration = Duration::from_millis(500);
 /// The host's whole handshake, from an answered JOIN_REQ to the end of its JOIN_CONFIRM wait: two
@@ -540,7 +545,7 @@ impl Net {
 
     /// Joiner: pair with a host that has a window open, using `addr` (the joiner's **own**
     /// address, which it keeps) for up to `timeout` ([`PAIRING_WINDOW`] for the default).
-    /// Each attempt draws a fresh ephemeral and nonce from the TRNG, sends the JOIN_REQ, takes
+    /// Each attempt sends the JOIN_REQ (an ephemeral and nonce from the TRNG, see below), takes
     /// the host's commitment from the JOIN_RESP, sends its nonce (JOIN_NONCE), checks the
     /// revealed nonce against the commitment and the host's confirmation tag (JOIN_REVEAL), and
     /// answers with the JOIN_CONFIRM under the derived key. Returns the host's address, the link
@@ -558,8 +563,15 @@ impl Net {
     /// host answered, only that host's: with two nodes joining in one window, each completes
     /// only its own handshake. A reserved `addr` (`0` / broadcast) can never join.
     ///
-    /// An attempt takes ~1.5 s without an answer (the ephemeral, the request, the 0.3 s wait)
-    /// and ~3.8 s for a whole handshake.
+    /// Unanswered attempts go out every [`JOIN_ATTEMPT_PERIOD`] (1.5 s); a whole handshake takes
+    /// ~3.8 s.
+    ///
+    /// One ephemeral (~1.2 s of curve arithmetic, which holds the single-threaded executor:
+    /// the button and the console stall meanwhile) serves every request until a host answers:
+    /// until then only its public key has been on air, and its nonce, the value the
+    /// commitment round protects, never left the node. Once a host answers, the ephemeral
+    /// serves that handshake only (its nonce goes out in the JOIN_NONCE), and the next attempt
+    /// draws a fresh one.
     pub async fn join(&mut self, addr: u32, timeout: Duration) -> Option<PairedPeer> {
         if self.txc.locked() {
             return None; // fail closed (nonce safety): the join frames consume TX counters
@@ -572,14 +584,18 @@ impl Net {
             return None;
         }
         let deadline = Instant::now().checked_add(timeout)?;
+        // The ephemeral of the unanswered requests (see above), drawn BEFORE a request goes
+        // out (its public key is what the request carries), so only the shared secret is
+        // computed after the reveal. TRNG down: refuse (logged), never fall back.
+        let mut unanswered: Option<Ephemeral> = None;
         while Instant::now() < deadline {
-            // A fresh ephemeral and nonce per attempt, drawn BEFORE the request goes out (its
-            // public key is what the request carries), so only the shared secret is computed
-            // after the reveal. TRNG down: refuse (logged), never fall back.
-            let eph = trng_ephemeral(true)?;
+            let attempt_start = Instant::now();
+            if unanswered.is_none() {
+                unanswered = Some(trng_ephemeral(true)?);
+            }
             let mut req = [0u8; REQ_LEN];
             req[0] = VERSION;
-            req[1..].copy_from_slice(eph.public());
+            req[1..].copy_from_slice(unanswered.as_ref().expect("drawn above").public());
             // Each join frame consumes a fresh counter, allocated before its TX await.
             let counter = self.alloc_counter()?; // None = TX locked: fail closed
             let req_hdr = Header {
@@ -617,8 +633,12 @@ impl Net {
                 }
             }
             let Some((gw_addr, resp)) = answer else {
-                continue; // no host answered: next attempt
+                // No host answered: the next request at the attempt pace, idle until then.
+                Timer::at(attempt_start + JOIN_ATTEMPT_PERIOD).await;
+                continue;
             };
+            // A host answered: this ephemeral now serves this handshake only.
+            let eph = unanswered.take().expect("drawn above");
             let mut e_gw = [0u8; PUBLIC_LEN];
             e_gw.copy_from_slice(&resp[1..1 + PUBLIC_LEN]);
             let mut commit = [0u8; COMMIT_LEN];

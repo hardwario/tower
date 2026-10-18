@@ -138,7 +138,9 @@ registered address by design (an authenticated host action: the re-provision pat
    `tower nodes add --ota`, the bridge's logs and the `gateway/pairing` topic show it for the
    comparison with the node's `net: pairing: SAS` line. Ephemeral secrets and nonces come from
    the hardware TRNG only (pairing is refused if the TRNG is unavailable) and are zeroized after
-   use. The registry entry is committed only after a valid node confirm, and only for a
+   use. A node keeps one ephemeral across its unanswered JOIN_REQs (only the public key is on air
+   until a gateway commits; the nonce is revealed only in that handshake's JOIN_NONCE) and draws
+   a new one for the attempt after any answer, so no nonce serves two handshakes. The registry entry is committed only after a valid node confirm, and only for a
    handshake that ends inside the operator's window (a JOIN_REQ too close to its end is not
    answered). The node commits only on the gateway's acknowledgement of a confirmed uplink under
    the new key, which only a holder of the key can seal; without one it discards the key, so a

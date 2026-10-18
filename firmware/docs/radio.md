@@ -372,9 +372,13 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
   but none: the host computes after the JOIN_NONCE, the node after the JOIN_REVEAL. The waits:
   the node waits 300 ms for the JOIN_RESP and 300 ms + `PEER_KEX_TIME` (1.5 s, ~27 % over the
   measurement) for the JOIN_REVEAL; the host waits 300 ms for the JOIN_NONCE and 300 ms +
-  `PEER_KEX_TIME` for the JOIN_CONFIRM. A node attempt takes ~1.5 s with no host answering
-  (ephemeral + request + 300 ms) and ~3.8 s for a whole handshake, so a one-minute window
-  (`PAIRING_WINDOW`) gives it ~40 attempts. Too short a wait fails every pairing, too long only
+  `PEER_KEX_TIME` for the JOIN_CONFIRM. With no host answering, the node sends a request every
+  `JOIN_ATTEMPT_PERIOD` (1.5 s: the request, the 300 ms wait, then idle), so a one-minute window
+  (`PAIRING_WINDOW`) gives it ~40 attempts; a whole handshake takes ~3.8 s. One ephemeral serves
+  the requests until a host answers (only its public key has been on air; its nonce leaves the
+  node only in the JOIN_NONCE), then that handshake alone: the ~1.2 s of curve arithmetic per
+  ephemeral holds the executor, and drawing one per attempt kept it busy ~80 % of the window, so
+  the button missed presses. Too short a wait fails every pairing, too long only
   slows a retry: re-tune `PEER_KEX_TIME` from the KAT's `timing:` line if it moves.
 - **The host's window has a fixed end.** `PairingHost::prepare(window)` fixes it before it draws
   the first ephemeral (~1.2 s), so the window closes `window` after the request that opened it.

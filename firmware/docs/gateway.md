@@ -189,9 +189,9 @@ gateway test.
   with a commitment round, docs/radio.md "OTA pairing") with any gateway that has a window open.
   It logs `net: pairing: SAS 123456` at the end of the handshake; the same SAS on the gateway's
   side (its console, and `tower nodes add --ota`, which prints it) is the man-in-the-middle check
-  (compared, it leaves an active attacker a 1 in 10⁶ chance; not compared, none is detected). An
-  attempt takes ~1.5 s when no gateway answers (fresh TRNG ephemeral, request, 300 ms wait) and
-  ~3.8 s for a whole handshake. Without a working hardware TRNG the node refuses to pair (logged).
+  (compared, it leaves an active attacker a 1 in 10⁶ chance; not compared, none is detected). With
+  no gateway answering, a request goes out every 1.5 s (one TRNG ephemeral serves them all, so
+  the button stays responsive); a whole handshake takes ~3.8 s. Without a working hardware TRNG the node refuses to pair (logged).
 - **Commit round**: the new key is provisional (RAM only) until the gateway acknowledges an
   uplink under it: the node sends its `NodeInfo` confirmed (500 ms after the handshake, then up
   to 6 attempts 2 s apart, ~15 s in all) and only on an ACK persists `(gw_addr, key, band,
