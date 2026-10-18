@@ -161,7 +161,17 @@ fn gw_params(gw: &serde_json::Value) -> Result<(u32, u8, u8)> {
                 format!("gateway describe: no radio {k} in the answer; update the `tower gateway` host")
             })
     };
-    Ok((addr, field("band")?, field("channel")?))
+    let band = field("band")?;
+    let channel = field("channel")?;
+    // A channel off the plan would tune the node off-band (the dongle once reported a stored
+    // record of another app as channel 104): refuse it rather than provision it.
+    if channel > tower_protocol::mgmt::MAX_CHANNEL {
+        bail!(
+            "gateway describe: channel {channel} is outside 0..={}; fix the gateway's `channel` setting",
+            tower_protocol::mgmt::MAX_CHANNEL
+        );
+    }
+    Ok((addr, band, channel))
 }
 
 #[cfg(test)]
@@ -179,5 +189,12 @@ mod tests {
         assert!(gw_params(&no_ch).unwrap_err().to_string().contains("channel"));
         let bad = serde_json::json!({ "gateway": "0x0000ab12", "band": 300, "channel": 0 });
         assert!(gw_params(&bad).is_err(), "out-of-range band");
+        let off_plan = serde_json::json!({ "gateway": "0x0000ab12", "band": 0, "channel": 104 });
+        assert!(
+            gw_params(&off_plan)
+                .unwrap_err()
+                .to_string()
+                .contains("channel 104")
+        );
     }
 }

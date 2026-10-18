@@ -78,11 +78,15 @@ impl Band {
     }
 }
 
+/// Highest channel index of the duty-cycle channel plan (the wire's
+/// [`tower_protocol::mgmt::MAX_CHANNEL`]); [`apply`] and [`set_band`] refuse a higher one.
+pub const MAX_CHANNEL: u8 = tower_protocol::mgmt::MAX_CHANNEL;
+
 /// Full RF configuration for a network.
 #[derive(Debug, Clone, Copy)]
 pub struct RfConfig {
     pub band: Band,
-    /// Channel index (0..=2). A node and its gateway must share one.
+    /// Channel index (`0..=`[`MAX_CHANNEL`]). A node and its gateway must share one.
     pub channel: u8,
 }
 
@@ -141,6 +145,11 @@ fn synt_bytes(f_hz: u64, b_div: u64, bs: u8) -> [u8; 4] {
 /// CHNUM): all a band switch needs to rewrite, since every other RF setting is
 /// band-independent. Shared by [`apply`] and [`set_band`].
 fn write_band_regs(spi: &mut Spirit1Spi, band: Band, channel: u8) -> Result<(), RadioError> {
+    // The last line of defence: a stored setting written by another app (the data EEPROM
+    // survives a reflash) once read back as channel 104, ~889 MHz, outside the EU band.
+    if channel > MAX_CHANNEL {
+        return Err(RadioError::BadChannel(channel));
+    }
     // Base frequency: pack SYNT[25:0] + WCP(0) + BS into SYNT3..SYNT0.
     spi.write_regs(
         regs::SYNT3,

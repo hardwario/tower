@@ -1387,6 +1387,7 @@ async fn handle_mgmt(
             // broadcast), and the gateway never at our own address (shared `src` ⇒ colliding
             // CCM nonces under the link key; `add_peer` would refuse it and the node go mute).
             if p.band > mgmt::BAND_US915
+                || p.channel > mgmt::MAX_CHANNEL
                 || is_reserved_addr(effective_addr)
                 || !peer_addr_valid(p.gw_addr, effective_addr)
             {

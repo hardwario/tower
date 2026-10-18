@@ -97,8 +97,15 @@ impl Queue {
             .iter()
             .position(|s| s.is_none())
             .ok_or(PushError::Full)?;
-        let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).filter(|&v| v != 0).unwrap_or(1);
+        // The next id no queued item holds: after the u16 wraps, an item queued 65535 pushes ago
+        // (a TTL of up to 18 h) may still hold one, and two items sharing an id would let a
+        // delivery or a `QueueDrop` pop the other node's command. At most `CAPACITY` ids can be
+        // taken, so this ends within `CAPACITY + 1` steps.
+        let mut id = self.next_id;
+        while self.slots.iter().flatten().any(|it| it.id == id) {
+            id = id.checked_add(1).filter(|&v| v != 0).unwrap_or(1);
+        }
+        self.next_id = id.checked_add(1).filter(|&v| v != 0).unwrap_or(1);
         let mut buf = [0u8; MAX_ITEM];
         buf[..data.len()].copy_from_slice(data);
         self.slots[slot] = Some(Item {
@@ -184,6 +191,21 @@ mod tests {
 
     const NODE_A: u32 = 0xAAAA_0001;
     const NODE_B: u32 = 0xBBBB_0002;
+
+    /// After the u16 id wraps, an item still queued keeps its id to itself: a delivery of the
+    /// newcomer must not pop the old one (another node's command).
+    #[test]
+    fn ids_stay_unique_across_the_wrap() {
+        let mut q = Queue::new();
+        let old = q.push(NODE_A, 60, b"old", 0).unwrap();
+        assert_eq!(old, 1);
+        q.next_id = u16::MAX;
+        assert_eq!(q.push(NODE_B, 60, b"b1", 0).unwrap(), u16::MAX);
+        let wrapped = q.push(NODE_B, 60, b"b2", 0).unwrap();
+        assert_ne!(wrapped, old, "an id still in use is skipped");
+        assert_eq!(q.pop(wrapped).unwrap().node_addr, NODE_B);
+        assert_eq!(q.pop(old).unwrap().node_addr, NODE_A);
+    }
 
     #[test]
     fn fifo_per_node_and_isolation() {

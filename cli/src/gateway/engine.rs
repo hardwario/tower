@@ -1009,7 +1009,9 @@ impl Engine {
             mgmt::TX_EXPIRED => {
                 if let Some(pi) = self.nodes[i].pending.iter().position(|p| p.item == item) {
                     let p = self.nodes[i].pending.remove(pi);
-                    self.shell_error(out, node, &p, "queue TTL expired before delivery");
+                    // An item whose transmit went unacknowledged (the node may have run it, only its ACK
+                    // lost) lapses the same way: say what is known.
+                    self.shell_error(out, node, &p, "queue TTL expired without a confirmed delivery");
                     self.publish_pending(out, i);
                 }
             }

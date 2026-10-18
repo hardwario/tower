@@ -104,6 +104,14 @@ fn run(
     let say = |s: String| {
         let _ = progress.send(CableMsg::Progress(s));
     };
+    // A channel off the plan would tune the node off-band: refuse it rather than provision it.
+    if gw.channel > tower_protocol::mgmt::MAX_CHANNEL {
+        return Err(format!(
+            "the gateway reports channel {}, outside 0..={}; fix its `channel` setting",
+            gw.channel,
+            tower_protocol::mgmt::MAX_CHANNEL
+        ));
+    }
 
     // 1. Probe the node's port (role must be Node).
     say(format!("probing {node_port}…"));

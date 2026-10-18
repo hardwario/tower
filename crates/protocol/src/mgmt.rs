@@ -88,7 +88,8 @@ pub const TX_BUSY: u8 = 2;
 pub const TX_DUTY_LIMITED: u8 = 3;
 /// Radio / crypto error.
 pub const TX_ERROR: u8 = 4;
-/// Queue item expired (TTL) before it could be delivered; never transmitted.
+/// Queue item expired (TTL) with no acknowledged delivery: never transmitted, or transmitted
+/// with no ACK (the node may have run it).
 pub const TX_EXPIRED: u8 = 5;
 
 // --- node entry flags -----------------------------------------------------------
@@ -107,6 +108,10 @@ pub const RSSI_NONE: i8 = i8::MAX;
 /// `Provision.band` / `DeviceInfo.band` values.
 pub const BAND_EU868: u8 = 0;
 pub const BAND_US915: u8 = 1;
+/// Highest radio channel index (`DeviceInfo.channel`, `Provision.channel`): duty-cycle mode
+/// uses channels `0..=MAX_CHANNEL`, a node and its gateway on the same one. A higher index would
+/// tune the synthesizer off the band's plan (channel 104 is ~889 MHz, outside EU 863-870 MHz).
+pub const MAX_CHANNEL: u8 = 2;
 
 /// Longest node name accepted by `NodeAdd` / `NodeUpdate` (bytes, UTF-8).
 pub const MAX_NODE_NAME: usize = 16;

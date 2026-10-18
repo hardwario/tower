@@ -107,7 +107,7 @@ host that reuses a low `cmd_id` from being mistaken for a re-delivery (the "empt
 ### TX outcomes (`RadioStat::Tx.outcome`)
 
 `TX_DELIVERED`(0, node ACKed), `TX_NOT_DELIVERED`(1), `TX_BUSY`(2), `TX_DUTY_LIMITED`(3),
-`TX_ERROR`(4), `TX_EXPIRED`(5, TTL lapsed before delivery; never transmitted).
+`TX_ERROR`(4), `TX_EXPIRED`(5, TTL lapsed with no acknowledged delivery: never transmitted, or transmitted with no ACK, so the node may have run it).
 
 ---
 
@@ -302,7 +302,7 @@ uplink cycle.
 |---|---|---|---|---|
 | `stats-period` | uint ms | `500` | 0..60000 | ambient channel-RSSI cadence; `0` = off. `StatsConfig` overrides at runtime. The sample is the RSSI latched by the latest idle receive-slice timeout (no separate deaf measuring window); a tick with no fresh idle sample (every slice caught a frame) is skipped |
 | `band` | enum | `eu868` | eu868 / us915 | radio band (**boot-applied**) |
-| `channel` | uint | `0` | 0..2 | radio channel (**boot-applied**) |
+| `channel` | uint | `0` | 0..2 | radio channel (**boot-applied**); a stored value outside 0..2 (another app's record: the data EEPROM survives a reflash) is ignored with `gateway: channel setting out of range (n), using channel 0` |
 | `keyed-join` | bool | `on` | on/off | answer keyed joins (E4) from registered nodes; off = refuse them (logged). Re-read every 2 s, no reboot needed |
 | `addr` | addr | `auto` | hex / auto / random | SDK base: the coordinator's radio address |
 | `identity` | str | *(empty)* | ≤ 32 chars | SDK base: friendly name |

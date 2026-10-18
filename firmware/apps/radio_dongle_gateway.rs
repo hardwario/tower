@@ -44,7 +44,7 @@ use embassy_time::{Duration, Instant, Timer};
 use log::{info, warn};
 use tower::led::{self, LedChannel, Pattern, Polarity, Step};
 use tower::radio::Spirit1;
-use tower::radio::config::Band;
+use tower::radio::config::{self, Band};
 use tower::radio::net::{Net, NetConfig, PairedPeer, PairingHost, SendResult, peer_addr_valid};
 use tower::storage::{NS_APP, NS_SHELL, Nv, Scoped};
 use tower::{app, board::Board, console, shell, watchdog};
@@ -114,7 +114,10 @@ static GW_SETTINGS: &[shell::Setting] = &[
     shell::Setting {
         key: SET_CHANNEL,
         name: "channel",
-        kind: shell::Kind::Uint { min: 0, max: 2 },
+        kind: shell::Kind::Uint {
+            min: 0,
+            max: config::MAX_CHANNEL as u32,
+        },
         default: "0",
     },
     // Answer keyed joins (E4) from registered nodes. On by default: the exchange is mutually
@@ -424,7 +427,17 @@ async fn run(b: Board) {
     }
 
     let band = read_band_setting(kv);
-    let channel = read_u32_setting(kv, SET_CHANNEL, 0) as u8;
+    // Range-checked here too: the shell checks a value only when it is written, and the data
+    // EEPROM survives a reflash, so this key may hold another app's record (the push button
+    // keeps `accel` there: "high" read back as channel 104, ~889 MHz, outside the EU band,
+    // and `Describe` would have handed it to every cable-paired node).
+    let channel = match read_u32_setting(kv, SET_CHANNEL, 0) {
+        c if c <= u32::from(config::MAX_CHANNEL) => c as u8,
+        c => {
+            log::warn!(target: "gateway", "channel setting out of range ({c}), using channel 0");
+            0
+        }
+    };
     let mut stats_period_ms = read_u32_setting(kv, SET_STATS_PERIOD, 500);
 
     let radio = Spirit1::new(
@@ -445,8 +458,9 @@ async fn run(b: Board) {
             band,
             channel,
             // Registered nodes mean this store held a TX watermark before: if it is gone now,
-            // fail closed rather than restart the counter under their keys.
-            keys_stored: registry::count(&buckets) > 0,
+            // fail closed rather than restart the counter under their keys. A registry in another
+            // format holds node keys too, even though it reads as empty here (`writable` off).
+            keys_stored: foreign_format || registry::count(&buckets) > 0,
         },
     )
     .await
@@ -454,7 +468,13 @@ async fn run(b: Board) {
         Ok(n) => n,
         Err(e) => {
             log::error!(target: "gateway", "radio init failed ({e}), gateway down");
-            return;
+            // Park, still checking in: the watchdog's liveness gate is armed, and a reset would
+            // only boot into the same failure every ~30 s, each boot filing a crash record that
+            // blames a hang. The console stays up for a diagnosis.
+            loop {
+                watchdog::checkin();
+                Timer::after(Duration::from_secs(5)).await;
+            }
         }
     };
     // Registered peers only: a frame from any address not in the peer table (never paired, or

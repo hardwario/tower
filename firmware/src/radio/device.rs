@@ -54,6 +54,9 @@ pub enum RadioError {
     /// only** (`Net::set_default_lane(false)`): nothing is sealed under the default key,
     /// which is not a link key there.
     NotRegistered,
+    /// A channel index past the band's plan ([`config::MAX_CHANNEL`](super::config::MAX_CHANNEL)):
+    /// it would tune the synthesizer off-band, so the radio is never programmed with it.
+    BadChannel(u8),
 }
 
 impl From<SpiError> for RadioError {
@@ -79,6 +82,7 @@ impl core::fmt::Display for RadioError {
                 f.write_str("TX locked: the nonce watermark is lost or could not be persisted")
             }
             RadioError::NotRegistered => f.write_str("not a registered peer (registered peers only)"),
+            RadioError::BadChannel(ch) => write!(f, "channel {ch} is outside the band's plan"),
         }
     }
 }

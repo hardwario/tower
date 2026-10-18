@@ -766,7 +766,7 @@ last chunk or one of these terminal errors:
 | `line too long for the radio MTU (max 56 bytes)` | `line` over 56 bytes |
 | a dongle error, e.g. `capacity exhausted` | The dongle refused the enqueue (queue full); `result` is `1`, the reason is in `error` |
 | `not queued: gateway serial link is down` / `not queued: device did not answer (timeout)` | The enqueue never reached the dongle or was not answered |
-| `queue TTL expired before delivery` | The node did not wake within `ttl` |
+| `queue TTL expired without a confirmed delivery` | No delivery to the node was acknowledged within `ttl` (it did not wake, or only the ACK of a delivery was lost, in which case it may have run the command) |
 | `queue TTL elapsed with no delivery report from the gateway` | Backstop, `ttl` plus 30 s without any report |
 | `delivered but no reply from the node` | Delivered, then no reply chunk for 30 s (each chunk restarts the wait) |
 | `gateway rebooted; command lost` | The dongle rebooted; its queue is gone (send the line again) |
@@ -775,7 +775,7 @@ last chunk or one of these terminal errors:
 | `node removed` | The node was removed |
 
 ```json
-{"id":"8b0f2c9a-1d2e-4c3b-9a8f-7e6d5c4b3a21","chunk":0,"text":"","done":true,"result":1,"truncated":false,"error":"queue TTL expired before delivery"}
+{"id":"8b0f2c9a-1d2e-4c3b-9a8f-7e6d5c4b3a21","chunk":0,"text":"","done":true,"result":1,"truncated":false,"error":"queue TTL expired without a confirmed delivery"}
 ```
 
 A request whose `id` is invalid or repeated, that does not parse (e.g. a `ttl` over 65535), or
