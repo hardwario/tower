@@ -28,9 +28,10 @@ async fn run(_b: Board) {
         info!("longline #{n}: {A}{A}{A}{A}{A}{A}");
         Timer::after_millis(400).await; // let the queue drain before the burst
 
-        // Then a burst far larger than the TX queue depth with no awaits between, so
-        // the queue overflows and the host shows a `Dropped` marker each round.
-        for i in 0..30 {
+        // Then a burst far larger than the TX queue (1.5 KB, some 30 of these lines) with no
+        // awaits between, so the queue overflows and the host shows a `Dropped` marker each
+        // round, right after the last line that made it.
+        for i in 0..60 {
             info!("burst {} (round {})", i, n);
         }
 

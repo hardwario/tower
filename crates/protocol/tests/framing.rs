@@ -214,8 +214,6 @@ fn chunking_budget_holds() {
     );
 }
 
-/// The largest `Log` the firmware can produce (192-char message, 24-char module, worst-case
-/// uptime) must fit; guards the firmware's MAX_MSG.
 /// A payload encoded on its own and framed later (the device's console queue) makes the same
 /// bytes as `encode_frame`, up to the largest payload; past it both halves refuse.
 #[test]
@@ -253,6 +251,8 @@ fn encode_frame_bytes_matches_encode_frame() {
     );
 }
 
+/// The largest `Log` the firmware can produce (192-char message, 24-char module, worst-case
+/// uptime) must fit; guards the firmware's MAX_MSG.
 #[test]
 fn max_log_fits() {
     let message = "x".repeat(192);

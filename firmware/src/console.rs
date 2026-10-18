@@ -58,7 +58,7 @@ use tower_protocol::msg::{
     Dropped, Event, Hello, Level, Log, MgmtResponse, Print, RadioStat, ShellCompletions, ShellResponse,
     Uplink,
 };
-use tower_protocol::ring::PayloadRing;
+use tower_protocol::ring::{PayloadRing, RECORD_OVERHEAD};
 use tower_protocol::{
     FrameDecoder, MAX_PAYLOAD, MAX_WIRE, MsgType, decode_frame, encode_frame, encode_frame_bytes,
     encode_payload,
@@ -143,23 +143,33 @@ struct Encoded {
 }
 
 impl Encoded {
-    /// `None` (counted as a drop) for a message that encodes past one frame.
-    fn new<T: Serialize>(msg_type: MsgType, payload: &T) -> Option<Self> {
-        let mut e = Self {
+    fn empty(msg_type: MsgType) -> Self {
+        Self {
             msg_type,
             len: 0,
             buf: [0; MAX_PAYLOAD],
-        };
-        match encode_payload(payload, &mut e.buf) {
+        }
+    }
+
+    /// Serialize `payload` in place; `false` (counted as a drop) if it encodes past one frame.
+    fn encode<T: Serialize>(&mut self, payload: &T) -> bool {
+        match encode_payload(payload, &mut self.buf) {
             Ok(n) => {
-                e.len = n;
-                Some(e)
+                self.len = n;
+                true
             }
             Err(_) => {
                 bump_dropped();
-                None
+                false
             }
         }
+    }
+
+    /// For the async producers, which move the message into their wait: `None` (counted as a
+    /// drop) if it encodes past one frame.
+    fn new<T: Serialize>(msg_type: MsgType, payload: &T) -> Option<Self> {
+        let mut e = Self::empty(msg_type);
+        e.encode(payload).then_some(e)
     }
 
     fn bytes(&self) -> &[u8] {
@@ -175,6 +185,38 @@ struct TxQueue {
     /// Async producers parked on a full ring ([`enqueue`]). More than 4 at once wakes them all
     /// (they re-register), which is correct, just busier.
     writers: MultiWakerRegistration<4>,
+    /// A drop-marker placeholder is queued (see [`TxQueue::mark_drop`]).
+    marker_queued: bool,
+}
+
+/// Ring bytes every message leaves free: room for a drop-marker placeholder (an empty
+/// `Dropped` record), so the marker can always be queued exactly where messages went missing.
+const MARKER_RESERVE: usize = RECORD_OVERHEAD;
+
+impl TxQueue {
+    /// Queue a message, leaving [`MARKER_RESERVE`] free, and wake the writer; `false` if it does
+    /// not fit.
+    fn push(&mut self, e: &Encoded) -> bool {
+        if self.ring.room() < RECORD_OVERHEAD + e.len + MARKER_RESERVE {
+            return false;
+        }
+        let pushed = self.ring.push(e.msg_type, e.bytes());
+        if pushed {
+            self.reader.wake();
+        }
+        pushed
+    }
+
+    /// Queue the drop marker's placeholder behind the messages queued so far, i.e. at the gap a
+    /// drop-newest leaves. One at a time: drops counted before the writer reaches it are reported
+    /// by it, together. Always fits: every message leaves [`MARKER_RESERVE`] free, and only this
+    /// placeholder uses that room.
+    fn mark_drop(&mut self) {
+        if !self.marker_queued && self.ring.push(MsgType::Dropped, &[]) {
+            self.marker_queued = true;
+            self.reader.wake();
+        }
+    }
 }
 
 /// Producer → writer queue. Single consumer (the writer task) owns the UART.
@@ -182,6 +224,7 @@ static TX: Mutex<RefCell<TxQueue>> = Mutex::new(RefCell::new(TxQueue {
     ring: PayloadRing::new(),
     reader: WakerRegistration::new(),
     writers: MultiWakerRegistration::new(),
+    marker_queued: false,
 }));
 /// Decoded host→device **shell** frames (ShellCommand / ShellComplete), copied whole for the
 /// shell to drain on its own task ([`crate::shell::serve_ext`] spawns it). The console owns this
@@ -200,8 +243,8 @@ static MGMT_RX: Channel<CriticalSectionRawMutex, Vec<u8, RX_COPY>, 1> = Channel:
 /// it is false they fall back to drop-newest, so a task emitting events on a battery node with
 /// USB unplugged is never parked forever on a full queue that has no writer to drain it.
 static CONSOLE_UP: AtomicBool = AtomicBool::new(false);
-/// Count of messages dropped because [`TX`] was full; reported by the writer
-/// as a [`Dropped`] marker before the next real frame.
+/// Count of messages dropped (a full [`TX`], an encode failure, a frame cut by an unplug);
+/// reported by the writer as a [`Dropped`] marker where the drop-marker placeholder sits.
 static DROPPED: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 /// Firmware name for the boot `Hello` (set by [`boot_banner`]); the dynamic console
 /// [`manager`] re-emits `Hello` with it on every USB plug-in so the host resyncs.
@@ -233,10 +276,12 @@ fn bump_dropped() {
     add_dropped(1);
 }
 
+/// Count `n` drops and queue the marker's placeholder. Never call it while [`TX`] is borrowed.
 fn add_dropped(n: u32) {
     critical_section::with(|cs| {
         let c = DROPPED.borrow(cs);
         c.set(c.get().saturating_add(n));
+        TX.borrow_ref_mut(cs).mark_drop();
     });
 }
 
@@ -251,23 +296,16 @@ fn take_dropped() -> u32 {
 
 /// Push `e` into [`TX`] and wake the writer; `false` if the ring has no room for it.
 fn push(e: &Encoded) -> bool {
-    critical_section::with(|cs| {
-        let mut q = TX.borrow_ref_mut(cs);
-        let pushed = q.ring.push(e.msg_type, e.bytes());
-        if pushed {
-            q.reader.wake();
-        }
-        pushed
-    })
+    critical_section::with(|cs| TX.borrow_ref_mut(cs).push(e))
 }
 
 /// Queue a message, dropping it (drop-newest) and bumping [`DROPPED`] if the ring has no room.
-/// Non-blocking: safe from any context (IRQ, the `log` backend). `None` = an encode failure,
-/// already counted.
-fn try_enqueue(e: Option<Encoded>) {
-    if let Some(e) = e
-        && !push(&e)
-    {
+/// Non-blocking: safe from any context (IRQ, the `log` backend). Encodes in place: the `log`
+/// backend calls this with the formatted line still on its stack, and a message moved through
+/// an `Option` cost that frame a second payload-sized copy.
+fn try_enqueue<T: Serialize>(msg_type: MsgType, payload: &T) {
+    let mut e = Encoded::empty(msg_type);
+    if e.encode(payload) && !push(&e) {
         bump_dropped();
     }
 }
@@ -295,8 +333,7 @@ async fn enqueue(e: Option<Encoded>) {
     poll_fn(|cx| {
         critical_section::with(|cs| {
             let mut q = TX.borrow_ref_mut(cs);
-            if q.ring.push(e.msg_type, e.bytes()) {
-                q.reader.wake();
+            if q.push(&e) {
                 Poll::Ready(())
             } else {
                 q.writers.register(cx.waker());
@@ -368,7 +405,7 @@ impl log::Log for ConsoleLogger {
         let mut message = Clipper::<MAX_MSG>(String::new());
         let _ = write!(message, "{}", record.args()); // truncates past MAX_MSG (never empties)
         let module = record.target().rsplit("::").next().unwrap_or(record.target());
-        try_enqueue(Encoded::new(
+        try_enqueue(
             MsgType::Log,
             &Log {
                 level: map_level(record.level()),
@@ -376,7 +413,7 @@ impl log::Log for ConsoleLogger {
                 module: clip_str(module, MOD_LEN),
                 message: message.0.as_str(),
             },
-        ));
+        );
     }
 
     fn flush(&self) {}
@@ -438,17 +475,24 @@ pub async fn manager(
         while !vbus.is_high() {
             let _ = select(vbus.wait_for_high(), Timer::after(Duration::from_millis(500))).await;
             crate::board::apply_stop_tuning();
+            if vbus.is_high() {
+                // The wake VBUS rising caused: what is queued is the backlog (the boot lines, a
+                // crash report) the writer is about to send, not something to drop.
+                break;
+            }
             // Drain anything left in the queue while there's no writer (counting it as dropped):
             // frees room so a producer that raced the unplug (checked CONSOLE_UP just before it
             // cleared) can't stay parked on a full ring; it wakes within one poll cycle.
-            let drained = critical_section::with(|cs| {
+            let (drained, had_marker) = critical_section::with(|cs| {
                 let mut q = TX.borrow_ref_mut(cs);
-                let n = q.ring.clear();
+                let had_marker = q.marker_queued;
+                let n = q.ring.clear() - u32::from(had_marker);
+                q.marker_queued = false;
                 q.writers.wake();
-                n
+                (n, had_marker)
             });
-            if drained > 0 {
-                add_dropped(drained);
+            if drained > 0 || had_marker {
+                add_dropped(drained); // and the marker's placeholder again, for the next plug-in
             }
         }
         Timer::after(Duration::from_millis(50)).await; // debounce
@@ -515,16 +559,17 @@ async fn flush_bounded(tx: &mut UartTx<'static, Async>) {
     let _ = with_timeout(Duration::from_millis(50), tx.flush()).await;
 }
 
-/// Scope guard that counts one dropped frame if destroyed while still armed. [`writer_loop`] arms
-/// it after dequeuing an item so that if the writer is cancelled (USB unplug via `select3`) before
-/// the item reaches the UART, the loss is still reflected in the host's Dropped accounting; it is
-/// disarmed (`.0 = false`) once the item's bytes are in the UART ring.
-struct OnCancelDrop(bool);
+/// Scope guard that counts `.0` dropped frames if destroyed while still armed. [`writer_loop`]
+/// arms it after dequeuing an item so that if the writer is cancelled (USB unplug via `select3`)
+/// before the item reaches the UART, the loss is still reflected in the host's Dropped
+/// accounting: one message, or the whole count a marker was about to report. It is disarmed
+/// (`.0 = 0`) once the item's bytes are in the UART ring.
+struct OnCancelDrop(u32);
 
 impl Drop for OnCancelDrop {
     fn drop(&mut self) {
-        if self.0 {
-            bump_dropped();
+        if self.0 > 0 {
+            add_dropped(self.0);
         }
     }
 }
@@ -583,6 +628,9 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
                 let mut q = TX.borrow_ref_mut(cs);
                 match q.ring.pop(&mut payload) {
                     Some(popped) => {
+                        if popped.0 == MsgType::Dropped {
+                            q.marker_queued = false;
+                        }
                         q.writers.wake(); // room freed for a producer waiting on a full ring
                         Poll::Ready(popped)
                     }
@@ -601,15 +649,19 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
         // manager's `select3`) before it is handed to the UART; this keeps the host's Dropped
         // accounting exact even for the "never dropped" backpressured producers. Disarmed once
         // the item's bytes are written into the UART ring.
-        let mut cancel_guard = OnCancelDrop(true);
-
-        // Report any dropped frames first (one marker before the next real frame).
-        let dropped = take_dropped();
-        if dropped > 0 {
-            send(tx, &mut seq, MsgType::Dropped, &Dropped { count: dropped }).await;
+        let mut cancel_guard = OnCancelDrop(1);
+        if msg_type == MsgType::Dropped {
+            // The placeholder queued where messages went missing: report every drop counted so
+            // far right here, so the host shows the marker at the gap, not before the backlog.
+            let dropped = take_dropped();
+            cancel_guard.0 = dropped;
+            if dropped > 0 {
+                send(tx, &mut seq, MsgType::Dropped, &Dropped { count: dropped }).await;
+            }
+        } else {
+            send_payload(tx, &mut seq, msg_type, &payload[..len]).await;
         }
-        send_payload(tx, &mut seq, msg_type, &payload[..len]).await;
-        cancel_guard.0 = false; // item's bytes are in the UART ring, not a drop
+        cancel_guard.0 = 0; // item's bytes are in the UART ring, not a drop
         // Drain the ring (still under the guard) before idling, so the frames actually
         // leave the wire rather than sitting in the buffer when STOP is next allowed.
         // Bounded: an unbounded flush can lose its TC flag to the RX ring's status
@@ -887,7 +939,7 @@ pub async fn flush() {
 pub fn _print(args: fmt::Arguments) {
     let mut s = Clipper::<MAX_MSG>(String::new());
     let _ = write!(s, "{}", args);
-    try_enqueue(Encoded::new(MsgType::Print, &Print { text: s.0.as_str() }));
+    try_enqueue(MsgType::Print, &Print { text: s.0.as_str() });
 }
 
 /// Write formatted text to the console with no trailing newline.

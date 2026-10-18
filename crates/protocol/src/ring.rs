@@ -44,6 +44,11 @@ impl<const N: usize> PayloadRing<N> {
         }
     }
 
+    /// Free bytes: a record takes [`RECORD_OVERHEAD`] plus its payload.
+    pub fn room(&self) -> usize {
+        N - self.len
+    }
+
     /// Whether a record with a `payload_len`-byte payload fits now.
     pub fn fits(&self, payload_len: usize) -> bool {
         payload_len <= MAX_PAYLOAD && RECORD_OVERHEAD + payload_len <= N - self.len
@@ -161,10 +166,12 @@ mod tests {
     fn a_full_ring_refuses_whole_records_only() {
         let mut r = PayloadRing::<{ RECORD_OVERHEAD + MAX_PAYLOAD }>::new();
         assert!(r.push(MsgType::Print, &payload(0, 200)[..200]));
+        assert_eq!(r.room(), 47);
         // 47 bytes left: a 45-byte payload fits exactly, a 46-byte one does not.
         assert!(!r.fits(46));
         assert!(!r.push(MsgType::Print, &payload(0, 46)[..46]));
         assert!(r.push(MsgType::Print, &payload(9, 45)[..45]));
+        assert_eq!(r.room(), 0);
         assert!(!r.push(MsgType::Print, &[]));
         assert!(!r.fits(MAX_PAYLOAD + 1), "never more than a frame carries");
         let mut out = [0u8; MAX_PAYLOAD];
