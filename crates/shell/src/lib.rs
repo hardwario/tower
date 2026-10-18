@@ -201,7 +201,7 @@ pub const fn varint_len(mut n: usize) -> usize {
 /// Byte budget for one `ShellCompletions` reply, so it always fits **one** wire frame.
 ///
 /// The reply is a single frame (the host matches it by `req_id`); 16 candidates averaging
-/// more than ~12 bytes overflow the ~249-byte payload, the encode fails, the reply is
+/// more than ~12 bytes overflow the 247-byte payload, the encode fails, the reply is
 /// dropped and the host's TAB just times out. The completer therefore admits candidates
 /// only while this budget holds, and flags `more` when it stops early.
 ///

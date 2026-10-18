@@ -95,8 +95,11 @@ impl DutyGovernor {
     /// FHSS **per-channel** dwell governor (§15.247): caps *transmitted* airtime on
     /// one hop channel to ≤ [`FHSS_DWELL_BURST_MS`] + 1 %·20 s = **300 ms in any
     /// 20 s** (a token bucket can spend at most `cap + permil·window`), which is 25 %
-    /// under the 0.4 s/20 s limit. One bucket per channel; the FHSS layer replaces
-    /// the band duty governor with these while hopping.
+    /// under the 0.4 s/20 s limit. The FHSS layer does not use it: there, occupancy is
+    /// bounded structurally (each channel is tuned at most once per 20 s, for one slot),
+    /// and the transmitted airtime is only counted per channel for the compliance
+    /// histogram (`Net::fhss_channel_airtime_ms`). The `fhss_kat` example checks this
+    /// governor's 300 ms worst case.
     pub fn fhss_channel() -> Self {
         Self::new(FHSS_DWELL_BURST_MS, FHSS_PERMIL)
     }

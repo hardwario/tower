@@ -69,8 +69,8 @@ effectively halt with them). Re-packing a full half synchronously is on the orde
 word writes at ~3.4 ms each ≈ **5.2 s of the whole chip frozen** (bench-measured 2026-07-05:
 5.16-5.20 s, flip-counter 1:1 with the stalls). Historically, whichever append happened to
 fill the active half paid for the whole compaction, with the console and radio dead for the
-duration: the boot-time session bump (a ~5 s "hung" boot every Nth reboot), a `settings set`,
-a radio watermark persist.
+duration: the boot-time session bump (a ~5 s "hung" boot every Nth reboot), a
+`system settings set`, a radio watermark persist.
 
 The SDK now compacts **incrementally, in the background**. A maintenance task (`storage::maintenance`, spawned by
 default by the `app!` macro) runs bounded slices of at most

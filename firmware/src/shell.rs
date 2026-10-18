@@ -52,7 +52,7 @@ use crate::console;
 use crate::storage::{FLIP_BUDGET, NS_SHELL, Nv, Scoped};
 
 const MAX_LINE: usize = 96;
-/// Max whitespace/`/`-separated tokens a command line may hold. An over-long line is rejected
+/// Max whitespace-separated tokens a command line may hold. An over-long line is rejected
 /// rather than having its tail silently dropped (see [`tokenize`] and the `ShellCommand` handler).
 const MAX_TOKENS: usize = 8;
 /// The paging window: a response is captured [`RESP_CAP`] bytes per handler run and paged out

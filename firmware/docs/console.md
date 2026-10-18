@@ -12,9 +12,9 @@ framework**. The host side is the **`tower`** CLI/TUI.
 > print / event streaming with overflow accounting, chunked shell responses, the
 > settings framework (6 kinds, range/enum validation, value completion), the
 > app-extensible deep-merge command tree, and the `tower` CLI + TUI are all
-> implemented and tested on real hardware. The codec has 20 host tests including
-> 9000 fuzz iterations (in `crates/protocol`, run with `cargo test -p tower-protocol` at the
-> repo root).
+> implemented and tested on real hardware. The codec is covered by the protocol crate's host
+> tests, including a 5000-iteration bit-flip test (in `crates/protocol`, run with
+> `cargo test -p tower-protocol` at the repo root).
 
 This is the standalone reference for using and maintaining the console subsystem:
 architecture, wire protocol, the firmware + host APIs, and a worked example per feature.
@@ -134,9 +134,10 @@ node would burn ~3.5 mA (WFI at 16 MHz) instead of idling at µA. The console is
   gap. The periodic wake costs sub-µA (STOP floor unchanged).
 
 RX is owned by the manager and **routed by frame type**: `ShellCommand`/`ShellComplete`
-go to the shell (`shell::dispatch_frame`; the shell registers its command tree + settings
-via `shell::serve`/`serve_ext`, which just store them and spawn no task). So the shell keeps
-working across teardown/rebuild without owning the raw RX half.
+go to the shell: the console copies each one into the `SHELL_RX` channel, and the shell's own
+`shell_rx_task` drains it into `shell::dispatch_frame` (`shell::serve`/`serve_ext` store the
+command tree + settings and spawn that task, once). So the shell keeps working across
+teardown/rebuild without owning the raw RX half, and a slow handler never stalls RX.
 
 **The `WakeGuard`:** even while the console is up, STOP would gate the USART clock and the
 writer's awaited TXE interrupt would never fire. The writer holds a `WakeGuard(Stop1)`
@@ -168,7 +169,8 @@ runs before the app's console.)
   ~500 ms poll already tolerates being late, so if it *never* appears, scope PA12 on
   plug: it must reach the STM32's V_IH, or the manager never sees "USB present." (Hardware
   issue, e.g. CBUS3 mis-configured in the FTDI EEPROM, not the firmware logic.)
-- **Logs appear but garbled** → framing / the reused static `TX_BUF`/`RX_BUF` across rebuilds.
+- **Logs appear but garbled** → framing / the statics reused across rebuilds (the TX queue
+  `TX`, the RX DMA ring `RX_DMA_BUF`).
 - **Shell silent, logs fine** → the RX router (`dispatch_frame`) or `SHELL_PARAMS` not set
   (a `no_shell` app has no shell by design).
 - **Current doesn't drop on unplug** → the UART isn't being dropped; check the manager's
@@ -369,7 +371,7 @@ tower complete "system settings set "   # ask the target what completes here
 | `system settings print` | list every setting and its value |
 | `system settings set <name>=<value>` | validate by kind + persist |
 | `system settings get <name>` | show value + constraints + default |
-| `export` | dump all settings as `settings set` lines (reproducible config) |
+| `export` | dump all settings as `system settings set` lines (reproducible config) |
 
 Unknown commands return result code 1. Words are separated by spaces (or tabs): the path into
 the tree, the command and its arguments, `system settings set name=value`; there is no leading
@@ -379,16 +381,16 @@ the tree, the command and its arguments, `system settings set name=value`; there
 (`shell::stream_line`, e.g. a gateway-queued `NodeCmd::Shell`: anything that can publish a
 downlink over MQTT). Operations that are destructive or cut the radio link therefore refuse
 remote lines with result **5 (`R_DENIED`)** and run only from the USB console:
-`system eeprom wipe` (built with `Entry::cmd_console_only`) and `settings set` of an
+`system eeprom wipe` (built with `Entry::cmd_console_only`) and `system settings set` of an
 address setting (`Kind::Addr`, i.e. `addr`). Everything else (including `system reboot`,
-`settings print/get`, `export`, and setting non-address values) works over the radio.
+`system settings print/get`, `export`, and setting non-address values) works over the radio.
 App commands opt in with `Entry::cmd_console_only(..)`; a handler that is only partly
 sensitive checks `ctx.is_remote()` itself.
 
 A response of any length reaches the host whole: the shell pages it out 256 bytes per handler
 run (`shell::RESP_CAP`, the handler re-run with an advancing window, the same on the console and
 over the radio) as 192-byte `chunk`/`last` frames that the host reassembles; `export` and
-`settings print` are the long ones.
+`system settings print` are the long ones.
 
 ---
 
@@ -440,7 +442,7 @@ static SETTINGS: &[Setting] = &[
   > system settings set mode=⇥     →  p2p  star  mesh
   ```
   A completion reply is always **one frame**: the target stops adding candidates before the
-  encoded reply would exceed the ~249-byte payload (or 16 entries) and sets `more`, so many
+  encoded reply would exceed the 247-byte payload (or 16 entries) and sets `more`, so many
   long app setting / enum names can't make TAB time out. The common prefix is cut at a char
   boundary (enum values may be non-ASCII).
 - Unset / unreadable / out-of-range stored values fall back to the `default`.
@@ -660,8 +662,9 @@ is a framing difference the tags can't see; `tower` reports that pattern once.
 `tower::console`:
 - `event(name, &[(k, v)]).await`: emit a structured event
 - `print!` / `println!`: raw text (re-exported macros)
-- `install_logger(max_level)`, `manager(usart1, tx_pin, rx_pin, vbus)`, `boot_banner(name)`:
-  wiring for the dynamic (USB-gated) console, handled for you by `Board::take` / `app!`
+- `install_logger(max_level)`, `manager(usart1, tx_pin, rx_pin, tx_dma, rx_dma, vbus)`,
+  `boot_banner(name)`: wiring for the dynamic (USB-gated) console, handled for you by
+  `Board::take` / `app!`
 
 `tower::shell`:
 - `serve(spawner, kv)` / `serve_ext(spawner, kv, app_commands, app_settings)`
@@ -698,9 +701,9 @@ cargo test -p tower-protocol   # at the repo root (or `just test` for the whole 
 ```
 
 These cover round-trips for every message, boundary frame sizes, the decoder's
-overflow/reset/resync state machine, exhaustive type mapping, and **9000 deterministic
-bit-flip fuzz iterations** proving every single-bit corruption is detected. (They run on the
-host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware-side paths
+overflow/reset/resync state machine, exhaustive type mapping, and a **5000-iteration
+deterministic bit-flip fuzz test** proving every single-bit corruption is detected. (They run on
+the host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware-side paths
 (logs, events, shell, settings, completion, panic, persistence) are verified on the dongle.
 
 ## Known limitations & caveats
@@ -725,8 +728,8 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
   up; scope PA12 on plug to confirm. The pin uses an internal pull-down so it reads a
   defined low when unplugged (no false "present"). PA12 is also the USB DP pin, used here
   purely as a VBUS-sense GPIO (no USB device peripheral is enabled).
-- **Setting values can't contain `/`, space, or tab**: those are command tokenizers.
-  Enum values dodge this by being a fixed set.
+- **Setting values can't contain a space or a tab**: whitespace separates the command's words
+  (a `/` is fine, e.g. `identity=lab/room-1`). Enum values dodge this by being a fixed set.
 - **postcard is not self-describing:** any change to a payload struct/enum is a wire
   change: make it in one commit across `crates/protocol` and its callers (runbook in
   `crates/protocol/AGENTS.md`); there is nothing to bump. Both ends build the change together;
@@ -734,5 +737,5 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
   another schema tag and are refused (`SchemaMismatch`).
 - **A handler whose output can exceed one 256-byte window runs once per window**: the shell
   pages long responses by re-running the handler, so such a handler must be deterministic and
-  free of side effects (the SDK's long ones, `export`, `settings print`, `resource print`, are
-  read-only; commands that change state print a few bytes and run once).
+  free of side effects (the SDK's long ones, `export`, `system settings print` and `system
+  resource print`, are read-only; commands that change state print a few bytes and run once).

@@ -90,7 +90,7 @@ The interactive commands:
 tower                             # bare: open the TUI console (same as `tower console`)
 tower console                     # full-screen TUI: logs + events + shell in one view
 tower console --reset             # NRST-pulse the device on connect to see it boot
-tower shell                       # line-based interactive shell (commands start with /)
+tower shell                       # line-based interactive shell (e.g. `system settings print`)
 tower shell --reset --timeout 3000
 tower complete "sys"             # ask the target to complete a partial command line
 ```
@@ -285,19 +285,19 @@ tower net status                                   # gateway online/offline + st
 Role is enforced: `tower gateway` at a node, or `nodes add --port` at a gateway, exits `126`.
 
 **Pairing over the air.** `tower nodes add --ota` opens the gateway's window; hold the node's
-button ≥ 1 s (an unpaired push button) to join. On success it prints the node and the
-handshake's 6-digit short authentication string, `paired 0x0000ab12 (SAS 123456)` (also in the
-bridge's log and on `gateway/pairing` as `"sas":"123456"`). Compare it with the SAS the node
-logs, `net: pairing: SAS 123456` (watch it with `tower -d <node port> logs` while the node is on
-USB and pairing): equal values rule out a man in the middle (a 1 in 10⁶ chance for an attacker);
-different values mean one sat in between, so remove the node and pair again. The node keeps the
-new key only once the gateway acknowledges its first uplink under it, so a lost handshake frame
-leaves it unpaired (another hold retries) rather than half-paired. A paired node whose gateway
-forgot it (removed, wiped, replaced), or one moving to another gateway, re-pairs with a **12 s
-hold**: remove it on its gateway first (`tower nodes remove <node>`; OTA pairing never re-keys a
-registered address), open a window, then hold. Its old pairing stays in force unless the new one
-commits. The RPC waits the window plus 15 s; a join the gateway reports even later is logged as
-such and published, not dropped.
+button (an unpaired push button) for at least its `hold-time` (1 s by default) to join. On success
+it prints the node and the handshake's 6-digit short authentication string,
+`paired 0x0000ab12 (SAS 123456)` (also in the bridge's log and on `gateway/pairing` as
+`"sas":"123456"`). Compare it with the SAS the node logs, `net: pairing: SAS 123456` (watch it
+with `tower -d <node port> logs` while the node is on USB and pairing): equal values rule out a
+man in the middle (a 1 in 10⁶ chance for an attacker); different values mean one sat in between,
+so remove the node and pair again. The node keeps the new key only once the gateway acknowledges
+its first uplink under it, so a lost handshake frame leaves it unpaired (another hold retries)
+rather than half-paired. A paired node whose gateway forgot it (removed, wiped, replaced), or one
+moving to another gateway, re-pairs with a **12 s hold**: remove it on its gateway first
+(`tower nodes remove <node>`; OTA pairing never re-keys a registered address), open a window, then
+hold. Its old pairing stays in force unless the new one commits. The RPC waits the window plus
+15 s; a join the gateway reports even later is logged as such and published, not dropped.
 
 **Moving a node key to another gateway** (a replacement dongle, or this one after a factory
 reset): `tower nodes show <node> --keys --json` on the live gateway gives the key and its two
