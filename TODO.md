@@ -47,7 +47,8 @@ energy per event, an attacker board, mutation testing, latency budgets, host-sid
 contract tests, radio pre-compliance, environment, production test, release qualification.
 Needs bench setup first (a self-hosted runner, a power-switching USB hub, the PPK2, a board
 for the rogue firmware). Open findings to run down with it: a remote shell reply chunk lost when two nodes answer
-at once (1 in 8 on the bench), and `radio_afa` delivering 14 of 19 confirmed sends.
+at once (1 in 8 on the bench before the 2026-10-18 fixes, 0 in 48 in the soak after them), and
+`radio_afa` delivering 14 of 19 confirmed sends.
 
 ## Compatibility gate (before the first users)
 
