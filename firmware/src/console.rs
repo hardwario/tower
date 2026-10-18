@@ -12,12 +12,14 @@
 //! channel 5 ([`RingBufferedUartRx`]), a different channel group from the WS2812 strip's channel
 //! 3, so both use DMA at once. While up it splits the UART and runs two halves:
 //!
-//! * producers (the `log` backend, `print!`, `event`, the boot `Hello`) build an owned
-//!   [`Outgoing`] message and `try_send` it into [`TX_CHANNEL`], non-blocking, drop-newest
-//!   on full (a dropped count is reported by the writer); [`writer_loop`] owns the [`UartTx`],
-//!   assigns the per-frame `seq` (so a gap means real wire loss, not a queue drop), encodes, and
-//!   DMA-writes, holding a `WakeGuard` across each burst so the low-power executor uses WFI
-//!   instead of STOP mid-transfer;
+//! * producers (the `log` backend, `print!`, `event`, ...) serialize their message on the spot
+//!   and push the postcard payload into [`TX`], a byte ring that stores each message at its real
+//!   size ([`PayloadRing`]); the `log` backend and `print!` drop the newest message when it has no
+//!   room (a dropped count is reported by the writer), the async producers wait for room;
+//!   [`writer_loop`] owns the [`UartTx`], pops the oldest payload, assigns the per-frame `seq` (so
+//!   a gap means real wire loss, not a queue drop), frames it and DMA-writes, holding a
+//!   `WakeGuard` across each burst so the low-power executor uses WFI instead of STOP
+//!   mid-transfer;
 //! * [`rx_loop`] reads the [`RingBufferedUartRx`] and [`route_frame`]s decoded frames into the
 //!   console-owned RX channels by type: shell frames to [`SHELL_RX`]; the shell drains its
 //!   channel on its own task. The console never calls up into that layer, so the transport
@@ -28,9 +30,11 @@
 
 use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
+use core::future::poll_fn;
 use core::panic::PanicInfo;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::task::Poll;
 
 use critical_section::Mutex;
 use embassy_futures::select::{select, select3};
@@ -45,6 +49,7 @@ use embassy_stm32::usart::{
 use embassy_stm32::{Peri, bind_interrupts};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::waitqueue::{MultiWakerRegistration, WakerRegistration};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use heapless::{String, Vec};
 use log::{LevelFilter, Metadata, Record};
@@ -53,7 +58,11 @@ use tower_protocol::msg::{
     Dropped, Event, Hello, Level, Log, MgmtResponse, Print, RadioStat, ShellCompletions, ShellResponse,
     Uplink,
 };
-use tower_protocol::{FrameDecoder, MAX_PAYLOAD, MAX_WIRE, MsgType, decode_frame, encode_frame};
+use tower_protocol::ring::PayloadRing;
+use tower_protocol::{
+    FrameDecoder, MAX_PAYLOAD, MAX_WIRE, MsgType, decode_frame, encode_frame, encode_frame_bytes,
+    encode_payload,
+};
 
 use crate::storage::{NS_SYS, Nv};
 
@@ -85,14 +94,17 @@ const FW_LEN: usize = 32;
 const FW_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 /// `NS_SYS` local key for the persisted boot counter (the `Hello` session_id).
 const KEY_BOOT_COUNT: u8 = 0x00;
-/// TX queue depth (frames). 4 (was 8): each slot is a ~280 B `Outgoing`, and on the
-/// 20 KB part every slot is stack the gateway/push-button products can't spare (the
+/// TX ring size (bytes). The queue stores each message as its encoded postcard payload plus a
+/// 2-byte record header ([`PayloadRing`]), so it holds as many messages as their bytes allow: a
+/// log line with a 40-character message costs ~56 B, so ~27 of them (21 measured on the bench
+/// with 56-character messages), or 6 of the largest (247 B) payloads. It replaced a queue of 4
+/// owned message structs, each slot sized for the largest message (~280 B), in less RAM than
+/// that queue took: every byte here is stack the gateway / push-button products can't spare (the
 /// bench-measured gateway high-water is 7360 B of a ~9 KB stack region, see docs/gateway.md,
-/// `system stack print`; the push-button peak is ~6.8 KB). The cost
-/// is honest and accounted: a boot burst deeper than 4 frames drops-newest and is
-/// reported by the writer's [`Dropped`] marker; the async producers ([`event`],
-/// [`uplink`], …) apply backpressure instead of dropping while the console is up.
-const TX_DEPTH: usize = 4;
+/// `system stack print`). A synchronous burst that still outgrows it drops-newest and is
+/// reported by the writer's [`Dropped`] marker; the async producers ([`event`], [`uplink`], ...)
+/// wait for room instead of dropping while the console is up.
+const TX_RING: usize = 1536;
 /// Host→device RX-copy capacity for the [`SHELL_RX`]/[`MGMT_RX`] channels. The largest
 /// legitimate inner frame is far below `MAX_WIRE`: a `ShellCommand` line caps at the
 /// shell's 96 bytes (~110 B framed) and the biggest `MgmtRequest` (a full-MTU
@@ -120,55 +132,57 @@ const MGMT_CHUNK: usize = 192;
 // req_id (≤3) + result (1) + chunk (≤3) + last (1) + the data's length varint (2) + the data.
 const _: () = assert!(3 + 1 + 3 + 1 + 2 + MGMT_CHUNK <= MAX_PAYLOAD);
 
-/// An owned outgoing message. The writer assigns the `seq` and encodes it, so nothing
-/// borrows past the producing call and dropped frames never consume sequence numbers.
-enum Outgoing {
-    Log {
-        level: Level,
-        uptime_us: u64,
-        module: String<MOD_LEN>,
-        message: String<MAX_MSG>,
-    },
-    Print(String<MAX_MSG>),
-    Event {
-        name: String<EV_NAME>,
-        fields: Vec<(String<EV_KEY>, String<EV_VAL>), EV_FIELDS>,
-    },
-    /// One frame of a shell response (the shell numbers and splits them).
-    ShellResponse {
-        cmd_id: u16,
-        result: u8,
-        chunk: u16,
-        last: bool,
-        text: String<SHELL_CHUNK>,
-    },
-    /// Completion result; all fields borrow the `'static` command tree, so no copy.
-    Completions(ShellCompletions<'static>),
-    /// One decrypted radio uplink, forwarded verbatim by a gateway app (data ≤ the
-    /// radio MTU, so it always fits one frame).
-    Uplink {
-        src: u32,
-        counter: u32,
-        rssi: i16,
-        lqi: u8,
-        data: Vec<u8, UPLINK_MAX>,
-    },
-    /// One pre-chunked management-response frame. Chunking is **app-driven** (the app
-    /// knows its record boundaries and streams them without a big reassembly buffer);
-    /// each enqueued item is exactly one wire frame.
-    MgmtChunk {
-        req_id: u16,
-        result: u8,
-        chunk: u16,
-        last: bool,
-        data: Vec<u8, MGMT_CHUNK>,
-    },
-    /// One radio-diagnostics sample (owned, tiny).
-    RadioStat(RadioStat),
+/// One message serialized for [`TX`]: its type and postcard payload. Built synchronously, so the
+/// message it came from (and everything it borrows) is gone before a producer awaits room, and a
+/// producer's future holds one payload-sized buffer, not the message's owned copies. The writer
+/// assigns the `seq` and frames it, so dropped messages never consume sequence numbers.
+struct Encoded {
+    msg_type: MsgType,
+    len: usize,
+    buf: [u8; MAX_PAYLOAD],
+}
+
+impl Encoded {
+    /// `None` (counted as a drop) for a message that encodes past one frame.
+    fn new<T: Serialize>(msg_type: MsgType, payload: &T) -> Option<Self> {
+        let mut e = Self {
+            msg_type,
+            len: 0,
+            buf: [0; MAX_PAYLOAD],
+        };
+        match encode_payload(payload, &mut e.buf) {
+            Ok(n) => {
+                e.len = n;
+                Some(e)
+            }
+            Err(_) => {
+                bump_dropped();
+                None
+            }
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+/// The producer → writer queue and the wakers of its two sides.
+struct TxQueue {
+    ring: PayloadRing<TX_RING>,
+    /// The writer, parked on an empty ring.
+    reader: WakerRegistration,
+    /// Async producers parked on a full ring ([`enqueue`]). More than 4 at once wakes them all
+    /// (they re-register), which is correct, just busier.
+    writers: MultiWakerRegistration<4>,
 }
 
 /// Producer → writer queue. Single consumer (the writer task) owns the UART.
-static TX_CHANNEL: Channel<CriticalSectionRawMutex, Outgoing, TX_DEPTH> = Channel::new();
+static TX: Mutex<RefCell<TxQueue>> = Mutex::new(RefCell::new(TxQueue {
+    ring: PayloadRing::new(),
+    reader: WakerRegistration::new(),
+    writers: MultiWakerRegistration::new(),
+}));
 /// Decoded host→device **shell** frames (ShellCommand / ShellComplete), copied whole for the
 /// shell to drain on its own task ([`crate::shell::serve_ext`] spawns it). The console owns this
 /// RX buffer and never calls into the shell, so the transport layer doesn't depend on the
@@ -186,7 +200,7 @@ static MGMT_RX: Channel<CriticalSectionRawMutex, Vec<u8, RX_COPY>, 1> = Channel:
 /// it is false they fall back to drop-newest, so a task emitting events on a battery node with
 /// USB unplugged is never parked forever on a full queue that has no writer to drain it.
 static CONSOLE_UP: AtomicBool = AtomicBool::new(false);
-/// Count of messages dropped because [`TX_CHANNEL`] was full; reported by the writer
+/// Count of messages dropped because [`TX`] was full; reported by the writer
 /// as a [`Dropped`] marker before the next real frame.
 static DROPPED: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 /// Firmware name for the boot `Hello` (set by [`boot_banner`]); the dynamic console
@@ -216,9 +230,13 @@ pub fn host_rx_age_ticks() -> u32 {
 }
 
 fn bump_dropped() {
+    add_dropped(1);
+}
+
+fn add_dropped(n: u32) {
     critical_section::with(|cs| {
         let c = DROPPED.borrow(cs);
-        c.set(c.get().saturating_add(1));
+        c.set(c.get().saturating_add(n));
     });
 }
 
@@ -231,40 +249,77 @@ fn take_dropped() -> u32 {
     })
 }
 
-/// Enqueue an outgoing message, dropping it (drop-newest) and bumping [`DROPPED`] if
-/// the queue is full. Non-blocking: safe from any context (IRQ, the `log` backend).
-fn try_enqueue(item: Outgoing) {
-    if TX_CHANNEL.try_send(item).is_err() {
+/// Push `e` into [`TX`] and wake the writer; `false` if the ring has no room for it.
+fn push(e: &Encoded) -> bool {
+    critical_section::with(|cs| {
+        let mut q = TX.borrow_ref_mut(cs);
+        let pushed = q.ring.push(e.msg_type, e.bytes());
+        if pushed {
+            q.reader.wake();
+        }
+        pushed
+    })
+}
+
+/// Queue a message, dropping it (drop-newest) and bumping [`DROPPED`] if the ring has no room.
+/// Non-blocking: safe from any context (IRQ, the `log` backend). `None` = an encode failure,
+/// already counted.
+fn try_enqueue(e: Option<Encoded>) {
+    if let Some(e) = e
+        && !push(&e)
+    {
         bump_dropped();
     }
 }
 
-/// Enqueue an outgoing message for the "async, never dropped" producers ([`event`],
-/// [`shell_response_frame`], [`shell_completions`]).
+/// Queue a message for the "async, never dropped" producers ([`event`],
+/// [`shell_response_frame`], [`shell_completions`], ...).
 ///
-/// While the console is up ([`CONSOLE_UP`]) this applies real backpressure, awaiting a free
-/// slot so a burst is never dropped. While it is **down** it falls back to non-blocking
-/// drop-newest: with no [`writer_loop`] draining [`TX_CHANNEL`], a plain `send().await` on a
-/// full queue would park the calling task until the next USB plug-in, silently stalling e.g. a
-/// battery node's measure loop. If USB is unplugged *during* a backpressured send, [`manager`]'s
-/// unplugged poll drains the queue (counting drops), which frees a slot and wakes the parked
-/// sender within one poll cycle, so the stall is bounded, never indefinite.
-async fn enqueue(item: Outgoing) {
-    if CONSOLE_UP.load(Ordering::Relaxed) {
-        TX_CHANNEL.send(item).await;
-    } else {
-        try_enqueue(item);
+/// While the console is up ([`CONSOLE_UP`]) this applies real backpressure, awaiting room in the
+/// ring so a burst is never dropped. While it is **down** it falls back to non-blocking
+/// drop-newest: with no [`writer_loop`] draining [`TX`], waiting on a full ring would park the
+/// calling task until the next USB plug-in, silently stalling e.g. a battery node's measure loop.
+/// If USB is unplugged *during* a backpressured wait, [`manager`]'s unplugged poll empties the
+/// ring (counting drops) and wakes the waiters within one poll cycle, so the stall is bounded,
+/// never indefinite.
+async fn enqueue(e: Option<Encoded>) {
+    let Some(e) = e else {
+        return;
+    };
+    if !CONSOLE_UP.load(Ordering::Relaxed) {
+        if !push(&e) {
+            bump_dropped();
+        }
+        return;
     }
+    poll_fn(|cx| {
+        critical_section::with(|cs| {
+            let mut q = TX.borrow_ref_mut(cs);
+            if q.ring.push(e.msg_type, e.bytes()) {
+                q.reader.wake();
+                Poll::Ready(())
+            } else {
+                q.writers.register(cx.waker());
+                Poll::Pending
+            }
+        })
+    })
+    .await;
+}
+
+/// `s` clipped to at most `n` bytes, at a char boundary.
+fn clip_str(s: &str, n: usize) -> &str {
+    let mut end = s.len().min(n);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Copy a string into a bounded buffer, clipping at a char boundary (ASCII in practice).
 fn clip<const N: usize>(s: &str) -> String<N> {
     let mut out = String::new();
-    let mut end = s.len().min(N);
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    let _ = out.push_str(&s[..end]);
+    let _ = out.push_str(clip_str(s, N));
     out
 }
 
@@ -300,8 +355,8 @@ fn map_level(l: log::Level) -> Level {
     }
 }
 
-/// `log` backend: renders the record into owned buffers and enqueues a [`Log`]; the
-/// host does the timestamp / colour / columns.
+/// `log` backend: renders the record and queues it as a [`Log`]; the host does the timestamp /
+/// colour / columns.
 struct ConsoleLogger;
 
 impl log::Log for ConsoleLogger {
@@ -313,12 +368,15 @@ impl log::Log for ConsoleLogger {
         let mut message = Clipper::<MAX_MSG>(String::new());
         let _ = write!(message, "{}", record.args()); // truncates past MAX_MSG (never empties)
         let module = record.target().rsplit("::").next().unwrap_or(record.target());
-        try_enqueue(Outgoing::Log {
-            level: map_level(record.level()),
-            uptime_us: Instant::now().as_micros(),
-            module: clip(module),
-            message: message.0,
-        });
+        try_enqueue(Encoded::new(
+            MsgType::Log,
+            &Log {
+                level: map_level(record.level()),
+                uptime_us: Instant::now().as_micros(),
+                module: clip_str(module, MOD_LEN),
+                message: message.0.as_str(),
+            },
+        ));
     }
 
     fn flush(&self) {}
@@ -328,8 +386,8 @@ static LOGGER: ConsoleLogger = ConsoleLogger;
 
 /// Install the `log` backend at `max_level`. Call once at start-up; the console UART
 /// itself is brought up/down dynamically by [`manager`] as USB is plugged/unplugged,
-/// but the backend (which only enqueues into [`TX_CHANNEL`]) is always present; when
-/// no UART exists the queue simply drops (harmless).
+/// but the backend (which only enqueues into [`TX`]) is always present; when no UART
+/// exists the queue simply drops (harmless).
 pub fn install_logger(max_level: LevelFilter) {
     // `_racy` variants: no atomic CAS on M0+. Safe: called once, single-threaded,
     // before any task or log call runs.
@@ -381,10 +439,16 @@ pub async fn manager(
             let _ = select(vbus.wait_for_high(), Timer::after(Duration::from_millis(500))).await;
             crate::board::apply_stop_tuning();
             // Drain anything left in the queue while there's no writer (counting it as dropped):
-            // frees slots so a producer that raced the unplug (checked CONSOLE_UP just before it
-            // cleared) can't stay parked on a full queue; it wakes within one poll cycle.
-            while TX_CHANNEL.try_receive().is_ok() {
-                bump_dropped();
+            // frees room so a producer that raced the unplug (checked CONSOLE_UP just before it
+            // cleared) can't stay parked on a full ring; it wakes within one poll cycle.
+            let drained = critical_section::with(|cs| {
+                let mut q = TX.borrow_ref_mut(cs);
+                let n = q.ring.clear();
+                q.writers.wake();
+                n
+            });
+            if drained > 0 {
+                add_dropped(drained);
             }
         }
         Timer::after(Duration::from_millis(50)).await; // debounce
@@ -413,7 +477,7 @@ pub async fn manager(
         // Equip RX with the circular DMA buffer: hardware fills it, so a slow reader can't overrun.
         let mut rx = rx.into_ring_buffered(unsafe { &mut *addr_of_mut!(RX_DMA_BUF) });
 
-        // Console is up: the writer below drains TX_CHANNEL, so producers may now apply
+        // Console is up: the writer below drains TX, so producers may now apply
         // backpressure (see `enqueue`). Set this before the Hello so it takes the same path.
         CONSOLE_UP.store(true, Ordering::Relaxed);
 
@@ -442,7 +506,7 @@ pub async fn manager(
 /// in the µs gap between the writer's flush poll and the RX sweep in the same executor cycle, the
 /// sweep consumes the flag before flush observes it (in the other interleaving the USART ISR sees
 /// TC already cleared and returns without waking): flush then waits for a TC edge that can never
-/// come (the writer IS the only TX producer), parking it forever. Downstream, `TX_CHANNEL` fills
+/// come (the writer IS the only TX producer), parking it forever. Downstream, `TX` fills
 /// and every backpressured producer (a gateway's whole main loop) parks with it: silent, deaf,
 /// IWDG still fed. Bench casualty 2026-07-13 (dongle wedged after hours; NRST recovered it).
 /// A full ~270 B frame drains in ~24 ms at 115200, so the 50 ms ceiling never truncates a real
@@ -465,7 +529,7 @@ impl Drop for OnCancelDrop {
     }
 }
 
-/// Drain [`TX_CHANNEL`] over `tx` until cancelled. Holds a [`WakeGuard`] across each transmit
+/// Drain [`TX`] over `tx` until cancelled. Holds a [`WakeGuard`] across each transmit
 /// burst so the low-power executor stays in WFI (clocks live) while the async DMA write awaits its
 /// transfer-complete interrupt, rather than dropping into STOP mid-transfer.
 ///
@@ -480,7 +544,7 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
     let mut seq: u16 = 0;
 
     // The writer emits the session's opening frames ITSELF, not via the shared producer queue,
-    // so a burst of logs racing a plug-in can never bump the `Hello` out of a full TX_CHANNEL
+    // so a burst of logs racing a plug-in can never bump the `Hello` out of a full TX ring
     // (drop-newest). The host relies on decoding a fresh Hello to reset its per-link `seq`
     // tracking (docs/console.md); dropping it would strand the host on a stale seq and print a
     // spurious wire-loss warning. Lead with a lone 0x00 to flush any partial frame left on the
@@ -513,7 +577,23 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
     }
 
     loop {
-        let item = TX_CHANNEL.receive().await;
+        let mut payload = [0u8; MAX_PAYLOAD];
+        let (msg_type, len) = poll_fn(|cx| {
+            critical_section::with(|cs| {
+                let mut q = TX.borrow_ref_mut(cs);
+                match q.ring.pop(&mut payload) {
+                    Some(popped) => {
+                        q.writers.wake(); // room freed for a producer waiting on a full ring
+                        Poll::Ready(popped)
+                    }
+                    None => {
+                        q.reader.register(cx.waker());
+                        Poll::Pending
+                    }
+                }
+            })
+        })
+        .await;
         // Hold STOP off across the burst so the DMA write completes (redundant with the RX ring's
         // stop refcount, see `writer_loop`; kept so the TX path is self-contained).
         let _guard = WakeGuard::new(StopMode::Stop1);
@@ -528,112 +608,7 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
         if dropped > 0 {
             send(tx, &mut seq, MsgType::Dropped, &Dropped { count: dropped }).await;
         }
-
-        match &item {
-            Outgoing::Log {
-                level,
-                uptime_us,
-                module,
-                message,
-            } => {
-                send(
-                    tx,
-                    &mut seq,
-                    MsgType::Log,
-                    &Log {
-                        level: *level,
-                        uptime_us: *uptime_us,
-                        module: module.as_str(),
-                        message: message.as_str(),
-                    },
-                )
-                .await
-            }
-            Outgoing::Print(text) => send(tx, &mut seq, MsgType::Print, &Print { text: text.as_str() }).await,
-            Outgoing::Event { name, fields } => {
-                // Capacity matches the wire type (`Event.fields: Vec<_, 8>`); the
-                // producer already capped the owned `fields` at EV_FIELDS (≤ 8).
-                let mut wire: Vec<(&str, &str), 8> = Vec::new();
-                for (k, v) in fields {
-                    let _ = wire.push((k.as_str(), v.as_str()));
-                }
-                send(
-                    tx,
-                    &mut seq,
-                    MsgType::Event,
-                    &Event {
-                        name: name.as_str(),
-                        fields: wire,
-                    },
-                )
-                .await
-            }
-            Outgoing::ShellResponse {
-                cmd_id,
-                result,
-                chunk,
-                last,
-                text,
-            } => {
-                send(
-                    tx,
-                    &mut seq,
-                    MsgType::ShellResponse,
-                    &ShellResponse {
-                        cmd_id: *cmd_id,
-                        result: *result,
-                        chunk: *chunk,
-                        last: *last,
-                        text: text.as_str(),
-                    },
-                )
-                .await
-            }
-            Outgoing::Completions(c) => send(tx, &mut seq, MsgType::ShellCompletions, c).await,
-            Outgoing::Uplink {
-                src,
-                counter,
-                rssi,
-                lqi,
-                data,
-            } => {
-                send(
-                    tx,
-                    &mut seq,
-                    MsgType::Uplink,
-                    &Uplink {
-                        src: *src,
-                        counter: *counter,
-                        rssi: *rssi,
-                        lqi: *lqi,
-                        data: data.as_slice(),
-                    },
-                )
-                .await
-            }
-            Outgoing::MgmtChunk {
-                req_id,
-                result,
-                chunk,
-                last,
-                data,
-            } => {
-                send(
-                    tx,
-                    &mut seq,
-                    MsgType::MgmtResponse,
-                    &MgmtResponse {
-                        req_id: *req_id,
-                        result: *result,
-                        chunk: *chunk,
-                        last: *last,
-                        data: data.as_slice(),
-                    },
-                )
-                .await
-            }
-            Outgoing::RadioStat(stat) => send(tx, &mut seq, MsgType::RadioStat, stat).await,
-        }
+        send_payload(tx, &mut seq, msg_type, &payload[..len]).await;
         cancel_guard.0 = false; // item's bytes are in the UART ring, not a drop
         // Drain the ring (still under the guard) before idling, so the frames actually
         // leave the wire rather than sitting in the buffer when STOP is next allowed.
@@ -712,10 +687,23 @@ pub fn mgmt_try_next() -> Option<Vec<u8, RX_COPY>> {
 
 /// Encode `payload` with the next `seq` and write it over the buffered UART (the caller
 /// holds a `WakeGuard` for the burst). An encode failure (payload over budget) is
-/// counted as a drop rather than silently lost.
+/// counted as a drop rather than silently lost. The writer's own frames (`Hello`, `Dropped`);
+/// queued messages are already encoded ([`send_payload`]).
 async fn send<T: Serialize>(tx: &mut UartTx<'static, Async>, seq: &mut u16, msg_type: MsgType, payload: &T) {
     let mut buf = [0u8; MAX_WIRE];
     match encode_frame(msg_type, *seq, payload, &mut buf) {
+        Ok(n) => {
+            *seq = seq.wrapping_add(1);
+            let _ = tx.write(&buf[..n]).await;
+        }
+        Err(_) => bump_dropped(),
+    }
+}
+
+/// [`send`] for a payload that is already postcard-encoded (a message popped from [`TX`]).
+async fn send_payload(tx: &mut UartTx<'static, Async>, seq: &mut u16, msg_type: MsgType, payload: &[u8]) {
+    let mut buf = [0u8; MAX_WIRE];
+    match encode_frame_bytes(msg_type, *seq, payload, &mut buf) {
         Ok(n) => {
             *seq = seq.wrapping_add(1);
             let _ = tx.write(&buf[..n]).await;
@@ -734,15 +722,20 @@ async fn send<T: Serialize>(tx: &mut UartTx<'static, Async>, seq: &mut u16, msg_
 /// console::event("measurement", &[("temp", "23.5"), ("rh", "41")]).await;
 /// ```
 pub async fn event(name: &str, fields: &[(&str, &str)]) {
-    let mut f: Vec<(String<EV_KEY>, String<EV_VAL>), EV_FIELDS> = Vec::new();
-    for &(k, v) in fields.iter().take(EV_FIELDS) {
-        let _ = f.push((clip(k), clip(v)));
-    }
-    enqueue(Outgoing::Event {
-        name: clip(name),
-        fields: f,
-    })
-    .await;
+    let e = {
+        let mut wire: Vec<(&str, &str), 8> = Vec::new();
+        for &(k, v) in fields.iter().take(EV_FIELDS) {
+            let _ = wire.push((clip_str(k, EV_KEY), clip_str(v, EV_VAL)));
+        }
+        Encoded::new(
+            MsgType::Event,
+            &Event {
+                name: clip_str(name, EV_NAME),
+                fields: wire,
+            },
+        )
+    };
+    enqueue(e).await;
 }
 
 /// Send one frame of a shell command response: `text` (at most [`SHELL_CHUNK`] bytes, clipped
@@ -751,20 +744,23 @@ pub async fn event(name: &str, fields: &[(&str, &str)]) {
 /// over a live console, so the writer is up to drain it). Used by the shell engine's console
 /// sink ([`crate::shell`]), which pages and splits a response of any length.
 pub(crate) async fn shell_response_frame(cmd_id: u16, result: u8, chunk: u16, last: bool, text: &str) {
-    enqueue(Outgoing::ShellResponse {
-        cmd_id,
-        result,
-        chunk,
-        last,
-        text: clip(text),
-    })
-    .await;
+    let e = Encoded::new(
+        MsgType::ShellResponse,
+        &ShellResponse {
+            cmd_id,
+            result,
+            chunk,
+            last,
+            text: clip_str(text, SHELL_CHUNK),
+        },
+    );
+    enqueue(e).await;
 }
 
-/// Send a completion result. The candidates borrow the `'static` command tree, so
-/// nothing is copied. Async: never dropped. Used by the shell engine.
-pub async fn shell_completions(c: tower_protocol::msg::ShellCompletions<'static>) {
-    enqueue(Outgoing::Completions(c)).await;
+/// Send a completion result. Async: never dropped. Used by the shell engine.
+pub async fn shell_completions(c: ShellCompletions<'static>) {
+    let e = Encoded::new(MsgType::ShellCompletions, &c);
+    enqueue(e).await;
 }
 
 /// Forward one decrypted, authenticated radio uplink to the host, verbatim: the
@@ -773,16 +769,17 @@ pub async fn shell_completions(c: tower_protocol::msg::ShellCompletions<'static>
 /// USB is present (a gateway is USB-powered by definition, so this is the normal
 /// path); drop-newest while down, counted in the [`Dropped`] marker.
 pub async fn uplink(src: u32, counter: u32, rssi: i16, lqi: u8, data: &[u8]) {
-    let mut v: Vec<u8, UPLINK_MAX> = Vec::new();
-    let _ = v.extend_from_slice(&data[..data.len().min(UPLINK_MAX)]);
-    enqueue(Outgoing::Uplink {
-        src,
-        counter,
-        rssi,
-        lqi,
-        data: v,
-    })
-    .await;
+    let e = Encoded::new(
+        MsgType::Uplink,
+        &Uplink {
+            src,
+            counter,
+            rssi,
+            lqi,
+            data: &data[..data.len().min(UPLINK_MAX)],
+        },
+    );
+    enqueue(e).await;
 }
 
 /// Send one management-response chunk (exactly one wire frame). Chunking is the
@@ -791,22 +788,24 @@ pub async fn uplink(src: u32, counter: u32, rssi: i16, lqi: u8, data: &[u8]) {
 /// on that last chunk (mirror of the shell-response discipline). A result-only reply
 /// is a single empty `last` chunk. Async: backpressured while USB is present.
 pub async fn mgmt_chunk(req_id: u16, result: u8, chunk: u16, last: bool, data: &[u8]) {
-    let mut v: Vec<u8, MGMT_CHUNK> = Vec::new();
-    let _ = v.extend_from_slice(&data[..data.len().min(MGMT_CHUNK)]);
-    enqueue(Outgoing::MgmtChunk {
-        req_id,
-        result,
-        chunk,
-        last,
-        data: v,
-    })
-    .await;
+    let e = Encoded::new(
+        MsgType::MgmtResponse,
+        &MgmtResponse {
+            req_id,
+            result,
+            chunk,
+            last,
+            data: &data[..data.len().min(MGMT_CHUNK)],
+        },
+    );
+    enqueue(e).await;
 }
 
 /// Send one radio-diagnostics sample ([`RadioStat`]) for the host's running channel
 /// graph. Async: backpressured while USB is present.
 pub async fn radio_stat(stat: RadioStat) {
-    enqueue(Outgoing::RadioStat(stat)).await;
+    let e = Encoded::new(MsgType::RadioStat, &stat);
+    enqueue(e).await;
 }
 
 /// Record the firmware name and emit the boot banner log. Called by the [`app!`](crate::app)
@@ -870,11 +869,11 @@ pub fn init_session(kv: Nv, spawner: crate::Spawner) {
 /// Await the writer draining every queued frame, then a short tail for the last frame to clear
 /// the UART. A caller that resets the MCU right after emitting a final response (the shell's
 /// `system reboot`) uses this so the reset can't cut the response off mid-frame; the old fixed
-/// 150 ms sleep was shorter than a full `TX_CHANNEL` at 115200 baud (~190 ms). Bounded so an
-/// absent/wedged writer (console down) can't hang the caller.
+/// 150 ms sleep was shorter than a full queue at 115200 baud (~190 ms then; a full [`TX`] ring
+/// takes ~150 ms). Bounded so an absent/wedged writer (console down) can't hang the caller.
 pub async fn flush() {
     for _ in 0..200 {
-        if TX_CHANNEL.is_empty() {
+        if critical_section::with(|cs| TX.borrow_ref(cs).ring.is_empty()) {
             break;
         }
         Timer::after(Duration::from_millis(5)).await;
@@ -888,7 +887,7 @@ pub async fn flush() {
 pub fn _print(args: fmt::Arguments) {
     let mut s = Clipper::<MAX_MSG>(String::new());
     let _ = write!(s, "{}", args);
-    try_enqueue(Outgoing::Print(s.0));
+    try_enqueue(Encoded::new(MsgType::Print, &Print { text: s.0.as_str() }));
 }
 
 /// Write formatted text to the console with no trailing newline.

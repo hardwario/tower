@@ -68,8 +68,9 @@ async fn run(_b: Board) {
         pass = false;
     }
 
-    // The console queue holds 4 frames and a log line that finds it full is dropped, so let the
-    // four lines above leave the wire before the next ones (the summary is what the bench reads).
+    // A log line that finds the console queue full is dropped (it holds some 20 lines), so let
+    // the four lines above leave the wire before the next ones (the summary is what the bench
+    // reads).
     tower::console::flush().await;
 
     // 3) Tamper: flip one ciphertext byte → open() must reject.

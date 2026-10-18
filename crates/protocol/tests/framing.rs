@@ -216,6 +216,43 @@ fn chunking_budget_holds() {
 
 /// The largest `Log` the firmware can produce (192-char message, 24-char module, worst-case
 /// uptime) must fit; guards the firmware's MAX_MSG.
+/// A payload encoded on its own and framed later (the device's console queue) makes the same
+/// bytes as `encode_frame`, up to the largest payload; past it both halves refuse.
+#[test]
+fn encode_frame_bytes_matches_encode_frame() {
+    fn same<T: serde::Serialize>(mt: MsgType, seq: u16, p: &T) {
+        let mut payload = [0u8; MAX_PAYLOAD];
+        let n = encode_payload(p, &mut payload).unwrap();
+        let (mut a, mut b) = ([0u8; MAX_WIRE], [0u8; MAX_WIRE]);
+        let na = encode_frame(mt, seq, p, &mut a).unwrap();
+        let nb = encode_frame_bytes(mt, seq, &payload[..n], &mut b).unwrap();
+        assert_eq!(a[..na], b[..nb], "{mt:?}");
+    }
+    same(MsgType::Print, 7, &Print { text: "hello" });
+    same(
+        MsgType::Log,
+        u16::MAX,
+        &Log {
+            level: Level::Warn,
+            uptime_us: 1_234_567,
+            module: "net",
+            message: "pairing: join request refused",
+        },
+    );
+    same(MsgType::Dropped, 0, &Dropped { count: 3 });
+    let max = [0x55u8; MAX_PAYLOAD - 2]; // with its 2-byte length varint: exactly MAX_PAYLOAD
+    same(MsgType::Print, 1, &&max[..]);
+
+    let over = [0x55u8; MAX_PAYLOAD - 1];
+    let mut payload = [0u8; MAX_PAYLOAD + 8];
+    assert_eq!(encode_payload(&&over[..], &mut payload), Err(Error::Encode));
+    let mut out = [0u8; MAX_WIRE];
+    assert_eq!(
+        encode_frame_bytes(MsgType::Print, 0, &[0u8; MAX_PAYLOAD + 1], &mut out),
+        Err(Error::Encode)
+    );
+}
+
 #[test]
 fn max_log_fits() {
     let message = "x".repeat(192);

@@ -58,7 +58,7 @@ async fn run(_b: Board) {
     g.refill_ms(1_000_000);
     pass &= g.budget_ms() == 100;
 
-    // The console queue holds 4 frames and a log line that finds it full is dropped: let the
+    // A log line that finds the console queue full is dropped (it holds some 20 lines): let the
     // four verdicts above leave the wire before the summary (what the bench reads).
     tower::console::flush().await;
     if pass {

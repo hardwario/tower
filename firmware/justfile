@@ -233,7 +233,7 @@ roles:
     cargo build --locked --release --examples --features role-peer-b
 
 # --document-private-items: the module docs deliberately narrate the internals (writer_loop,
-# TX_CHANNEL, ...) with intra-doc links; building the private items keeps those links live, and the
+# TX, ...) with intra-doc links; building the private items keeps those links live, and the
 # -A silences the corresponding lint (everything else, i.e. broken links, bare URLs, malformed
 # HTML, still fails).
 # Build the SDK's rustdoc, failing on any warning.

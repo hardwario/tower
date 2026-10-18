@@ -124,8 +124,8 @@ async fn run(_b: Board) {
         }
     }
 
-    // Re-emit the verdict every 5 s: the boot burst above (~10 frames in ~10 ms) can overflow
-    // the console TX queue (drop-newest, see src/console.rs TX_DEPTH), and the verdict is the
+    // Re-emit the verdict every 5 s: a boot burst can overflow the console TX queue
+    // (drop-newest, see src/console.rs TX_RING), and the verdict is the
     // one line that must survive. This way `tower logs` attached at ANY time still sees it.
     loop {
         if pass {

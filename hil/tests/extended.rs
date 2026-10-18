@@ -32,7 +32,7 @@ const FAILS: &[&str] = &["FAIL", "MISMATCH"];
 /// `pass` AND none of `fails` (so a pass token that is the tail of a fail token, like `MATCH` in
 /// `MISMATCH`, can never pass), fail fast on any frame containing one of `fails`. Tracks the
 /// device's `Dropped` markers so a verdict lost to the console writer's drop-newest queue
-/// (TX_DEPTH) is diagnosed as such, not as "did it boot?". Also asserts gap-free transport (seq gaps ≠ writer drops:
+/// (TX_RING) is diagnosed as such, not as "did it boot?". Also asserts gap-free transport (seq gaps ≠ writer drops:
 /// the writer assigns seq at encode, so its drops surface ONLY via the Dropped marker).
 fn run_kat(example: &str, pass: &str, fails: &[&str], secs: u64) {
     let bench = bench_or_fail();
@@ -64,7 +64,7 @@ fn run_kat(example: &str, pass: &str, fails: &[&str], secs: u64) {
             panic!(
                 "{example}: no verdict within {secs} s, and the device reported {dropped} \
                  dropped console frame(s); the verdict line likely fell to the writer's \
-                 drop-newest queue (src/console.rs TX_DEPTH); re-emit the verdict periodically"
+                 drop-newest queue (src/console.rs TX_RING); flush the console before it"
             )
         }
         panic!("{example}: no verdict within {secs} s; did it boot?")

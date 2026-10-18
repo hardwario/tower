@@ -86,21 +86,24 @@ app!(run);
 ```
  producers                         one writer task                 host
  ─────────                         ───────────────                 ────
- log::{error..trace}!  ┐
- print! / println!     ├─ try_send ─► TX_CHANNEL ─► seq+encode ─► UartTx (DMA ch4) ═══► tower
- console::event().await┘  (drop-      (depth 4)    (COBS+CRC+        (PA9, 115200)
- shell responses          newest)                   postcard)
+ log::{error..trace}!  ┐  postcard
+ print! / println!     ├─ payload ─► TX ring ───► seq+frame ──► UartTx (DMA ch4) ═══► tower
+ console::event().await┘  (drop-     (1.5 KB of   (COBS+CRC)      (PA9, 115200)
+ shell responses          newest)    records)
                                        ▲
  host commands ═► RingBufferedUartRx ──► FrameDecoder ─► shell ─► responses ─┘
  (PA10, DMA ch5 ring)
 ```
 
-- **Producers** build an owned message and `try_send` it into a bounded channel
-  (depth 4). Non-blocking and safe from any context (including the `log` backend).
-  If the queue is full the newest is dropped and a counter bumped.
+- **Producers** serialize their message on the spot (its postcard payload) and push it into a
+  1.5 KB byte ring that stores each message at its real size
+  (`tower_protocol::ring::PayloadRing`), so it holds 20 to 30 typical log lines. The `log`
+  backend and `print!` are non-blocking and safe from any context: if the ring has no room the
+  newest is dropped and a counter bumped. The async producers (`event`, shell responses,
+  management and uplink frames) wait for room instead while the console is up.
 - **One writer loop** (inside `console::manager`) owns the UART TX. It assigns the
   per-frame **`seq`** at send time (so a gap on the wire means *real* loss, never a queue
-  drop), encodes the frame, and writes it. Before the next real frame it emits a
+  drop), frames the payload, and writes it. Before the next real frame it emits a
   `Dropped{count}` marker if anything was dropped.
 - **The codec** (`tower-protocol`) frames every message identically; see *Wire
   protocol*.
@@ -176,7 +179,7 @@ runs before the app's console.)
 
 ### The panic path
 
-The executor is dead in a panic, so the channel/writer can't run. The panic handler
+The executor is dead in a panic, so the queue/writer can't run. The panic handler
 silences the buffered ISR and **blocking-writes one framed `Log` (level Error)
 straight to the USART registers via the PAC**, leading with a `0x00` so any byte still
 in the shift register can't prefix and corrupt the frame. `tower logs` shows the panic
@@ -273,10 +276,11 @@ follow them in your app too:
   ready)`. It ends with one summary verdict, `all checks PASS` (the phrase the bench waits for)
   or `some checks FAIL`: `edge: frame limits, all checks PASS`. A `PASS` or `MATCH` line is
   `info`, a `FAIL` or `MISMATCH` line `error`.
-- **Bursts.** The console queue holds 4 frames and the logger cannot wait for room (`log` is
-  synchronous), so lines logged back to back beyond that are dropped; the host then shows `N log
-  frame(s) dropped`. Await `console::flush()` before a line that must arrive (a summary verdict
-  always does) or between groups of lines.
+- **Bursts.** The console queue holds about 1.5 KB of encoded messages (20 to 30 typical
+  lines) and the logger cannot wait for room (`log` is synchronous), so a longer back-to-back
+  burst loses its newest lines; the host then shows `N log frame(s) dropped`. Await
+  `console::flush()` before a line that must arrive (a summary verdict always does) or between
+  groups of lines.
 - **Lines that tools read are an interface:** the verdicts, `net: pairing: SAS n` and the few
   example lines the bench parses (`pair: paired node 0x…, key …`, `persist: TX counter resumed at
   …`, `confirmed: #n delivered`) are matched by the HIL bench (`hil/tests`) and the hwtest
@@ -309,7 +313,7 @@ No sequence gap is reported, because dropped messages never consumed a `seq`.
 
 Structured, **self-describing** key=value records: the host renders any app's events
 with no shared per-app schema. `event()` is `async`: while USB is present it applies
-**backpressure** (awaits a free queue slot, so a burst is never dropped); while USB is
+**backpressure** (awaits room in the queue, so a burst is never dropped); while USB is
 unplugged there is no writer to drain the queue, so it falls back to **drop-newest with a
 count** (surfaced later as the `Dropped` marker) rather than parking the low-power executor
 forever on a full queue. Call it from async code.
@@ -637,7 +641,7 @@ is a framing difference the tags can't see; `tower` reports that pattern once.
 | `MAX_MSG` | 192 | log / print text |
 | `SHELL_CHUNK` | 192 | shell-response text per frame (chunked) |
 | `MAX_SETTING` | 64 | largest setting value |
-| TX queue depth | 4 | producer → writer channel (`console::TX_DEPTH`; was 8; each slot is ~280 B of RAM) |
+| TX queue | 1536 B | producer → writer byte ring (`console::TX_RING`): messages stored encoded at their real size, 20 to 30 log lines; it replaced 4 slots of ~280 B owned messages, in less RAM |
 
 ### Shell result codes
 

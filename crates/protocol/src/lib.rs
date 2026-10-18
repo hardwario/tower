@@ -56,6 +56,7 @@ pub mod fingerprint;
 pub mod mgmt;
 pub mod msg;
 pub mod radio;
+pub mod ring;
 
 pub use msg::*;
 use serde::Serialize;
@@ -226,6 +227,34 @@ pub fn encode_frame<T: Serialize>(
     encode_frame_with_tag(CONSOLE_TAG, msg_type, seq, payload, out)
 }
 
+/// Serialize a message payload (postcard) into `out` on its own, for framing later with
+/// [`encode_frame_bytes`]: the device's console queue ([`ring::PayloadRing`]) stores messages this
+/// way. Returns the byte count; [`Error::Encode`] past [`MAX_PAYLOAD`] (what one frame carries)
+/// or past `out`.
+pub fn encode_payload<T: Serialize>(payload: &T, out: &mut [u8]) -> Result<usize, Error> {
+    let room = out.len().min(MAX_PAYLOAD);
+    Ok(postcard::to_slice(payload, &mut out[..room])
+        .map_err(|_| Error::Encode)?
+        .len())
+}
+
+/// [`encode_frame`] for a payload that is already postcard-encoded ([`encode_payload`]): the same
+/// bytes on the wire.
+pub fn encode_frame_bytes(
+    msg_type: MsgType,
+    seq: u16,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    if payload.len() > MAX_PAYLOAD {
+        return Err(Error::Encode);
+    }
+    let mut inner = [0u8; MAX_FRAME];
+    let body = header(&mut inner, CONSOLE_TAG, msg_type, seq) + payload.len();
+    inner[HDR..body].copy_from_slice(payload);
+    seal(&mut inner, body, out)
+}
+
 /// [`encode_frame`] with an explicit schema `tag` in place of [`CONSOLE_TAG`]: for framing
 /// tests whose bytes must not move with the schema, and for simulating a peer built from
 /// another checkout. Production code uses [`encode_frame`].
@@ -237,17 +266,28 @@ pub fn encode_frame_with_tag<T: Serialize>(
     out: &mut [u8],
 ) -> Result<usize, Error> {
     let mut inner = [0u8; MAX_FRAME];
-    inner[0] = msg_type as u8;
-    inner[1..3].copy_from_slice(&tag.to_le_bytes());
-    inner[3..5].copy_from_slice(&seq.to_le_bytes());
-
-    let used = postcard::to_slice(payload, &mut inner[HDR..])
+    let hdr = header(&mut inner, tag, msg_type, seq);
+    let used = postcard::to_slice(payload, &mut inner[hdr..])
         .map_err(|_| Error::Encode)?
         .len();
-    let body = HDR + used;
+    let body = hdr + used;
     if body + CRC_LEN > MAX_FRAME {
         return Err(Error::Encode);
     }
+    seal(&mut inner, body, out)
+}
+
+/// Write the frame header (type, tag, seq) at the start of `inner`; returns its length.
+fn header(inner: &mut [u8; MAX_FRAME], tag: u16, msg_type: MsgType, seq: u16) -> usize {
+    inner[0] = msg_type as u8;
+    inner[1..3].copy_from_slice(&tag.to_le_bytes());
+    inner[3..5].copy_from_slice(&seq.to_le_bytes());
+    HDR
+}
+
+/// Append the CRC to the `body` bytes of `inner` (header and payload), COBS-encode the result
+/// into `out` and terminate it; returns the byte count written.
+fn seal(inner: &mut [u8; MAX_FRAME], body: usize, out: &mut [u8]) -> Result<usize, Error> {
     let crc = crc::crc32_ieee(&inner[..body]);
     inner[body..body + CRC_LEN].copy_from_slice(&crc.to_le_bytes());
     let inner_len = body + CRC_LEN;

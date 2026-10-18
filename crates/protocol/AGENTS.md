@@ -41,6 +41,9 @@ to keep in mind:
 - Size budgets: `MAX_FRAME` (256) and `MAX_PAYLOAD` (247) are what the firmware console, the
   shell's `CompletionBudget`, the CLI and the harness size against; the capacity tests in
   `tests/framing.rs` and `tests/radio.rs` hold the largest real payloads to them.
+- `src/ring.rs` (`PayloadRing`) is not wire: it is the device console's TX queue, messages kept
+  as their encoded payloads (`encode_payload`) and framed later (`encode_frame_bytes`, the same
+  bytes as `encode_frame`). It lives here, hardware-free, so its wraparound logic is host-tested.
 
 ## Tests / checks
 

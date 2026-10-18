@@ -13,7 +13,7 @@
 //!
 //! Because dispatch runs on its own task (not inline on the RX loop), a slow handler does not
 //! stall RX draining, but handlers should still be short, and their
-//! `ShellResponse`s go through the bounded `TX_CHANNEL`. Not a place for long-running work.
+//! `ShellResponse`s go through the bounded console TX ring. Not a place for long-running work.
 //!
 //! Both use the same tokenizer + [`resolve`] walk, so completion can never suggest
 //! something execution won't accept.
