@@ -34,6 +34,21 @@ range); nothing that needs a node and a gateway on air was.
 **Done when.** Each item passes on the bench and the results are noted in
 `firmware/docs/test-plan.md`.
 
+**Status 2026-10-18** (three-board bench, results in
+[firmware/tools/hwtest/RESULTS-2026-10-18.md](firmware/tools/hwtest/RESULTS-2026-10-18.md)):
+OTA pairing, lost confirm, re-pair, window end, backoff, key move and the HIL gateway group
+pass. Open: the replay item (nothing can reboot the dongle under a running `tower gateway`; a
+reboot RPC would make it testable) and the PPK2 look at the idle floor (no PPK2 on the bench).
+
+## Test layers to add
+
+[docs/test-strategy.md](docs/test-strategy.md): nightly HIL, long soak, power loss and brown-out,
+energy per event, an attacker board, mutation testing, latency budgets, host-side snapshots and
+contract tests, radio pre-compliance, environment, production test, release qualification.
+Needs bench setup first (a self-hosted runner, a power-switching USB hub, the PPK2, a board
+for the rogue firmware). Open findings to run down with it: a remote shell reply chunk lost when two nodes answer
+at once (1 in 8 on the bench), and `radio_afa` delivering 14 of 19 confirmed sends.
+
 ## Compatibility gate (before the first users)
 
 **Why.** Until TOWER has users, AGENTS.md says "no backward compatibility anywhere": formats and
