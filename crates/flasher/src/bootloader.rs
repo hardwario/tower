@@ -165,10 +165,23 @@ impl<'a, T: Transport> Bootloader<'a, T> {
     /// is acknowledged second (a NACK here is [`NackStage::Payload`], the
     /// device rejecting an out-of-range page). Callers walking an unknown flash
     /// density must treat only a *payload* NACK as the flash boundary.
+    ///
+    /// Every page must lie in main flash (`< pages_in(MAX_FLASH_SIZE)`, 1536 pages of 128 bytes):
+    /// page `n` is the 128 bytes at `FLASH_BASE + n * 128`, so a page number past main flash
+    /// would address the data EEPROM (page 4096 is 0x0808_0000: radio keys, TX counters) or
+    /// beyond. The same bound as [`write_block`](Self::write_block)'s, enforced here so that no
+    /// caller of the public API can erase outside main flash; the density boundary of a smaller
+    /// part is still found by the device's payload NACK.
     pub fn extended_erase_pages(&mut self, pages: &[u16], timeout: Duration) -> Result<()> {
         if pages.is_empty() || pages.len() > 80 {
             return Err(Error::InvalidArgument {
                 context: "extended_erase_pages expects 1..=80 pages",
+            });
+        }
+        let main_flash_pages = target::pages_in(target::MAX_FLASH_SIZE);
+        if pages.iter().any(|&p| usize::from(p) >= main_flash_pages) {
+            return Err(Error::InvalidArgument {
+                context: "extended_erase_pages erases main flash only (never the data EEPROM)",
             });
         }
         self.send_command(CMD_EXT_ERASE, "Extended Erase command")?;
@@ -686,6 +699,39 @@ pub(crate) mod tests {
             t.push_bytes(&[ACK, ACK, ACK]);
             Bootloader::new(&mut t).write_block(addr, &[0u8; 8]).unwrap();
         }
+    }
+
+    /// Extended Erase stays inside main flash too: a page number at or past the 1536 pages of
+    /// the 192 KiB maximum (page 4096 would be the data EEPROM at 0x0808_0000), alone or hidden
+    /// in a valid list, is refused before anything is sent.
+    #[test]
+    fn extended_erase_refuses_pages_outside_main_flash() {
+        let main_flash_pages = target::pages_in(target::MAX_FLASH_SIZE) as u16;
+        assert_eq!(main_flash_pages, 1536);
+        assert_eq!(
+            target::FLASH_BASE + 4096 * target::PAGE_SIZE as u32,
+            0x0808_0000,
+            "page 4096 is the data EEPROM"
+        );
+        for pages in [
+            vec![main_flash_pages],
+            vec![4096],
+            vec![u16::MAX],
+            vec![0, main_flash_pages - 1, main_flash_pages],
+        ] {
+            let mut t = ScriptedTransport::new();
+            let err = Bootloader::new(&mut t)
+                .extended_erase_pages(&pages, Duration::from_secs(1))
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidArgument { .. }), "{pages:?}: {err:?}");
+            assert!(t.written().is_empty(), "{pages:?}: nothing on the wire");
+        }
+        // The first and the last page of main flash are fine.
+        let mut t = ScriptedTransport::new();
+        t.push_erase_chunk_ack();
+        Bootloader::new(&mut t)
+            .extended_erase_pages(&[0, main_flash_pages - 1], Duration::from_secs(1))
+            .unwrap();
     }
 
     /// A stale byte is dropped by `discard_input` (the double-NACK case), a regular reply

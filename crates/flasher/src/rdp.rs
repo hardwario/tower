@@ -86,6 +86,13 @@ const RDP_TIMEOUT: Duration = Duration::from_secs(30);
 /// middle of that reload.
 const RESET_SETTLE: Duration = Duration::from_millis(100);
 
+/// Pause before reading the state back when the second ACK of an accepted Readout Protect /
+/// Unprotect went missing without a timeout (a stray byte, an I/O error): the device may still
+/// be writing the option bytes or mass-erasing, and the NRST pulse of the next session must not
+/// cut that short. The work takes well under a second (see [`RDP_TIMEOUT`]); this leaves margin.
+/// After a timeout the device had [`RDP_TIMEOUT`] already, and [`RESET_SETTLE`] is enough.
+const UNCONFIRMED_SETTLE: Duration = Duration::from_secs(2);
+
 /// Read Memory probes per decision: a protected chip must refuse every one of them, each
 /// refusal followed by a healthy `Get ID`.
 const PROBE_ATTEMPTS: u32 = 2;
@@ -151,8 +158,10 @@ impl Change {
 /// `changed() == false`. Otherwise Readout Protect (`82 7D`, ACK, [`Progress::ReadoutChanging`],
 /// ACK once the option bytes are written); the device then resets itself, so the bootloader
 /// is re-entered exactly like the first time and the probe reads the new state back.
-/// [`Error::ReadoutUnchanged`] if it still reads unprotected. Every path ends with a reset into
-/// the application (best effort on errors).
+/// [`Error::ReadoutUnchanged`] if it still reads unprotected. When the command was accepted
+/// (first ACK) but the second ACK was lost (a timeout or a stray byte), the outcome is unknown:
+/// the state is read back the same way and reported in [`Error::ReadoutUnconfirmed`]. Every path
+/// ends with a reset into the application (best effort on errors).
 ///
 /// Undoing this costs everything stored on the chip: [`unprotect`] mass-erases the flash AND
 /// the data EEPROM. The application keeps running from flash at level 1, but RM0367 3.4.1
@@ -173,8 +182,10 @@ pub fn protect(port: &mut Port, progress: &mut dyn FnMut(Progress)) -> Result<Ch
 /// Same sequence as [`protect`] with Readout Unprotect (`92 6D`; the second ACK comes after
 /// the mass erase). A chip that is not protected is left alone: nothing is sent, nothing is
 /// erased, and the result has `changed() == false`. [`Error::ReadoutUnchanged`] if the
-/// read-back still finds it protected. The device is reset into the application at the end;
-/// with the flash erased there is nothing to run until it is re-flashed.
+/// read-back still finds it protected. A lost second ACK is [`Error::ReadoutUnconfirmed`] with
+/// the state read back, which tells whether the flash and the data EEPROM were erased. The
+/// device is reset into the application at the end; with the flash erased there is nothing to
+/// run until it is re-flashed.
 pub fn unprotect(port: &mut Port, progress: &mut dyn FnMut(Progress)) -> Result<Change> {
     set_level(port, false, progress)
 }
@@ -199,33 +210,54 @@ fn set_level(port: &mut Port, protect: bool, progress: &mut dyn FnMut(Progress))
         });
     }
 
+    let mut was_accepted = false;
     let sent = {
         let mut bl = Bootloader::new(port);
-        let mut accepted = || progress(Progress::ReadoutChanging { protect });
+        let mut accepted = || {
+            was_accepted = true;
+            progress(Progress::ReadoutChanging { protect });
+        };
         if protect {
             bl.readout_protect(RDP_TIMEOUT, &mut accepted)
         } else {
             bl.readout_unprotect(RDP_TIMEOUT, &mut accepted)
         }
     };
-    if let Err(e) = sent {
-        // A command-stage NACK changed nothing; a failure after the first ACK leaves the level
-        // unknown (the caller reads it with `chip::info`). Either way this session is over.
-        let _ = port.reset_into_app();
-        return Err(e);
+    match sent {
+        Ok(()) => {}
+        // Refused at the command byte (nothing changed), or a NACK in place of the second ACK
+        // (AN3155: the update failed, the level stays): the outcome is known, this session is
+        // over.
+        Err(e) if !was_accepted || matches!(e, Error::Nack { .. }) => {
+            let _ = port.reset_into_app();
+            return Err(e);
+        }
+        // Accepted, but the second ACK never came (a timeout, a stray byte, an I/O error): the
+        // option bytes may or may not have changed, and for Unprotect the flash and the data
+        // EEPROM may or may not be erased. Don't leave the operator guessing: read the state
+        // back like after a success, and report it with the error.
+        Err(e) => {
+            std::thread::sleep(if matches!(e, Error::Timeout { .. }) {
+                RESET_SETTLE
+            } else {
+                UNCONFIRMED_SETTLE
+            });
+            let readback = read_back(port, progress);
+            if readback.is_ok() {
+                let _ = port.reset_into_app();
+            }
+            return Err(Error::ReadoutUnconfirmed {
+                protect,
+                error: Box::new(e),
+                readback: readback.map_err(Box::new),
+            });
+        }
     }
 
     // The device resets itself to load the new option bytes. Re-enter the bootloader exactly
     // like the first time (the reset pulse with BOOT0 high, 0x7F, retries) and read back.
     std::thread::sleep(RESET_SETTLE);
-    flash::connect(port, progress)?;
-    let readout_protected = match identify(&mut Bootloader::new(port), progress, false) {
-        Ok((_, protected)) => protected,
-        Err(e) => {
-            let _ = port.reset_into_app();
-            return Err(e);
-        }
-    };
+    let readout_protected = read_back(port, progress)?;
     port.reset_into_app()?;
     if readout_protected != protect {
         return Err(Error::ReadoutUnchanged { protect });
@@ -235,6 +267,22 @@ fn set_level(port: &mut Port, protect: bool, progress: &mut dyn FnMut(Progress))
         was_protected,
         readout_protected,
     })
+}
+
+/// A new bootloader session ([`flash::connect`], which restores the application when entry
+/// fails) and the [`probe`]: the protection state after the device reset itself. On a failed
+/// probe the application is reset back into; on success the session is left open for the
+/// caller to end.
+fn read_back(port: &mut Port, progress: &mut dyn FnMut(Progress)) -> Result<bool> {
+    flash::connect(port, progress)?;
+    let probed = identify(&mut Bootloader::new(port), progress, false);
+    match probed {
+        Ok((_, readout_protected)) => Ok(readout_protected),
+        Err(e) => {
+            let _ = port.reset_into_app();
+            Err(e)
+        }
+    }
 }
 
 /// `Get ID` then [`probe`], reporting [`Progress::ReadoutProbed`] (and
@@ -257,8 +305,9 @@ fn identify<T: Transport>(
 pub(crate) mod tests {
     use super::*;
     use crate::bootloader::tests::ScriptedTransport;
+    use crate::fake_stm32::{ERASED, FakeStm32, Fault, Op};
     use crate::flash::{FlashOptions, no_progress};
-    use crate::port::tests::fake_port;
+    use crate::port::tests::{device_port, fake_port};
 
     const ACK: u8 = 0x79;
     const NACK: u8 = 0x1F;
@@ -572,6 +621,106 @@ pub(crate) mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    // ---- a lost second ACK ---------------------------------------------------------------
+
+    /// Readout Unprotect is accepted, then its second ACK never comes (a timeout). The outcome
+    /// is unknown, so the state is read back in a new bootloader session: the chip reads open,
+    /// and the error says the flash and the data EEPROM were mass-erased.
+    #[test]
+    fn unprotect_with_a_lost_second_ack_reads_the_state_back() {
+        let mut chip = FakeStm32::new(0x447, 192)
+            .protected()
+            .with_fault(0x92, 0, Fault::Silent);
+        chip.flash[..4].copy_from_slice(&[0x00, 0x50, 0x00, 0x20]);
+        let (mut port, state) = device_port(chip);
+        let mut seen = Vec::new();
+        let err = unprotect(&mut port, &mut |p| seen.push(p)).unwrap_err();
+        match &err {
+            Error::ReadoutUnconfirmed {
+                protect: false,
+                error,
+                readback: Ok(false),
+            } => assert!(matches!(**error, Error::Timeout { .. }), "{error:?}"),
+            other => panic!("expected ReadoutUnconfirmed, got {other:?}"),
+        }
+        assert!(err.to_string().contains("mass-erased"), "{err}");
+
+        let st = state.lock().unwrap();
+        let chip = st.device.as_ref().unwrap();
+        assert!(!chip.protected);
+        assert!(chip.flash.iter().all(|&b| b == ERASED));
+        assert_eq!(
+            chip.ops.iter().filter(|op| **op == Op::Init).count(),
+            2,
+            "read back in a second session: {:?}",
+            chip.ops
+        );
+        assert!(st.lines.ends_with(&APP_RESET_TAIL), "reset into app");
+        assert!(chip.running_app());
+        let probes: Vec<bool> = seen
+            .iter()
+            .filter_map(|p| match p {
+                Progress::ReadoutProbed { readout_protected } => Some(*readout_protected),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(probes, [true, false], "probed before and after");
+    }
+
+    /// Readout Protect is accepted, then a stray byte comes in place of the second ACK: read
+    /// back, the chip is protected, and the error says so.
+    #[test]
+    fn protect_with_garbage_for_the_second_ack_reads_the_state_back() {
+        let chip = FakeStm32::new(0x447, 192).with_fault(0x82, 0, Fault::Garbage);
+        let (mut port, state) = device_port(chip);
+        let err = protect(&mut port, &mut no_progress).unwrap_err();
+        match &err {
+            Error::ReadoutUnconfirmed {
+                protect: true,
+                error,
+                readback: Ok(true),
+            } => assert!(
+                matches!(**error, Error::UnexpectedByte { got: 0x00, .. }),
+                "{error:?}"
+            ),
+            other => panic!("expected ReadoutUnconfirmed, got {other:?}"),
+        }
+        assert!(err.to_string().contains("the protection is set"), "{err}");
+        let st = state.lock().unwrap();
+        assert!(st.device.as_ref().unwrap().protected);
+        assert!(st.lines.ends_with(&APP_RESET_TAIL), "reset into app");
+    }
+
+    /// The wording of each read-back outcome names the state and, for Unprotect, the erase.
+    #[test]
+    fn readout_unconfirmed_names_the_outcome() {
+        let lost = || {
+            Box::new(Error::Timeout {
+                context: "the second ACK".into(),
+            })
+        };
+        for (protect, readback, needle) in [
+            (true, Ok(true), "the protection is set"),
+            (true, Ok(false), "the protection was not set"),
+            (false, Ok(false), "the flash and the data EEPROM were mass-erased"),
+            (false, Ok(true), "the protection was not removed"),
+            (
+                false,
+                Err(Box::new(Error::BootloaderInit { attempts: 5 })),
+                "may have been erased",
+            ),
+        ] {
+            let err = Error::ReadoutUnconfirmed {
+                protect,
+                error: lost(),
+                readback,
+            };
+            let msg = err.to_string();
+            assert!(msg.contains(needle), "{msg}");
+            assert!(msg.contains("timed out waiting for the second ACK"), "{msg}");
+        }
     }
 
     // ---- nothing else sends 0x82 / 0x92 ------------------------------------------------

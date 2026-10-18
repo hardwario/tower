@@ -45,10 +45,15 @@ are updated).
   served, twice) and why it beats Get Version's option bytes (fixed 0x00) are documented in
   `src/rdp.rs`; a probe without a clean answer is an error, never a default. `flash` / `erase`
   probe right after `Get ID` and fail with `Error::ReadoutProtected` before anything is sent.
-- Writes never leave main flash (192 KiB on the L083), enforced in `Bootloader::write_block`: the
-  6 KiB data EEPROM at `0x0808_0000` (radio keys, TX counters) and the option bytes are out of
-  reach, and `erase` wipes main flash only. The one thing that wipes the data EEPROM is
+- Writes and erases never leave main flash (192 KiB on the L083), enforced in
+  `Bootloader::write_block` (addresses) and `Bootloader::extended_erase_pages` (pages < 1536):
+  the 6 KiB data EEPROM at `0x0808_0000` (radio keys, TX counters) and the option bytes are out
+  of reach, and `erase` wipes main flash only. The one thing that wipes the data EEPROM is
   `rdp::unprotect`'s mass erase, and it does nothing on a chip that is not protected.
+- `flash` writes the first 256-byte block (the vector table) last, after the rest is written
+  and verified: an interrupted flash leaves it blank (erased), so a truncated image never boots.
+  `flash` / `erase` refuse an unknown product id (`Error::UnknownChip`) before anything is
+  erased; only `chip::info` reports one.
 - Read-only operations restore the application on every path (`chip::info`, and `flash::connect`
   when bootloader entry fails), so a query never leaves a board parked in the bootloader. So do
   `rdp::protect` / `unprotect` (on errors too, best effort) and a `flash` / `erase` refused by the
@@ -57,7 +62,8 @@ are updated).
 - The NRST/BOOT0 pulse (`Port::reset_into_bootloader` / `reset_into_app`, RTS = NRST, DTR = BOOT0)
   is tuned for the TOWER auto-reset circuit; its timing constants are `pub` because the `tower`
   CLI and the HIL harness reuse them for their console resets. Don't change them without testing
-  on hardware.
+  on hardware. `flash::connect` doubles the BOOT0 hold on each retry (50 ms up to
+  `BOOT_RELEASE_HOLD_MAX`, 400 ms); the line sequence is pinned by a test.
 - Ports are opened exclusively (TIOCEXCL + flock).
 
 ## Checks
@@ -71,8 +77,9 @@ cargo test -p tower-flasher
 ```
 
 The tests need no hardware (a scripted fake port drives `flash`, `erase`, `chip::info`,
-`rdp::protect` and `rdp::unprotect` end to end). Never open a real serial port, flash a board or
-change its protection unless the user asks.
+`rdp::protect` and `rdp::unprotect` end to end; `src/fake_stm32.rs` is a stateful simulated
+STM32L0 with fault injection for the wire-exact flash tests). Never open a real serial port,
+flash a board or change its protection unless the user asks.
 
 ## Writing style
 

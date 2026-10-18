@@ -30,8 +30,15 @@ use crate::target;
 pub const BOOT_PRIME: Duration = Duration::from_millis(10);
 /// How long RESET is held asserted before BOOT0 is raised.
 pub const BOOT_RESET_HOLD: Duration = Duration::from_millis(50);
-/// Settle after raising BOOT0 + releasing RESET (lets the NRST cap ramp up).
+/// Settle after raising BOOT0 + releasing RESET (lets the NRST cap ramp up). This is the hold of
+/// the first bootloader-entry attempt; `flash::connect` doubles it on each retry, up to
+/// [`BOOT_RELEASE_HOLD_MAX`].
 pub const BOOT_RELEASE_HOLD: Duration = Duration::from_millis(50);
+/// Cap on the BOOT0 hold of a bootloader-entry retry. 50 ms is an estimate against the RC ramp
+/// of NRST (1 µF cap); a board whose ramp is slower (component tolerance, another bridge) would
+/// miss the latch on every identical retry. Holding BOOT0 longer is harmless: once the ROM
+/// bootloader runs, BOOT0 is not sampled again until the next reset.
+pub const BOOT_RELEASE_HOLD_MAX: Duration = Duration::from_millis(400);
 /// Settle after dropping BOOT0, before the `0x7F` init byte.
 pub const BOOT_PRE_INIT: Duration = Duration::from_millis(50);
 /// RESET pulse width for a reset into the application.
@@ -163,6 +170,14 @@ impl Port {
     /// the cap delays the NRST rise so BOOT0 is high when the chip latches it,
     /// selecting system memory. (F,F) then drops BOOT0 (harmless once latched).
     pub fn reset_into_bootloader(&mut self) -> Result<()> {
+        self.reset_into_bootloader_with_hold(BOOT_RELEASE_HOLD)
+    }
+
+    /// [`reset_into_bootloader`](Self::reset_into_bootloader) holding BOOT0 high for
+    /// `release_hold` after RESET is released, instead of [`BOOT_RELEASE_HOLD`]. The same line
+    /// sequence; `flash::connect` lengthens the hold on each retry (see
+    /// [`BOOT_RELEASE_HOLD_MAX`]).
+    pub fn reset_into_bootloader_with_hold(&mut self, release_hold: Duration) -> Result<()> {
         self.clear_buffers()?;
         self.set_rts(true)?;
         self.set_dtr(true)?; // run baseline
@@ -170,7 +185,7 @@ impl Port {
         // From here NRST is driven low (RESET asserted). If a modem-line write
         // fails mid-sequence, don't leave the device held in reset: best-effort
         // restore the run state before surfacing the original error.
-        self.drive_into_bootloader().inspect_err(|_| {
+        self.drive_into_bootloader(release_hold).inspect_err(|_| {
             let _ = self.set_lines(true, true);
         })
     }
@@ -178,13 +193,13 @@ impl Port {
     /// The RESET-asserted tail of [`reset_into_bootloader`](Self::reset_into_bootloader).
     /// Split out so its caller can restore the run state if any line write fails
     /// while NRST is held low.
-    fn drive_into_bootloader(&mut self) -> Result<()> {
+    fn drive_into_bootloader(&mut self, release_hold: Duration) -> Result<()> {
         self.set_rts(true)?;
         self.set_dtr(false)?; // RESET asserted
         sleep(BOOT_RESET_HOLD);
         self.set_dtr(true)?;
         self.set_rts(false)?; // BOOT0 high + RESET released (cap ramp)
-        sleep(BOOT_RELEASE_HOLD);
+        sleep(release_hold);
         self.set_dtr(false)?; // BOOT0 low (already in bootloader)
         sleep(BOOT_PRE_INIT);
         self.clear_input()?;
@@ -359,6 +374,7 @@ impl crate::bootloader::Transport for Port {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::fake_stm32::FakeStm32;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -381,6 +397,11 @@ pub(crate) mod tests {
         pub(crate) replies: VecDeque<u8>,
         /// Every byte written to the port, in order.
         pub(crate) written: Vec<u8>,
+        /// A simulated chip behind the port ([`FakeStm32`]). When set, it receives every byte
+        /// written and every modem-line write, its replies are what `read` returns (`replies`
+        /// and `read_fill` are unused), and a read with no reply pending times out, like a real
+        /// port in front of a silent device.
+        pub(crate) device: Option<FakeStm32>,
     }
 
     /// A scriptable in-memory [`SerialPort`] for exercising `Port`'s timeout
@@ -412,6 +433,9 @@ pub(crate) mod tests {
                 ));
             }
             s.lines.push((which, level));
+            if let Some(device) = s.device.as_mut() {
+                device.set_line(which, level);
+            }
             Ok(())
         }
     }
@@ -424,20 +448,25 @@ pub(crate) mod tests {
             if buf.is_empty() {
                 return Ok(0);
             }
-            buf[0] = self
-                .state
-                .lock()
-                .unwrap()
-                .replies
-                .pop_front()
-                .unwrap_or(self.read_fill);
+            let mut s = self.state.lock().unwrap();
+            if let Some(device) = s.device.as_mut() {
+                buf[0] = device
+                    .reply()
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?;
+                return Ok(1);
+            }
+            buf[0] = s.replies.pop_front().unwrap_or(self.read_fill);
             Ok(1)
         }
     }
 
     impl Write for FakePort {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.state.lock().unwrap().written.extend_from_slice(buf);
+            let mut s = self.state.lock().unwrap();
+            s.written.extend_from_slice(buf);
+            if let Some(device) = s.device.as_mut() {
+                device.receive(buf);
+            }
             Ok(buf.len())
         }
         fn flush(&mut self) -> io::Result<()> {
@@ -510,7 +539,12 @@ pub(crate) mod tests {
         fn bytes_to_write(&self) -> serialport::Result<u32> {
             Ok(0)
         }
-        fn clear(&self, _: ClearBuffer) -> serialport::Result<()> {
+        fn clear(&self, buffer: ClearBuffer) -> serialport::Result<()> {
+            if matches!(buffer, ClearBuffer::Input | ClearBuffer::All)
+                && let Some(device) = self.state.lock().unwrap().device.as_mut()
+            {
+                device.clear_replies();
+            }
             Ok(())
         }
         fn try_clone(&self) -> serialport::Result<Box<dyn SerialPort>> {
@@ -542,6 +576,87 @@ pub(crate) mod tests {
             ..Default::default()
         }));
         (port_with(state.clone()), state)
+    }
+
+    /// A `Port` over the in-memory `FakePort` with the simulated chip `device` behind it (see
+    /// [`FakeStm32`]): the engine tests drive `flash`, `erase` and `rdp` end to end against it,
+    /// then inspect the wire (`written`, `lines`) and the chip (`device`: its flash, its op log).
+    pub(crate) fn device_port(device: FakeStm32) -> (Port, Arc<Mutex<FakeState>>) {
+        let state = Arc::new(Mutex::new(FakeState {
+            timeout: DEFAULT_TIMEOUT,
+            device: Some(device),
+            ..Default::default()
+        }));
+        (port_with(state.clone()), state)
+    }
+
+    /// The raw modem-line writes of `Port::reset_into_bootloader`, pinned: the run baseline
+    /// (T,T), RESET asserted (T,F), the transient (T,T) while DTR rises before RTS falls, BOOT0
+    /// high with RESET released (F,T), then BOOT0 low (F,F). Tuned for the 1 µF cap on NRST; a
+    /// reordering is a hardware change and must fail here first.
+    pub(crate) const BOOTLOADER_ENTRY_LINES: [(char, bool); 7] = [
+        ('R', true),
+        ('D', true),
+        ('R', true),
+        ('D', false),
+        ('D', true),
+        ('R', false),
+        ('D', false),
+    ];
+
+    /// The line states `(rts, dtr)` after each write of [`BOOTLOADER_ENTRY_LINES`], from the run
+    /// state: (T,T) -> (T,F) -> (T,T) -> (F,T) -> (F,F).
+    #[test]
+    fn reset_into_bootloader_line_sequence_is_pinned() {
+        let (mut port, state) = device_port(FakeStm32::new(0x447, 192));
+        port.reset_into_bootloader().unwrap();
+        let st = state.lock().unwrap();
+        assert_eq!(st.lines, BOOTLOADER_ENTRY_LINES);
+        let (mut rts, mut dtr) = (true, true);
+        let mut states = vec![(rts, dtr)];
+        for &(which, level) in &st.lines {
+            match which {
+                'R' => rts = level,
+                _ => dtr = level,
+            }
+            if states.last() != Some(&(rts, dtr)) {
+                states.push((rts, dtr));
+            }
+        }
+        assert_eq!(
+            states,
+            [
+                (true, true),
+                (true, false),
+                (true, true),
+                (false, true),
+                (false, false)
+            ]
+        );
+        // The simulated circuit latched BOOT0 high: the ROM bootloader awaits 0x7F.
+        assert!(st.device.as_ref().unwrap().in_bootloader());
+
+        // A retry's longer BOOT0 hold drives exactly the same lines.
+        drop(st);
+        port.reset_into_bootloader_with_hold(BOOT_RELEASE_HOLD_MAX)
+            .unwrap();
+        let st = state.lock().unwrap();
+        assert_eq!(st.lines[BOOTLOADER_ENTRY_LINES.len()..], BOOTLOADER_ENTRY_LINES);
+    }
+
+    /// The reset into the application: RESET asserted with BOOT0 low, then released; the
+    /// simulated chip boots its application.
+    #[test]
+    fn reset_into_app_line_sequence_is_pinned() {
+        let (mut port, state) = device_port(FakeStm32::new(0x447, 192));
+        port.reset_into_bootloader().unwrap();
+        port.reset_into_app_no_settle().unwrap();
+        let st = state.lock().unwrap();
+        assert_eq!(
+            st.lines[BOOTLOADER_ENTRY_LINES.len()..],
+            [('R', true), ('D', false), ('R', false)]
+        );
+        assert!(st.device.as_ref().unwrap().running_app());
     }
 
     /// C2: a loaned handle's configured timeout survives the engine's per-command

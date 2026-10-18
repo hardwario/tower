@@ -1302,8 +1302,21 @@ fn flash_progress(verbose: bool) -> impl FnMut(tower_flasher::flash::Progress) {
         bar
     }
 
+    // tower-flasher writes the image's first block (the vector table) after verifying the rest,
+    // so with verify on a phase resumes after another (write, verify, write, verify). Entering
+    // another phase drops the active bar if it is unfinished; the finished bars stay on screen.
+    fn enter(bar: &mut Option<ProgressBar>, active: &mut &'static str, phase: &'static str) {
+        if *active != phase {
+            if let Some(b) = bar.take() {
+                b.finish_and_clear();
+            }
+            *active = phase;
+        }
+    }
+
     // The single bar for the active phase; swapped as erase → write → verify advance.
     let mut bar: Option<ProgressBar> = None;
+    let mut phase: &'static str = "";
     move |p| {
         if verbose {
             eprintln!("[tower] {p:?}");
@@ -1315,6 +1328,7 @@ fn flash_progress(verbose: bool) -> impl FnMut(tower_flasher::flash::Progress) {
                 pages_done,
                 pages_total,
             } => {
+                enter(&mut bar, &mut phase, "erasing");
                 let b = bar.get_or_insert_with(|| pages_bar(pages_total, "erasing"));
                 b.set_length(pages_total as u64);
                 b.set_position(pages_done as u64);
@@ -1328,6 +1342,7 @@ fn flash_progress(verbose: bool) -> impl FnMut(tower_flasher::flash::Progress) {
                 bytes_done,
                 bytes_total,
             } => {
+                enter(&mut bar, &mut phase, "writing");
                 let b = bar.get_or_insert_with(|| bytes_bar(bytes_total as u64, "writing"));
                 b.set_position(bytes_done as u64);
                 if bytes_done == bytes_total
@@ -1340,6 +1355,7 @@ fn flash_progress(verbose: bool) -> impl FnMut(tower_flasher::flash::Progress) {
                 bytes_done,
                 bytes_total,
             } => {
+                enter(&mut bar, &mut phase, "verifying");
                 let b = bar.get_or_insert_with(|| bytes_bar(bytes_total as u64, "verifying"));
                 b.set_position(bytes_done as u64);
                 if bytes_done == bytes_total

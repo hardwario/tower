@@ -122,6 +122,62 @@ pub enum Error {
         if *.protect { "not protected" } else { "protected" }
     )]
     ReadoutUnchanged { protect: bool },
+
+    /// [`rdp::protect`](crate::rdp::protect) / [`rdp::unprotect`](crate::rdp::unprotect): the
+    /// bootloader accepted the command (its first ACK), but the second ACK, which confirms the
+    /// option-byte update (and for Unprotect the mass erase), did not come: `error` is what came
+    /// instead (a timeout, a stray byte, an I/O error). The outcome was then read back in a new
+    /// bootloader session: `readback` is the protection state found, or why it could not be read.
+    /// For Unprotect this is what tells the operator whether the flash and the data EEPROM were
+    /// erased.
+    #[error(
+        "the bootloader accepted Readout {} but did not confirm it ({error}); {}",
+        if *.protect { "Protect" } else { "Unprotect" },
+        unconfirmed_outcome(*.protect, .readback)
+    )]
+    ReadoutUnconfirmed {
+        protect: bool,
+        error: Box<Error>,
+        readback: std::result::Result<bool, Box<Error>>,
+    },
+
+    /// `Get ID` returned a product id the crate does not know
+    /// ([`target::max_flash_size`](crate::target::max_flash_size) has no size for it): its flash
+    /// size and layout are unknown, so [`flash`](crate::flash::flash) and
+    /// [`erase`](crate::flash::erase) refuse it before anything is erased or written. Only
+    /// [`chip::info`](crate::chip::info) reports such an id.
+    #[error(
+        "chip id 0x{id:03X} is not a recognized STM32L0 product id; refusing to {operation} it, since its \
+         flash size and layout are unknown"
+    )]
+    UnknownChip { id: u16, operation: &'static str },
+}
+
+/// Wording for [`Error::ReadoutUnconfirmed`]: the state read back, and what it means.
+fn unconfirmed_outcome(protect: bool, readback: &std::result::Result<bool, Box<Error>>) -> String {
+    match (protect, readback) {
+        (true, Ok(true)) => {
+            "a new bootloader session reads the chip as protected (RDP level 1): the protection is set".into()
+        }
+        (true, Ok(false)) => {
+            "a new bootloader session reads the chip as not protected: the protection was not set".into()
+        }
+        (false, Ok(false)) => "a new bootloader session reads the chip as not protected: the protection was \
+                               removed, and the flash and the data EEPROM were mass-erased"
+            .into(),
+        (false, Ok(true)) => "a new bootloader session still reads the chip as protected (RDP level 1): the \
+                              protection was not removed (whether the flash was erased cannot be read while \
+                              it is protected)"
+            .into(),
+        (protect, Err(e)) => format!(
+            "the protection state could not be read back ({e}){}; power-cycle the board and read it again",
+            if protect {
+                ""
+            } else {
+                ", so the flash and the data EEPROM may have been erased"
+            }
+        ),
+    }
 }
 
 /// Wording for [`Error::FirmwareTooLarge`]: the family maximum vs a smaller, identified part.

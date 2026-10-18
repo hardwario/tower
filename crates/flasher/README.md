@@ -58,7 +58,9 @@ flash::flash(&mut port, &firmware, &opts, &mut |p: Progress| {
 The high-level entry points:
 
 - `flash::flash`: enter the bootloader, `Get ID`, erase the image footprint, write, verify,
-  start the application (each step optional through `FlashOptions`);
+  start the application (each step optional through `FlashOptions`). The first 256-byte block
+  (the vector table) is written last, after the rest is written and verified, so an
+  interrupted flash leaves a blank vector table, never a truncated image that boots;
 - `flash::erase`: full-chip erase of main flash, then back into the application;
 - `chip::info`: read-only, returns a `ChipInfo` (`id`, `family`, `bootloader_version`,
   `commands`, `readout_protected`, plus `is_known()` / `bootloader_version_parts()`) and restores
@@ -85,8 +87,10 @@ Operating notes:
 - Erase wipes **main flash only**; the data EEPROM (6 KiB on the L083: radio keys, TX counters)
   survives. Use the firmware's EEPROM wipe (`system eeprom wipe confirm` in the TOWER shell) to
   clear it. (The one library path that clears it is `rdp::unprotect` on a protected chip.)
-- Writes are bounded to main flash in the protocol engine itself (`Bootloader::write_block`
-  refuses any other address), so the option bytes and the data EEPROM are out of reach.
+- Writes and erases are bounded to main flash in the protocol engine itself
+  (`Bootloader::write_block` refuses any other address, `Bootloader::extended_erase_pages` any
+  page past the 1536 of the 192 KiB maximum), so the option bytes and the data EEPROM are out
+  of reach.
 - `firmware::load` accepts a **raw `.bin`** only (written at `0x08000000`). Convert ELF/HEX
   first, e.g. `arm-none-eabi-objcopy -O binary firmware.elf firmware.bin` (or
   `cargo objcopy --release -- -O binary out.bin`, which `just fw build` does). The file is
@@ -109,8 +113,11 @@ sequence is tuned for that auto-reset circuit (FT231X driving NRST/BOOT0 through
 hardware-independent.
 
 Once in the bootloader, the engine speaks the standard ST protocol (init `0x7F`, ACK `0x79`).
-`Get ID` reports the product id (e.g. `0x447` for STM32L0x3); any recognized STM32L0 id is
-accepted, and an unknown id is only reported (a front end may warn). Erase uses an explicit page
+`Get ID` reports the product id (e.g. `0x447` for STM32L0x3). `flash` and `erase` accept only a
+recognized STM32L0 id and refuse an unknown one (its flash size and layout are unknown) before
+anything is erased; `chip::info` reports it. Each bootloader-entry retry holds BOOT0 high
+longer after the reset (50, 100, 200, 400 ms), so a board whose NRST ramps slower than the
+tuned 50 ms is not failed five times by the same timing. Erase uses an explicit page
 list (the STM32L0 bootloader rejects the 0xFFFF mass-erase code); because the bootloader won't
 report the flash size, a full-chip erase walks the page list up to the family maximum in 80-page
 chunks. When a chunk is NACKed the page list has run past the end of this part's flash. AN3155
@@ -151,8 +158,11 @@ the ST citations are in the `rdp` module docs (`src/rdp.rs`); in short:
 Both entry points: enter the bootloader, `Get ID`, probe; send the command only if the state
 has to change (`82 7D` or `92 6D`, first ACK, then the second ACK once the option bytes are
 written, after the mass erase for unprotect); the device resets itself; re-enter the bootloader
-the normal way, probe again, reset into the application. The two opcodes are sent nowhere else,
-and the tests pin that.
+the normal way, probe again, reset into the application. When the command was accepted but the
+second ACK is lost (a timeout or a stray byte), the state is read back the same way and
+reported with the error (`Error::ReadoutUnconfirmed`): for unprotect, that tells whether the
+flash and the data EEPROM were erased. The two opcodes are sent nowhere else, and the tests pin
+that.
 
 ## Tests
 
@@ -162,7 +172,11 @@ list, write padding, chunk/address bookkeeping, the main-flash bound of Write Me
 readout-protection handshakes and probe, and a scripted fake serial port that drives `flash`,
 `erase`, `chip::info`, `rdp::protect` and `rdp::unprotect` end to end (including the
 reset-into-app restore paths, the fail-fast on a protected chip, and a check that no other entry
-point sends Readout Protect / Unprotect).
+point sends Readout Protect / Unprotect). A simulated STM32L0 (`src/fake_stm32.rs`: flash that
+erases to 0x00 and refuses to program a non-erased byte, checksum and bounds checks, RDP, the
+NRST/BOOT0 lines, injectable NACKs and timeouts) runs `flash`, `erase` and the protection
+changes end to end and pins every Write Memory and Read Memory on the wire, the vector-table
+block last.
 Linux builds need `libudev-dev` + `pkg-config` (the `serialport` dependency).
 
 ## License

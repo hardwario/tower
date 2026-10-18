@@ -38,6 +38,8 @@
 pub mod bootloader;
 pub mod chip;
 pub mod error;
+#[cfg(test)]
+mod fake_stm32;
 pub mod firmware;
 pub mod flash;
 pub mod port;
