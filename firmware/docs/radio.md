@@ -385,8 +385,8 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
   `open_pairing` takes a listen slice, never listens past the window, and answers a JOIN_REQ only
   while the whole host handshake still fits (`HOST_HANDSHAKE_TIME`: two turnarounds, two frames,
   both waits and its own shared secret, ~3.9 s; `tower_net::pairing::handshake_fits`), refusing it
-  otherwise with `pairing: join request from 0x… refused (the window closes before a handshake
-  could finish)`. A handshake therefore never commits after the window closed, when the operator's
+  otherwise with `pairing: join request from 0x… refused: the window closes before a handshake
+  could finish`. A handshake therefore never commits after the window closed, when the operator's
   tooling may already have reported a timeout. One `open_pairing` call lasts at most its slice
   plus one handshake plus one ephemeral (~7 s for the gateway's 2 s slices).
 - **Framing.** `JOIN_FRAME_KEY` is public and never used for anything else: it only gives the
@@ -404,8 +404,9 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
   it computes.
 
 **OTA pairing only adds new peers.** The host sends no JOIN_RESP for a JOIN_REQ whose address
-is already a registered peer, reserved, or the host's own (logged once per window call as
-`pairing: join request from 0x… refused (…)`). The key agreement is unauthenticated until someone
+is already a registered peer, reserved, or the host's own (a warning, at most one per 10 s with
+the count of attempts it stands for: `pairing: join request from 0x… refused: … (n since the last
+report)`). The key agreement is unauthenticated until someone
 compares the SAS, so anyone could otherwise JOIN_REQ *as a victim*, complete a handshake and
 re-key the victim out of the network. To re-pair a known node, remove it first (`remove_peer`;
 the gateway's `NodeRemove`). The joiner accepts only host frames addressed to itself (`dest ==

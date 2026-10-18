@@ -302,6 +302,8 @@ pub struct Net {
     keyed_join_enabled: bool,
     /// Keyed-join refusal warning rate limit.
     keyed_log: LogLimit,
+    /// OTA join refusal warning rate limit (a refused joiner retries for its whole window).
+    pair_log: LogLimit,
 }
 
 impl Net {
@@ -381,6 +383,7 @@ impl Net {
             keyed_responder: None,
             keyed_join_enabled: false,
             keyed_log: LogLimit::new(),
+            pair_log: LogLimit::new(),
         })
     }
 

@@ -388,7 +388,6 @@ impl Net {
             return None;
         }
         let mut buf = [0u8; REQ_LEN];
-        let mut refusal_logged = false;
         while Instant::now() < deadline {
             if !host.ready() {
                 Timer::at(deadline).await; // TRNG down: nothing to answer with (logged once)
@@ -413,7 +412,7 @@ impl Net {
                 Some("not a pairing v3 request")
             } else if !join_request_admissible(peer_addr, self.addr, registered) {
                 Some(if registered {
-                    "already registered - remove it first to re-pair"
+                    "already registered, remove it to re-pair"
                 } else {
                     "invalid address"
                 })
@@ -425,10 +424,16 @@ impl Net {
                 None
             };
             if let Some(why) = refusal {
-                if !refusal_logged {
-                    // Once per call: a refused joiner retries for its whole window.
-                    refusal_logged = true;
-                    log::warn!(target: "net", "pairing: join request from 0x{:08x} refused ({})", peer_addr, why);
+                // A refused joiner retries for its whole window, and the host calls this once per
+                // listen slice: one line per interval, counting the attempts it stands for.
+                if let Some(n) = self.pair_log.hit() {
+                    log::warn!(
+                        target: "net",
+                        "pairing: join request from 0x{:08x} refused: {} ({} since the last report)",
+                        peer_addr,
+                        why,
+                        n
+                    );
                 }
                 continue;
             }

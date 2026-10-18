@@ -313,7 +313,7 @@ uplink cycle.
   rule out a man in the middle (an attacker's chance of matching it is 1 in 10⁶). **OTA pairing
   only adds new nodes:** a JOIN_REQ from an address that is already registered (or reserved, or
   the gateway's own) gets no answer, and the gateway logs `net: pairing: join request from 0x…
-  refused (already registered …)`. The key agreement is unauthenticated until the SAS is
+  refused: already registered, remove it to re-pair` (at most once per 10 s, with a count). The key agreement is unauthenticated until the SAS is
   compared, so answering would let anyone re-key a registered node by joining *as* it. **To
   re-pair a known node (e.g. after a factory reset, or with its 12 s re-pair hold), `NodeRemove`
   it first**, then open the window. The registry commit is insert-only as a backstop
@@ -324,8 +324,8 @@ uplink cycle.
   only for pairing frames (registered nodes' uplinks wait for the window to end; a node retries
   them like any unacknowledged uplink), which is why a window closes as soon as it served its
   purpose. A JOIN_REQ is answered only while a whole handshake (~3.9 s) still fits before the
-  window's end (`net: pairing: join request from 0x… refused (the window closes before a
-  handshake could finish)`), so no node is committed after the host was told the window expired. A commit can
+  window's end (`net: pairing: join request from 0x… refused: the window closes before a
+  handshake could finish`), so no node is committed after the host was told the window expired. A commit can
   still take a few seconds past the window (its registry write may absorb a synchronous EEPROM
   compaction, ~5.2 s); `tower gateway` waits the window plus 15 s, and reports a `Paired` that
   arrives even later (`node … paired after the window's answer timed out`, plus the
