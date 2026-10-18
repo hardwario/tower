@@ -365,6 +365,8 @@ fn shell(s: &mut Session, node: &str, line: &str, ttl: u16, timeout: Duration, n
     let mut result = 0u8;
     // The CR that ended the previous chunk: the radio's chunking can split a CRLF.
     let mut held_cr = false;
+    // The output so far ends inside a line: close it when the reply is done, like `tower exec`.
+    let mut mid_line = false;
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -408,13 +410,20 @@ fn shell(s: &mut Session, node: &str, line: &str, ttl: u16, timeout: Duration, n
                     eprintln!("[tower] {}", sanitize_line(err));
                     return Ok(EXIT_ERROR);
                 }
-                print!("{}", shell_chunk_text(&mut held_cr, &rsp.text, rsp.done));
+                let text = shell_chunk_text(&mut held_cr, &rsp.text, rsp.done);
+                print!("{text}");
+                if !text.is_empty() {
+                    mid_line = !text.ends_with('\n');
+                }
                 if rsp.truncated {
                     eprintln!("[tower] response truncated (chunk lost over the air)");
                     result = result.max(1);
                 }
                 if rsp.done {
                     use std::io::Write as _;
+                    if mid_line {
+                        println!();
+                    }
                     let _ = std::io::stdout().flush();
                     // Clamp like `tower exec`: device results own 1..=123.
                     return Ok(match rsp.result.max(result) {
