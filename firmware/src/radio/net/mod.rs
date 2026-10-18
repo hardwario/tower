@@ -845,7 +845,7 @@ impl Net {
                 if self.radio.tx(answer.frame(), false, TX_TIMEOUT).await.is_ok() {
                     self.keyed_join = Some(answer.peer);
                 } else if let Some(n) = self.keyed_log.hit() {
-                    log::warn!(target: "net", "keyed join from {:08X}: response TX failed ({} event(s))", answer.peer, n);
+                    log::warn!(target: "net", "keyed join from 0x{:08x}: response not sent ({} since the last report)", answer.peer, n);
                 }
             }
             return None;
@@ -945,7 +945,7 @@ impl Net {
         };
         log::warn!(
             target: "net",
-            "replay dropped: {:08X} counter {} <= last-seen {} ({} drop(s) since last report)",
+            "replay from 0x{:08x} dropped: counter {} <= {} ({} since the last report)",
             src,
             counter,
             self.lane(src).last_seen(),

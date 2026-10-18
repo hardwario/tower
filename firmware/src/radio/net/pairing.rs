@@ -205,7 +205,7 @@ fn trng_ephemeral(log: bool) -> Option<Ephemeral> {
     if e.is_none() && log {
         log::error!(
             target: "net",
-            "pairing: hardware TRNG unavailable, refusing to pair (ephemeral keys must not come from the software fallback)"
+            "pairing: refused, TRNG unavailable (keys never come from the fallback)"
         );
     }
     e
@@ -383,7 +383,7 @@ impl Net {
             return None;
         }
         if self.access != Access::Duty {
-            log::warn!(target: "net", "pairing: refused, the radio is not in Duty mode");
+            log::warn!(target: "net", "pairing: refused, radio not in duty mode");
             Timer::at(deadline).await;
             return None;
         }
@@ -428,7 +428,7 @@ impl Net {
                 if !refusal_logged {
                     // Once per call: a refused joiner retries for its whole window.
                     refusal_logged = true;
-                    log::warn!(target: "net", "pairing: JOIN_REQ from {:08X} refused ({})", peer_addr, why);
+                    log::warn!(target: "net", "pairing: join request from 0x{:08x} refused ({})", peer_addr, why);
                 }
                 continue;
             }
@@ -491,7 +491,7 @@ impl Net {
             // covers it), then the reveal of the nonce we committed to, with our tag.
             let Some(session) = handshake(&eph, &e_node, &n_node[1..], Role::Gateway, peer_addr, self.addr)
             else {
-                log::warn!(target: "net", "pairing: JOIN_REQ from {:08X} refused (low-order key)", peer_addr);
+                log::warn!(target: "net", "pairing: join request from 0x{:08x} refused (low-order key)", peer_addr);
                 continue;
             };
             let mut reveal = [0u8; REVEAL_LEN];
@@ -580,7 +580,7 @@ impl Net {
             return None; // a host refuses it anyway; don't advertise it on air
         }
         if self.access != Access::Duty {
-            log::warn!(target: "net", "pairing: refused, the radio is not in Duty mode");
+            log::warn!(target: "net", "pairing: refused, radio not in duty mode");
             return None;
         }
         let deadline = Instant::now().checked_add(timeout)?;
@@ -694,7 +694,7 @@ impl Net {
                         broken_logged = true;
                         log::warn!(
                             target: "net",
-                            "pairing: JOIN_REVEAL from {:08X} does not open its commitment, ignored",
+                            "pairing: reveal from 0x{:08x} does not open its commitment, ignored",
                             gw_addr
                         );
                     }
@@ -706,7 +706,7 @@ impl Net {
                 if !session.verify(Role::Gateway, &buf[1 + NONCE_LEN..]) {
                     log::warn!(
                         target: "net",
-                        "pairing: JOIN_REVEAL from {:08X} failed key confirmation, ignored",
+                        "pairing: reveal from 0x{:08x} failed key confirmation, ignored",
                         gw_addr
                     );
                     continue;
@@ -727,7 +727,7 @@ impl Net {
                 if !self.tx_pair(session.link_key(), &conf_hdr, &conf).await {
                     // The host commits only on this confirm: committing without it would leave
                     // the node holding a key its gateway never installed. Start a new attempt.
-                    log::warn!(target: "net", "pairing: JOIN_CONFIRM not sent (duty-limited or radio error)");
+                    log::warn!(target: "net", "pairing: confirm not sent (duty limit or radio error)");
                     break;
                 }
                 // Sent, but not known to have arrived: the caller's commit round settles that.
@@ -857,7 +857,7 @@ impl Net {
                 if let Some(n) = self.keyed_log.hit() {
                     log::warn!(
                         target: "net",
-                        "keyed join from {:08X} refused: {} ({} refusal(s) since last report)",
+                        "keyed join from 0x{:08x} refused: {} ({} since the last report)",
                         src,
                         why,
                         n

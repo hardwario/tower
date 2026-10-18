@@ -35,7 +35,7 @@ async fn run(mut b: Board) {
     //                   b.radio_miso, b.radio_cs, b.radio_sdn, b.radio_irq);
     //   let mut net = tower::radio::net::Net::new(radio, b.kv,
     //                   NetConfig { addr, key: KEY, band: Band::Eu868, channel: 0 }).await?;
-    info!(target: "climate", "radio_climate_monitor skeleton: measuring every {MEASURE_INTERVAL_SECS} s");
+    info!(target: "climate", "measuring every {MEASURE_INTERVAL_SECS} s (skeleton: no radio yet)");
 
     loop {
         match b.tmp112.oneshot().await {
@@ -43,11 +43,11 @@ async fn run(mut b: Board) {
                 let mc = tmp112::raw_to_millicelsius(raw);
                 let sign = if mc < 0 { "-" } else { "" };
                 let centi = (mc.unsigned_abs() + 5) / 10; // milli- -> centi-deg, rounded
-                info!(target: "climate", "{}{}.{:02} deg. C", sign, centi / 100, centi % 100);
+                info!(target: "climate", "temperature {}{}.{:02} °C", sign, centi / 100, centi % 100);
                 // TODO: send the reading to the gateway over the radio, e.g.
                 //   net.send(&Reading { millicelsius: mc }).await;
             }
-            Err(e) => error!(target: "climate", "tmp112 read failed: {:?}", e),
+            Err(e) => error!(target: "climate", "TMP112 read failed: {:?}", e),
         }
         Timer::after_secs(MEASURE_INTERVAL_SECS).await;
     }

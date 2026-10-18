@@ -311,7 +311,7 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
 - **Commitment** (BLE f4): `C_gw = HMAC-SHA256(key = N_gw, "tower pairing v3 commit" ‖ node_addr
   LE ‖ gw_addr LE ‖ E_node ‖ E_gw)[..16]`. The host commits to its nonce `N_gw` before it sees
   `N_node`; the node sends `N_node` only once it holds `C_gw`, and accepts a JOIN_REVEAL only if
-  its `N_gw` opens `C_gw` (otherwise `net: pairing: JOIN_REVEAL from … does not open its
+  its `N_gw` opens `C_gw` (otherwise `net: pairing: reveal from 0x… does not open its
   commitment, ignored`: never a key derived from it). Nonces are 16 bytes, fresh per handshake.
 - **Key schedule** (`tower_net::handshake`, host-tested against RFC 7748 / RFC 5869 vectors and
   an independent reference; `crypto_x25519_kat` checks the same golden on the board): the
@@ -344,7 +344,7 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
 - **SAS** (BLE g2): `u64 LE(SHA-256("tower pairing v3 sas" ‖ th)[..8]) mod 10⁶`. Both ends log
   `net: pairing: SAS 123456`, and both hand it to their caller (`PairedPeer::sas`): the product
   gateway returns it in its `Paired` answer, so `tower nodes add --ota` prints it next to the
-  node's address, and the node repeats it in its `JOINED gateway` line. Its real guarantee: an
+  node's address, and the node repeats it in its `node: paired with gateway` line. Its real guarantee: an
   active man in the middle that runs one
   handshake with each side shows the same 6 digits on both with probability **10⁻⁶ per attempt,
   whatever its computing power**, IF the operator compares the two values. The commitment is
@@ -385,8 +385,8 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
   `open_pairing` takes a listen slice, never listens past the window, and answers a JOIN_REQ only
   while the whole host handshake still fits (`HOST_HANDSHAKE_TIME`: two turnarounds, two frames,
   both waits and its own shared secret, ~3.9 s; `tower_net::pairing::handshake_fits`), refusing it
-  otherwise with `pairing: JOIN_REQ from … refused (the window closes before a handshake could
-  finish)`. A handshake therefore never commits after the window closed, when the operator's
+  otherwise with `pairing: join request from 0x… refused (the window closes before a handshake
+  could finish)`. A handshake therefore never commits after the window closed, when the operator's
   tooling may already have reported a timeout. One `open_pairing` call lasts at most its slice
   plus one handshake plus one ephemeral (~7 s for the gateway's 2 s slices).
 - **Framing.** `JOIN_FRAME_KEY` is public and never used for anything else: it only gives the
@@ -405,7 +405,7 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
 
 **OTA pairing only adds new peers.** The host sends no JOIN_RESP for a JOIN_REQ whose address
 is already a registered peer, reserved, or the host's own (logged once per window call as
-`pairing: JOIN_REQ from … refused (…)`). The key agreement is unauthenticated until someone
+`pairing: join request from 0x… refused (…)`). The key agreement is unauthenticated until someone
 compares the SAS, so anyone could otherwise JOIN_REQ *as a victim*, complete a handshake and
 re-key the victim out of the network. To re-pair a known node, remove it first (`remove_peer`;
 the gateway's `NodeRemove`). The joiner accepts only host frames addressed to itself (`dest ==

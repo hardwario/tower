@@ -195,9 +195,9 @@ gateway test.
 - **Commit round**: the new key is provisional (RAM only) until the gateway acknowledges an
   uplink under it: the node sends its `NodeInfo` confirmed (500 ms after the handshake, then up
   to 6 attempts 2 s apart, ~15 s in all) and only on an ACK persists `(gw_addr, key, band,
-  channel)` in `NS_APP` and logs `JOINED gateway XXXXXXXX (SAS 123456, uid …)`. No ACK (a lost
-  JOIN_CONFIRM, a full or failing gateway registry): it logs `pairing with gateway XXXXXXXX not
-  confirmed (no ACK under the new key), discarded` and stays unpaired, so another hold retries
+  channel)` in `NS_APP` and logs `node: paired with gateway 0x…, SAS 123456 (uid …)`. No ACK (a
+  lost JOIN_CONFIRM, a full or failing gateway registry): it logs `node: pairing: gateway 0x… did
+  not confirm (no ACK), key discarded` and stays unpaired, so another hold retries
   (the gateway's window stays open after a lost confirm). Before this round a lost confirm left a
   node that believed it was paired while the gateway dropped all its uplinks, recoverable only
   over USB. The one asymmetry left is the reverse and needs every acknowledgement of the round to
@@ -211,7 +211,7 @@ gateway test.
   re-keys an address a gateway still has registered (see the gateway side), so: **remove the node
   on its gateway (`tower nodes remove <node>`), open a window (`tower nodes add --ota`), then hold
   the button 12 s.** A paired node whose uplinks go unacknowledged 8 times in a row logs a hint
-  saying so (`gateway XXXXXXXX: 8 uplinks in a row unacknowledged; …`); it keeps sending, since
+  saying so (`node: gateway 0x…: 8 uplinks unacknowledged; …`); it keeps sending, since
   the usual cause is range or a gateway that is off.
 - **Cable**: on USB the node serves the management channel: `Describe` (role probe), `Provision`
   (host-minted credentials; the key never rides the shell history), and `JoinOpen`
@@ -307,12 +307,12 @@ uplink cycle.
   error log), opens the radio window, and on a completed handshake (the commitment round, then a
   valid JOIN_CONFIRM under the derived key) logs `net: pairing: SAS 123456`, commits the registry
   entry (flags `UNNAMED` until the host auto-names it from the first `NodeInfo` via
-  `NodeUpdate`), logs `paired node XXXXXXXX (SAS 123456)` and answers the *delayed*
+  `NodeUpdate`), logs `gateway: node 0x… paired, SAS 123456` and answers the *delayed*
   `Paired {addr, sas}`, or `MGMT_TIMEOUT` on expiry. The host prints the SAS (`tower nodes add
   --ota`, the TUI and service logs, the `gateway/pairing` topic): compare it with the node's to
   rule out a man in the middle (an attacker's chance of matching it is 1 in 10⁶). **OTA pairing
   only adds new nodes:** a JOIN_REQ from an address that is already registered (or reserved, or
-  the gateway's own) gets no answer, and the gateway logs `pairing: JOIN_REQ from XXXXXXXX
+  the gateway's own) gets no answer, and the gateway logs `net: pairing: join request from 0x…
   refused (already registered …)`. The key agreement is unauthenticated until the SAS is
   compared, so answering would let anyone re-key a registered node by joining *as* it. **To
   re-pair a known node (e.g. after a factory reset, or with its 12 s re-pair hold), `NodeRemove`
@@ -324,8 +324,8 @@ uplink cycle.
   only for pairing frames (registered nodes' uplinks wait for the window to end; a node retries
   them like any unacknowledged uplink), which is why a window closes as soon as it served its
   purpose. A JOIN_REQ is answered only while a whole handshake (~3.9 s) still fits before the
-  window's end (`pairing: JOIN_REQ from … refused (the window closes before a handshake could
-  finish)`), so no node is committed after the host was told the window expired. A commit can
+  window's end (`net: pairing: join request from 0x… refused (the window closes before a
+  handshake could finish)`), so no node is committed after the host was told the window expired. A commit can
   still take a few seconds past the window (its registry write may absorb a synchronous EEPROM
   compaction, ~5.2 s); `tower gateway` waits the window plus 15 s, and reports a `Paired` that
   arrives even later (`node … paired after the window's answer timed out`, plus the

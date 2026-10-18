@@ -400,8 +400,8 @@ async fn run(b: Board) {
         if let Some(sens) = accel_sens {
             let _ = accel.init();
             match accel.enable_tilt(TiltConfig::new(sens)) {
-                Ok(()) => info!(target: "button", "accel tilt armed"),
-                Err(_) => warn!(target: "button", "accel tilt enable failed"),
+                Ok(()) => info!(target: "accel", "tilt detection armed"),
+                Err(_) => warn!(target: "accel", "tilt detection not armed (I2C error)"),
             }
         }
         Some(accel)
@@ -449,7 +449,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            log::error!(target: "button", "net init: {e}; radio dead, local mode only");
+            log::error!(target: "node", "radio init failed ({e}), running without radio");
             return;
         }
     };
@@ -470,8 +470,8 @@ async fn run(b: Board) {
         // Refused: the gateway's address is reserved or this node's own (`addr` set to it).
         // Stay off the air rather than talk to a peer we cannot key (docs/gateway.md).
         log::error!(
-            target: "button",
-            "gateway {:08X} refused as a peer (this node is {:08X}): radio off; fix the `addr` setting or re-pair",
+            target: "node",
+            "gateway 0x{:08x} is not a valid peer of 0x{:08x}, radio off: fix addr or re-pair",
             p.gw_addr,
             addr
         );
@@ -479,12 +479,10 @@ async fn run(b: Board) {
     }
     let _ = net.sleep().await; // radio sleeps between events from the start
 
-    info!(
-        target: "button",
-        "PUSH-BUTTON {:08X}: {}",
-        addr,
-        if provision.is_some() { "paired" } else { "UNPAIRED (hold the button to pair)" }
-    );
+    match provision {
+        Some(p) => info!(target: "node", "0x{:08x} paired with gateway 0x{:08x}", addr, p.gw_addr),
+        None => info!(target: "node", "0x{:08x} not paired: hold the button 1 s to pair", addr),
+    }
     // The unpaired cue runs for `UNPAIRED_CUE`, then stops; a button press shows it again.
     let mut cue_until: Option<Instant> = None;
     if provision.is_none() {
@@ -618,7 +616,7 @@ async fn run(b: Board) {
                     // Held REPAIR_HOLD while paired (no Release seen): pair again. The current
                     // pairing stays in force unless the new one commits.
                     pressed_at = None; // one gesture, one attempt
-                    info!(target: "button", "re-pair: button held {} s", REPAIR_HOLD.as_secs());
+                    info!(target: "node", "re-pairing (button held {} s)", REPAIR_HOLD.as_secs());
                     let attempt = pin!(pair(
                         &mut net,
                         addr,
@@ -694,7 +692,7 @@ async fn run(b: Board) {
                 // latch): take it after a short pause, no fault.
                 if tilt == Tilt::ReadFailed {
                     if accel_backoff == ACCEL_BACKOFF_MIN {
-                        warn!(target: "button", "accel interrupt source unreadable (I2C), backing off");
+                        warn!(target: "accel", "interrupt source unreadable (I2C), backing off");
                     }
                     accel_quiet = Some(Instant::now() + accel_backoff);
                     accel_backoff = (accel_backoff * 2).min(ACCEL_BACKOFF_MAX);
@@ -781,7 +779,7 @@ async fn pair(
     window: Duration,
     current: Option<Provisioned>,
 ) -> PairOutcome {
-    info!(target: "button", "JOIN: looking for a pairing window ({} s)…", window.as_secs());
+    info!(target: "node", "pairing: looking for a gateway window, {} s", window.as_secs());
     led.set_background(Some(JOINING));
     let _ = net.wake().await;
     let joined = net.join(addr, window).await;
@@ -792,7 +790,7 @@ async fn pair(
         Some(UNPROVISIONED)
     };
     let Some(peer) = joined else {
-        warn!(target: "button", "join failed (no gateway window in range)");
+        warn!(target: "node", "pairing failed: no gateway window in range");
         led.set_background(idle_led);
         return PairOutcome::NoWindow;
     };
@@ -814,7 +812,7 @@ async fn pair(
     // A refusal (a reserved address, or our own) leaves the peer table as it was: never fall
     // back to another key for that address, and persist nothing.
     if !net.add_peer(rec.gw_addr, &rec.key) {
-        warn!(target: "button", "join: gateway {:08X} refused as a peer, discarded", rec.gw_addr);
+        warn!(target: "node", "pairing: gateway 0x{:08x} is not a valid peer, discarded", rec.gw_addr);
         led.set_background(idle_led);
         return PairOutcome::Refused;
     }
@@ -836,10 +834,10 @@ async fn pair(
                     }
                 }
                 warn!(
-                    target: "button",
-                    "pairing with gateway {:08X} not confirmed (no ACK under the new key), discarded{}",
+                    target: "node",
+                    "pairing: gateway 0x{:08x} did not confirm (no ACK), key discarded{}",
                     rec.gw_addr,
-                    if current.is_some() { "; the previous pairing stays" } else { "; hold the button to retry" }
+                    if current.is_some() { ", the previous pairing stays" } else { ", hold the button to retry" }
                 );
                 led.set_background(idle_led);
                 return PairOutcome::Unconfirmed;
@@ -861,14 +859,14 @@ async fn pair(
         // The success line names this unit by its MCU factory ID, so a host log or the operator
         // can tie the pairing (and its SAS) to a device.
         info!(
-            target: "button",
-            "JOINED gateway {:08X} (SAS {:06}, uid {})",
+            target: "node",
+            "paired with gateway 0x{:08x}, SAS {:06} (uid {})",
             rec.gw_addr,
             sas,
             UniqueId::read()
         );
     } else {
-        warn!(target: "button", "JOINED {:08X} but persist failed; will not survive reboot", rec.gw_addr);
+        warn!(target: "node", "paired with gateway 0x{:08x} but not saved (lost at reboot)", rec.gw_addr);
     }
     led.set_background(None);
     PairOutcome::Paired { rec, sas, persisted }
@@ -907,8 +905,8 @@ fn button_name(kind: ButtonKind) -> &'static str {
 }
 
 /// The note on an event the node shows but cannot send: unpaired, or a pairing attempt runs.
-const UNPAIRED_NOTE: &str = "not paired, not sent: hold the button to pair";
-const PAIRING_NOTE: &str = "pairing in progress, not sent";
+const UNPAIRED_NOTE: &str = "not paired";
+const PAIRING_NOTE: &str = "pairing";
 
 /// Show a button event on the console: a log line and a structured event (`tower events`).
 /// `note` says why it goes nowhere, if it does. Dropped while USB is unplugged.
@@ -927,8 +925,8 @@ async fn show_button(kind: ButtonKind, count: u32, note: Option<&str>) {
 /// Show an accelerometer motion event on the console (see [`show_button`]).
 async fn show_motion(face: u8, note: Option<&str>) {
     match note {
-        None => info!(target: "button", "motion, face {}", face),
-        Some(note) => info!(target: "button", "motion, face {} ({})", face, note),
+        None => info!(target: "accel", "motion, face {}", face),
+        Some(note) => info!(target: "accel", "motion, face {} ({})", face, note),
     }
     use core::fmt::Write as _;
     let mut f: heapless::String<3> = heapless::String::new();
@@ -1047,7 +1045,7 @@ async fn commit_uplink(net: &mut Net, gw_addr: u32) -> bool {
     let result = net.send(gw_addr, &buf[..n], true, 3).await;
     let _ = net.sleep().await;
     if !matches!(result, SendResult::Delivered) {
-        warn!(target: "button", "commit uplink: {result}");
+        warn!(target: "node", "pairing: commit uplink {result}");
         return false;
     }
     true
@@ -1061,7 +1059,7 @@ async fn uplink(net: &mut Net, provision: Option<Provisioned>, msg: &NodeMsg<'_>
     };
     let mut buf = [0u8; MAX_RADIO_PAYLOAD];
     let Ok(n) = encode_node_msg(msg, &mut buf) else {
-        warn!(target: "button", "uplink encode failed");
+        warn!(target: "node", "uplink not encoded");
         return false;
     };
     let _ = net.wake().await;
@@ -1070,15 +1068,15 @@ async fn uplink(net: &mut Net, provision: Option<Provisioned>, msg: &NodeMsg<'_>
     if delivered {
         UNACKED.store(0, Ordering::Relaxed);
     } else {
-        warn!(target: "button", "uplink: {result}");
+        warn!(target: "node", "uplink {result}");
         let streak = UNACKED.load(Ordering::Relaxed).saturating_add(1);
         UNACKED.store(streak, Ordering::Relaxed);
         if streak == UNACKED_HINT {
             // Most likely out of range or switched off; but a gateway that no longer knows this
             // node drops everything it sends, and only a re-pair gets it back.
             warn!(
-                target: "button",
-                "gateway {:08X}: {} uplinks in a row unacknowledged; if it no longer has this node, remove it there, open a pairing window and hold the button {} s to re-pair",
+                target: "node",
+                "gateway 0x{:08x}: {} uplinks unacknowledged; if it forgot this node, re-pair (hold {} s)",
                 p.gw_addr,
                 streak,
                 REPAIR_HOLD.as_secs()
@@ -1141,11 +1139,11 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
                     && LAST_REMOTE_EPOCH.load(Relaxed) == epoch
                 {
                     let result = ((last >> 16) & 0xFF) as u8;
-                    info!(target: "button", "remote shell: duplicate cmd {} (not re-run)", cmd_id);
+                    info!(target: "node", "remote shell: command {} repeated, not run again", cmd_id);
                     sink.done(result).await; // empty reply, cached result
                     return true;
                 }
-                info!(target: "button", "remote shell: {}", line);
+                info!(target: "node", "remote shell: {}", line);
                 // Stream the response chunk-by-chunk: no fixed response buffer, so a full
                 // `export` or `settings print` is never truncated (the dispatcher owns the
                 // unbounded producers; `RadioSink` owns the radio framing).
@@ -1163,8 +1161,8 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
             }
             Err(tower_protocol::Error::SchemaMismatch { got }) => {
                 warn!(
-                    target: "button",
-                    "downlink radio schema {:#06x}, this build {:#06x}: the host was built from another checkout; rebuild both",
+                    target: "node",
+                    "downlink schema {:#06x}, expected {:#06x}: build host and node from one checkout",
                     got,
                     RADIO_TAG
                 );
@@ -1173,7 +1171,7 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
                 return false;
             }
             Err(_) => {
-                warn!(target: "button", "downlink malformed, dropped");
+                warn!(target: "node", "downlink malformed, dropped");
                 return false;
             }
         }
@@ -1229,7 +1227,7 @@ impl<'a> RadioSink<'a> {
         if !delivered {
             // A lost chunk shows up host-side as a chunk gap (incomplete response);
             // aborting beats streaming the tail of a response the host can't anchor.
-            warn!(target: "button", "response chunk {} undelivered, aborting", self.chunk - 1);
+            warn!(target: "node", "remote shell: response chunk {} not delivered, rest dropped", self.chunk - 1);
             self.ok = false;
         }
         delivered
@@ -1360,7 +1358,7 @@ async fn handle_mgmt(
                 return;
             }
             respond_record(req_id, &ProvisionAck { addr: effective_addr }).await;
-            info!(target: "button", "provisioned for gateway {:08X}, rebooting", p.gw_addr);
+            info!(target: "node", "provisioned for gateway 0x{:08x}, rebooting", p.gw_addr);
             // Band/channel/id take effect at Net::new; reboot into the new identity
             // (also bumps session_id, so the host sees the reprovision).
             console::flush().await;

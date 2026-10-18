@@ -804,7 +804,7 @@ relying on the RPC answer alone.
 
 **Comparing the SAS.** `sas` is a string of exactly 6 digits; keep it a string (leading zeros
 matter). The node logs the same value on its USB console as `net: pairing: SAS 004321` (and in
-its `JOINED gateway ... (SAS 004321, ...)` line; watch it with `tower -d <node port> logs`).
+its `node: paired with gateway 0x..., SAS 004321` line; watch it with `tower -d <node port> logs`).
 Show the gateway's value to the person pairing and have them compare: equal values rule out a
 man in the middle (an active attacker has a 1 in 10^6 chance of matching); different values
 mean someone sat in between, so `node_remove` the node at once and pair it again. A SAS nobody

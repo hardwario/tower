@@ -269,7 +269,7 @@ fn table_row(n: &Node) -> String {
 fn sas_hint(addr: &str) -> String {
     format!(
         "[tower] compare this SAS with the one the node logged (`net: pairing: SAS ...`, also in its \
-         `JOINED gateway` line); they must match. A mismatch means a man in the middle: remove the \
+         `node: paired with gateway` line); they must match. A mismatch means a man in the middle: remove the \
          node (`tower nodes remove {addr}`) and pair it again."
     )
 }

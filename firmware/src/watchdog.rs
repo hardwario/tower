@@ -176,7 +176,7 @@ async fn feeder(mut wdg: IndependentWatchdog<'static, IWDG>, interval: Duration)
             // console (USB-attached case) AND in the reset-surviving crash breadcrumb, so a
             // battery node's wedge leaves a trace the next boot reports (the boot reporter only
             // trusts a `watchdog` record when the reset really was the IWDG).
-            log::error!(target: "watchdog", "main loop unresponsive; letting the IWDG reset");
+            log::error!(target: "watchdog", "main loop unresponsive, letting the IWDG reset");
             if !withheld {
                 crate::crashlog::record_unless_fault(
                     crate::crashlog::Kind::Watchdog,

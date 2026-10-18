@@ -414,7 +414,7 @@ pub fn rand_u32() -> u32 {
         }
         None => {
             if RAND_SOURCE.load(Relaxed) != 2 {
-                log::warn!(target: "rng", "hardware TRNG unavailable - using the non-cryptographic fallback");
+                log::warn!(target: "rng", "TRNG unavailable, using the non-cryptographic fallback");
             }
             RAND_SOURCE.store(2, Relaxed);
             rand_u32_sw()

@@ -417,7 +417,7 @@ async fn run(b: Board) {
     if foreign_format {
         log::error!(
             target: "gateway",
-            "registry format marker is not this firmware's ({}): registry left untouched, node changes refused; reflash from the same checkout",
+            "registry format {} unknown: left as is, node changes refused (reflash)",
             registry::FORMAT
         );
         buckets.writable = false;
@@ -453,7 +453,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            log::error!(target: "gateway", "net init: {e}; gateway down");
+            log::error!(target: "gateway", "radio init failed ({e}), gateway down");
             return;
         }
     };
@@ -472,7 +472,7 @@ async fn run(b: Board) {
         for i in 0..registry::BUCKETS {
             for rec in registry::load(&buckets, i).iter() {
                 if !net.add_peer(rec.addr, &rec.key) {
-                    warn!(target: "gateway", "peer table refused {:08X}, node will not decrypt", rec.addr);
+                    warn!(target: "gateway", "node 0x{:08x} not in the peer table, its frames will not decrypt", rec.addr);
                 }
                 node_count += 1;
             }
@@ -482,7 +482,7 @@ async fn run(b: Board) {
 
     info!(
         target: "gateway",
-        "GATEWAY {:08X}: {} node(s), band {}, ch {}",
+        "0x{:08x} ready: {} nodes, band {}, channel {}",
         addr,
         node_count,
         match band { Band::Eu868 => "eu868", Band::Us915 => "us915" },
@@ -613,7 +613,7 @@ async fn run(b: Board) {
         // A registered node's keyed join (E4) was answered inside recv(): nothing to
         // install (its key and lane already are), just say so.
         if let Some(node_addr) = net.take_keyed_join() {
-            info!(target: "gateway", "node {:08X} joined (keyed)", node_addr);
+            info!(target: "gateway", "node 0x{:08x} joined (keyed)", node_addr);
         }
 
         // 4. Housekeeping: TTL expiry (reported as TX_EXPIRED) + the ambient-RSSI tick.
@@ -671,10 +671,10 @@ async fn commit_pairing(peer: PairedPeer, req_id: u16, net: &mut Net, buckets: &
     match registry::add_new(buckets, &rec) {
         Ok(()) => {
             if !net.add_peer(node_addr, &peer.key) {
-                warn!(target: "gateway", "peer table refused {:08X}, node will not decrypt", node_addr);
+                warn!(target: "gateway", "node 0x{:08x} not in the peer table, its frames will not decrypt", node_addr);
             }
             STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
-            info!(target: "gateway", "paired node {:08X} (SAS {:06})", node_addr, peer.sas);
+            info!(target: "gateway", "node 0x{:08x} paired, SAS {:06}", node_addr, peer.sas);
             respond_record(
                 req_id,
                 &Paired {
@@ -685,7 +685,7 @@ async fn commit_pairing(peer: PairedPeer, req_id: u16, net: &mut Net, buckets: &
             .await;
         }
         Err(RegistryError::Exists) => {
-            warn!(target: "gateway", "pairing: {:08X} is already registered; remove it first to re-pair", node_addr);
+            warn!(target: "gateway", "pairing: node 0x{:08x} already registered, remove it to re-pair", node_addr);
             respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
         }
         Err(RegistryError::Full) => respond_empty(req_id, mgmt::MGMT_FULL).await,
@@ -713,7 +713,7 @@ async fn handle_mgmt(
     // Under the registry format guard nothing may join: a node could not be committed (the
     // buckets refuse every write) and would be left half-paired.
     if !buckets.writable && matches!(req.op, MgmtOp::NodeAdd { .. } | MgmtOp::PairingOpen { .. }) {
-        warn!(target: "gateway", "registry of another format: node changes refused");
+        warn!(target: "gateway", "node change refused: registry of another format");
         respond_empty(req_id, mgmt::MGMT_STORAGE).await;
         return;
     }
@@ -795,7 +795,7 @@ async fn handle_mgmt(
             // registry re-imported) would otherwise repeat its old nonces from counter 1. A fresh
             // key carries 0 (nothing to do). Refused if the raise cannot be made durable.
             if !net.raise_tx_floor(tx_floor) {
-                warn!(target: "gateway", "node {:08X}: TX counter floor {} not durable, not added", addr, tx_floor);
+                warn!(target: "gateway", "node 0x{:08x} not added: TX counter floor {} not saved", addr, tx_floor);
                 respond_empty(req_id, mgmt::MGMT_STORAGE).await;
                 return;
             }
@@ -812,13 +812,13 @@ async fn handle_mgmt(
             ) {
                 Ok(()) => {
                     if !net.add_peer(addr, &key) {
-                        warn!(target: "gateway", "peer table refused {:08X}, node will not decrypt", addr);
+                        warn!(target: "gateway", "node 0x{:08x} not in the peer table, its frames will not decrypt", addr);
                     }
                     // A moved key's replay lane resumes where its old gateway left it, so the
                     // node's recorded frames do not replay into this one (0 = nothing to do).
                     let _ = net.raise_peer_floor(addr, rx_floor);
                     STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
-                    info!(target: "gateway", "node {:08X} added ({})", addr, name);
+                    info!(target: "gateway", "node 0x{:08x} added ({})", addr, name);
                     respond_empty(req_id, mgmt::MGMT_OK).await;
                 }
                 Err(RegistryError::Full) => respond_empty(req_id, mgmt::MGMT_FULL).await,
@@ -832,7 +832,7 @@ async fn handle_mgmt(
                 stats.remove(addr);
                 STAT_NODES.store(registry::count(buckets) as u32, Ordering::Relaxed);
                 STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
-                info!(target: "gateway", "node {:08X} removed", addr);
+                info!(target: "gateway", "node 0x{:08x} removed", addr);
                 respond_empty(req_id, mgmt::MGMT_OK).await;
             }
             Err(RegistryError::NotFound) => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
@@ -889,7 +889,7 @@ async fn handle_mgmt(
                 respond_empty(req_id, mgmt::MGMT_UNSUPPORTED).await;
                 return;
             };
-            info!(target: "gateway", "pairing window open ({} s)", window);
+            info!(target: "gateway", "pairing window open, {} s", window);
             led.set_background(Some(PAIRING));
             *pairing = Some(PairingSession { req_id, host });
             // The response is DELAYED: it resolves when the window does.
@@ -969,7 +969,7 @@ async fn handle_mgmt(
         }
         // Node-side ops: this device is a gateway.
         MgmtOp::Provision(_) | MgmtOp::JoinOpen { .. } => {
-            warn!(target: "gateway", "unsupported mgmt op (node-side)");
+            warn!(target: "gateway", "management request not supported here (a node-side op)");
             respond_empty(req_id, mgmt::MGMT_UNSUPPORTED).await;
         }
     }

@@ -59,6 +59,41 @@ against the new firmware, because every frame carries the schema tag it was buil
   hard-won caveats live in the `docs/*.md` guides and in code comments (don't strip them).
 - Radio is regulatory-sensitive: FCC `§15.247` / EU duty citations in code are real; keep them.
 
+## Log messages
+
+What the device logs is user interface (the TUI's log pane, `tower logs`, the bench), so every
+line speaks in one voice; `docs/console.md` (*Logging*) shows the same rules to SDK users.
+
+- **Target = the subject.** `target:` names what the line is about, short and lowercase: an
+  SDK subsystem (`boot`, `crash`, `net`, `radio`, `rng`, `storage`, `watchdog`) or a part of the
+  app (the push button logs `node`, `button` and `accel`; the gateway `gateway`). The console
+  shows `target: message`, so the message never repeats the target. A message may open with a
+  sub-subject and a colon when a subsystem logs several kinds of things (`net: pairing: SAS
+  123456`).
+- **Lowercase, no trailing period.** Words keep their case only when they have one of their own:
+  acronyms and part names (ACK, SAS, TRNG, EEPROM, I2C, IWDG, USB, TMP112). No capitals for
+  emphasis or state (`PAIRED`, `JOIN`), no decorative characters (an ellipsis, arrows, dashes);
+  unit symbols such as `°C` are fine.
+- **The event or the state first, then the facts**, short (aim under 72 characters; the TUI's log
+  pane is narrow): `click #3`, `paired with gateway 0x0000ab12, SAS 123456`, `pairing window
+  open, 60 s`.
+- **Values look the same everywhere:** radio addresses `0x%08x` (as `tower` and the MQTT API
+  print them), a unit after a space (`60 s`, `-71 dBm`), an event's sequence number `#n`, a
+  SAS as six digits, a count of repeats as `(n since the last report)`.
+- **Context in parentheses, briefly:** `(not paired)`, `(pairing)`. A remedy only where the
+  user has to act, once, on the line that reports the state, not repeated on every event that
+  state affects.
+- **Protocol messages by name in words** (`join request`, `reveal`, `confirm`), not their wire
+  identifiers.
+- **One line per event; a long operation logs its start and its outcome**, not each step.
+- **Levels:** `error` when a function is lost (no radio, storage failed, a crash); `warn` when
+  something failed or was refused and the device carries on (an undelivered uplink, a refused
+  frame, a backoff); `info` for state changes and the events a user acts on; `debug` for
+  developer detail. A warning that can repeat is rate-limited and reports its count.
+- **Lines that tools read are an interface:** the examples' verdict lines (`ALL PASS`, `MATCH`,
+  `JOINED ***`) and `net: pairing: SAS n` are matched by the HIL bench (`hil/tests`) and the
+  hwtest scripts (`tools/hwtest`); change them together with their readers.
+
 ## Writing style
 
 No em or en dashes. This applies everywhere: code, comments, docs, UI texts and commit messages. Use a comma, a semicolon, a colon or parentheses, or split the sentence. A plain hyphen is fine.
