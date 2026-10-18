@@ -60,6 +60,8 @@ const MAX_COMMAND_PAYLOAD: usize = 4096;
 const RECENT_IDS: usize = 64;
 /// Uplinks held (not dropped) while the startup registry sync is still in flight.
 const HELD_UPLINKS: usize = 16;
+/// `NodeList` answers in a row that may arrive with a lost chunk and still be listed again.
+const LIST_GAP_RETRIES: u8 = 3;
 /// Distinct unregistered senders tracked for drop accounting (the table resets beyond).
 const UNREGISTERED_TRACKED: usize = 32;
 
@@ -354,12 +356,18 @@ pub(crate) struct Engine {
     /// The first `NodeList` has been merged; before that an unknown uplink sender may
     /// simply not be mirrored *yet* (held, not dropped).
     registry_synced: bool,
+    /// `NodeList` answers in a row that arrived with a lost chunk (not merged).
+    list_gaps: u8,
     held: Vec<HeldUplink>,
     /// Uplinks dropped per unregistered sender (bounded table).
     unregistered: Vec<(u32, u64)>,
     /// Recently seen MQTT request ids (QoS-1 redelivery dedup), oldest first.
     recent_ids: VecDeque<String>,
-    pairing_rpc: Option<String>,
+    /// The `req_id` of the `PairingOpen` whose window `gateway/pairing` shows (with its end
+    /// tick in `pairing_until`). Only that request's outcome closes it: a `pairing_cancel` lets
+    /// go of it before the dongle answers the cancelled request, whose answer must not close
+    /// another window.
+    pairing_req: Option<u16>,
     pairing_until: Option<u64>,
     /// The `req_id` of a `PairingOpen` this side gave up on (timed out): its answer may still
     /// come, and a late `Paired` is a node the gateway did register.
@@ -409,6 +417,19 @@ fn kind_of(firmware_name: &str) -> String {
         .replace('_', "-")
 }
 
+/// The auto-name `kind:n` (`push-button:0`), the kind clipped on a char boundary so the whole
+/// name fits [`mgmt::MAX_NODE_NAME`]: the dongle refuses a longer one, and the node, still
+/// unnamed, would be named again (and refused again) on every heartbeat. A clipped kind can
+/// match another one's, but the caller's search for a free `n` keeps the name unique.
+fn auto_name(kind: &str, n: u32) -> String {
+    let suffix = format!(":{n}");
+    let mut end = kind.len().min(mgmt::MAX_NODE_NAME.saturating_sub(suffix.len()));
+    while !kind.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{suffix}", &kind[..end])
+}
+
 impl Engine {
     pub(crate) fn new(prefix: String, port_name: String, describe: DeviceInfoOwned) -> Self {
         Self {
@@ -425,10 +446,11 @@ impl Engine {
             pending_mgmt: Vec::new(),
             nodes: Vec::new(),
             registry_synced: false,
+            list_gaps: 0,
             held: Vec::new(),
             unregistered: Vec::new(),
             recent_ids: VecDeque::new(),
-            pairing_rpc: None,
+            pairing_req: None,
             pairing_until: None,
             late_pairing: None,
             tick: 0,
@@ -497,7 +519,9 @@ impl Engine {
                 }));
                 // Resync: the dongle may have rebooted while we were away (its Hello
                 // settles that), and requests issued while the link was down were never
-                // delivered: reconcile the pending mirror with what is really queued.
+                // delivered: reconcile the pending mirror with what is really queued, and the
+                // registry mirror with the device's (it took a rename or an auto-name when it
+                // was queued, which the drop may have failed unsent).
                 self.issue(&mut out, OpKind::Describe, MgmtOp::Describe, None);
                 self.issue(
                     &mut out,
@@ -505,6 +529,7 @@ impl Engine {
                     MgmtOp::QueueList { node_addr: 0 },
                     None,
                 );
+                self.issue(&mut out, OpKind::NodeList, MgmtOp::NodeList, None);
             }
             Input::SerialDown { error } => {
                 self.serial_up = false;
@@ -832,10 +857,12 @@ impl Engine {
             flags &= !mgmt::NODE_FLAG_SLEEPING;
         }
 
+        // The mirror takes an update only once it is queued: one refused up front (the serial
+        // link is down) never reaches the dongle, and the next heartbeat tries again.
         if self.nodes[i].entry.flags & mgmt::NODE_FLAG_UNNAMED != 0 {
             // Auto-name: smallest free index for this kind.
             let name = (0..)
-                .map(|n| format!("{kind}:{n}"))
+                .map(|n| auto_name(&kind, n))
                 .find(|cand| !self.nodes.iter().any(|m| &m.entry.name == cand))
                 .unwrap();
             flags &= !mgmt::NODE_FLAG_UNNAMED;
@@ -849,17 +876,25 @@ impl Engine {
                 name: Some(name.as_str()),
                 flags: Some(flags),
             };
-            self.issue(out, OpKind::NodeUpdate { id: src }, op, None);
-            self.nodes[i].entry.name = name;
-            self.nodes[i].entry.flags = flags;
+            if self
+                .issue(out, OpKind::NodeUpdate { id: src }, op, None)
+                .is_some()
+            {
+                self.nodes[i].entry.name = name;
+                self.nodes[i].entry.flags = flags;
+            }
         } else if flags != self.nodes[i].entry.flags {
             let op = MgmtOp::NodeUpdate {
                 addr: src,
                 name: None,
                 flags: Some(flags),
             };
-            self.issue(out, OpKind::NodeUpdate { id: src }, op, None);
-            self.nodes[i].entry.flags = flags;
+            if self
+                .issue(out, OpKind::NodeUpdate { id: src }, op, None)
+                .is_some()
+            {
+                self.nodes[i].entry.flags = flags;
+            }
         }
         self.publish_node(out, i);
     }
@@ -886,6 +921,10 @@ impl Engine {
             self.nodes[i].pending[pi].truncated = true;
         }
         self.nodes[i].pending[pi].next_chunk = chunk.chunk.wrapping_add(1);
+        // The reply timeout counts from the last sign of life: a long streamed reply is cut
+        // only once the node goes quiet. A chunk also proves the command delivered, should its
+        // `TX_DELIVERED` report come later (or be lost).
+        self.nodes[i].pending[pi].delivered_tick = Some(self.tick);
         let rsp = payload::ShellRsp {
             id: self.nodes[i].pending[pi].rpc.clone(),
             chunk: chunk.chunk,
@@ -1037,7 +1076,27 @@ impl Engine {
                     }),
                 );
             }
+            (OpKind::NodeList, None) if p.truncated => {
+                // A lost chunk: the records around the gap are spliced from two halves, and a
+                // node missing from the list proves nothing. Merging would drop live nodes
+                // (clearing their retained topics, ending their dialogs) or mirror garbage, so
+                // the mirror stays as it is (and the startup sync pending) and the registry is
+                // listed again: a lost chunk is a transient. A few times in a row at most, so a
+                // link that keeps losing them can't loop; the next refresh tries again.
+                self.rpc_err(
+                    out,
+                    &p,
+                    "the device's answer arrived incomplete (a chunk was lost)",
+                );
+                self.list_gaps = self.list_gaps.saturating_add(1);
+                if self.list_gaps <= LIST_GAP_RETRIES
+                    && !self.pending_mgmt.iter().any(|q| matches!(q.op, OpKind::NodeList))
+                {
+                    self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
+                }
+            }
             (OpKind::NodeList, None) => {
+                self.list_gaps = 0;
                 let entries: Vec<NodeEntry> = parse_records(&p.data);
                 let owned: Vec<NodeEntryOwned> = entries.into_iter().map(Into::into).collect();
                 self.merge_registry(owned, out);
@@ -1072,24 +1131,11 @@ impl Engine {
             }
             (OpKind::NodeRemove { id }, None) => {
                 let id = *id;
-                if let Some(i) = self.nodes.iter().position(|n| n.entry.addr == id) {
-                    for pd in std::mem::take(&mut self.nodes[i].pending) {
-                        self.shell_error(out, id, &pd, "node removed");
-                    }
-                    self.nodes.remove(i);
-                }
-                // Clear the retained topics for the removed node.
-                for topic in [
-                    topics::node(&self.prefix, id),
-                    topics::node_temperature(&self.prefix, id),
-                    topics::node_shell_pending(&self.prefix, id),
-                ] {
-                    out.push(Output::Publish {
-                        topic,
-                        payload: Vec::new(),
-                        retain: true,
-                    });
-                }
+                let pending = match self.nodes.iter().position(|n| n.entry.addr == id) {
+                    Some(i) => self.nodes.remove(i).pending,
+                    None => Vec::new(),
+                };
+                self.node_gone(out, id, &pending);
                 self.emit_registry(out);
                 self.rpc_ok(out, &p, serde_json::Value::Null);
             }
@@ -1116,9 +1162,12 @@ impl Engine {
                 Err(_) => self.rpc_err(out, &p, "malformed key record"),
             },
             (OpKind::PairingOpen, None) => {
-                // Delayed resolution: a node joined.
-                self.pairing_rpc = None;
-                self.pairing_until = None;
+                // Delayed resolution: a node joined (`on_paired` publishes the join).
+                let ours = self.pairing_req == Some(p.req_id);
+                if ours {
+                    self.pairing_req = None;
+                    self.pairing_until = None;
+                }
                 let joined = postcard::from_bytes::<Paired>(&p.data).ok();
                 match joined {
                     Some(j) => {
@@ -1127,7 +1176,9 @@ impl Engine {
                     }
                     None => {
                         out.push(Output::Event(Event::Log("pairing window resolved".into())));
-                        self.publish_pairing(out, None, None);
+                        if ours {
+                            self.publish_pairing(out, None, None);
+                        }
                         self.rpc_ok(out, &p, serde_json::json!({ "joined": null }));
                         self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
                     }
@@ -1203,9 +1254,7 @@ impl Engine {
             (OpKind::StatsConfig, None) => self.rpc_ok(out, &p, serde_json::Value::Null),
             // ---- refusals ----
             (OpKind::PairingOpen, Some(e)) => {
-                self.pairing_rpc = None;
-                self.pairing_until = None;
-                self.publish_pairing(out, None, None);
+                self.end_pairing(out, p.req_id);
                 if result == mgmt::MGMT_TIMEOUT {
                     // Window expired unjoined: a normal outcome, not an error.
                     self.rpc_ok(out, &p, serde_json::json!({ "joined": null }));
@@ -1216,12 +1265,16 @@ impl Engine {
             (OpKind::QueuePush { node, shell }, Some(e)) => {
                 let node = *node;
                 if let Some(origin) = shell {
+                    // The shell's generic failure, as for every bridge-reported end: the
+                    // dongle's management code is another code space (`MGMT_FULL` = 4 and
+                    // `MGMT_BUSY` = 5 would read as shell results; 5 is the shell's "denied").
+                    // The reason is in `error`.
                     let rsp = payload::ShellRsp {
                         id: origin.rpc.clone(),
                         chunk: 0,
                         text: String::new(),
                         done: true,
-                        result: result.max(1),
+                        result: 1,
                         truncated: false,
                         error: Some(e.to_string()),
                     };
@@ -1448,8 +1501,12 @@ impl Engine {
             })
         };
         match req.op.as_str() {
-            "describe" => self.issue(out, OpKind::Describe, MgmtOp::Describe, rpc),
-            "node_list" => self.issue(out, OpKind::NodeList, MgmtOp::NodeList, rpc),
+            "describe" => {
+                self.issue(out, OpKind::Describe, MgmtOp::Describe, rpc);
+            }
+            "node_list" => {
+                self.issue(out, OpKind::NodeList, MgmtOp::NodeList, rpc);
+            }
             "node_add" => {
                 // Cable pairing: the client provisioned the node on its own serial
                 // port and registers (id, key, name) here, with a freshly minted key (no
@@ -1509,16 +1566,28 @@ impl Engine {
                 );
             }
             "node_remove" => match node_param() {
-                Some(id) => self.issue(
-                    out,
-                    OpKind::NodeRemove { id },
-                    MgmtOp::NodeRemove { addr: id },
-                    rpc,
-                ),
+                Some(id) => {
+                    self.issue(
+                        out,
+                        OpKind::NodeRemove { id },
+                        MgmtOp::NodeRemove { addr: id },
+                        rpc,
+                    );
+                }
                 None => self.rpc_err_direct(out, &me, "unknown node"),
             },
             "node_rename" => {
-                let Some(id) = node_param() else {
+                // Only a mirrored node: the dongle's `NodeUpdate` replaces the flags, so the
+                // rename carries the node's own with `unnamed` cleared (sent without flags, the
+                // node stayed unnamed and its next `NodeInfo` auto-named over the rename), and
+                // `check_name` needs the other names to refuse a duplicate. Before the startup
+                // listing lands, every node is unknown here.
+                let Some((id, flags)) = node_param().and_then(|id| {
+                    self.nodes
+                        .iter()
+                        .find(|n| n.entry.addr == id)
+                        .map(|n| (id, n.entry.flags & !mgmt::NODE_FLAG_UNNAMED))
+                }) else {
                     return self.rpc_err_direct(out, &me, "unknown node");
                 };
                 let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
@@ -1527,36 +1596,49 @@ impl Engine {
                 if let Err(e) = self.check_name(name, id) {
                     return self.rpc_err_direct(out, &me, &e);
                 }
-                let flags = self
-                    .nodes
-                    .iter()
-                    .find(|n| n.entry.addr == id)
-                    .map(|n| n.entry.flags & !mgmt::NODE_FLAG_UNNAMED);
                 let op = MgmtOp::NodeUpdate {
                     addr: id,
                     name: Some(name),
-                    flags,
+                    flags: Some(flags),
                 };
-                self.issue(out, OpKind::NodeUpdate { id }, op, rpc);
                 // Mirror the name now: the node's next `NodeInfo` may land before the gateway
                 // answers, and an unnamed mirror would auto-name it over the operator's choice.
-                if let Some(n) = self.nodes.iter_mut().find(|n| n.entry.addr == id) {
+                // Only a queued rename, though: one refused up front never reaches the dongle.
+                if self.issue(out, OpKind::NodeUpdate { id }, op, rpc).is_some()
+                    && let Some(n) = self.nodes.iter_mut().find(|n| n.entry.addr == id)
+                {
                     n.entry.name = name.to_string();
-                    n.entry.flags &= !mgmt::NODE_FLAG_UNNAMED;
+                    n.entry.flags = flags;
                 }
             }
             "reveal_key" => match node_param() {
-                Some(id) => self.issue(
-                    out,
-                    OpKind::RevealKey { id },
-                    MgmtOp::NodeRevealKey { addr: id },
-                    rpc,
-                ),
+                Some(id) => {
+                    self.issue(
+                        out,
+                        OpKind::RevealKey { id },
+                        MgmtOp::NodeRevealKey { addr: id },
+                        rpc,
+                    );
+                }
                 None => self.rpc_err_direct(out, &me, "unknown node"),
             },
             "node_add_ota" => {
-                if self.pairing_rpc.is_some() {
+                if self.pairing_req.is_some() {
                     return self.rpc_err_direct(out, &me, "a pairing window is already open");
+                }
+                // A cancelled window stays open on the dongle until it takes the cancel and
+                // answers the cancelled `PairingOpen`; a new one before that would be refused
+                // `busy`, or open while the old answer is still on its way.
+                if self
+                    .pending_mgmt
+                    .iter()
+                    .any(|p| matches!(p.op, OpKind::PairingOpen))
+                {
+                    return self.rpc_err_direct(
+                        out,
+                        &me,
+                        "the cancelled pairing window has not closed yet; try again",
+                    );
                 }
                 let window = params
                     .get("window")
@@ -1564,19 +1646,22 @@ impl Engine {
                     .unwrap_or(60)
                     .clamp(1, 600) as u16;
                 // No key to mint: OTA pairing derives the link key on both ends (X25519).
-                self.pairing_rpc = Some(req.id.clone());
-                self.pairing_until = Some(self.tick + window as u64);
-                self.publish_pairing(out, None, None);
-                self.issue_delayed(
+                // The window shows as open once its request is queued (the dongle answers only
+                // when it ends, or at once with a refusal, which closes it again).
+                if let Some(req_id) = self.issue_delayed(
                     out,
                     OpKind::PairingOpen,
                     MgmtOp::PairingOpen { window },
                     rpc,
                     window as u64 + PAIRING_SLACK_S,
-                );
+                ) {
+                    self.pairing_req = Some(req_id);
+                    self.pairing_until = Some(self.tick + window as u64);
+                    self.publish_pairing(out, None, None);
+                }
             }
             "pairing_cancel" => {
-                self.pairing_rpc = None;
+                self.pairing_req = None;
                 self.pairing_until = None;
                 self.publish_pairing(out, None, None);
                 self.issue(out, OpKind::PairingCancel, MgmtOp::PairingCancel, rpc);
@@ -1679,14 +1764,22 @@ impl Engine {
             ))));
             // An unanswered enqueue may still have landed on the device (only the reply
             // was lost): reconcile afterwards so such an orphan is dropped, not run with
-            // nobody listening, which keeps the "not queued" answer below true.
-            resync_queue |= matches!(p.op, OpKind::QueuePush { .. });
+            // nobody listening, which keeps the "not queued" answer below true. An unanswered
+            // drop may never have landed: its dialogs already ended `dequeued`, so the item
+            // left queued is just such an orphan.
+            resync_queue |= matches!(p.op, OpKind::QueuePush { .. } | OpKind::QueueDrop { .. });
             if matches!(p.op, OpKind::PairingOpen) {
                 // The window's answer may still come: a late `Paired` is a node the gateway did
                 // register, so it is reported when it lands (`on_late_pairing`), not dropped.
                 self.late_pairing = Some(p.req_id);
             }
-            self.fail_op(out, p.op, p.rpc.as_ref(), "device did not answer (timeout)");
+            self.fail_op(
+                out,
+                p.op,
+                Some(p.req_id),
+                p.rpc.as_ref(),
+                "device did not answer (timeout)",
+            );
         }
         if resync_queue {
             self.issue(out, OpKind::QueueSync, MgmtOp::QueueList { node_addr: 0 }, None);
@@ -1739,9 +1832,17 @@ impl Engine {
 
     // ---- helpers --------------------------------------------------------------------
 
-    /// Allocate a req_id, encode and send `op`, and track the reply.
-    fn issue(&mut self, out: &mut Vec<Output>, kind: OpKind, op: MgmtOp<'_>, rpc: Option<RpcRef>) {
-        self.issue_delayed(out, kind, op, rpc, MGMT_TIMEOUT_TICKS);
+    /// Allocate a req_id, encode and send `op`, and track the reply. Returns the req_id, or
+    /// `None` when the op was failed up front (link down, encode failure) and will never reach
+    /// the dongle: a caller that mirrors the op's effect does so only on `Some`.
+    fn issue(
+        &mut self,
+        out: &mut Vec<Output>,
+        kind: OpKind,
+        op: MgmtOp<'_>,
+        rpc: Option<RpcRef>,
+    ) -> Option<u16> {
+        self.issue_delayed(out, kind, op, rpc, MGMT_TIMEOUT_TICKS)
     }
 
     fn issue_delayed(
@@ -1751,12 +1852,13 @@ impl Engine {
         op: MgmtOp<'_>,
         rpc: Option<RpcRef>,
         timeout_ticks: u64,
-    ) {
+    ) -> Option<u16> {
         if !self.serial_up {
             // The serial thread drops frames while the port is down: fail now instead of
             // after a timeout (or, for a shell enqueue, never). Engine-internal ops need no
             // answer: the reconnect resync re-issues what matters.
-            return self.fail_op(out, kind, rpc.as_ref(), "gateway serial link is down");
+            self.fail_op(out, kind, None, rpc.as_ref(), "gateway serial link is down");
+            return None;
         }
         let req_id = self.next_req;
         self.next_req = self.next_req.checked_add(1).filter(|&v| v != 0).unwrap_or(1);
@@ -1777,8 +1879,12 @@ impl Engine {
                     holds_slot_until: u64::MAX,
                 });
                 self.send_next_mgmt(out);
+                Some(req_id)
             }
-            None => self.fail_op(out, kind, rpc.as_ref(), "request encode failed"),
+            None => {
+                self.fail_op(out, kind, Some(req_id), rpc.as_ref(), "request encode failed");
+                None
+            }
         }
     }
 
@@ -1815,7 +1921,13 @@ impl Engine {
             .partition(|p| p.frame.is_some());
         self.pending_mgmt = sent;
         for p in unsent {
-            self.fail_op(out, p.op, p.rpc.as_ref(), "gateway serial link is down");
+            self.fail_op(
+                out,
+                p.op,
+                Some(p.req_id),
+                p.rpc.as_ref(),
+                "gateway serial link is down",
+            );
         }
     }
 
@@ -1823,12 +1935,20 @@ impl Engine {
     /// whoever is waiting. An RPC gets its error response; a shell enqueue (which has no
     /// RPC id) gets a terminal `shell/rsp` error (it used to vanish silently while the
     /// client waited out its timeout); a pairing window resets the published state.
-    fn fail_op(&mut self, out: &mut Vec<Output>, op: OpKind, rpc: Option<&RpcRef>, error: &str) {
+    /// `req_id` is `None` for an op failed before it was tracked.
+    fn fail_op(
+        &mut self,
+        out: &mut Vec<Output>,
+        op: OpKind,
+        req_id: Option<u16>,
+        rpc: Option<&RpcRef>,
+        error: &str,
+    ) {
         match op {
             OpKind::PairingOpen => {
-                self.pairing_rpc = None;
-                self.pairing_until = None;
-                self.publish_pairing(out, None, None);
+                if let Some(req_id) = req_id {
+                    self.end_pairing(out, req_id);
+                }
             }
             OpKind::QueuePush {
                 node,
@@ -1850,8 +1970,8 @@ impl Engine {
                 });
                 out.push(Output::Event(Event::Shell { node, rsp }));
             }
-            // The mirror took the new name when the update was sent: restore it from the
-            // device (a link that is down resyncs on reconnect instead).
+            // The mirror took the new name when the update was queued: restore it from the
+            // device (with the link down, the reconnect's listing does).
             OpKind::NodeUpdate { .. } if self.serial_up => {
                 self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
             }
@@ -2018,6 +2138,26 @@ impl Engine {
         self.issue(out, OpKind::NodeList, MgmtOp::NodeList, None);
     }
 
+    /// Node `id` left the registry, seen in the `NodeRemove` answer or in a listing without it:
+    /// end each of its pending shell dialogs (`pending`, taken out of its dropped mirror row)
+    /// with its one terminal `done`, and clear its retained topics (empty payloads).
+    fn node_gone(&self, out: &mut Vec<Output>, id: u32, pending: &[PendingShell]) {
+        for pd in pending {
+            self.shell_error(out, id, pd, "node removed");
+        }
+        for topic in [
+            topics::node(&self.prefix, id),
+            topics::node_temperature(&self.prefix, id),
+            topics::node_shell_pending(&self.prefix, id),
+        ] {
+            out.push(Output::Publish {
+                topic,
+                payload: Vec::new(),
+                retain: true,
+            });
+        }
+    }
+
     /// Merge a fresh `NodeList` into the mirror: keep host-side enrichment (kind,
     /// session, pendings) for surviving nodes, publish adds/changes, clear removals.
     fn merge_registry(&mut self, fresh: Vec<NodeEntryOwned>, out: &mut Vec<Output>) {
@@ -2058,19 +2198,15 @@ impl Engine {
                 }),
             }
         }
-        // Anything left in the old mirror was removed on the device.
-        for gone in self
-            .nodes
+        // Anything left in the old mirror was removed on the device (e.g. a `node_remove` whose
+        // answer was lost): clean up as that answer would have.
+        let old = std::mem::replace(&mut self.nodes, next);
+        for gone in old
             .iter()
-            .filter(|o| next.iter().all(|n| n.entry.addr != o.entry.addr))
+            .filter(|o| self.nodes.iter().all(|n| n.entry.addr != o.entry.addr))
         {
-            out.push(Output::Publish {
-                topic: topics::node(&self.prefix, gone.entry.addr),
-                payload: Vec::new(),
-                retain: true,
-            });
+            self.node_gone(out, gone.entry.addr, &gone.pending);
         }
-        self.nodes = next;
         for i in 0..self.nodes.len() {
             self.publish_node(out, i);
         }
@@ -2230,6 +2366,17 @@ impl Engine {
             Err(_) => out.push(Output::Event(Event::Log(
                 "late pairing answer from the gateway did not decode; run `nodes list`".into(),
             ))),
+        }
+    }
+
+    /// The `PairingOpen` `req_id` ended unjoined (expired, refused, failed): back to `idle`, but
+    /// only if its window is the one shown (`pairing_req`); after a `pairing_cancel` it no
+    /// longer is, and its answer must not close a window opened since.
+    fn end_pairing(&mut self, out: &mut Vec<Output>, req_id: u16) {
+        if self.pairing_req == Some(req_id) {
+            self.pairing_req = None;
+            self.pairing_until = None;
+            self.publish_pairing(out, None, None);
         }
     }
 
@@ -3765,5 +3912,371 @@ mod tests {
         let _ = e.handle(Input::MqttUp);
         let out = e.handle(Input::MqttDown { error: "eof".into() });
         assert!(logs(&out)[0].starts_with("mqtt lost"));
+    }
+
+    /// A `NodeInfo` heartbeat from `src`, running firmware `fw`, as an uplink.
+    fn info_uplink(src: u32, counter: u32, fw: &str) -> Input {
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(
+            &NodeMsg::Info(radio::NodeInfo {
+                firmware_name: fw,
+                firmware_version: "v0.1.0",
+                session_id: 1,
+                sleeping: true,
+            }),
+            &mut env,
+        )
+        .unwrap();
+        Input::SerialFrame(SerialMsg::Uplink {
+            src,
+            counter,
+            rssi: -60,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        })
+    }
+
+    /// One chunk of a successful management answer.
+    fn mgmt_chunk(req_id: u16, chunk: u16, last: bool, data: &[u8]) -> Input {
+        Input::SerialFrame(SerialMsg::Mgmt {
+            req_id,
+            result: MGMT_OK,
+            chunk,
+            last,
+            data: data.to_vec(),
+        })
+    }
+
+    /// Answer every request the engine sends, in order, as the device would: a `NodeList` with
+    /// `registry`, anything else with an empty success. Bounded, so a request loop fails the test.
+    fn answer_all(e: &mut Engine, registry: &[u8]) {
+        for _ in 0..16 {
+            let Some(p) = e.pending_mgmt.iter().find(|p| p.frame.is_none()) else {
+                return;
+            };
+            let (req_id, list) = (p.req_id, matches!(p.op, OpKind::NodeList));
+            let _ = reply(e, req_id, MGMT_OK, if list { registry } else { &[] });
+        }
+        panic!("the engine kept sending requests: {:?}", queued_ops(e));
+    }
+
+    /// A `NodeList` answer with a lost middle chunk can't prove a node absent, and its records
+    /// are spliced from the bytes around the gap: nothing is merged (no node vanishes, no retained
+    /// topic is cleared, the startup sync stays pending), the RPC fails, and the registry is
+    /// listed again.
+    #[test]
+    fn a_node_list_with_a_lost_chunk_is_not_merged() {
+        let mut e = engine();
+        let a = node_entry_record(0xAB12, "kitchen", 0);
+        let registry = [a.clone(), node_entry_record(0xCD34, "porch", 0)].concat();
+        // Chunks 0 and 2 of a three-chunk answer; chunk 1 (the end of the first record and the
+        // start of the second) was lost.
+        let gapped = |e: &mut Engine, req_id: u16| {
+            let _ = e.handle(mgmt_chunk(req_id, 0, false, &registry[..a.len() - 3]));
+            e.handle(mgmt_chunk(req_id, 2, true, &registry[a.len() + 4..]))
+        };
+        let start = e.start();
+        let (list_id, _) = start.iter().find_map(sent_op).unwrap();
+        let out = gapped(&mut e, list_id);
+        assert!(!e.registry_synced, "the startup sync has not landed");
+        assert!(e.nodes.is_empty(), "{:?}", e.nodes);
+        assert!(
+            queued_ops(&e).iter().any(|o| o.contains("NodeList")),
+            "{:?}",
+            queued_ops(&e)
+        );
+        let (sync, op) = out.iter().find_map(sent_op).expect("the queue sync goes out");
+        assert!(op.contains("QueueList"), "{op}");
+        let out = reply(&mut e, sync, MGMT_OK, &[]);
+        let (relist, _) = out
+            .iter()
+            .find_map(sent_op)
+            .expect("the registry is listed again");
+        let _ = reply(&mut e, relist, MGMT_OK, &registry);
+        assert!(e.registry_synced);
+
+        let out = e.handle(mqtt_in("tower/gateway/cmd", br#"{"id":"u-l","op":"node_list"}"#));
+        let (list_id, _) = out.iter().find_map(sent_op).unwrap();
+        let out = gapped(&mut e, list_id);
+        let names: Vec<(u32, &str)> = e
+            .nodes
+            .iter()
+            .map(|n| (n.entry.addr, n.entry.name.as_str()))
+            .collect();
+        assert_eq!(names, [(0xAB12, "kitchen"), (0xCD34, "porch")]);
+        assert!(
+            !out.iter()
+                .any(|o| matches!(o, Output::Publish { payload, .. } if payload.is_empty())),
+            "no retained topic is cleared: {out:?}"
+        );
+        assert!(!rpc_rsp(&out, "u-l").ok);
+        assert!(
+            out.iter()
+                .filter_map(sent_op)
+                .any(|(_, op)| op.contains("NodeList")),
+            "the registry is listed again"
+        );
+    }
+
+    /// A removal the bridge learns of only from a listing (a `node_remove` whose answer timed out
+    /// although the dongle did remove the node) cleans up as the removal's answer does: each
+    /// pending shell dialog ends with its one `done`, and every retained topic of the node clears.
+    #[test]
+    fn a_removal_seen_only_in_a_listing_cleans_up_like_node_remove() {
+        let mut e = engine();
+        queue_shell(&mut e, 0xAB12, 3, "u-2", "/x");
+        let _ = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-rm","op":"node_remove","params":{"addr":"0x0000ab12"}}"#,
+        ));
+        let mut out = Vec::new();
+        for _ in 0..=MGMT_TIMEOUT_TICKS {
+            out.extend(e.handle(Input::Tick));
+        }
+        assert!(!rpc_rsp(&out, "u-rm").ok, "the removal's answer was lost");
+        let out = e.handle(mqtt_in("tower/gateway/cmd", br#"{"id":"u-l","op":"node_list"}"#));
+        let (list_id, _) = out.iter().find_map(sent_op).unwrap();
+        let out = reply(&mut e, list_id, MGMT_OK, &[]);
+        assert!(e.nodes.is_empty());
+        assert_eq!(publishes(&out, "tower/nodes/0x0000ab12/shell/rsp").len(), 1);
+        let rsp = last_shell_rsp(&out);
+        assert_eq!(rsp.id, "u-2");
+        assert!(
+            rsp.done && rsp.error.as_deref() == Some("node removed"),
+            "{rsp:?}"
+        );
+        for topic in [
+            "tower/nodes/0x0000ab12",
+            "tower/nodes/0x0000ab12/measure/temperature",
+            "tower/nodes/0x0000ab12/shell/pending",
+        ] {
+            assert!(
+                out.iter().any(
+                    |o| matches!(o, Output::Publish { topic: t, payload, retain: true }
+                    if t == topic && payload.is_empty())
+                ),
+                "missing empty retained publish for {topic}"
+            );
+        }
+    }
+
+    /// A rename refused up front (the serial link is down) never reaches the dongle, so the
+    /// mirror keeps the old name.
+    #[test]
+    fn a_rename_refused_while_the_serial_link_is_down_is_not_mirrored() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let _ = e.handle(Input::SerialDown { error: "gone".into() });
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-ren","op":"node_rename","params":{"addr":"0x0000ab12","name":"porch"}}"#,
+        ));
+        assert!(!rpc_rsp(&out, "u-ren").ok);
+        assert_eq!(e.nodes[0].entry.name, "kitchen");
+        assert!(
+            publishes(&out, "tower/nodes/0x0000ab12").is_empty(),
+            "nothing renamed to publish"
+        );
+    }
+
+    /// An auto-name still waiting for the request slot when the serial link drops is never sent,
+    /// though the mirror took it: the reconnect lists the registry, which restores the device's
+    /// truth (still unnamed), so the next heartbeat names the node for real.
+    #[test]
+    fn an_auto_name_lost_at_a_serial_drop_is_undone_by_the_reconnect() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "", NODE_FLAG_UNNAMED);
+        // A request in flight holds the slot, so the auto-name waits.
+        let out = e.handle(mqtt_in("tower/gateway/cmd", br#"{"id":"u-d","op":"describe"}"#));
+        let (held, _) = out.iter().find_map(sent_op).unwrap();
+        let _ = e.handle(info_uplink(0xAB12, 1, "radio_push_button"));
+        assert!(
+            queued_ops(&e).iter().any(|o| o.contains("push-button:0")),
+            "{:?}",
+            queued_ops(&e)
+        );
+        let _ = e.handle(Input::SerialDown { error: "gone".into() });
+        let _ = e.handle(Input::SerialUp);
+        let _ = reply(&mut e, held, MGMT_OK, &[]);
+        answer_all(&mut e, &node_entry_record(0xAB12, "", NODE_FLAG_UNNAMED));
+        let n = &e.nodes[0].entry;
+        assert!(
+            n.name.is_empty() && n.flags & NODE_FLAG_UNNAMED != 0,
+            "the device's truth: {n:?}"
+        );
+        let out = e.handle(info_uplink(0xAB12, 2, "radio_push_button"));
+        assert!(
+            out.iter()
+                .filter_map(sent_op)
+                .any(|(_, op)| op.contains("push-button:0")),
+            "named again"
+        );
+    }
+
+    /// A rename needs the node in the mirror. The dongle's `NodeUpdate` replaces the flags, so the
+    /// host sends the node's flags with `unnamed` cleared (sent without flags, the node stayed
+    /// unnamed and its next heartbeat auto-named over the rename), and the duplicate-name check
+    /// needs the other names. Until the startup listing lands, the node is an `unknown node`.
+    #[test]
+    fn a_rename_needs_the_node_mirrored_and_clears_unnamed() {
+        let mut e = engine();
+        let start = e.start();
+        let (list_id, _) = start.iter().find_map(sent_op).unwrap();
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-ren","op":"node_rename","params":{"addr":"0x0000cd34","name":"porch"}}"#,
+        ));
+        assert_eq!(rpc_rsp(&out, "u-ren").error.as_deref(), Some("unknown node"));
+        assert!(
+            !queued_ops(&e).iter().any(|o| o.contains("NodeUpdate")),
+            "{:?}",
+            queued_ops(&e)
+        );
+        let record = node_entry_record(0xCD34, "", NODE_FLAG_UNNAMED | NODE_FLAG_SLEEPING);
+        let out = reply(&mut e, list_id, MGMT_OK, &record);
+        let (sync, _) = out.iter().find_map(sent_op).unwrap();
+        let _ = reply(&mut e, sync, MGMT_OK, &[]);
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-ren2","op":"node_rename","params":{"addr":"0x0000cd34","name":"porch"}}"#,
+        ));
+        let (_, op) = out.iter().find_map(sent_op).expect("the rename goes out");
+        assert!(op.contains(&format!("flags: Some({NODE_FLAG_SLEEPING})")), "{op}");
+    }
+
+    /// A cancelled window stays the dongle's until it answers the cancelled `PairingOpen`: a new
+    /// `node_add_ota` is refused until then, and once that answer is in, a new window opens and
+    /// shows on `gateway/pairing`.
+    #[test]
+    fn a_new_pairing_window_waits_for_the_cancelled_one_to_close() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-a","op":"node_add_ota","params":{"window":30}}"#,
+        ));
+        let (open_a, _) = out.iter().find_map(sent_op).unwrap();
+        let _ = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-c","op":"pairing_cancel"}"#,
+        ));
+        let mut cancel = None;
+        for _ in 0..PAIRING_PICKUP_TICKS {
+            cancel = cancel.or(e.handle(Input::Tick).iter().find_map(sent_op));
+        }
+        let (cancel, op) = cancel.expect("the cancel goes out after the pickup");
+        assert!(op.contains("PairingCancel"), "{op}");
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-b","op":"node_add_ota","params":{"window":30}}"#,
+        ));
+        assert!(!rpc_rsp(&out, "u-b").ok, "window A is still open on the dongle");
+        // The dongle takes the cancel: window A resolves unjoined, then the cancel is acked.
+        let out = reply(&mut e, open_a, mgmt::MGMT_TIMEOUT, &[]);
+        assert!(rpc_rsp(&out, "u-a").data["joined"].is_null());
+        let out = reply(&mut e, cancel, MGMT_OK, &[]);
+        assert!(rpc_rsp(&out, "u-c").ok);
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-b2","op":"node_add_ota","params":{"window":30}}"#,
+        ));
+        assert!(
+            out.iter()
+                .filter_map(sent_op)
+                .any(|(_, op)| op.contains("PairingOpen"))
+        );
+        let pairing = publishes(&out, "tower/gateway/pairing");
+        let p: payload::Pairing = serde_json::from_slice(pairing.last().unwrap()).unwrap();
+        assert_eq!((p.state.as_str(), p.remaining), ("open", Some(30)));
+    }
+
+    /// An auto-name fits the dongle's name limit: a long kind is clipped (on a char boundary) so
+    /// `kind:n` stays within `MAX_NODE_NAME`; the dongle refused a longer one, and the node, still
+    /// unnamed, was named again on every heartbeat.
+    #[test]
+    fn auto_names_fit_the_name_limit() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "", NODE_FLAG_UNNAMED);
+        let out = e.handle(info_uplink(0xAB12, 1, "radio_climate_monitor"));
+        let (_, op) = out.iter().find_map(sent_op).expect("the auto-name goes out");
+        assert!(op.contains("\"climate-monito:0\""), "{op}");
+        assert_eq!(e.nodes[0].entry.name, "climate-monito:0");
+        for n in [0, 9, 10, 12345] {
+            let name = auto_name("ěěěěěěěěěě", n);
+            assert!(name.len() <= mgmt::MAX_NODE_NAME, "{name}");
+            assert!(name.ends_with(&format!("ě:{n}")), "{name}");
+        }
+    }
+
+    /// An unanswered `queue_drop` may not have reached the dongle, whose item would then still run
+    /// with nobody listening (its dialog already ended `dequeued`): the queue is resynced, as after
+    /// an unanswered enqueue, so such an item is dropped as stale.
+    #[test]
+    fn an_unanswered_queue_drop_resyncs_the_queue() {
+        let mut e = engine();
+        queue_shell(&mut e, 0xAB12, 3, "u-2", "/x");
+        let out = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"u-d","op":"queue_drop","params":{"addr":"0x0000ab12","ref":3}}"#,
+        ));
+        assert_eq!(last_shell_rsp(&out).error.as_deref(), Some("dequeued"));
+        let mut out = Vec::new();
+        for _ in 0..=MGMT_TIMEOUT_TICKS {
+            out.extend(e.handle(Input::Tick));
+        }
+        assert!(!rpc_rsp(&out, "u-d").ok);
+        assert!(
+            e.pending_mgmt.iter().any(|p| matches!(p.op, OpKind::QueueSync)),
+            "a queue resync follows"
+        );
+    }
+
+    /// A long streamed reply keeps its dialog alive: every arriving chunk restarts the reply
+    /// timeout, which only ends a reply the node has gone quiet on.
+    #[test]
+    fn a_streaming_reply_is_not_cut_while_its_chunks_keep_coming() {
+        let mut e = engine();
+        queue_shell(&mut e, 0xAB12, 9, "u-1", "/log tail");
+        let _ = e.handle(Input::SerialFrame(SerialMsg::Stat(RadioStat::Tx {
+            dest: 0xAB12,
+            item: 9,
+            outcome: mgmt::TX_DELIVERED,
+            ack_rssi: None,
+        })));
+        let rsp = "tower/nodes/0x0000ab12/shell/rsp";
+        for chunk in 0..3 {
+            for _ in 0..SHELL_REPLY_TIMEOUT_TICKS - 1 {
+                assert!(
+                    publishes(&e.handle(Input::Tick), rsp).is_empty(),
+                    "cut mid-stream"
+                );
+            }
+            let out = shell_chunk_uplink(&mut e, 0xAB12, 1, chunk, false, "aa");
+            assert!(last_shell_rsp(&out).error.is_none());
+        }
+        let out = shell_chunk_uplink(&mut e, 0xAB12, 1, 3, true, "bb");
+        let last = last_shell_rsp(&out);
+        assert!(last.done && last.error.is_none() && !last.truncated, "{last:?}");
+    }
+
+    /// A refused enqueue answers the dialog in the shell's code space: the generic failure `1`,
+    /// the dongle's reason in `error`. Its management code (`MGMT_FULL` = 4, `MGMT_BUSY` = 5)
+    /// would read as another shell result (`5` is the shell's "denied").
+    #[test]
+    fn a_refused_enqueue_reports_the_generic_shell_failure() {
+        for code in [mgmt::MGMT_FULL, mgmt::MGMT_BUSY, mgmt::MGMT_NOT_FOUND] {
+            let mut e = engine();
+            with_node(&mut e, 0xAB12, "kitchen", 0);
+            let out = e.handle(mqtt_in(
+                "tower/nodes/0x0000ab12/shell/req",
+                br#"{"id":"u-q","line":"x"}"#,
+            ));
+            let (req_id, _) = out.iter().find_map(sent_op).unwrap();
+            let out = reply(&mut e, req_id, code, &[]);
+            let rsp = last_shell_rsp(&out);
+            assert_eq!(rsp.result, 1, "code {code}");
+            assert!(rsp.done);
+            assert_eq!(rsp.error.as_deref(), payload::mgmt_error_str(code));
+        }
     }
 }

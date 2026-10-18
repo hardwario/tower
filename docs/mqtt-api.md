@@ -218,7 +218,7 @@ The retained join result stays until the next pairing state change or the bridge
 
 Retained, one per registered node; an **empty payload** (not JSON) clears it when the node is
 removed. Republished on registry refreshes (bridge start, `node_list`, adds, renames, pairing,
-a dongle reboot), on each of the node's `NodeInfo` heartbeats, when a remote command is
+a dongle reboot, a serial reconnect), on each of the node's `NodeInfo` heartbeats, when a remote command is
 queued for it, and on every broker (re)connect. The same object is an element of the
 `node_list` RPC answer.
 
@@ -228,7 +228,7 @@ queued for it, and on every broker (re)connect. The same object is an element of
 | `name` | string | Friendly name, at most 16 bytes; `""` while `unnamed` |
 | `kind` | string | Device kind from the node's firmware name (`radio_push_button` is `push-button`); `""` until the node's first `NodeInfo` heartbeat since the bridge started |
 | `sleeping` | bool | The node sleeps between uplinks (downlinks wait for its next uplink) |
-| `unnamed` | bool | No name assigned yet; the bridge auto-names the node `<kind>:<n>` (e.g. `push-button:0`) on its first heartbeat |
+| `unnamed` | bool | No name assigned yet; the bridge auto-names the node `<kind>:<n>` (e.g. `push-button:0`; the kind clipped so the name fits 16 bytes, e.g. `climate-monito:0`) on its first heartbeat |
 | `last_seen` | number or `null` | Seconds since the node's last uplink as the dongle reported it at the last registry refresh, or `0` after an uplink the bridge has seen since; not aged between refreshes, so for liveness use the `ts` of the node's events or a fresh `node_list`. `null` = not heard since the dongle booted |
 | `rssi` | number or `null` | RSSI of the last uplink, dBm; `null` = none yet |
 | `uplinks` | number | Uplinks since the dongle booted |
@@ -479,7 +479,9 @@ The gateway's network parameters. No params.
 #### `node_list`
 
 The registry, read from the dongle. No params. `data` is an array of [Node](#nodesaddr)
-objects; the call also refreshes every retained `nodes/{addr}`.
+objects; the call also refreshes every retained `nodes/{addr}`. An answer that lost a chunk on
+the serial link is not used: the RPC fails with `the device's answer arrived incomplete (a chunk
+was lost)` and the bridge lists the registry again by itself.
 
 ```json
 {"id":"u-l","op":"node_list"}
@@ -534,7 +536,9 @@ is **delayed** until the window resolves.
 | The window expired, or `pairing_cancel` closed it | `ok: true`, `data: {"joined": null}` (not an error) |
 | No answer within the window plus 15 s | `ok: false`, `device did not answer (timeout)` (a join reported later still appears on `gateway/pairing`) |
 
-Errors: `a pairing window is already open` (this bridge has one open), and from the dongle
+Errors: `a pairing window is already open` (this bridge has one open), `the cancelled pairing
+window has not closed yet; try again` (after a `pairing_cancel`, until the dongle answered the
+cancelled window), and from the dongle
 `busy (conflicting operation in flight)`, `capacity exhausted` (registry full),
 `operation not supported by this device` (no hardware TRNG), `device storage error` (a
 registry written by another firmware build).
@@ -570,8 +574,9 @@ Name rules (also for `node_add`): 1 to 16 bytes of UTF-8 (`name must be 1..=16 b
 printable, without control or bidirectional override characters
 (`name must be printable text (no control characters)`), not shaped like an address
 (`name must not look like a node address (0xHHHHHHHH)`), and unique
-(`name "<name>" is already used by <addr>`). Other errors: `unknown node`, `missing name`, and
-the dongle's `not found`. Renaming clears `unnamed`.
+(`name "<name>" is already used by <addr>`). Other errors: `unknown node` (also for a node the
+bridge has not listed yet, e.g. before its startup listing landed), `missing name`, and the
+dongle's `not found`. Renaming clears `unnamed`.
 
 ```json
 {"id":"u-r","op":"node_rename","params":{"addr":"0x0000ab12","name":"kitchen"}}
@@ -585,7 +590,8 @@ the dongle's `not found`. Renaming clears `unnamed`.
 Unpairs a node: the dongle forgets its key and drops its queued downlinks. The bridge clears
 the retained `nodes/{addr}`, `nodes/{addr}/measure/temperature` and `nodes/{addr}/shell/pending`
 (empty payloads), and every pending shell command of the node ends with the error
-`node removed`. A removed node can pair again (section 6). Errors: `unknown node`, `not found`.
+`node removed`. The same happens when a listing shows a node gone (e.g. a removal whose answer
+was lost). A removed node can pair again (section 6). Errors: `unknown node`, `not found`.
 
 ```json
 {"id":"u-rm","op":"node_remove","params":{"addr":"kitchen"}}
@@ -650,7 +656,8 @@ The remote shell commands it removes end at once with the error `dequeued` and l
 `shell/pending`. Without `ref`, every not yet delivered command of the node goes. A `ref` that
 was already delivered is no longer on the dongle (the RPC answers `not found`), but the bridge
 stops waiting for its reply. Errors: `unknown node`, `ref must be a queue item id (1..=65535)`,
-`not found` (nothing matched on the dongle).
+`not found` (nothing matched on the dongle). After a drop the dongle never answered, the bridge
+reconciles the queue and drops the item if it is still there.
 
 ```json
 {"id":"u-qd","op":"queue_drop","params":{"addr":"0x0000ab12","ref":9}}
@@ -706,8 +713,9 @@ uplinks, so the line waits in the dongle's downlink queue until then.
 **1. Subscribe** to `nodes/{addr}/shell/rsp` (and, if you want the queue state,
 `nodes/{addr}/shell/pending`) before sending.
 
-**2. Request.** Publish on `nodes/{addr}/shell/req` (canonical lowercase address in the topic),
-QoS 1, **not retained**:
+**2. Request.** Publish on `nodes/{addr}/shell/req`, QoS 1, **not retained**. The bridge
+accepts the address in either case (`0x0000ab12` or `0X0000AB12`), but always answers on the
+lowercase topic (`nodes/0x0000ab12/shell/rsp`), so subscribe there:
 
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
@@ -739,7 +747,7 @@ all and 2 per node, in RAM, so a dongle reboot loses it.
 | `chunk` | number | Chunk index, from `0` |
 | `text` | string | This chunk's output (at most 56 bytes); concatenate the chunks in order |
 | `done` | bool | The last message of the dialog |
-| `result` | number | The shell result, authoritative only when `done`: `0` ok, `1` not found, `2` bad argument, `3` storage error, `4` output truncated, `5` denied (a console-only command, refused over the radio); with `error`, non-zero |
+| `result` | number | The shell result, authoritative only when `done`: `0` ok, `1` not found, `2` bad argument, `3` storage error, `5` denied (a console-only command, refused over the radio); with `error` (a failure the bridge reports), `1` |
 | `truncated` | bool | A chunk was lost on the air (a gap in `chunk`): the output is incomplete. Sticky for the rest of the dialog |
 | `error` | string | Present only on a terminal failure reported by the bridge instead of a node reply; `text` is then empty |
 
@@ -756,11 +764,11 @@ last chunk or one of these terminal errors:
 |---------|------|
 | `unknown node` | The node is not registered |
 | `line too long for the radio MTU (max 56 bytes)` | `line` over 56 bytes |
-| a dongle error, e.g. `capacity exhausted` | The dongle refused the enqueue (queue full); `result` is the dongle's refusal code |
+| a dongle error, e.g. `capacity exhausted` | The dongle refused the enqueue (queue full); `result` is `1`, the reason is in `error` |
 | `not queued: gateway serial link is down` / `not queued: device did not answer (timeout)` | The enqueue never reached the dongle or was not answered |
 | `queue TTL expired before delivery` | The node did not wake within `ttl` |
 | `queue TTL elapsed with no delivery report from the gateway` | Backstop, `ttl` plus 30 s without any report |
-| `delivered but no reply from the node` | Delivered, then no reply within 30 s |
+| `delivered but no reply from the node` | Delivered, then no reply chunk for 30 s (each chunk restarts the wait) |
 | `gateway rebooted; command lost` | The dongle rebooted; its queue is gone (send the line again) |
 | `no longer queued on the gateway (lost while the host link was down)` | Found missing after the serial link came back |
 | `dequeued` | Dropped with `queue_drop` |
@@ -771,7 +779,8 @@ last chunk or one of these terminal errors:
 ```
 
 A request whose `id` is invalid or repeated, that does not parse (e.g. a `ttl` over 65535), or
-whose topic does not hold a canonical address, gets no response. Remote commands that would orphan a node (`system eeprom wipe`, changing its
+whose topic does not hold an address (`0x` or `0X` and exactly 8 hex digits, in either case)
+gets no response. Remote commands that would orphan a node (`system eeprom wipe`, changing its
 address setting) are refused with `result` `5`; `system reboot` works. The queue may deliver a
 line more than once; the node recognizes a re-delivery and does not run it again.
 
@@ -784,10 +793,10 @@ checked by comparing a 6-digit short authentication string (SAS) shown at both e
 2. Send `node_add_ota` with the window you need (default 60 s, at most 600 s) and wait up to the
    window plus 20 s for the response. `gateway/pairing` turns to `{"state":"open","remaining":N}`
    and counts down every second.
-3. Put the node in join mode: on an unpaired push button, hold the button for at least 1 s. A
-   node that is paired already (moving to this gateway, or one whose gateway forgot it) re-pairs
-   with a 12 s hold; OTA pairing never re-keys an address the gateway still has registered, so
-   `node_remove` it here first.
+3. Put the node in join mode: on an unpaired push button, hold the button for at least its
+   `hold-time` setting (1 s by default). A node that is paired already (moving to this gateway,
+   or one whose gateway forgot it) re-pairs with a 12 s hold; OTA pairing never re-keys an
+   address the gateway still has registered, so `node_remove` it here first.
 4. On a join, `gateway/pairing` becomes `{"state":"idle","joined":"0x0000cd34","sas":"004321"}`
    and the RPC answers `{"joined":"0x0000cd34","sas":"004321"}`. The node then appears on
    `nodes/{addr}` (`unnamed`), and the bridge names it `push-button:0` (or the next free index)
