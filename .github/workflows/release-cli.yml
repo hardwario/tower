@@ -2,8 +2,7 @@
 # together with the product firmware built from the same commit (a `tower` binary and firmware
 # from other sources refuse each other's frames, so the two ship as a matched set).
 #
-# The other crates are internal path dependencies with no releases of their own; the historical
-# `protocol-v*` and `jolt-v*` tags are not built.
+# The other crates are internal path dependencies with no releases or tags of their own.
 #
 # Dry run: start the workflow by hand on main (Actions > Release (tower CLI) > Run workflow). It
 # runs the checks and every build and uploads the archives as workflow artifacts, but skips the
@@ -210,7 +209,7 @@ jobs:
             exit 1
           fi
 
-      # Archive name = tag + target, e.g. tower-cli-v2.0.0-aarch64-apple-darwin.tar.gz (a dry run
+      # Archive name = tag + target, e.g. tower-cli-v1.0.0-aarch64-apple-darwin.tar.gz (a dry run
       # names it after the branch).
       - name: Package
         id: package

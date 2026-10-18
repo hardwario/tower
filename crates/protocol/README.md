@@ -91,10 +91,9 @@ peers and no version negotiation.
 
 ## History
 
-Releases used to be tagged `protocol-vX.Y.Z` with hand-bumped version constants (a 3-bit header
-version, a radio schema version byte, a 32-bit fingerprint in `Hello`). Those tags stay in the
-repository as history; no new ones are made. The version constants were replaced by the schema
-tags, and the crate is versioned `0.0.0` (internal, never published).
+The wire used to carry hand-bumped version constants (a 3-bit header version, a radio schema
+version byte, a 32-bit fingerprint in `Hello`). They were replaced by the schema tags, and the
+crate is versioned `0.0.0` (internal, never published, no tags of its own).
 
 ## License
 

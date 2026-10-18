@@ -27,9 +27,8 @@ from the schema's structural hash (`src/fingerprint.rs`), so the stale side fail
    install-cli`). A board or a `tower` binary from another checkout is rejected by its tag
    (`tower` prints the mismatch banner and exits 125).
 
-That is all: no version constant, no changelog, no golden bytes to update, no tag to cut. The
-`protocol-v*` git tags that exist are history (the earlier hand-versioned releases); no new ones
-are made. Things to keep in mind:
+That is all: no version constant, no changelog, no golden bytes to update, no tag to cut. Things
+to keep in mind:
 
 - A rename keeps the tags (names are not hashed). Never use a serde attribute that changes the
   encoding (`skip`, `with`, `flatten`, ...): the `Schema` derive cannot see it.

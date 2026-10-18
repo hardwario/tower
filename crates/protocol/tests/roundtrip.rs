@@ -262,7 +262,7 @@ fn crc_valid_foreign_tag_is_schema_mismatch() {
 }
 
 /// A frame from the last tree that framed with a version byte (`ver_type ‖ seq ‖ payload ‖
-/// crc`, tag protocol-v1.6.0; these are its `Hello` golden wire bytes) is refused, never
+/// crc`; these are its `Hello` golden wire bytes) is refused, never
 /// decoded: its CRC still covers the whole frame, so it passes, and its seq bytes land where the
 /// tag is read. A board or a `tower` binary from that tree is caught by the same mismatch path.
 #[test]

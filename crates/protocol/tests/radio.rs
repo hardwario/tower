@@ -123,7 +123,7 @@ fn foreign_tag_is_rejected() {
     );
 }
 
-/// An envelope from the tree that led with a one-byte schema version (protocol-v1.6.0; a
+/// An envelope from the last tree that led with a one-byte schema version (there a
 /// `NodeMsg::Button { Click, 42 }` was `[0x02, 0x01, 0x02, 0x2a]`) is refused on its tag.
 #[test]
 fn a_version_byte_envelope_from_an_older_tree_is_refused() {

@@ -91,7 +91,7 @@ Open it here and run `/bootstrap`; `AGENTS.md` gives it the whole-stack context.
 - The other crates are internal path dependencies (version `0.0.0`, never published) and are not
   released on their own. The wire has no version: every frame and radio envelope carries a schema
   tag derived from `crates/protocol`'s types, so a board or a `tower` binary built from another
-  checkout is refused. The older `protocol-vX.Y.Z` tags are history; no new ones are made.
+  checkout is refused.
 
 ## Contributing
 
