@@ -112,6 +112,9 @@ async fn run(b: Board) {
     }
 
     let pass = used >= 50 && max_ms <= LIMIT_MS && edges_ok;
+    // Let the verdicts above leave the wire first: the console queue holds 4 frames and a log
+    // line that finds it full is dropped, and the summary is the line the bench waits for.
+    tower::console::flush().await;
     if pass {
         info!(
             target: "fhss",

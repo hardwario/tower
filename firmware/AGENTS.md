@@ -98,6 +98,10 @@ line speaks in one voice; `docs/console.md` (*Logging*) shows the same rules to 
   ready)`. It ends with one summary verdict, `all checks PASS` (the phrase the bench waits for)
   or `some checks FAIL`: `edge: frame limits, all checks PASS`. A `PASS` or `MATCH` line is
   `info`, a `FAIL` or `MISMATCH` line `error`.
+- **Bursts.** The console queue holds 4 frames and the logger cannot wait for room (`log` is
+  synchronous), so lines logged back to back beyond that are dropped; the host then shows `N log
+  frame(s) dropped`. Await `console::flush()` before a line that must arrive (a summary verdict
+  always does) or between groups of lines.
 - **Lines that tools read are an interface:** the verdicts, `net: pairing: SAS n` and the few
   example lines the bench parses (`pair: paired node 0x…, key …`, `persist: TX counter resumed at
   …`, `confirmed: #n delivered`) are matched by the HIL bench (`hil/tests`) and the hwtest

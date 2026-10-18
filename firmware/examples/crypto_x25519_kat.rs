@@ -251,6 +251,9 @@ async fn run(_b: Board) {
         if budget_ok { "" } else { ": raise PEER_KEX_TIME" }
     );
 
+    // Let the verdicts above leave the wire first: the console queue holds 4 frames and a log
+    // line that finds it full is dropped, and the summary is the line the bench waits for.
+    tower::console::flush().await;
     loop {
         let (used, total) = (stack::used(), stack::total());
         if pass {
