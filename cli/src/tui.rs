@@ -21,7 +21,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 use tower_protocol::msg::{
     Dropped, Event as EvMsg, Hello, Level, Log, Print, ShellCommand, ShellComplete, ShellCompletions,
     ShellResponse,
@@ -1117,17 +1117,12 @@ fn render_text_pane<T>(
     let block = if title.is_empty() {
         Block::default()
     } else {
-        let style = if focused {
-            Style::new().fg(Color::LightRed).add_modifier(Modifier::BOLD)
-        } else {
-            Style::new()
-        };
-        Block::bordered().title(title).border_style(style)
+        pane_block(title, focused)
     };
-    let bordered = !title.is_empty();
-    let inner_h = area.height.saturating_sub(if bordered { 2 } else { 0 }) as usize;
-    // Wrap width = inner content width (both borders removed when bordered).
-    let inner_w = area.width.saturating_sub(if bordered { 2 } else { 0 }) as usize;
+    // Wrap width and height = the content area (borders and padding removed when framed).
+    let inner = block.inner(area);
+    let inner_h = inner.height as usize;
+    let inner_w = inner.width as usize;
     if inner_h == 0 {
         f.render_widget(Paragraph::new(Vec::<Line>::new()).block(block), area);
         return;
@@ -1165,14 +1160,23 @@ fn render_text_pane<T>(
     f.render_widget(p, area);
 }
 
-fn render_shell(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == Pane::Shell;
+/// A framed pane: the title set off by a space on each side, the content one column in from
+/// both side borders, and the focused pane's border highlighted.
+fn pane_block(title: &str, focused: bool) -> Block<'static> {
     let style = if focused {
         Style::new().fg(Color::LightRed).add_modifier(Modifier::BOLD)
     } else {
         Style::new()
     };
-    let block = Block::bordered().title("Interactive Shell").border_style(style);
+    Block::bordered()
+        .title(format!(" {title} "))
+        .padding(Padding::horizontal(1))
+        .border_style(style)
+}
+
+fn render_shell(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
+    let focused = app.focus == Pane::Shell;
+    let block = pane_block("Interactive Shell", focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 {

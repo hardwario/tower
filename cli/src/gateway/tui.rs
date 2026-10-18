@@ -35,7 +35,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, Chart, Clear, Dataset, GraphType, LegendPosition, Paragraph, Row, Table, Wrap,
+    Axis, Block, Chart, Clear, Dataset, GraphType, LegendPosition, Padding, Paragraph, Row, Table, Wrap,
 };
 
 use super::engine::{Event, FrontendCmd, Input, MqttDir, MqttMsg, NodeView, RadioSample};
@@ -1200,8 +1200,10 @@ fn render_footer(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)).style(bar), area);
 }
 
+/// A framed pane (`title` carries its own spaces): the content one column in from both side
+/// borders, and the focused pane's border highlighted.
 fn pane_block(title: String, focused: bool) -> Block<'static> {
-    let mut b = Block::bordered().title(title);
+    let mut b = Block::bordered().title(title).padding(Padding::horizontal(1));
     if focused {
         b = b.border_style(Style::new().fg(Color::LightRed).add_modifier(Modifier::BOLD));
     }
@@ -1249,10 +1251,12 @@ fn render_nodes(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
         .collect();
     let table = Table::new(
         rows,
+        // 54 columns with the gaps: what a 100-column terminal leaves the pane (58 % of it, less
+        // the borders and padding). NAME takes whatever is wider; TYPE fits "push-button".
         [
             Constraint::Length(10),
-            Constraint::Min(10),
-            Constraint::Length(12),
+            Constraint::Min(8),
+            Constraint::Length(11),
             Constraint::Length(6),
             Constraint::Length(5),
             Constraint::Length(5),
@@ -1297,9 +1301,9 @@ fn render_chart(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
     // column off and the rounding drifts, rendering ragged bars/gaps (seen 2026-07-13).
     // ratatui-widgets 0.3 layout: left gutter = max(y-label width, first-x-label
     // width − 1) + 1 for the axis line (both terms held at 4 here: "-110" is 4 chars;
-    // the time labels are clamped to ≤5 below), plus the pane's 2 border columns when
-    // not zoomed. The x-label/axis rows cost height only, never columns.
-    let slots = (area.width.saturating_sub(if zoomed { 5 } else { 7 }) as usize).max(2);
+    // the time labels are clamped to ≤5 below), plus the pane's 2 border and 2 padding columns
+    // when not zoomed. The x-label/axis rows cost height only, never columns.
+    let slots = (area.width.saturating_sub(if zoomed { 5 } else { 9 }) as usize).max(2);
     // Bar `back` fills columns x = -(back·BAR_STRIDE) .. and BAR_W-1 more to the
     // left; only bars whose left column still fits inside the plot are drawn.
     let bars = (slots + BAR_STRIDE - BAR_W) / BAR_STRIDE;
@@ -1899,6 +1903,7 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
     let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
         Block::bordered()
             .title(title)
+            .padding(Padding::horizontal(1))
             .border_style(Style::new().fg(Color::Yellow)),
     );
     f.render_widget(p, area);
