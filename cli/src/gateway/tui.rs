@@ -27,6 +27,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
+use crate::history::{History, SEARCH_HINT, Search, SearchStep};
 use anyhow::Result;
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
@@ -163,8 +164,11 @@ struct App {
     shell_partial: HashMap<u32, (String, String)>,
     line: String,
     cursor: usize,
-    history: Vec<String>,
-    hist_idx: Option<usize>,
+    /// The command history, shared with the console TUI and `tower shell` and kept across
+    /// sessions (`crate::history`).
+    history: History,
+    /// Ctrl-R: the incremental history search in progress, if any (the prompt shows it).
+    search: Option<Search>,
     log: VecDeque<String>,
     log_scroll: usize,
     /// The broker traffic feed (both directions, capped). Never filtered at
@@ -439,8 +443,8 @@ pub(crate) fn run(
         shell_partial: HashMap::new(),
         line: String::new(),
         cursor: 0,
-        history: Vec::new(),
-        hist_idx: None,
+        history: History::load(),
+        search: None,
         log: VecDeque::new(),
         log_scroll: 0,
         mqtt: VecDeque::new(),
@@ -794,7 +798,13 @@ fn handle_nodes_key(app: &mut App, code: KeyCode) {
 }
 
 fn handle_shell_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    if app.search.is_some() {
+        return handle_search_key(app, code, mods);
+    }
     match (code, mods) {
+        (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+            app.search = Some(Search::new(&app.line, app.cursor));
+        }
         // Node-tab switching (Alt+arrows, or brackets on an empty line).
         (KeyCode::Left, KeyModifiers::ALT) => {
             app.shell_node = app.shell_node.saturating_sub(1);
@@ -809,14 +819,17 @@ fn handle_shell_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             app.shell_node = (app.shell_node + 1).min(app.nodes.len().saturating_sub(1));
         }
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+            app.history.stop_browsing();
             app.line.clear();
             app.cursor = 0;
         }
         (KeyCode::Char(c), m) if m.is_empty() || m == KeyModifiers::SHIFT => {
+            app.history.stop_browsing();
             app.line.insert(app.cursor, c);
             app.cursor += c.len_utf8();
         }
         (KeyCode::Backspace, _) => {
+            app.history.stop_browsing();
             if app.cursor > 0 {
                 let mut i = app.cursor - 1;
                 while !app.line.is_char_boundary(i) {
@@ -844,29 +857,45 @@ fn handle_shell_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 app.cursor = i;
             }
         }
-        (KeyCode::Up, _) if app.line.is_empty() || app.hist_idx.is_some() => {
-            let idx = match app.hist_idx {
-                Some(0) | None if app.history.is_empty() => return,
-                None => app.history.len() - 1,
-                Some(0) => 0,
-                Some(i) => i - 1,
-            };
-            app.hist_idx = Some(idx);
-            app.line = app.history[idx].clone();
-            app.cursor = app.line.len();
-        }
-        (KeyCode::Down, _) if app.hist_idx.is_some() => {
-            let i = app.hist_idx.unwrap();
-            if i + 1 < app.history.len() {
-                app.hist_idx = Some(i + 1);
-                app.line = app.history[i + 1].clone();
-            } else {
-                app.hist_idx = None;
-                app.line.clear();
+        (KeyCode::Up, _) => {
+            if let Some(line) = app.history.up(&app.line) {
+                app.line = line.to_string();
+                app.cursor = app.line.len();
             }
-            app.cursor = app.line.len();
         }
+        (KeyCode::Down, _) => {
+            if let Some(line) = app.history.down() {
+                app.line = line;
+                app.cursor = app.line.len();
+            }
+        }
+        (KeyCode::Home, _) => app.cursor = 0,
+        (KeyCode::End, _) => app.cursor = app.line.len(),
         (KeyCode::Enter, _) => submit_line(app),
+        _ => {}
+    }
+}
+
+/// A key while the history search runs (see [`Search::key`]); Ctrl-C still quits (the global
+/// keys run first).
+fn handle_search_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let Some(search) = app.search.as_mut() else {
+        return;
+    };
+    let ctrl = mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    let step = search.key(&app.history, code, ctrl);
+    if step == SearchStep::Continue {
+        return;
+    }
+    let search = app.search.take().expect("searching");
+    (app.line, app.cursor) = match step {
+        SearchStep::Cancel => (search.original, search.original_cursor),
+        _ => search.finish(&app.history),
+    };
+    app.history.stop_browsing();
+    match step {
+        SearchStep::Run => submit_line(app),
+        SearchStep::Edit(Some(key)) => handle_shell_key(app, key, KeyModifiers::NONE),
         _ => {}
     }
 }
@@ -880,8 +909,7 @@ fn submit_line(app: &mut App) {
         app.push_log("no node selected; pair one first (F2)".into());
         return;
     };
-    app.history.push(line.clone());
-    app.hist_idx = None;
+    app.history.push(&line);
     app.line.clear();
     app.cursor = 0;
     app.next_req += 1;
@@ -1415,6 +1443,20 @@ fn render_chart(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
     f.render_widget(chart, area);
 }
 
+/// The shell prompt: the line with a block cursor on the character at `cursor` (or after the
+/// line's end).
+fn prompt_line(line: &str, cursor: usize) -> Line<'static> {
+    let (before, rest) = line.split_at(cursor.min(line.len()));
+    let mut chars = rest.chars();
+    let under = chars.next().map_or_else(|| " ".to_string(), String::from);
+    Line::from(vec![
+        "> ".fg(Color::Cyan),
+        Span::raw(before.to_string()),
+        Span::styled(under, Style::new().add_modifier(Modifier::REVERSED)),
+        Span::raw(chars.as_str().to_string()),
+    ])
+}
+
 fn render_shell(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
     let (title, node_addr) = match app.shell_target() {
         Some(n) => (
@@ -1464,11 +1506,15 @@ fn render_shell(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
                 )));
             }
         }
-        lines.push(Line::from(vec![
-            "> ".fg(Color::Cyan),
-            Span::raw(app.line.clone()),
-            Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED)),
-        ]));
+        lines.push(match &app.search {
+            Some(search) => {
+                let mut spans = search.prompt(&app.history);
+                spans.push(Span::raw("   "));
+                spans.push(Span::styled(SEARCH_HINT, Style::new().fg(Color::DarkGray)));
+                Line::from(spans)
+            }
+            None => prompt_line(&app.line, app.cursor),
+        });
     } else {
         lines.push(Line::from("pair a node first: F2 opens the pairing window"));
     }
@@ -1937,8 +1983,8 @@ mod tests {
             shell_partial: HashMap::new(),
             line: String::new(),
             cursor: 0,
-            history: Vec::new(),
-            hist_idx: None,
+            history: History::in_memory(Vec::new()),
+            search: None,
             log: VecDeque::new(),
             log_scroll: 0,
             mqtt: VecDeque::new(),
@@ -2043,6 +2089,68 @@ mod tests {
         }
         let grid = render(&mut app);
         assert!(grid.contains("/led on"), "echoed into the dialog");
+    }
+
+    /// The shell pane's history: Up recalls the commands of earlier sessions, Ctrl-R finds one
+    /// by its words and Enter runs it, Esc gives back the line from before the search.
+    #[test]
+    fn shell_history_and_search() {
+        let (mut app, _etx, irx) = test_app();
+        app.history = History::in_memory(vec!["/led on".into(), "/system settings print".into()]);
+        app.on_event(Event::Registry(vec![node(0xAB12, "kitchen", 0)]));
+        app.focus = Pane::Shell;
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            app.line, "/system settings print",
+            "the newest of an earlier session"
+        );
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.line, "/led on");
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.line, "", "past the newest: the (empty) line being typed");
+        // Ctrl-R, a query, then Esc: the line from before the search comes back.
+        for c in "/x".chars() {
+            handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        handle_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        for c in "led".chars() {
+            handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        let grid = render(&mut app);
+        assert!(grid.contains("search: led") && grid.contains("/led on"), "{grid}");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!((app.line.as_str(), app.cursor), ("/x", 2));
+        // Ctrl-R again and Enter: the match runs and lands in the history.
+        handle_key(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        handle_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        for c in "SETT".chars() {
+            handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        match irx.try_recv() {
+            Ok(Input::Frontend(FrontendCmd::Shell { req, .. })) => {
+                assert_eq!(req.line, "/system settings print");
+            }
+            other => panic!("expected a shell FrontendCmd, got {other:?}"),
+        }
+        assert!(app.search.is_none() && app.line.is_empty());
+        assert_eq!(app.history.entries().last().unwrap(), "/system settings print");
+    }
+
+    /// The prompt draws its cursor on the character at the cursor, not always at the end.
+    #[test]
+    fn prompt_cursor_follows_the_cursor() {
+        let spans = prompt_line("/led on", 4).spans;
+        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(texts, ["> ", "/led", " ", "on"]);
+        assert!(spans[2].style.add_modifier.contains(Modifier::REVERSED));
+        let at_end: Vec<String> = prompt_line("/a", 2)
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(at_end, ["> ", "/a", " ", ""]);
     }
 
     #[test]

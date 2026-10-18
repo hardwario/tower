@@ -97,6 +97,18 @@ tower complete "/sys"             # ask the target to complete a partial command
 
 Both TUIs (the console and `tower gateway`) list their keys in the footer; F10 or Ctrl+C quits.
 
+**Command history.** The console TUI, the shell pane of `tower gateway` and `tower shell` share
+one command history that survives restarts: Up and Down walk it (Down past the newest gives back
+the line you were typing), and Ctrl-R searches it. In the TUIs, while searching, type words that
+must all appear in a command, in any order and any case; Ctrl-R or Up steps to older matches,
+Down back to newer ones, Enter runs the match, Left/Right/Home/End/Tab take it into the line for
+editing, and Esc (or Ctrl-G) gives back the line from before the search (`tower shell` searches
+with its line editor's own Ctrl-R). The newest 1000 commands are kept, readable by you only, in
+`~/.local/state/tower/history` (Linux; `$XDG_STATE_HOME` if set),
+`~/Library/Application Support/tower/history` (macOS) or `%LOCALAPPDATA%\tower\history`
+(Windows). Set `TOWER_HISTORY_FILE` to use another file, or to an empty value to keep no history
+on disk.
+
 And for transport debugging:
 
 ```sh

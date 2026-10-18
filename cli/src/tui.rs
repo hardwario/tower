@@ -22,6 +22,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
+
+use crate::history::{History, SEARCH_HINT, Search, SearchStep};
 use tower_protocol::msg::{
     Dropped, Event as EvMsg, Hello, Level, Log, Print, ShellCommand, ShellComplete, ShellCompletions,
     ShellResponse,
@@ -63,8 +65,11 @@ struct App {
     responses: VecDeque<String>,
     input: String,
     cursor: usize,
-    history: Vec<String>,
-    hist_idx: Option<usize>,
+    /// The command history, shared with `tower gateway` and `tower shell` and kept across
+    /// sessions (`crate::history`).
+    history: History,
+    /// Ctrl-R: the incremental history search in progress, if any (the prompt shows it).
+    search: Option<Search>,
     focus: Pane,
     zoom: bool,
     paused: bool,
@@ -152,7 +157,7 @@ impl PendingCmd {
 }
 
 impl App {
-    fn new(port_name: String) -> Self {
+    fn new(port_name: String, history: History) -> Self {
         App {
             port_name,
             sp: None,
@@ -162,8 +167,8 @@ impl App {
             responses: VecDeque::new(),
             input: String::new(),
             cursor: 0,
-            history: Vec::new(),
-            hist_idx: None,
+            history,
+            search: None,
             focus: Pane::Shell,
             zoom: false,
             paused: false,
@@ -292,7 +297,7 @@ pub fn run(port: String, reset: bool) -> Result<()> {
     // the error prints normally. `--reset` is consumed here, on the initial attach; the
     // reconnect path never re-resets (a flaky link mustn't become a reboot loop).
     let sp = crate::port::open_console_responsive(&port, reset)?;
-    let mut app = App::new(port);
+    let mut app = App::new(port, History::load());
     app.sp = Some(sp);
     if reset {
         app.boot_wait = Some(Instant::now());
@@ -716,8 +721,12 @@ fn handle_command_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     // Other Control/Alt-modified keys are commands, not text: handle the readline-style editing
     // bindings and drop the rest, so e.g. a stray Ctrl+<x> can't insert a literal control
     // character into the command line. (Plain Shift is fine; it just gives capitals.)
+    if app.search.is_some() {
+        return handle_search_key(app, code, mods, altgr_text);
+    }
     if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !altgr_text {
         match code {
+            KeyCode::Char('r') => start_search(app),  // Ctrl+R: search the history
             KeyCode::Char('u') => kill_to_start(app), // Ctrl+U: clear to line start
             KeyCode::Char('w') => kill_word(app),     // Ctrl+W: delete previous word
             KeyCode::Char('a') => app.cursor = 0,     // Ctrl+A: line start
@@ -732,11 +741,13 @@ fn handle_command_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::PageUp => app.scroll[2] = app.scroll[2].saturating_add(10),
         KeyCode::PageDown => app.scroll[2] = app.scroll[2].saturating_sub(10),
         KeyCode::Char(ch) => {
+            app.history.stop_browsing();
             app.input.insert(app.cursor, ch);
             app.cursor += ch.len_utf8();
             app.hint.clear();
         }
         KeyCode::Backspace => {
+            app.history.stop_browsing();
             if app.cursor > 0 {
                 let prev = app.input[..app.cursor]
                     .chars()
@@ -803,32 +814,49 @@ fn next_char(s: &str, cur: usize) -> usize {
     s[cur..].chars().next().map(|c| c.len_utf8()).unwrap_or(0)
 }
 
+/// Up: the next older command (the line being typed is kept for Down to give back).
 fn history_prev(app: &mut App) {
-    if app.history.is_empty() {
-        return;
+    if let Some(line) = app.history.up(&app.input) {
+        app.input = line.to_string();
+        app.cursor = app.input.len();
     }
-    let i = match app.hist_idx {
-        None => app.history.len() - 1,
-        Some(0) => 0,
-        Some(i) => i - 1,
-    };
-    app.hist_idx = Some(i);
-    app.input = app.history[i].clone();
-    app.cursor = app.input.len();
 }
 
+/// Down: the next newer command, and past the newest the line that was being typed.
 fn history_next(app: &mut App) {
-    match app.hist_idx {
-        Some(i) if i + 1 < app.history.len() => {
-            app.hist_idx = Some(i + 1);
-            app.input = app.history[i + 1].clone();
-            app.cursor = app.input.len();
-        }
-        _ => {
-            app.hist_idx = None;
-            app.input.clear();
-            app.cursor = 0;
-        }
+    if let Some(line) = app.history.down() {
+        app.input = line;
+        app.cursor = app.input.len();
+    }
+}
+
+/// Ctrl+R: start an incremental search of the history.
+fn start_search(app: &mut App) {
+    app.search = Some(Search::new(&app.input, app.cursor));
+    app.hint = SEARCH_HINT.into();
+}
+
+/// A key while the history search runs (see [`Search::key`]).
+fn handle_search_key(app: &mut App, code: KeyCode, mods: KeyModifiers, altgr_text: bool) {
+    let Some(search) = app.search.as_mut() else {
+        return;
+    };
+    let ctrl = mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !altgr_text;
+    let step = search.key(&app.history, code, ctrl);
+    if step == SearchStep::Continue {
+        return;
+    }
+    let search = app.search.take().expect("searching");
+    (app.input, app.cursor) = match step {
+        SearchStep::Cancel => (search.original, search.original_cursor),
+        _ => search.finish(&app.history),
+    };
+    app.history.stop_browsing();
+    app.hint.clear();
+    match step {
+        SearchStep::Run => send_command(app),
+        SearchStep::Edit(Some(key)) => handle_command_key(app, key, KeyModifiers::NONE),
+        _ => {}
     }
 }
 
@@ -881,10 +909,7 @@ fn send_command(app: &mut App) {
     push_cap(&mut app.responses, format!("> {line}"));
     app.pending
         .push_back(PendingCmd::new(cmd_id, line.clone(), Instant::now()));
-    if app.history.last().map(|h| h.as_str()) != Some(line.as_str()) {
-        app.history.push(line);
-    }
-    app.hist_idx = None;
+    app.history.push(&line);
     app.input.clear();
     app.cursor = 0;
     app.hint.clear();
@@ -1219,7 +1244,9 @@ fn render_shell(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         "> ".to_string(),
         Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
     );
-    let line = if app.input.is_empty() {
+    let line = if let Some(search) = &app.search {
+        Line::from(search.prompt(&app.history))
+    } else if app.input.is_empty() {
         Line::from(vec![
             prompt,
             Span::styled(
@@ -1244,7 +1271,11 @@ fn render_shell(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     }
 
     if focused {
-        let cx = rows[1].x + 2 + app.input[..app.cursor].chars().count() as u16;
+        let cx = match &app.search {
+            // The cursor sits after the query.
+            Some(s) => rows[1].x + s.cursor_col(),
+            None => rows[1].x + 2 + app.input[..app.cursor].chars().count() as u16,
+        };
         f.set_cursor_position((cx.min(rows[1].x + rows[1].width.saturating_sub(1)), rows[1].y));
     }
 }
@@ -1290,7 +1321,7 @@ mod tests {
     use tower_protocol::msg::{Candidate, CandidateKind, ShellResponse};
 
     fn test_app() -> App {
-        App::new("/dev/mock".to_string())
+        App::new("/dev/mock".to_string(), History::in_memory(Vec::new()))
     }
 
     /// A freshly sent in-flight command `cmd_id` (its line is `/c<cmd_id>`).
@@ -1996,5 +2027,43 @@ mod tests {
         assert!(app.responses.is_empty());
         assert_eq!(app.cmd_id, 1);
         assert!(!app.hint.is_empty());
+    }
+
+    /// The console's history: Up recalls the commands of earlier sessions (and Down gives the
+    /// line being typed back), Ctrl-R finds one by its words with the prompt showing the match,
+    /// Right takes it into the line for editing, Esc gives back the line from before.
+    #[test]
+    fn command_history_and_search() {
+        let mut app = App::new(
+            "/dev/mock".to_string(),
+            History::in_memory(vec!["/export".into(), "/system resource print".into()]),
+        );
+        for c in "/sy".chars() {
+            handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.input, "/system resource print");
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!((app.input.as_str(), app.cursor), ("/sy", 3), "the draft is back");
+
+        handle_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        for c in "exp".chars() {
+            handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        let text = render_to_text_sized(&mut app, 100, 18);
+        assert!(text.contains("search: exp") && text.contains("/export"), "{text}");
+        assert_eq!(app.input, "/sy", "the line is untouched while searching");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!((app.input.as_str(), app.cursor), ("/sy", 3));
+        assert!(app.search.is_none() && app.hint.is_empty());
+
+        handle_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        for c in "PRINT".chars() {
+            handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.input, "/system resource print", "taken into the line");
+        assert_eq!(app.cursor, app.input.len() - 1, "and the Left applied");
+        assert!(app.search.is_none());
     }
 }

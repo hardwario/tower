@@ -26,6 +26,7 @@ use tower_protocol::{FrameDecoder, MsgType, decode_frame, encode_frame};
 mod client;
 mod gateway;
 mod highlight;
+mod history;
 mod mgmt;
 mod port;
 mod render;
@@ -33,6 +34,7 @@ mod session;
 mod term;
 mod tui;
 
+use history::History;
 use port::{devices, open_console, pick_port};
 use render::{ColorMode, OutputMode, Renderer, View, device_text, hexline, read_loop, warn_mismatch};
 #[cfg(test)]
@@ -670,6 +672,12 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
     }));
     let mut rl: Editor<ShellHelper, rustyline::history::DefaultHistory> = Editor::new()?;
     rl.set_helper(Some(ShellHelper { conn: conn.clone() }));
+    // The history the TUIs share (Up/Down and rustyline's own Ctrl-R search it); every command
+    // run here is appended to it too.
+    let mut history = History::load();
+    for entry in history.entries() {
+        let _ = rl.add_history_entry(entry.as_str());
+    }
 
     let mut cmd_id: u16 = 1;
     let mut seq: u16 = 0;
@@ -686,6 +694,7 @@ fn shell(port: Option<String>, reset: bool, delay: Option<u64>, timeout: Duratio
                     break;
                 }
                 let _ = rl.add_history_entry(line);
+                history.push(line);
 
                 let mut c = conn.borrow_mut();
                 let Conn { sp, dec, gate, .. } = &mut *c;
