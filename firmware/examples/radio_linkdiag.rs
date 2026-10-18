@@ -48,7 +48,7 @@ async fn run(b: Board) {
 async fn tx_trace(radio: &mut Spirit1) -> ! {
     const LEN: usize = 16;
     let mut seq: u32 = 0;
-    info!(target: "txdiag", "TX trace: load FIFO, strobe TX, watch the state machine");
+    info!(target: "txdiag", "TX trace: load the FIFO, strobe TX, watch the state machine");
     loop {
         // Build a known payload.
         let mut payload = [0xA5u8; LEN];
@@ -89,9 +89,9 @@ async fn tx_trace(radio: &mut Spirit1) -> ! {
 
         info!(
             target: "txdiag",
-            "seq={} fifo_loaded={} (expect {}) | states={} | irq=0x{:08X} tx_sent={} | fifo_after={}",
+            "#{}: FIFO {} of {} B, states {}, IRQ 0x{:08x} ({}), FIFO after {} B",
             seq, loaded, LEN, StateTrace(&trace[..n]), irq,
-            irq & regs::IRQ_TX_DATA_SENT != 0, after
+            if irq & regs::IRQ_TX_DATA_SENT != 0 { "sent" } else { "not sent" }, after
         );
         seq = seq.wrapping_add(1);
         Timer::after_millis(1000).await;
@@ -129,7 +129,7 @@ async fn rx_poll(radio: &mut Spirit1) -> ! {
             let m = (f as usize).min(buf.len());
             let _ = radio.spi().read_fifo(&mut buf[..m]);
             let plen = radio.rx_packet_len().unwrap_or(0);
-            info!(target: "rxdiag", ">>> RX FIFO {} bytes, RX_PCKT_LEN={}: {}", f, plen, HexN(&buf[..m.min(20)]));
+            info!(target: "rxdiag", "RX FIFO {} B, RX_PCKT_LEN {}: {}", f, plen, HexN(&buf[..m.min(20)]));
             let _ = radio.spi().command(regs::CMD_SABORT);
             let _ = radio.spi().command(regs::CMD_FLUSHRXFIFO);
             let _ = radio.spi().command(regs::CMD_RX);
@@ -142,14 +142,8 @@ async fn rx_poll(radio: &mut Spirit1) -> ! {
             let st = radio.mc_state().unwrap_or(0xFF);
             info!(
                 target: "rxdiag",
-                "state=0x{:02X} max_fifo={} irq=0x{:08X} [preamble={} sync={} ready={} crc={} disc={} fifoerr={}]",
-                st, max_fifo, acc_irq,
-                acc_irq & regs::IRQ_VALID_PREAMBLE != 0,
-                acc_irq & regs::IRQ_VALID_SYNC != 0,
-                acc_irq & regs::IRQ_RX_DATA_READY != 0,
-                acc_irq & regs::IRQ_CRC_ERROR != 0,
-                acc_irq & regs::IRQ_RX_DATA_DISC != 0,
-                acc_irq & regs::IRQ_RX_FIFO_ERROR != 0,
+                "state 0x{:02x}, FIFO peak {} B, IRQ 0x{:08x} ({})",
+                st, max_fifo, acc_irq, IrqFlags(acc_irq)
             );
             acc_irq = 0;
             max_fifo = 0;
@@ -163,7 +157,7 @@ async fn rx_poll(radio: &mut Spirit1) -> ! {
     }
 }
 
-/// Format a state-code trace like `03->4F->0F->5F->03`.
+/// Format a state-code trace like `03 4f 0f 5f 03` (in the order the states were seen).
 #[cfg(feature = "role-node")]
 struct StateTrace<'a>(&'a [u8]);
 #[cfg(feature = "role-node")]
@@ -171,9 +165,9 @@ impl core::fmt::Display for StateTrace<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         for (i, s) in self.0.iter().enumerate() {
             if i > 0 {
-                write!(f, "->")?;
+                write!(f, " ")?;
             }
-            write!(f, "{:02X}", s)?;
+            write!(f, "{:02x}", s)?;
         }
         Ok(())
     }
@@ -184,8 +178,41 @@ struct HexN<'a>(&'a [u8]);
 #[cfg(not(feature = "role-node"))]
 impl core::fmt::Display for HexN<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        for b in self.0 {
-            write!(f, "{:02x} ", b)?;
+        for (i, b) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, " ")?;
+            }
+            write!(f, "{:02x}", b)?;
+        }
+        Ok(())
+    }
+}
+
+/// Name the RX events set in an accumulated IRQ status, like `preamble, sync, ready`.
+#[cfg(not(feature = "role-node"))]
+struct IrqFlags(u32);
+#[cfg(not(feature = "role-node"))]
+impl core::fmt::Display for IrqFlags {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut any = false;
+        for (bit, name) in [
+            (regs::IRQ_VALID_PREAMBLE, "preamble"),
+            (regs::IRQ_VALID_SYNC, "sync"),
+            (regs::IRQ_RX_DATA_READY, "ready"),
+            (regs::IRQ_CRC_ERROR, "CRC error"),
+            (regs::IRQ_RX_DATA_DISC, "discarded"),
+            (regs::IRQ_RX_FIFO_ERROR, "FIFO error"),
+        ] {
+            if self.0 & bit != 0 {
+                if any {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}", name)?;
+                any = true;
+            }
+        }
+        if !any {
+            write!(f, "no RX event")?;
         }
         Ok(())
     }

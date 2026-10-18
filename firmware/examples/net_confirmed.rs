@@ -3,10 +3,10 @@
 //!   TOWER_FEATURES=role-node    just flash example net_confirmed   # confirmed sender
 //!   TOWER_FEATURES=role-gateway just flash example net_confirmed   # receiver + auto-ACK
 //!
-//! Node: sends a confirmed message every 2 s and reports Delivered / NotDelivered
+//! Node: sends a confirmed message every 2 s and reports `delivered` / `not delivered`
 //! with the latency. Gateway: receives, auto-ACKs, and logs each accepted message
 //! (a retransmit re-sends the cached ACK without re-delivering; a replay is dropped).
-//! Watch both monitors: the Node should report `Delivered` once the Gateway ACKs.
+//! Watch both monitors: the Node should report `delivered` once the Gateway ACKs.
 
 #![no_std]
 #![no_main]
@@ -60,7 +60,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "confirmed", "net init: {e}");
+            error!(target: "confirmed", "net init failed: {e}");
             return;
         }
     };
@@ -73,7 +73,7 @@ async fn run(b: Board) {
 
 #[cfg(feature = "role-node")]
 async fn node(net: &mut Net) -> ! {
-    info!(target: "confirmed", "NODE: confirmed send every 2 s (reps=3)");
+    info!(target: "confirmed", "node 0x{:08x}: a confirmed send every 2 s (3 attempts)", NODE_ADDR);
     let mut seq: u32 = 0;
     loop {
         let mut msg = [0u8; 8];
@@ -86,13 +86,13 @@ async fn node(net: &mut Net) -> ! {
         let r = net.send(GW_ADDR, &msg, true, 3).await;
         let ms = t0.elapsed().as_millis();
         match r {
-            SendResult::Delivered => info!(target: "confirmed", "seq={} Delivered ({} ms)", seq, ms),
-            SendResult::NotDelivered => warn!(target: "confirmed", "seq={} NotDelivered ({} ms)", seq, ms),
-            SendResult::Busy => warn!(target: "confirmed", "seq={} Busy", seq),
-            SendResult::DutyLimited => warn!(target: "confirmed", "seq={} DutyLimited", seq),
-            SendResult::Error(e) => error!(target: "confirmed", "seq={} Error {e}", seq),
-            // WrongMode/NotSynced only arise in AFA/FHSS modes (not plain send).
-            other => warn!(target: "confirmed", "seq={} {other}", seq),
+            SendResult::Delivered => info!(target: "confirmed", "#{} delivered ({} ms)", seq, ms),
+            SendResult::NotDelivered => {
+                warn!(target: "confirmed", "#{} not delivered, no ACK ({} ms)", seq, ms)
+            }
+            SendResult::Error(e) => warn!(target: "confirmed", "#{} failed: {e}", seq),
+            // Busy / DutyLimited; WrongMode/NotSynced only arise in AFA/FHSS modes (not plain send).
+            other => warn!(target: "confirmed", "#{} not sent: {other}", seq),
         }
         seq = seq.wrapping_add(1);
         embassy_time::Timer::after_secs(2).await;
@@ -101,14 +101,15 @@ async fn node(net: &mut Net) -> ! {
 
 #[cfg(not(feature = "role-node"))]
 async fn gateway(net: &mut Net) -> ! {
-    info!(target: "confirmed", "GATEWAY: receiving + auto-ACK");
+    info!(target: "confirmed", "gateway 0x{:08x}: receiving, ACKing confirmed frames", GW_ADDR);
     loop {
         if let Some(rx) = net.recv(Duration::from_secs(10)).await {
             let text = core::str::from_utf8(rx.data()).unwrap_or("<bin>");
             info!(
                 target: "confirmed",
-                "rx src={:08X} cnt={} rssi={}dBm confirmed={} \"{}\" (ACKed)",
-                rx.src, rx.counter, rx.rssi, rx.confirmed, text
+                "rx from 0x{:08x}, counter {}, {} dBm: \"{}\" ({})",
+                rx.src, rx.counter, rx.rssi, text,
+                if rx.confirmed { "ACKed" } else { "not confirmed" }
             );
         }
     }

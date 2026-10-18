@@ -17,7 +17,7 @@ use tower::{app, board::Board};
 
 async fn run(_b: Board) {
     for i in (1..=10).rev() {
-        info!("alive, deliberate panic in {}s", i);
+        info!("alive, deliberate panic in {} s", i);
         Timer::after_secs(1).await;
     }
     panic!("deliberate panic-path test");

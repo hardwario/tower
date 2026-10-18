@@ -20,9 +20,9 @@ async fn run(mut b: Board) {
                 let sign = if mc < 0 { "-" } else { "" };
                 // milli-degrees -> centi-degrees, rounded, for two decimal places.
                 let centi = (mc.unsigned_abs() + 5) / 10;
-                info!(target: "tmp112", "{}{}.{:02} deg. C", sign, centi / 100, centi % 100);
+                info!(target: "tmp112", "{}{}.{:02} °C", sign, centi / 100, centi % 100);
             }
-            Err(e) => error!(target: "tmp112", "read failed: {:?}", e),
+            Err(e) => error!(target: "tmp112", "read failed (I2C {:?})", e),
         }
         Timer::after_secs(2).await;
     }

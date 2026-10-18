@@ -34,10 +34,10 @@ async fn run(b: Board) {
     );
 
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "radio_cw", "exit_shutdown: {e}");
+        error!(target: "cw", "shutdown exit failed: {e}");
     }
     if let Err(e) = radio.read_device_id() {
-        error!(target: "radio_cw", "device id: {e}");
+        error!(target: "cw", "device ID check failed: {e}");
     }
 
     let cfg = RfConfig {
@@ -46,9 +46,9 @@ async fn run(b: Board) {
     };
     match config::apply(&mut radio, &cfg).await {
         Ok(()) => {
-            info!(target: "radio_cw", "RF configured: EU868 ch{} (868.{} MHz)", CHANNEL, 1 + CHANNEL * 2)
+            info!(target: "cw", "RF configured: EU 868, channel {} (868.{} MHz)", CHANNEL, 1 + CHANNEL * 2)
         }
-        Err(e) => error!(target: "radio_cw", "config: {e}"),
+        Err(e) => error!(target: "cw", "RF config failed: {e}"),
     }
 
     #[cfg(feature = "role-node")]
@@ -59,7 +59,7 @@ async fn run(b: Board) {
 
 #[cfg(feature = "role-node")]
 async fn tx_role(radio: &mut Spirit1) -> ! {
-    info!(target: "radio_cw", "TX role: keying CW on ch{} (3 s on / 2 s off)", CHANNEL);
+    info!(target: "cw", "TX: keying the carrier on channel {}, 3 s on, 2 s off", CHANNEL);
     loop {
         match radio.cw_test(true).await {
             Ok(()) => {
@@ -68,25 +68,31 @@ async fn tx_role(radio: &mut Spirit1) -> ! {
                 let st = radio.mc_state().unwrap_or(0xFF);
                 let lock_err = radio.error_lock().unwrap_or(false);
                 let what = match st {
-                    0x5F => "TX (emitting)",
-                    0x13 => "LOCKWON (synth NOT locked!)",
+                    0x5F => "TX, emitting",
+                    0x13 => "LOCKWON, synth not locked",
                     0x4F => "still calibrating",
                     _ => "unexpected",
                 };
-                info!(target: "radio_cw", "CW ON: state=0x{:02X} {} error_lock={}", st, what, lock_err);
+                info!(
+                    target: "cw",
+                    "carrier on, state 0x{:02x} ({}){}",
+                    st,
+                    what,
+                    if lock_err { ", synth lock error" } else { "" }
+                );
             }
-            Err(e) => error!(target: "radio_cw", "cw on: {e}"),
+            Err(e) => error!(target: "cw", "carrier on failed: {e}"),
         }
         Timer::after_secs(3).await;
         let _ = radio.cw_test(false).await;
-        info!(target: "radio_cw", "CW OFF");
+        info!(target: "cw", "carrier off");
         Timer::after_secs(2).await;
     }
 }
 
 #[cfg(not(feature = "role-node"))]
 async fn rx_role(radio: &mut Spirit1) -> ! {
-    info!(target: "radio_cw", "RX role: sampling RSSI on ch{} (carrier detect)", CHANNEL);
+    info!(target: "cw", "RX: sampling RSSI on channel {} (carrier detect)", CHANNEL);
     let mut n = 0u32;
     loop {
         match radio.rssi_sample().await {
@@ -94,23 +100,25 @@ async fn rx_role(radio: &mut Spirit1) -> ! {
                 let dbm = config::rssi_to_dbm(raw);
                 let carrier = dbm > -100;
                 // First few samples: also report state/lock to confirm RX works.
-                let diag = if n < 3 {
+                if n < 3 {
                     let st = radio.mc_state().unwrap_or(0xFF);
                     let lock_err = radio.error_lock().unwrap_or(false);
-                    info!(target: "radio_cw", "  (diag state=0x{:02X} error_lock={})", st, lock_err);
-                    true
-                } else {
-                    false
-                };
+                    info!(
+                        target: "cw",
+                        "RX check: state 0x{:02x}{}",
+                        st,
+                        if lock_err { ", synth lock error" } else { "" }
+                    );
+                }
                 info!(
-                    target: "radio_cw",
-                    "RSSI {} dBm (raw=0x{:02X}) {}{}",
-                    dbm, raw,
-                    if carrier { "<<< CARRIER" } else { "(floor)" },
-                    if diag { " [diag]" } else { "" }
+                    target: "cw",
+                    "RSSI {} dBm, {} (raw 0x{:02x})",
+                    dbm,
+                    if carrier { "carrier" } else { "noise floor" },
+                    raw
                 );
             }
-            Err(e) => error!(target: "radio_cw", "rssi_sample: {e}"),
+            Err(e) => error!(target: "cw", "RSSI sample failed: {e}"),
         }
         n = n.wrapping_add(1);
         Timer::after_millis(500).await;

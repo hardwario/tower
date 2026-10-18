@@ -16,7 +16,7 @@ use tower::{app, board::Board, console};
 async fn run(_b: Board) {
     let mut n: u32 = 0;
     loop {
-        info!("loop tick {}", n); // a normal log, to show interleaving
+        info!("loop tick #{}", n); // a normal log, to show interleaving
 
         let mut count = String::<12>::new();
         let _ = write!(count, "{}", n);
@@ -35,7 +35,7 @@ async fn run(_b: Board) {
 
         if n.is_multiple_of(5) {
             console::event("heartbeat", &[("uptime", count.as_str())]).await;
-            warn!("warning at tick {}", n);
+            warn!("warning at tick #{}", n);
         }
 
         n = n.wrapping_add(1);

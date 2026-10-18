@@ -36,17 +36,17 @@ async fn run(b: Board) {
     );
 
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "radio", "exit_shutdown: {e}");
+        error!(target: "radio", "shutdown exit failed: {e}");
     }
     if let Err(e) = radio.read_device_id() {
-        error!(target: "radio", "device id: {e}");
+        error!(target: "radio", "device ID check failed: {e}");
     }
     let cfg = RfConfig {
         band: config::Band::DEFAULT,
         channel: CHANNEL,
     };
     if let Err(e) = config::apply(&mut radio, &cfg).await {
-        error!(target: "radio", "config: {e}");
+        error!(target: "radio", "RF config failed: {e}");
     }
 
     #[cfg(feature = "role-node")]
@@ -57,14 +57,14 @@ async fn run(b: Board) {
 
 #[cfg(feature = "role-node")]
 async fn beacon(radio: &mut Spirit1) -> ! {
-    info!(target: "beacon", "TX: sending a {}-byte frame every 1 s on ch{}", PAYLOAD, CHANNEL);
+    info!(target: "beacon", "TX: a {} B frame every 1 s on channel {}", PAYLOAD, CHANNEL);
     let mut seq: u32 = 0;
     loop {
         let mut frame = [0xA5u8; PAYLOAD];
         frame[..4].copy_from_slice(&seq.to_le_bytes());
         match radio.tx(&frame, false, Duration::from_millis(200)).await {
-            Ok(()) => info!(target: "beacon", "tx seq={} ok", seq),
-            Err(e) => warn!(target: "beacon", "tx seq={} failed: {e}", seq),
+            Ok(()) => info!(target: "beacon", "#{} sent", seq),
+            Err(e) => warn!(target: "beacon", "#{} not sent: {e}", seq),
         }
         seq = seq.wrapping_add(1);
         embassy_time::Timer::after_secs(1).await;
@@ -73,7 +73,7 @@ async fn beacon(radio: &mut Spirit1) -> ! {
 
 #[cfg(not(feature = "role-node"))]
 async fn sniffer(radio: &mut Spirit1) -> ! {
-    info!(target: "sniffer", "RX: listening on ch{} (RSSI/LQI/SQI/AFC per packet)", CHANNEL);
+    info!(target: "sniffer", "RX: listening on channel {} (RSSI, LQI, SQI and AFC per packet)", CHANNEL);
     let mut buf = [0u8; 96];
     let mut last_seq: Option<u32> = None;
     loop {
@@ -90,17 +90,24 @@ async fn sniffer(radio: &mut Spirit1) -> ! {
                     _ => 0,
                 };
                 last_seq = Some(seq);
-                info!(
-                    target: "sniffer",
-                    "rx len={} seq={} rssi={}dBm(0x{:02X}) pqi={} sqi={} afc={}{}",
-                    len, seq, q.rssi, q.rssi_raw, q.lqi, q.sqi, q.afc_raw,
-                    if gap > 0 { " <gap!>" } else { "" }
-                );
+                if gap == 0 {
+                    info!(
+                        target: "sniffer",
+                        "rx #{}, {} B, {} dBm (raw 0x{:02x}), PQI {}, SQI {}, AFC {}",
+                        seq, len, q.rssi, q.rssi_raw, q.lqi, q.sqi, q.afc_raw
+                    );
+                } else {
+                    info!(
+                        target: "sniffer",
+                        "rx #{}, {} B, {} dBm (raw 0x{:02x}), PQI {}, SQI {}, AFC {} ({} missed)",
+                        seq, len, q.rssi, q.rssi_raw, q.lqi, q.sqi, q.afc_raw, gap
+                    );
+                }
             }
             Err(tower::radio::RadioError::Timeout) => {
-                info!(target: "sniffer", "...idle (no packet in 5 s)");
+                info!(target: "sniffer", "idle, no packet in 5 s");
             }
-            Err(e) => warn!(target: "sniffer", "rx error: {e}"),
+            Err(e) => warn!(target: "sniffer", "rx failed: {e}"),
         }
     }
 }

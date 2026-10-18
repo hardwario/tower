@@ -17,20 +17,20 @@ use tower::{app, board::Board, console, println};
 
 async fn run(_b: Board) {
     // The shell is served automatically by `app!` (Responses/Command panes), over the shared KV.
-    info!("console_full ready: drive the shell, e.g. `system identity print`");
+    info!("ready: drive the shell, e.g. `system identity print`");
 
     let mut n: u32 = 0;
     loop {
         // Logs across levels so the Logs pane shows colour + variety.
-        info!("heartbeat {}", n);
+        info!("heartbeat #{}", n);
         if n.is_multiple_of(3) {
-            warn!("periodic warning at tick {}", n);
-            debug!("debug detail at tick {}", n);
-            trace!("trace detail at tick {}", n);
+            warn!("periodic warning at tick #{}", n);
+            debug!("debug detail at tick #{}", n);
+            trace!("trace detail at tick #{}", n);
         }
         if n.is_multiple_of(5) {
-            error!("sample error at tick {}", n);
-            println!("raw println at tick {}", n);
+            error!("sample error at tick #{}", n);
+            println!("raw println at tick #{}", n);
         }
 
         // A structured event so the Events pane has content.

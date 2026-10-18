@@ -6,7 +6,7 @@
 //!
 //! Tilt detection is **opt-in** via the `TILT` constant below: set it to a
 //! [`Sensitivity`](tower::lis2dh12::Sensitivity) to have the accelerometer's
-//! hardware interrupt (INT1 → PB6) flag any manipulation (logged as `tilt!` and
+//! hardware interrupt (INT1 → PB6) flag any manipulation (logged as `tilt detected` and
 //! flashed on the LED), or `None` to disable it.
 //!
 //! The accelerometer shares the I²C2 bus with the TMP112, so the app reclaims the
@@ -60,21 +60,21 @@ async fn run(b: Board) {
 
     match accel.who_am_i() {
         Ok(lis2dh12::WHO_AM_I_ID) => {}
-        Ok(id) => warn!(target: "accel", "unexpected WHO_AM_I 0x{:02X} (continuing)", id),
-        Err(e) => error!(target: "accel", "not responding: {:?}", e),
+        Ok(id) => warn!(target: "accel", "unexpected WHO_AM_I 0x{:02x}, continuing", id),
+        Err(e) => error!(target: "accel", "not responding (I2C {:?})", e),
     }
     if let Err(e) = accel.init() {
-        error!(target: "accel", "init failed: {:?}", e);
+        error!(target: "accel", "init failed (I2C {:?})", e);
     }
 
     if let Some(cfg) = TILT {
         match accel.enable_tilt(cfg) {
             Ok(()) => info!(target: "accel", "tilt detection enabled"),
-            Err(e) => error!(target: "accel", "tilt enable failed: {:?}", e),
+            Err(e) => error!(target: "accel", "tilt detection not enabled (I2C {:?})", e),
         }
     }
 
-    info!(target: "accel", "turn the board to roll the dice (face-up = 1..6)");
+    info!(target: "accel", "turn the board to roll the dice (the face up, 1 to 6)");
 
     let mut last: Option<u8> = None;
     loop {
@@ -93,7 +93,7 @@ async fn run(b: Board) {
 
         if tilted {
             if accel.tilt_triggered().unwrap_or(false) {
-                warn!(target: "accel", "tilt! device moved");
+                info!(target: "accel", "tilt detected");
                 led.play(ALERT);
             }
             continue;
@@ -105,11 +105,11 @@ async fn run(b: Board) {
                 if let Some(face) = sample.dice()
                     && last != Some(face)
                 {
-                    info!(target: "accel", "dice: {}", face);
+                    info!(target: "accel", "face {} up", face);
                     last = Some(face);
                 }
             }
-            Err(e) => error!(target: "accel", "read failed: {:?}", e),
+            Err(e) => error!(target: "accel", "read failed (I2C {:?})", e),
         }
     }
 }

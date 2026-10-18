@@ -8,8 +8,8 @@
 //! parks on the rendezvous channel, catches a beacon within ≤1 cycle (~24 s),
 //! reconstructs the gateway's slot clock, and then hops in lockstep, sending a
 //! confirmed uplink each slot (the gateway is listening on that slot's channel) and
-//! re-aligning on every beacon. Reset the gateway to see the node go LOST → rescan →
-//! re-LOCK (F9). Both ends hop; the channel index moves every slot.
+//! re-aligning on every beacon. Reset the gateway to see the node log `sync lost,
+//! rescanning` and then lock again (F9). Both ends hop; the channel index moves every slot.
 //!
 //! US 915 FHSS is the compliant high-power path (unlike the narrowband bench mode);
 //! exact §15.247 parameters are config to verify before a product claim.
@@ -75,7 +75,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "fhss", "net init: {e}");
+            error!(target: "fhss", "net init failed: {e}");
             return;
         }
     };
@@ -84,10 +84,14 @@ async fn run(b: Board) {
     {
         net.add_peer(NODE_ADDR, &KEY);
         if let Err(e) = net.enable_fhss(FhssRole::Master, FhssConfig::default()).await {
-            error!(target: "fhss", "enable_fhss: {e}");
+            error!(target: "fhss", "enabling failed: {e}");
             return;
         }
-        info!(target: "fhss", "MASTER: hopping 80 ch, beacon+listen per 300 ms slot");
+        info!(
+            target: "fhss",
+            "master 0x{:08x}: hopping 80 channels, beacon and listen per 300 ms slot",
+            GW_ADDR
+        );
         loop {
             let Some(s) = net.fhss_master_tick().await else {
                 continue; // master mode not active (shouldn't happen: enabled above)
@@ -95,12 +99,12 @@ async fn run(b: Board) {
             if let Some(rx) = s.received {
                 info!(
                     target: "fhss",
-                    "rx uplink seq={} on ch={} slot={} src={:08X} rssi={}dBm{}",
+                    "uplink #{} on channel {}, slot {}, from 0x{:08x}, {} dBm{}",
                     seq_of(rx.data()), s.channel, s.slot, rx.src, rx.rssi,
                     if rx.confirmed { " (ACKed)" } else { "" }
                 );
             } else if s.slot.is_multiple_of(30) {
-                info!(target: "fhss", "beaconing slot={} ch={} (no uplink)", s.slot, s.channel);
+                info!(target: "fhss", "beaconing, slot {} on channel {} (no uplink)", s.slot, s.channel);
             }
         }
     }
@@ -109,10 +113,14 @@ async fn run(b: Board) {
     {
         net.add_peer(GW_ADDR, &KEY);
         if let Err(e) = net.enable_fhss(FhssRole::Node, FhssConfig::default()).await {
-            error!(target: "fhss", "enable_fhss: {e}");
+            error!(target: "fhss", "enabling failed: {e}");
             return;
         }
-        info!(target: "fhss", "NODE: scanning for gateway beacon (parked on rendezvous)");
+        info!(
+            target: "fhss",
+            "node 0x{:08x}: scanning for a gateway beacon (parked on the rendezvous channel)",
+            NODE_ADDR
+        );
         let mut seq: u32 = 0;
         let mut was_synced = false;
         loop {
@@ -120,22 +128,22 @@ async fn run(b: Board) {
             match slot.state {
                 FhssState::Scanning => {
                     if was_synced {
-                        warn!(target: "fhss", "LOST sync, rescanning");
+                        warn!(target: "fhss", "sync lost, rescanning");
                         was_synced = false;
                     }
                 }
                 FhssState::Synced => {
                     if !was_synced {
-                        info!(target: "fhss", "LOCKED slot={} ch={}", slot.slot, slot.channel);
+                        info!(target: "fhss", "locked to the hop schedule, slot {} on channel {}", slot.slot, slot.channel);
                         was_synced = true;
                     }
                     if slot.got_beacon {
                         match net.fhss_send(GW_ADDR, &seq.to_le_bytes(), true).await {
                             SendResult::Delivered => {
-                                info!(target: "fhss", "seq={} ch={} Delivered", seq, net.fhss_current_channel())
+                                info!(target: "fhss", "#{} delivered on channel {}", seq, net.fhss_current_channel())
                             }
                             SendResult::NotDelivered => {
-                                warn!(target: "fhss", "seq={} ch={} no-ack", seq, net.fhss_current_channel())
+                                warn!(target: "fhss", "#{} not delivered on channel {}, no ACK", seq, net.fhss_current_channel())
                             }
                             _ => {}
                         }

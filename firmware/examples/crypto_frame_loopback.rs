@@ -35,24 +35,28 @@ async fn run(_b: Board) {
     let n = match frame::seal_frame(&mut ccm, &KEY, &hdr, payload, &mut buf) {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "frame", "seal: {e}");
+            error!(target: "frame", "seal failed: {e}");
             return;
         }
     };
-    info!(target: "frame", "sealed DATA frame: {} bytes (hdr14 + {} payload + tag8)", n, payload.len());
+    info!(target: "frame", "data frame sealed, {} B (14 B header, {} B payload, 8 B tag)", n, payload.len());
 
     match frame::open_frame(&mut ccm, &KEY, &mut buf[..n]) {
         Ok((rh, range)) => {
             let pt = &buf[range];
             let hdr_ok = rh == hdr;
             let pt_ok = pt == payload;
-            info!(target: "frame", "open: header {} payload {}",
-                if hdr_ok { "MATCH" } else { "MISMATCH" },
-                if pt_ok { "MATCH" } else { "MISMATCH" });
+            if hdr_ok && pt_ok {
+                info!(target: "frame", "header and payload round-trip MATCH");
+            } else {
+                error!(target: "frame", "round-trip MISMATCH (header {}, payload {})",
+                    if hdr_ok { "same" } else { "differs" },
+                    if pt_ok { "same" } else { "differs" });
+            }
             pass &= hdr_ok && pt_ok;
         }
         Err(e) => {
-            error!(target: "frame", "open (valid): unexpected {e}");
+            error!(target: "frame", "open of the genuine frame FAIL ({e})");
             pass = false;
         }
     }
@@ -62,10 +66,14 @@ async fn run(_b: Board) {
     buf[frame::HDR_LEN + 2] ^= 0x40; // flip a ciphertext bit
     match frame::open_frame(&mut ccm, &KEY, &mut buf[..n2]) {
         Err(frame::FrameError::AuthFail) => {
-            info!(target: "frame", "tampered frame: correctly REJECTED (AuthFail)")
+            info!(target: "frame", "refusal of a tampered frame PASS (authentication failed)")
         }
-        other => {
-            error!(target: "frame", "tampered frame: expected AuthFail, got {:?}", other);
+        Err(e) => {
+            error!(target: "frame", "refusal of a tampered frame FAIL ({e})");
+            pass = false;
+        }
+        Ok(_) => {
+            error!(target: "frame", "refusal of a tampered frame FAIL (it opened)");
             pass = false;
         }
     }
@@ -75,9 +83,15 @@ async fn run(_b: Board) {
     let mut wrong = KEY;
     wrong[0] ^= 0xFF;
     match frame::open_frame(&mut ccm, &wrong, &mut buf[..n3]) {
-        Err(frame::FrameError::AuthFail) => info!(target: "frame", "wrong key: correctly REJECTED"),
-        other => {
-            error!(target: "frame", "wrong key: expected AuthFail, got {:?}", other);
+        Err(frame::FrameError::AuthFail) => {
+            info!(target: "frame", "refusal under a wrong key PASS (authentication failed)")
+        }
+        Err(e) => {
+            error!(target: "frame", "refusal under a wrong key FAIL ({e})");
+            pass = false;
+        }
+        Ok(_) => {
+            error!(target: "frame", "refusal under a wrong key FAIL (it opened)");
             pass = false;
         }
     }
@@ -93,15 +107,19 @@ async fn run(_b: Board) {
     };
     let chunk = [0xA5u8; 64];
     let nb = frame::seal_frame(&mut ccm, &KEY, &bhdr, &chunk, &mut buf).unwrap();
-    info!(target: "frame", "sealed BULK frame: {} bytes (hdr17 + 64 chunk + tag8)", nb);
+    info!(target: "frame", "bulk frame sealed, {} B (17 B header, 64 B chunk, 8 B tag)", nb);
     match frame::open_frame(&mut ccm, &KEY, &mut buf[..nb]) {
         Ok((rh, range)) => {
             let ok = rh == bhdr && buf[range] == chunk[..];
-            info!(target: "frame", "bulk open: {}", if ok { "MATCH (index in nonce ok)" } else { "MISMATCH" });
+            if ok {
+                info!(target: "frame", "bulk round-trip MATCH (index in the nonce)");
+            } else {
+                error!(target: "frame", "bulk round-trip MISMATCH");
+            }
             pass &= ok;
         }
         Err(e) => {
-            error!(target: "frame", "bulk open: {e}");
+            error!(target: "frame", "bulk open FAIL ({e})");
             pass = false;
         }
     }
@@ -111,9 +129,9 @@ async fn run(_b: Board) {
     // one line that must survive. This way `tower logs` attached at ANY time still sees it.
     loop {
         if pass {
-            info!(target: "frame", "frame codec + nonce + CCM loopback: ALL PASS ***");
+            info!(target: "frame", "codec, nonce and CCM loopback, all checks PASS");
         } else {
-            error!(target: "frame", "frame loopback: FAILURES above");
+            error!(target: "frame", "codec, nonce and CCM loopback, some checks FAIL");
         }
         embassy_time::Timer::after_secs(5).await;
     }

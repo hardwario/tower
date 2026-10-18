@@ -11,7 +11,8 @@
 //! self-describing (`[seq:4][len:1][crc32:4][filler…]`), so the gateway verifies
 //! integrity and ordering without lockstep.
 //!
-//! Invariants (→ §14), latched to the LED (solid = FAIL) and a `VERDICT:` line:
+//! Invariants (→ §14), latched to the LED (solid = FAIL) and the periodic
+//! `invariants PASS` / `invariants FAIL` line:
 //!   • payload integrity: embedded crc32 matches recomputed (gateway)
 //!   • strict-monotonic accepted counter per src: no replay/reorder accepted
 //!   • oversized send always locally rejected (node)
@@ -109,7 +110,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "soak", "net init: {e}");
+            error!(target: "soak", "net init failed: {e}");
             return;
         }
     };
@@ -129,7 +130,11 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
     if rng == 0 {
         rng = 1;
     }
-    info!(target: "soak", "NODE seed=0x{:08X}  (cumulative: tx_ok={} fails={})", rng, cum_ok, cum_fail);
+    info!(
+        target: "soak",
+        "node 0x{:08x}: seed 0x{:08x} (so far {} delivered, {} failures)",
+        NODE_ADDR, rng, cum_ok, cum_fail
+    );
 
     let mut seq: u32 = 0;
     let (mut ok, mut nd, mut busy, mut duty, mut rej) = (0u32, 0u32, 0u32, 0u32, 0u32);
@@ -145,7 +150,7 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
                 SendResult::Error(_) => rej += 1,
                 other => {
                     fails += 1;
-                    error!(target: "soak", "INVARIANT: oversized send not rejected ({other}) ✗");
+                    error!(target: "soak", "oversize refusal FAIL (the send returned: {other})");
                 }
             }
         } else {
@@ -185,11 +190,19 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
             let akv = net.kv().scope(NS_APP);
             let _ = akv.set_bytes(KV_COUNT, &(cum_ok + ok).to_le_bytes());
             let _ = akv.set_bytes(KV_FAIL, &fails.to_le_bytes());
-            info!(
-                target: "soak",
-                "VERDICT: {}  iters={} ok={} nd={} busy={} duty={} rej={} fails={}",
-                if fails == 0 { "PASS" } else { "FAIL" }, iters, ok, nd, busy, duty, rej, fails
-            );
+            if fails == 0 {
+                info!(
+                    target: "soak",
+                    "invariants PASS ({} sends: {} delivered, {} no ACK, {} busy, {} duty, {} oversize)",
+                    iters, ok, nd, busy, duty, rej
+                );
+            } else {
+                error!(
+                    target: "soak",
+                    "invariants FAIL ({} sends: {} delivered, {} no ACK, {} busy, {} duty, {} oversize; {} failures)",
+                    iters, ok, nd, busy, duty, rej, fails
+                );
+            }
         }
         // Timing jitter ~0.5..2 s (keeps near the EU duty budget, bursts over it).
         let jitter = 500 + (r >> 24) % 1500;
@@ -200,7 +213,11 @@ async fn node(net: &mut Net, led: &mut Output<'static>, cum_ok: u32, cum_fail: u
 #[cfg(not(feature = "role-node"))]
 async fn gateway(net: &mut Net, led: &mut Output<'static>, cum_acc: u32, cum_fail: u32) -> ! {
     net.add_peer(NODE_ADDR, &KEY);
-    info!(target: "soak", "GATEWAY checking integrity + ordering  (cumulative: accepted={} fails={})", cum_acc, cum_fail);
+    info!(
+        target: "soak",
+        "gateway 0x{:08x}: checking integrity and order (so far {} accepted, {} failures)",
+        GW_ADDR, cum_acc, cum_fail
+    );
 
     let mut last: Option<u32> = None;
     let (mut accepted, mut integ, mut order) = (0u32, 0u32, 0u32);
@@ -221,7 +238,15 @@ async fn gateway(net: &mut Net, led: &mut Output<'static>, cum_acc: u32, cum_fai
                 if declared != d.len() || got != want {
                     integ += 1;
                     fails += 1;
-                    error!(target: "soak", "INVARIANT: integrity src={:08X} cnt={} declared={} actual={} ✗", rx.src, rx.counter, declared, d.len());
+                    error!(
+                        target: "soak",
+                        "integrity FAIL (0x{:08x}, counter {}: {} differs, {} B declared, {} B received)",
+                        rx.src,
+                        rx.counter,
+                        if declared != d.len() { "length" } else { "CRC" },
+                        declared,
+                        d.len()
+                    );
                 }
             }
             // Strict-monotonic accepted counter (no replay/reorder accepted).
@@ -230,7 +255,7 @@ async fn gateway(net: &mut Net, led: &mut Output<'static>, cum_acc: u32, cum_fai
             {
                 order += 1;
                 fails += 1;
-                error!(target: "soak", "INVARIANT: counter {} <= last {} ✗", rx.counter, p);
+                error!(target: "soak", "order FAIL (counter {} accepted after {})", rx.counter, p);
             }
             last = Some(rx.counter);
 
@@ -243,11 +268,20 @@ async fn gateway(net: &mut Net, led: &mut Output<'static>, cum_acc: u32, cum_fai
                 let akv = net.kv().scope(NS_APP);
                 let _ = akv.set_bytes(KV_COUNT, &(cum_acc + accepted).to_le_bytes());
                 let _ = akv.set_bytes(KV_FAIL, &fails.to_le_bytes());
-                info!(
-                    target: "soak",
-                    "VERDICT: {}  accepted={} integrity_fail={} order_fail={} fails={} last_cnt={}",
-                    if fails == 0 { "PASS" } else { "FAIL" }, accepted, integ, order, fails, last.unwrap_or(0)
-                );
+                if fails == 0 {
+                    info!(
+                        target: "soak",
+                        "invariants PASS ({} accepted, last counter {})",
+                        accepted,
+                        last.unwrap_or(0)
+                    );
+                } else {
+                    error!(
+                        target: "soak",
+                        "invariants FAIL ({} accepted, last counter {}; {} integrity, {} order, {} failures in all)",
+                        accepted, last.unwrap_or(0), integ, order, fails
+                    );
+                }
             }
         }
     }

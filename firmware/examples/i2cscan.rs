@@ -23,16 +23,16 @@ async fn run(b: Board) {
     // a bus scanner wants to see the real bus, so bypass the AtshaGuard via into_inner().
     let mut i2c = b.tmp112.release().into_inner();
 
-    info!(target: "i2c", "scanning I2C2 @ 100 kHz ...");
+    info!(target: "i2c", "scanning I2C2 at 100 kHz");
     let mut found = 0;
     for addr in 0x08u8..=0x77 {
         // A 1-byte read ACKs the address if a device is present.
         if i2c.blocking_read(addr, &mut [0u8; 1]).is_ok() {
-            info!(target: "i2c", "device at 0x{:02X}", addr);
+            info!(target: "i2c", "device at 0x{:02x}", addr);
             found += 1;
         }
     }
-    info!(target: "i2c", "scan complete - {} device(s)", found);
+    info!(target: "i2c", "scan complete, {} device(s)", found);
 
     // The scan probes every address (incl. the ATSHA204A at 0x64); re-sleep it
     // defensively so a probed/woken crypto part can't hold ~200 µA. Good hygiene after

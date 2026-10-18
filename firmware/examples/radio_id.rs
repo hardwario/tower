@@ -27,10 +27,10 @@ async fn run(b: Board) {
         b.radio_irq,
     );
 
-    info!(target: "radio_id", "exiting SHUTDOWN (driving SDN low)...");
+    info!(target: "radio", "leaving shutdown (driving SDN low)");
     match radio.exit_shutdown().await {
-        Ok(()) => info!(target: "radio_id", "radio reached READY"),
-        Err(e) => error!(target: "radio_id", "exit_shutdown: {e} (continuing to probe)"),
+        Ok(()) => info!(target: "radio", "reached the ready state"),
+        Err(e) => error!(target: "radio", "shutdown exit failed: {e} (probing anyway)"),
     }
 
     loop {
@@ -38,19 +38,19 @@ async fn run(b: Board) {
             Ok(id) => {
                 if id.is_supported() {
                     info!(
-                        target: "radio_id",
-                        "OK: partnum=0x{:02X} version=0x{:02X} (part_number={}) - SPIRIT1 verified",
+                        target: "radio",
+                        "device ID MATCH (partnum 0x{:02x}, version 0x{:02x}: SPIRIT1, part {})",
                         id.partnum, id.version, id.part_number()
                     );
                 } else {
                     error!(
-                        target: "radio_id",
-                        "MISMATCH: partnum=0x{:02X} version=0x{:02X} (expected 0x01 / 0x30) - check SPI/CS/SDN",
+                        target: "radio",
+                        "device ID MISMATCH (partnum 0x{:02x}, version 0x{:02x}; expected 0x01, 0x30: check SPI, CS, SDN)",
                         id.partnum, id.version
                     );
                 }
             }
-            Err(e) => error!(target: "radio_id", "SPI read failed: {e}"),
+            Err(e) => error!(target: "radio", "SPI read failed: {e}"),
         }
         Timer::after_secs(2).await;
     }

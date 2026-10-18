@@ -18,11 +18,11 @@
 #![no_main]
 
 use embassy_time::Duration;
-use log::{error, info};
+use log::{error, info, warn};
 use tower::radio::{RfConfig, Spirit1, config};
 use tower::{app, board::Board};
 #[cfg(feature = "role-node")]
-use {embassy_time::Instant, embassy_time::Timer, log::warn};
+use {embassy_time::Instant, embassy_time::Timer};
 
 const CHANNEL: u8 = 0;
 
@@ -37,17 +37,17 @@ async fn run(b: Board) {
         b.radio_irq,
     );
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "sleep", "exit_shutdown: {e}");
+        error!(target: "sleep", "shutdown exit failed: {e}");
     }
     if let Err(e) = radio.read_device_id() {
-        error!(target: "sleep", "device id: {e}");
+        error!(target: "sleep", "device ID check failed: {e}");
     }
     let cfg = RfConfig {
         band: config::Band::DEFAULT,
         channel: CHANNEL,
     };
     if let Err(e) = config::apply(&mut radio, &cfg).await {
-        error!(target: "sleep", "config: {e}");
+        error!(target: "sleep", "RF config failed: {e}");
     }
 
     #[cfg(feature = "role-node")]
@@ -58,25 +58,25 @@ async fn run(b: Board) {
 
 #[cfg(feature = "role-node")]
 async fn node(radio: &mut Spirit1, cfg: &RfConfig) -> ! {
-    info!(target: "sleep", "NODE: TX then sleep, alternating SLEEP / SHUTDOWN on ch{}", CHANNEL);
+    info!(target: "sleep", "node: TX, then sleep and shutdown in turn, on channel {}", CHANNEL);
     let mut seq: u32 = 0;
     loop {
         // Transmit (radio is READY here, freshly woken on later iterations).
         let mut frame = [0x5Au8; 12];
         frame[..4].copy_from_slice(&seq.to_le_bytes());
         match radio.tx(&frame, false, Duration::from_millis(200)).await {
-            Ok(()) => info!(target: "sleep", "seq={} tx ok", seq),
-            Err(e) => warn!(target: "sleep", "seq={} tx {e}", seq),
+            Ok(()) => info!(target: "sleep", "#{} sent", seq),
+            Err(e) => warn!(target: "sleep", "#{} not sent: {e}", seq),
         }
 
         // Sleep between transfers, alternating the two low-power modes.
         let use_shutdown = seq % 2 == 1;
         if use_shutdown {
             radio.enter_shutdown();
-            info!(target: "sleep", "→ SHUTDOWN (powered down)");
+            info!(target: "sleep", "radio in shutdown (powered down)");
         } else {
             let _ = radio.to_sleep().await;
-            info!(target: "sleep", "→ SLEEP (config retained)");
+            info!(target: "sleep", "radio in sleep (config retained)");
         }
         Timer::after_secs(3).await; // (MCU would drop to STOP here if USB unplugged)
 
@@ -89,19 +89,18 @@ async fn node(radio: &mut Spirit1, cfg: &RfConfig) -> ! {
             let _ = radio.to_ready().await;
         }
         let us = t0.elapsed().as_micros();
-        info!(
-            target: "sleep",
-            "woke from {} in {} µs",
-            if use_shutdown { "SHUTDOWN (+reconfig)" } else { "SLEEP" },
-            us
-        );
+        if use_shutdown {
+            info!(target: "sleep", "woke from shutdown in {} µs (with reconfig)", us);
+        } else {
+            info!(target: "sleep", "woke from sleep in {} µs", us);
+        }
         seq = seq.wrapping_add(1);
     }
 }
 
 #[cfg(not(feature = "role-node"))]
 async fn gateway(radio: &mut Spirit1) -> ! {
-    info!(target: "sleep", "GATEWAY: receiving across the node's sleep cycles on ch{}", CHANNEL);
+    info!(target: "sleep", "gateway: receiving across the node's sleep cycles, channel {}", CHANNEL);
     let mut buf = [0u8; 96];
     let mut last: Option<u32> = None;
     loop {
@@ -117,12 +116,12 @@ async fn gateway(radio: &mut Spirit1) -> ! {
                     _ => "",
                 };
                 last = Some(seq);
-                info!(target: "sleep", "rx seq={} len={} rssi={}dBm{}", seq, len, q.rssi, relink);
+                info!(target: "sleep", "rx #{}, {} B, {} dBm{}", seq, len, q.rssi, relink);
             }
             Err(tower::radio::RadioError::Timeout) => {
-                info!(target: "sleep", "...idle (no frame in 8 s)");
+                info!(target: "sleep", "idle, no frame in 8 s");
             }
-            Err(e) => info!(target: "sleep", "rx {e}"),
+            Err(e) => warn!(target: "sleep", "rx failed: {e}"),
         }
     }
 }

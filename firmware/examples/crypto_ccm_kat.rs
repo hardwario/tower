@@ -42,21 +42,29 @@ async fn run(_b: Board) {
     let tag = ccm.seal(&KEY, &NONCE, &AAD, &mut buf);
     let ct_ok = buf == EXPECT_CT;
     let tag_ok = tag == EXPECT_TAG;
-    info!(target: "ccm_kat", "seal ciphertext: {}", if ct_ok { "MATCH" } else { "MISMATCH" });
-    info!(target: "ccm_kat", "seal tag:        {}", if tag_ok { "MATCH" } else { "MISMATCH" });
-    info!(target: "ccm_kat", "  tag got/exp: {} / {}", Hex(&tag), Hex(&EXPECT_TAG));
+    if ct_ok {
+        info!(target: "ccm", "seal ciphertext MATCH");
+    } else {
+        error!(target: "ccm", "seal ciphertext MISMATCH");
+    }
+    if tag_ok {
+        info!(target: "ccm", "seal tag MATCH");
+    } else {
+        error!(target: "ccm", "seal tag MISMATCH");
+    }
+    info!(target: "ccm", "tag {} (expected {})", Hex(&tag), Hex(&EXPECT_TAG));
     pass &= ct_ok && tag_ok;
 
     // 2) Open the genuine ciphertext+tag → must succeed and recover plaintext.
     if ccm.open(&KEY, &NONCE, &AAD, &mut buf, &tag) {
         if buf == PLAIN {
-            info!(target: "ccm_kat", "open (valid):    OK (plaintext recovered)");
+            info!(target: "ccm", "open of the genuine ciphertext PASS (plaintext recovered)");
         } else {
-            error!(target: "ccm_kat", "open (valid): plaintext mismatch");
+            error!(target: "ccm", "open of the genuine ciphertext FAIL (plaintext differs)");
             pass = false;
         }
     } else {
-        error!(target: "ccm_kat", "open (valid): UNEXPECTED auth fail");
+        error!(target: "ccm", "open of the genuine ciphertext FAIL (authentication failed)");
         pass = false;
     }
 
@@ -64,16 +72,16 @@ async fn run(_b: Board) {
     let mut tampered = EXPECT_CT;
     tampered[0] ^= 0x01;
     if ccm.open(&KEY, &NONCE, &AAD, &mut tampered, &EXPECT_TAG) {
-        error!(target: "ccm_kat", "open (tampered): WRONGLY ACCEPTED");
+        error!(target: "ccm", "refusal of a tampered ciphertext FAIL (accepted)");
         pass = false;
     } else {
-        info!(target: "ccm_kat", "open (tampered): correctly REJECTED");
+        info!(target: "ccm", "refusal of a tampered ciphertext PASS");
     }
 
     if pass {
-        info!(target: "ccm_kat", "AES-128-CCM RFC 3610 #1 + tamper: ALL PASS ***");
+        info!(target: "ccm", "RFC 3610 vector #1 and tamper, all checks PASS");
     } else {
-        error!(target: "ccm_kat", "AES-128-CCM: FAILURES above");
+        error!(target: "ccm", "RFC 3610 vector #1 and tamper, some checks FAIL");
     }
 
     loop {

@@ -12,9 +12,7 @@
 #![no_main]
 
 use embassy_time::Timer;
-#[cfg(feature = "role-node")]
-use log::warn;
-use log::{error, info};
+use log::{error, info, warn};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
@@ -59,40 +57,42 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "bulk", "net init: {e}");
+            error!(target: "bulk", "net init failed: {e}");
             return;
         }
     };
 
     #[cfg(not(feature = "role-node"))]
     {
-        info!(target: "bulk", "SENDER: serving a {}-byte blob", BLOB_LEN);
+        info!(target: "bulk", "sender 0x{:08x}: serving a {} B blob", GW_ADDR, BLOB_LEN);
         loop {
             let mut blob = [0u8; BLOB_LEN];
             for (i, b) in blob.iter_mut().enumerate() {
                 *b = i as u8;
             }
-            let ok = net.bulk_serve(NODE_ADDR, &blob).await;
-            info!(target: "bulk", "bulk_serve done (served_last={})", ok);
+            if net.bulk_serve(NODE_ADDR, &blob).await {
+                info!(target: "bulk", "blob served");
+            } else {
+                warn!(target: "bulk", "blob not served to the end (session idled out)");
+            }
             Timer::after_secs(1).await;
         }
     }
 
     #[cfg(feature = "role-node")]
     {
-        info!(target: "bulk", "REQUESTER: pulling the blob from {:08X}", GW_ADDR);
+        info!(target: "bulk", "requester 0x{:08x}: pulling the blob from 0x{:08x}", NODE_ADDR, GW_ADDR);
         loop {
             let mut out = [0u8; 256];
             match net.bulk_fetch(GW_ADDR, &mut out).await {
                 Some(n) => {
-                    let good = (0..n).all(|i| out[i] == i as u8);
-                    info!(
-                        target: "bulk",
-                        "fetched {} bytes ({} chunks), verify {}",
-                        n, n.div_ceil(64), if good { "OK ***" } else { "MISMATCH" }
-                    );
+                    if (0..n).all(|i| out[i] == i as u8) {
+                        info!(target: "bulk", "fetched {} B in {} chunks, pattern MATCH", n, n.div_ceil(64));
+                    } else {
+                        error!(target: "bulk", "fetched {} B in {} chunks, pattern MISMATCH", n, n.div_ceil(64));
+                    }
                 }
-                None => warn!(target: "bulk", "bulk_fetch failed/timeout"),
+                None => warn!(target: "bulk", "fetch failed or timed out"),
             }
             Timer::after_secs(1).await;
         }

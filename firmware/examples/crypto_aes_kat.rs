@@ -31,12 +31,12 @@ async fn run(_b: Board) {
     let mut block = PLAIN;
     aes.encrypt_block(&mut block);
 
-    info!(target: "aes_kat", "expect: {}", Hex(&EXPECT));
-    info!(target: "aes_kat", "got:    {}", Hex(&block));
+    info!(target: "aes", "expected {}", Hex(&EXPECT));
+    info!(target: "aes", "got      {}", Hex(&block));
     if block == EXPECT {
-        info!(target: "aes_kat", "AES-128 ECB FIPS-197 vector: MATCH ***");
+        info!(target: "aes", "FIPS-197 vector MATCH (AES-128 ECB)");
     } else {
-        error!(target: "aes_kat", "AES-128 ECB FIPS-197 vector: MISMATCH");
+        error!(target: "aes", "FIPS-197 vector MISMATCH (AES-128 ECB)");
     }
 
     loop {

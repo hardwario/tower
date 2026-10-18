@@ -50,22 +50,22 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "persist", "net init: {e}");
+            error!(target: "persist", "net init failed: {e}");
             return;
         }
     };
 
     info!(
         target: "persist",
-        "BOOT: resumed tx_counter={} reserve_watermark={} last_seen={}",
+        "TX counter resumed at {}, reserve watermark {}, last seen {}",
         net.tx_counter(), net.reserve_watermark(), net.last_seen()
     );
-    info!(target: "persist", "power-cycle the board (then: tower logs) to see the counter resume at the watermark");
+    info!(target: "persist", "reset or power-cycle the board: the counter resumes at the watermark");
 
     // Advance the counter with unconfirmed sends (no ACK needed).
     loop {
         let _ = net.send(PEER_ADDR, b"x", false, 1).await;
-        info!(target: "persist", "sent; tx_counter now {} (watermark {})", net.tx_counter(), net.reserve_watermark());
+        info!(target: "persist", "sent, TX counter now {} (watermark {})", net.tx_counter(), net.reserve_watermark());
         Timer::after_secs(2).await;
     }
 }

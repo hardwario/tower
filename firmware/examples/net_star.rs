@@ -74,7 +74,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "star", "net init: {e}");
+            error!(target: "star", "net init failed: {e}");
             return;
         }
     };
@@ -83,7 +83,7 @@ async fn run(b: Board) {
     {
         net.add_peer(NODE_A, &KEY_A);
         net.add_peer(NODE_B, &KEY_B);
-        info!(target: "star", "GATEWAY {:08X}: {} peers registered (per-node keys)", GW_ADDR, net.peer_count());
+        info!(target: "star", "gateway 0x{:08x}: {} peers registered (per-node keys)", GW_ADDR, net.peer_count());
         loop {
             if let Some(rx) = net.recv(Duration::from_secs(10)).await {
                 let who = match rx.src {
@@ -94,7 +94,7 @@ async fn run(b: Board) {
                 let text = core::str::from_utf8(rx.data()).unwrap_or("<bin>");
                 info!(
                     target: "star",
-                    "rx node {} (src={:08X}) cnt={} rssi={}dBm \"{}\" (ACKed, per-node key)",
+                    "rx node {} (0x{:08x}), counter {}, {} dBm: \"{}\" (ACKed, per-node key)",
                     who, rx.src, rx.counter, rx.rssi, text
                 );
             }
@@ -103,7 +103,13 @@ async fn run(b: Board) {
 
     #[cfg(feature = "role-node")]
     {
-        info!(target: "star", "NODE {} ({:08X}): confirmed uplink to GW under per-node key", NODE.2, NODE.0);
+        info!(
+            target: "star",
+            "node {} (0x{:08x}): confirmed uplinks to 0x{:08x} under its own key",
+            NODE.2,
+            NODE.0,
+            GW_ADDR
+        );
         let mut seq: u32 = 0;
         loop {
             let mut msg = [0u8; 6];
@@ -113,9 +119,8 @@ async fn run(b: Board) {
             msg[3] = b'0' + ((seq / 10) % 10) as u8;
             msg[4] = b'0' + (seq % 10) as u8;
             match net.send(GW_ADDR, &msg, true, 3).await {
-                SendResult::Delivered => info!(target: "star", "node {} seq={} Delivered", NODE.2, seq),
-                SendResult::NotDelivered => warn!(target: "star", "node {} seq={} NotDelivered", NODE.2, seq),
-                other => warn!(target: "star", "node {} seq={} {other}", NODE.2, seq),
+                SendResult::Delivered => info!(target: "star", "node {} #{} delivered", NODE.2, seq),
+                other => warn!(target: "star", "node {} #{} {other}", NODE.2, seq),
             }
             seq = seq.wrapping_add(1);
             Timer::after_secs(2).await;

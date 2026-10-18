@@ -1,5 +1,5 @@
 //! HIL smoke group: flash a self-checking KAT example to the Dongle, decode its framed boot
-//! output natively, and await the `ALL PASS` verdict (firmware/docs/test-plan.md §1:
+//! output natively, and await the `all checks PASS` verdict (firmware/docs/test-plan.md §1:
 //! self-checking KATs).
 //!
 //! These need the bench, so they are `#[ignore]`d: `cargo test` COMPILES them (proving the
@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use tower_hil::{Console, Frame, Role, bench_or_fail, build_image, frame_text};
 
-/// crypto_ccm_kat is a one-shot KAT: it prints RFC 3610 vector verdicts then `*** ALL PASS ***`
-/// (or an `error!` FAIL line) within ms of boot. Flash it to the Dongle, reset, and await PASS.
+/// crypto_ccm_kat is a one-shot KAT: it prints RFC 3610 vector verdicts (`MATCH`, `PASS`) then
+/// `..., all checks PASS` (or `error!` lines ending in `MISMATCH` / `FAIL`) within ms of boot.
+/// Flash it to the Dongle, reset, and await the summary.
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn smoke_ccm_kat_all_pass() {
@@ -25,15 +26,11 @@ fn smoke_ccm_kat_all_pass() {
     let mut console = Console::open(&bench.dongle.serial).expect("open Dongle console");
     console.reset_into_app().expect("reset the Dongle into the app");
 
-    // Await a positive verdict; a FAIL/MISMATCH/VIOLATION line fails fast.
+    // Await the summary verdict; a FAIL/MISMATCH line (a failed check) fails fast.
     let verdict = console
         .wait_for(Duration::from_secs(8), |f| {
             frame_text(f).is_some_and(|t| {
-                t.contains("ALL PASS")
-                    || t.contains("PASS ***")
-                    || t.contains("FAIL")
-                    || t.contains("MISMATCH")
-                    || t.contains("VIOLATION")
+                t.contains("all checks PASS") || t.contains("FAIL") || t.contains("MISMATCH")
             })
         })
         .expect("console read")
@@ -41,7 +38,7 @@ fn smoke_ccm_kat_all_pass() {
 
     let text = frame_text(&verdict).unwrap_or("");
     assert!(
-        !text.contains("FAIL") && !text.contains("MISMATCH") && !text.contains("VIOLATION"),
+        !text.contains("FAIL") && !text.contains("MISMATCH"),
         "crypto_ccm_kat reported a failure: {text:?}"
     );
 

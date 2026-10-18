@@ -54,15 +54,15 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "fhssc", "net init: {e}");
+            error!(target: "fhss", "net init failed: {e}");
             return;
         }
     };
     if let Err(e) = net.enable_fhss(FhssRole::Master, FhssConfig::default()).await {
-        error!(target: "fhssc", "enable_fhss: {e}");
+        error!(target: "fhss", "enabling failed: {e}");
         return;
     }
-    info!(target: "fhssc", "running hop-master for {} slots (>1 cycle of {})…", SLOTS, FHSS_N);
+    info!(target: "fhss", "hop master running for {} slots (more than one {}-slot cycle)", SLOTS, FHSS_N);
 
     let mut visited = [false; FHSS_N as usize];
     for _ in 0..SLOTS {
@@ -86,19 +86,40 @@ async fn run(b: Board) {
     let mean_ms = sum_ms / FHSS_N as u32;
     let edges_ok = visited[0] && visited[FHSS_N as usize - 1]; // band edges exercised
 
-    info!(target: "fhssc", "channels used = {} / {}  (≥50: {})", used, FHSS_N, used >= 50);
-    info!(
-        target: "fhssc",
-        "per-channel airtime: max={}ms min={}ms mean={}ms  (≤{}ms: {})",
-        max_ms, min_ms, mean_ms, LIMIT_MS, max_ms <= LIMIT_MS
-    );
-    info!(target: "fhssc", "band edges used: ch0 ({}Hz) + ch{} ({}Hz): {}", fhss_freq_hz(0), FHSS_N - 1, fhss_freq_hz(FHSS_N - 1), edges_ok);
+    if used >= 50 {
+        info!(target: "fhss", "channels used PASS ({} of {}, at least 50)", used, FHSS_N);
+    } else {
+        error!(target: "fhss", "channels used FAIL ({} of {}, at least 50)", used, FHSS_N);
+    }
+    if max_ms <= LIMIT_MS {
+        info!(
+            target: "fhss",
+            "per-channel airtime PASS (max {} ms, min {} ms, mean {} ms; limit {} ms)",
+            max_ms, min_ms, mean_ms, LIMIT_MS
+        );
+    } else {
+        error!(
+            target: "fhss",
+            "per-channel airtime FAIL (max {} ms, min {} ms, mean {} ms; limit {} ms)",
+            max_ms, min_ms, mean_ms, LIMIT_MS
+        );
+    }
+    let (lo, hi) = (fhss_freq_hz(0), fhss_freq_hz(FHSS_N - 1));
+    if edges_ok {
+        info!(target: "fhss", "band edges used PASS (channel 0 at {} Hz, {} at {} Hz)", lo, FHSS_N - 1, hi);
+    } else {
+        error!(target: "fhss", "band edges used FAIL (channel 0 at {} Hz, {} at {} Hz)", lo, FHSS_N - 1, hi);
+    }
 
     let pass = used >= 50 && max_ms <= LIMIT_MS && edges_ok;
     if pass {
-        info!(target: "fhssc", "F10 COMPLIANCE: PASS *** ({} ch, max {}ms ≤ {}ms)", used, max_ms, LIMIT_MS);
+        info!(
+            target: "fhss",
+            "F10 compliance, all checks PASS ({} channels, airtime max {} of {} ms)",
+            used, max_ms, LIMIT_MS
+        );
     } else {
-        error!(target: "fhssc", "F10 COMPLIANCE: FAIL");
+        error!(target: "fhss", "F10 compliance, some checks FAIL");
     }
     loop {
         embassy_time::Timer::after_secs(5).await;

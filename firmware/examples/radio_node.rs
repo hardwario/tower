@@ -4,7 +4,7 @@
 //!
 //! Pairs with `radio_gateway`. Every 5 s the node sends a confirmed telemetry
 //! frame (sequence, battery mV, temperature ×10 °C) to the gateway and reports
-//! whether it was `Delivered` (ACKed) with the round-trip latency. This is the
+//! whether it was `delivered` (ACKed) with the round-trip latency. This is the
 //! canonical use of the network layer: secure (AES-CCM), confirmed, replay-safe,
 //! duty-metered uplink in ~20 lines of application code.
 //!
@@ -53,13 +53,18 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "node", "net init: {e}");
+            error!(target: "node", "net init failed: {e}");
             return;
         }
     };
     net.add_peer(GW_ADDR, &KEY); // gateway under its per-link key
 
-    info!(target: "node", "NODE {:08X}: confirmed telemetry → GW {:08X} every 5 s", NODE_ADDR, GW_ADDR);
+    info!(
+        target: "node",
+        "0x{:08x} sending confirmed telemetry to gateway 0x{:08x} every 5 s",
+        NODE_ADDR,
+        GW_ADDR
+    );
     let mut seq: u32 = 0;
     let (mut delivered, mut lost) = (0u32, 0u32);
     loop {
@@ -80,14 +85,14 @@ async fn run(b: Board) {
         match r {
             SendResult::Delivered => {
                 delivered += 1;
-                info!(target: "node", "seq={} Delivered ({} ms) vbat={}mV temp={}.{}°C [ok={} lost={}]",
+                info!(target: "node", "#{} delivered ({} ms): {} mV, {}.{} °C ({} delivered, {} lost)",
                     seq, ms, vbat_mv, temp_c10 / 10, temp_c10 % 10, delivered, lost);
             }
             SendResult::NotDelivered => {
                 lost += 1;
-                warn!(target: "node", "seq={} NotDelivered ({} ms) [ok={} lost={}]", seq, ms, delivered, lost);
+                warn!(target: "node", "#{} not delivered, no ACK ({} ms; {} delivered, {} lost)", seq, ms, delivered, lost);
             }
-            other => warn!(target: "node", "seq={} {other}", seq),
+            other => warn!(target: "node", "#{} not sent: {other}", seq),
         }
         seq = seq.wrapping_add(1);
         Timer::after(Duration::from_secs(5)).await;

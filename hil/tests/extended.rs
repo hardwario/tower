@@ -22,9 +22,15 @@ fn build_and_flash(bench: &Bench, role: Role, example: &str, features: &str) -> 
     bench.flash(role, &bin)
 }
 
+/// The summary verdict a self-checking example logs when every check passed (firmware/AGENTS.md,
+/// "Log messages"): the last word of a verdict line is `PASS`, `FAIL`, `MATCH` or `MISMATCH`.
+const ALL_PASS: &str = "all checks PASS";
+/// The verdict words that fail a KAT: any failed check or a failed summary.
+const FAILS: &[&str] = &["FAIL", "MISMATCH"];
+
 /// Flash a one-shot KAT to the Dongle, reset, and await its verdict: pass only if a frame contains
-/// `pass` AND none of `fails` (so a pass token that is the tail of a fail token, like `MATCH ***` in
-/// `MISMATCH ***`, can never pass), fail fast on any frame containing one of `fails`. Tracks the
+/// `pass` AND none of `fails` (so a pass token that is the tail of a fail token, like `MATCH` in
+/// `MISMATCH`, can never pass), fail fast on any frame containing one of `fails`. Tracks the
 /// device's `Dropped` markers so a verdict lost to the console writer's drop-newest queue
 /// (TX_DEPTH) is diagnosed as such, not as "did it boot?". Also asserts gap-free transport (seq gaps ≠ writer drops:
 /// the writer assigns seq at encode, so its drops surface ONLY via the Dropped marker).
@@ -74,16 +80,18 @@ fn run_kat(example: &str, pass: &str, fails: &[&str], secs: u64) {
     );
 }
 
-/// Parse the decimal number right after `key` in `text` (e.g. `tx_counter=` -> 1025).
+/// Parse the decimal number right after `key` in `text` (e.g. `resumed at ` -> 1025).
 fn field_u64(text: &str, key: &str) -> Option<u64> {
     let rest = &text[text.find(key)? + key.len()..];
     let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 
-/// Parse the 8-hex-digit id right after `key` (e.g. `id=` -> 0x1234ABCD).
+/// Parse the 8 hex digits right after `key`, with or without a `0x` prefix (e.g. `paired node `
+/// -> 0x000000bb in `paired node 0x000000bb, ...`, `key ` -> 0x1a2b3c4d in `key 1a2b3c4d`).
 fn field_hex32(text: &str, key: &str) -> Option<u32> {
     let rest = &text[text.find(key)? + key.len()..];
+    let rest = rest.strip_prefix("0x").unwrap_or(rest);
     u32::from_str_radix(rest.get(..8)?, 16).ok()
 }
 
@@ -91,6 +99,47 @@ fn field_hex32(text: &str, key: &str) -> Option<u32> {
 fn field_sas(text: &str) -> Option<u32> {
     let rest = &text[text.find("pairing: SAS ")? + "pairing: SAS ".len()..];
     rest.get(..6)?.parse().ok()
+}
+
+/// Whether a send outcome line reports a delivery (`#3 delivered (35 ms)`, `A: PING 3
+/// delivered`): `delivered` is also the tail of `not delivered`, so that one is excluded.
+fn delivered(text: &str) -> bool {
+    text.contains("delivered") && !text.contains("not delivered")
+}
+
+/// net_persist's boot line, `TX counter resumed at 1025, reserve watermark 2049, last seen 0`:
+/// the live counter follows `RESUMED`, the reserved watermark `WATERMARK`.
+const RESUMED: &str = "TX counter resumed at ";
+const WATERMARK: &str = "reserve watermark ";
+
+/// The parsers above against the lines the examples log (host only: runs in a plain `cargo test`),
+/// so a reworded log line fails here before it fails on the bench.
+#[test]
+fn parsers_read_the_example_lines() {
+    let resumed = "TX counter resumed at 1025, reserve watermark 2049, last seen 0";
+    assert!(resumed.starts_with(RESUMED));
+    assert_eq!(field_u64(resumed, RESUMED), Some(1025));
+    assert_eq!(field_u64(resumed, WATERMARK), Some(2049));
+
+    let host = "paired node 0x000000bb, key 1a2b3c4d (first 4 bytes; address chosen by the node)";
+    let joiner = "joined host 0x22222222 as 0x000000bb, key 1a2b3c4d (first 4 bytes; uid 0042001F-...)";
+    assert_eq!(field_hex32(host, "paired node "), Some(0xbb));
+    assert_eq!(field_hex32(joiner, " as "), Some(0xbb));
+    assert_eq!(field_hex32(host, "key "), Some(0x1a2b_3c4d));
+    assert_eq!(field_hex32(joiner, "key "), Some(0x1a2b_3c4d));
+    assert_eq!(field_sas("pairing: SAS 012345"), Some(12_345));
+
+    assert!(delivered("#3 delivered (35 ms)"));
+    assert!(!delivered("#3 not delivered, no ACK (1200 ms)"));
+    assert!(delivered("A: PING 3 delivered"));
+    assert!(!delivered("A: PING 3 not delivered (no ACK)"));
+
+    // A pass token never matches inside its failing counterpart.
+    assert!(!"FIPS-197 vector MISMATCH (AES-128 ECB)".contains("vector MATCH"));
+    assert!("FIPS-197 vector MATCH (AES-128 ECB)".contains("vector MATCH"));
+    assert!(!"frame limits, some checks FAIL".contains(ALL_PASS));
+    assert!("frame limits, all checks PASS".contains(ALL_PASS));
+    assert!(!FAILS.iter().any(|f| "frame limits, all checks PASS".contains(f)));
 }
 
 // ---------------------------------------------------------------------------
@@ -101,8 +150,8 @@ fn field_sas(text: &str) -> Option<u32> {
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn ext_crypto_aes_kat() {
-    // The full verdict prefix, not a bare "MATCH ***" (the tail of a "MISMATCH ***").
-    run_kat("crypto_aes_kat", "vector: MATCH ***", &["MISMATCH"], 8);
+    // The verdict with the word before it, not a bare "MATCH" (the tail of a "MISMATCH").
+    run_kat("crypto_aes_kat", "vector MATCH", FAILS, 8);
 }
 
 /// Frame codec + nonce + CCM loopback, incl. tamper + wrong-key rejection.
@@ -111,19 +160,14 @@ fn ext_crypto_aes_kat() {
 fn ext_crypto_frame_loopback() {
     // 12 s: the example re-emits its verdict every 5 s (the boot-burst copy can be a casualty
     // of the TX queue), so the window must cover at least one re-emission cycle.
-    run_kat(
-        "crypto_frame_loopback",
-        "ALL PASS ***",
-        &["MISMATCH", "expected AuthFail"],
-        12,
-    );
+    run_kat("crypto_frame_loopback", ALL_PASS, FAILS, 12);
 }
 
 /// FHSS hop permutation + beacon frame round-trip KAT.
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn ext_fhss_kat() {
-    run_kat("fhss_kat", "ALL PASS ***", &["FAIL"], 10);
+    run_kat("fhss_kat", ALL_PASS, FAILS, 10);
 }
 
 /// The pairing-v3 crypto on the MCU: X25519 vs RFC 7748 §5.2 / §6.1, then the handshake golden
@@ -132,40 +176,35 @@ fn ext_fhss_kat() {
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn ext_crypto_x25519_kat() {
-    run_kat(
-        "crypto_x25519_kat",
-        "x25519_kat: ALL PASS ***",
-        &["MISMATCH", "FAILURES"],
-        40,
-    );
+    run_kat("crypto_x25519_kat", ALL_PASS, FAILS, 40);
 }
 
 /// Duty-cycle governor KAT (the regulatory token-bucket arithmetic, on target).
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn ext_net_duty_kat() {
-    run_kat("net_duty_kat", "ALL PASS ***", &["FAIL"], 10);
+    run_kat("net_duty_kat", ALL_PASS, FAILS, 10);
 }
 
 /// Frame-size limits / boundary conditions of the codec.
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn ext_edge_frame_limits() {
-    run_kat("edge_frame_limits", "ALL PASS ***", &["FAIL"], 10);
+    run_kat("edge_frame_limits", ALL_PASS, FAILS, 10);
 }
 
 /// Radio state machine recovery: must never wedge.
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn ext_edge_recovery() {
-    run_kat("edge_recovery", "ALL PASS ***", &["FAIL"], 25);
+    run_kat("edge_recovery", ALL_PASS, FAILS, 25);
 }
 
 // ---------------------------------------------------------------------------
 // Two-board RF scenarios (core slot = second Dongle as radio peer)
 // ---------------------------------------------------------------------------
 
-/// Bidirectional confirmed P2P: A pings (Delivered), B receives + pongs (Delivered),
+/// Bidirectional confirmed P2P: A pings (delivered), B receives + pongs (delivered),
 /// A receives the pong: both directions of the half-duplex link with per-link keys.
 #[test]
 #[ignore = "requires the HIL bench (two TOWER boards in RF range)"]
@@ -179,13 +218,14 @@ fn ext_net_p2p_bidirectional() {
     b.reset_into_app().expect("reset B");
     a.reset_into_app().expect("reset A");
 
-    // A: confirmed PING delivered, and B's PONG received back.
+    // A: confirmed PING delivered, and B's PONG received back. `delivered` is also the tail of
+    // `not delivered`, so that one is excluded explicitly.
     let a_ping = a
         .wait_for(Duration::from_secs(30), |f| {
-            frame_text(f).is_some_and(|t| t.contains("PING") && t.contains("Delivered"))
+            frame_text(f).is_some_and(|t| t.contains("PING") && delivered(t))
         })
         .expect("A console read");
-    assert!(a_ping.is_some(), "A never reported a Delivered PING within 30 s");
+    assert!(a_ping.is_some(), "A never reported a delivered PING within 30 s");
     assert!(
         a.wait_for_text(Duration::from_secs(15), "A: rx")
             .expect("A console read"),
@@ -200,14 +240,14 @@ fn ext_net_p2p_bidirectional() {
     );
     let b_pong = b
         .wait_for(Duration::from_secs(15), |f| {
-            frame_text(f).is_some_and(|t| t.contains("PONG") && t.contains("Delivered"))
+            frame_text(f).is_some_and(|t| t.contains("PONG") && delivered(t))
         })
         .expect("B console read");
-    assert!(b_pong.is_some(), "B never reported a Delivered PONG");
+    assert!(b_pong.is_some(), "B never reported a delivered PONG");
 }
 
 /// Full stack over the air: CCM-sealed DATA sent by the node, authenticated + decrypted by
-/// the gateway (AUTH OK), with no auth failures in the capture window.
+/// the gateway (`authenticated from ...`), with no authentication failures in the capture window.
 #[test]
 #[ignore = "requires the HIL bench (two TOWER boards in RF range)"]
 fn ext_net_secure_ping_auth() {
@@ -221,7 +261,7 @@ fn ext_net_secure_ping_auth() {
     node.reset_into_app().expect("reset node");
 
     assert!(
-        node.wait_for_text(Duration::from_secs(20), "tx cnt=")
+        node.wait_for_text(Duration::from_secs(20), "sent counter")
             .expect("node console read"),
         "node never sent a sealed frame"
     );
@@ -231,12 +271,12 @@ fn ext_net_secure_ping_auth() {
     let auth_ok = frames
         .iter()
         .filter_map(frame_text)
-        .filter(|t| t.contains("AUTH OK"))
+        .filter(|t| t.starts_with("authenticated from"))
         .count();
     let auth_fail = frames
         .iter()
         .filter_map(frame_text)
-        .filter(|t| t.contains("auth FAIL"))
+        .filter(|t| t.contains("authentication failed"))
         .count();
     assert!(
         auth_ok > 0,
@@ -248,7 +288,7 @@ fn ext_net_secure_ping_auth() {
 /// OTA pairing (v3, X25519 key agreement with a commitment round: JOIN_REQ, JOIN_RESP,
 /// JOIN_NONCE, JOIN_REVEAL, JOIN_CONFIRM): host opens a window, joiner joins with its own
 /// address; both sides must log the SAME node address, the same derived key prefix and the same
-/// SAS (`net: pairing: SAS dddddd`, logged just before each side's PAIRED / JOINED line), and the
+/// SAS (`net: pairing: SAS dddddd`, logged just before each side's `paired` / `joined` line), and the
 /// joiner must never have seen a reveal that breaks the host's commitment or fails its tag.
 #[test]
 #[ignore = "requires the HIL bench (two TOWER boards in RF range)"]
@@ -263,7 +303,7 @@ fn ext_net_pairing_handshake() {
     host.reset_into_app().expect("reset host");
     joiner.reset_into_app().expect("reset joiner");
 
-    // The joiner logs its SAS, then JOINED (or `join failed` when the window passed unjoined).
+    // The joiner logs its SAS, then `joined` (or `join failed` when the window passed unjoined).
     // A reveal that does not open the commitment, or fails key confirmation, is what a man in the
     // middle (or a broken handshake) looks like on a bench with only the two boards: fail on it.
     let sas = joiner
@@ -285,10 +325,10 @@ fn ext_net_pairing_handshake() {
     let joiner_sas = field_sas(st).expect("join failed on the joiner");
     let joined = joiner
         .wait_for(Duration::from_secs(10), |f| {
-            frame_text(f).is_some_and(|t| t.contains("JOINED ***"))
+            frame_text(f).is_some_and(|t| t.starts_with("joined host"))
         })
         .expect("joiner console read")
-        .expect("joiner logged a SAS but no JOINED");
+        .expect("joiner logged a SAS but no `joined` line");
     let jt = frame_text(&joined).unwrap_or("").to_string();
 
     let sas = host
@@ -300,27 +340,26 @@ fn ext_net_pairing_handshake() {
     let host_sas = field_sas(frame_text(&sas).unwrap_or("")).expect("host SAS line malformed");
     let paired = host
         .wait_for(Duration::from_secs(10), |f| {
-            frame_text(f).is_some_and(|t| t.contains("PAIRED ***"))
+            frame_text(f).is_some_and(|t| t.starts_with("paired node"))
         })
         .expect("host console read")
-        .expect("host never logged PAIRED");
+        .expect("host never logged a `paired` line");
     let ht = frame_text(&paired).unwrap_or("").to_string();
 
     // No key travels on air: both ends DERIVE it, so the prefixes must agree (and differ per
     // run), and the SAS values must match (a mismatch is what a man in the middle looks like).
-    let host_key = field_hex32(&ht, "key[..4]=").expect("host PAIRED line has no key prefix");
-    let joiner_key = field_hex32(&jt, "key[..4]=").expect("joiner JOINED line has no key prefix");
+    let host_key = field_hex32(&ht, "key ").expect("host `paired` line has no key prefix");
+    let joiner_key = field_hex32(&jt, "key ").expect("joiner `joined` line has no key prefix");
     assert_eq!(
         host_key, joiner_key,
         "the two ends derived different keys: {ht:?} / {jt:?}"
     );
     assert_eq!(host_sas, joiner_sas, "SAS mismatch between the two ends");
 
-    // The joiner chooses its address; the host must have learned exactly that address. (The
-    // firmware logs `addr=` since the 2026-07-12 radio-address rename; matching the old `id=`
-    // key would panic here on the bench.)
-    let host_addr = field_hex32(&ht, "addr=").expect("host PAIRED line has no addr=");
-    let joiner_addr = field_hex32(&jt, "addr=").expect("joiner JOINED line has no addr=");
+    // The joiner chooses its address; the host must have learned exactly that address (the host
+    // logs `paired node 0x...`, the joiner `joined host 0x... as 0x...`).
+    let host_addr = field_hex32(&ht, "paired node ").expect("host `paired` line has no address");
+    let joiner_addr = field_hex32(&jt, " as ").expect("joiner `joined` line has no address");
     assert_eq!(
         host_addr, joiner_addr,
         "host installed a different node address than the joiner chose"
@@ -339,7 +378,7 @@ fn ext_net_bulk_pull() {
     let mut snd = Console::open(&bench.dongle.serial).expect("open sender console");
 
     // RF flake tolerance: a chunked bulk session can die to a single lost window mid-air
-    // ("bulk_fetch failed/timeout", observed once on 2026-07-05, clean on retry). The boards
+    // (a failed fetch, observed once on 2026-07-05, clean on retry). The boards
     // are flashed once; a retry is just a re-reset + re-observe. ONLY that transport failure is
     // retried: a `MISMATCH` is corrupted data (never RF luck) and no verdict at all means the
     // requester never ran; both fail at once. One retry keeps a real regression loud: two
@@ -355,18 +394,18 @@ fn ext_net_bulk_pull() {
         let verdict = req
             .wait_for(Duration::from_secs(40), |f| {
                 frame_text(f).is_some_and(|t| {
-                    t.contains("verify OK ***") || t.contains("MISMATCH") || t.contains("bulk_fetch failed")
+                    t.contains("pattern MATCH") || t.contains("MISMATCH") || t.contains("fetch failed")
                 })
             })
             .expect("requester console read")
             .expect("bulk pull: no verdict frame within 40 s; did the requester run?");
         let t = frame_text(&verdict).unwrap_or("");
-        if t.contains("verify OK ***") {
-            assert!(t.contains("fetched 200 bytes"), "unexpected blob size: {t:?}");
+        if t.contains("pattern MATCH") {
+            assert!(t.contains("fetched 200 B "), "unexpected blob size: {t:?}");
             return;
         }
         assert!(
-            t.contains("bulk_fetch failed"),
+            t.contains("fetch failed"),
             "bulk pull returned corrupted data (not a flake): {t:?}"
         );
         last = t.to_string();
@@ -375,7 +414,7 @@ fn ext_net_bulk_pull() {
 }
 
 /// Rapid-fire confirmed sends: the gateway must accept counters strictly monotonically:
-/// an out-of-order or replayed counter is a latched ORDER VIOLATION.
+/// an out-of-order or replayed counter is a latched `counters monotonic FAIL`.
 #[test]
 #[ignore = "requires the HIL bench (two TOWER boards in RF range)"]
 fn ext_edge_rapid_monotonic() {
@@ -395,13 +434,11 @@ fn ext_edge_rapid_monotonic() {
     assert!(
         texts
             .iter()
-            .any(|t| t.contains("accepted=") && t.contains("(monotonic OK)")),
+            .any(|t| t.contains(" accepted, ") && t.contains("monotonic PASS")),
         "gateway never reported monotonic progress (saw: {texts:?})"
     );
     assert!(
-        !texts
-            .iter()
-            .any(|t| t.contains("ORDER VIOLATION") || t.contains("(FAILED)")),
+        !texts.iter().any(|t| t.contains("monotonic FAIL")),
         "gateway accepted an out-of-order/replayed counter: {texts:?}"
     );
 }
@@ -422,13 +459,13 @@ fn ext_net_persist_counter_resumes() {
 
     let boot1 = console
         .wait_for(Duration::from_secs(10), |f| {
-            frame_text(f).is_some_and(|t| t.contains("BOOT: resumed tx_counter="))
+            frame_text(f).is_some_and(|t| t.starts_with(RESUMED))
         })
         .expect("console read")
-        .expect("no BOOT banner (boot 1)");
+        .expect("no counter resume line (boot 1)");
     let t1 = frame_text(&boot1).unwrap_or("").to_string();
-    let cnt1 = field_u64(&t1, "tx_counter=").expect("boot 1: no tx_counter");
-    let wm1 = field_u64(&t1, "reserve_watermark=").expect("boot 1: no watermark");
+    let cnt1 = field_u64(&t1, RESUMED).expect("boot 1: no TX counter");
+    let wm1 = field_u64(&t1, WATERMARK).expect("boot 1: no watermark");
     assert!(
         wm1 > cnt1,
         "watermark must be reserved ahead of the live counter: {t1:?}"
@@ -437,7 +474,7 @@ fn ext_net_persist_counter_resumes() {
     // Let it burn a few counter values, then reboot and require the resume-at-watermark jump.
     assert!(
         console
-            .wait_for_text(Duration::from_secs(10), "sent; tx_counter now")
+            .wait_for_text(Duration::from_secs(10), "sent, TX counter now")
             .expect("read"),
         "net_persist never sent (boot 1)"
     );
@@ -445,13 +482,13 @@ fn ext_net_persist_counter_resumes() {
 
     let boot2 = console
         .wait_for(Duration::from_secs(10), |f| {
-            frame_text(f).is_some_and(|t| t.contains("BOOT: resumed tx_counter="))
+            frame_text(f).is_some_and(|t| t.starts_with(RESUMED))
         })
         .expect("console read")
-        .expect("no BOOT banner (boot 2)");
+        .expect("no counter resume line (boot 2)");
     let t2 = frame_text(&boot2).unwrap_or("").to_string();
-    let cnt2 = field_u64(&t2, "tx_counter=").expect("boot 2: no tx_counter");
-    let wm2 = field_u64(&t2, "reserve_watermark=").expect("boot 2: no watermark");
+    let cnt2 = field_u64(&t2, RESUMED).expect("boot 2: no TX counter");
+    let wm2 = field_u64(&t2, WATERMARK).expect("boot 2: no watermark");
     assert!(
         cnt2 >= wm1,
         "boot 2 resumed at {cnt2}, BELOW boot 1's watermark {wm1}: counter reuse (replay hazard): {t2:?}"

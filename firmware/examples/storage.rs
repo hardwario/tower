@@ -51,7 +51,7 @@ async fn run(b: Board) {
         _ => 0, // absent / blank / unexpected -> start at zero
     } + 1;
     if let Err(e) = kv.set_bytes(KEY_BOOTS, &boots.to_le_bytes()) {
-        error!(target: "storage", "boot-counter save failed: {e}");
+        error!(target: "storage", "boot counter not saved: {e}");
     }
 
     // --- postcard record: a settings struct ---------------------------------
@@ -60,18 +60,24 @@ async fn run(b: Board) {
         Ok(None) => {
             let s = Settings::default();
             if let Err(e) = kv.set(KEY_SETTINGS, &s) {
-                error!(target: "storage", "settings save failed: {e}");
+                error!(target: "storage", "settings not saved: {e}");
             }
             info!(target: "storage", "settings initialized to defaults");
             s
         }
         Err(e) => {
-            error!(target: "storage", "settings load failed: {e}");
+            error!(target: "storage", "settings not loaded, using the defaults: {e}");
             Settings::default()
         }
     };
 
-    info!(target: "storage", "boot #{}, settings {:?}", boots, settings);
+    info!(
+        target: "storage",
+        "boot #{}, settings: interval {} s, name {}",
+        boots,
+        settings.interval_s,
+        core::str::from_utf8(&settings.name).unwrap_or("(not text)")
+    );
 
     loop {
         Timer::after_secs(60).await;

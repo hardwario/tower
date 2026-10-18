@@ -16,8 +16,8 @@ range); nothing that needs a node and a gateway on air was.
 **What to run** (a Core Module with `radio_push_button`, a Radio Dongle with
 `radio_dongle_gateway`, `tower` from the same commit, EEPROM wiped first):
 - OTA pairing: `tower nodes add --ota`, hold 1 s; the node's `net: pairing: SAS`, the CLI's
-  `paired ... (SAS n)` and the gateway log show the same six digits; `JOINED` follows on the
-  node and its NodeInfo names it.
+  `paired ... (SAS n)` and the gateway log show the same six digits; `node: paired with gateway
+  ...` follows on the node and its NodeInfo names it.
 - Lost confirm (a temporary patch that skips the JOIN_CONFIRM transmit): the node discards the
   key after its commit round and pairs again on the next hold.
 - Re-pair: a 12 s hold on a paired node is refused while it is registered; after `tower nodes

@@ -17,11 +17,12 @@ root: the whole host workspace).
 ## 1. Scope & philosophy
 
 - **Self-checking first.** Most non-interactive examples are *known-answer tests* (KATs) or
-  invariant checkers that print a single verdict line ending in `ALL PASS ***` / `PASS ***` /
-  `MATCH ***`, or an `error!` line (`FAIL` / `MISMATCH` / `VIOLATION`). The pass criterion is
-  "the verdict line is present and positive." These need no human judgement.
+  invariant checkers that log a verdict per check (its last word `PASS` / `MATCH`, or `FAIL` /
+  `MISMATCH` on an `error!` line) and one summary verdict, `… all checks PASS` or `… some checks
+  FAIL` (the convention in `firmware/AGENTS.md`, "Log messages"). The pass criterion is "the
+  summary verdict is present and positive." These need no human judgement.
 - **Two-board RF tests** assert link-level behaviour (delivery, ordering, ACK, RSSI, hopping).
-  Pass = both ends log the expected exchange with no `FAIL`/`VIOLATION`/`MISMATCH`.
+  Pass = both ends log the expected exchange with no `FAIL`/`MISMATCH`.
 - **Interactive/physical tests** (button, accelerometer dice/tilt, LED visual, LED strip)
   require a human; the plan documents the action and the expected log/visual so they can be
   signed off by eye. An agent without hands records "boot OK + instructions emitted; physical
@@ -96,7 +97,7 @@ while the chip is held in reset, so it catches boot output from the first byte, 
 
 ```sh
 python3 tools/hwtest/cap.py <seconds> tower -d <PORT> logs --reset --color never > out.txt
-grep -iE 'PASS|FAIL|MISMATCH|VIOLATION' out.txt   # the verdict line
+grep -E 'PASS|FAIL|MATCH' out.txt   # the verdict lines (MATCH also finds MISMATCH)
 ```
 
 Use Mode B for: all crypto/frame/duty/fhss KATs, `edge_recovery`, `radio_id/state/regdump`,
@@ -193,11 +194,11 @@ B=tower logs --reset, H=host, X=interactive, S=shell-exec).
 ### B. Board bring-up & peripheral drivers
 | ID | Example | Mode | Pass / observable | Edge cases |
 |---|---|---|---|---|
-| B1 | i2cscan | B | `scan complete - N device(s)`; lists `0x64` (+`0x49`,`0x19` if sensor board) | wrong/missing pull-ups → 0 devices; TMP112 in shutdown still ACKs |
+| B1 | i2cscan | B | `scan complete, N device(s)`; lists `0x64` (+`0x49`,`0x19` if sensor board) | wrong/missing pull-ups → 0 devices; TMP112 in shutdown still ACKs |
 | B2 | blinky | X (visual) | boot banner; LED heartbeat (40 ms on / 1960 off) + double-blink every 5 s preempts it | queue depth 8 overflow drops oldest; zero-duration step must not hang; `set_background(None)` idempotent |
 | B3 | button | X | `press/release/click/hold` lines + LED flash on each | click ≤500 ms vs hold ≥1 s boundary; debounce 20 ms; button held at boot; rapid double-tap; bounce on release |
-| B4 | thermometer | B | on sensor board: `NN.NN deg. C` every 2 s; **on these bare boards: `read failed` (NACK), expected** | negative temps sign-extend; wrong strap → persistent NACK; I2C lockup |
-| B5 | accelerometer | X+B | on sensor board: `dice: 1..6` per orientation, `tilt!` on shake (rate-limited 500 ms); **bare boards: WHO_AM_I/absent error** | all 6 faces (opposite faces sum to 7); 45° tilt → no face; sensitivity Ultra vs Low; min_interval throttle |
+| B4 | thermometer | B | on sensor board: `NN.NN °C` every 2 s; **on these bare boards: `read failed` (NACK), expected** | negative temps sign-extend; wrong strap → persistent NACK; I2C lockup |
+| B5 | accelerometer | X+B | on sensor board: `face N up` (1 to 6) per orientation, `tilt detected` on shake (rate-limited 500 ms); **bare boards: WHO_AM_I/absent error** | all 6 faces (opposite faces sum to 7); 45° tilt → no face; sensitivity Ultra vs Low; min_interval throttle |
 | B6 | strip | X (visual) | boot banner; scrolling rainbow on WS2812 (needs a strip on PA1) | brightness 0/100/gamma; RGB vs RGBW; zero-length; len>buffer panics; DMA1_CH3 contention |
 | B7 | storage | B then reset+B | boot 1: `settings initialized to defaults`, `boot #1`; after reset `boot #2`, `#3`… (counter persists) | missing key→default; bad CRC→default; wrong-type read→None; compaction when full; power-loss mid-write keeps prior value |
 
@@ -205,84 +206,84 @@ B=tower logs --reset, H=host, X=interactive, S=shell-exec).
 | ID | Example | Mode | Pass / observable | Edge cases |
 |---|---|---|---|---|
 | C1 | console_demo | A | logs at ERROR/WARN/INFO/DEBUG/TRACE + `println!`; long line truncated at 192 B on a char boundary; `Dropped{count}` marker after a burst overflows the depth-8 TX queue | UTF-8 (`°C`) not split at truncation; seq increments (check with `tower monitor`); drop-newest policy |
-| C2 | console_panic | B | countdown `alive, deliberate panic in Ns`, then one ERROR frame `panicked at … console_panic.rs:LINE` emitted by the PAC-level panic handler, then a RESET: boot banner + `crash` ERROR frame re-reporting the panic from the breadcrumb (`system crash print` agrees) | panic frame leads with `0x00` to flush a partial frame; if console not up, the breadcrumb still records (verify via the post-reset report); message clipped to 192 B; crash-loops by design → bootguard backoff after 8 |
+| C2 | console_panic | B | countdown `alive, deliberate panic in N s`, then one ERROR frame `panicked at … console_panic.rs:LINE` emitted by the PAC-level panic handler, then a RESET: boot banner + `crash` ERROR frame re-reporting the panic from the breadcrumb (`system crash print` agrees) | panic frame leads with `0x00` to flush a partial frame; if console not up, the breadcrumb still records (verify via the post-reset report); message clipped to 192 B; crash-loops by design → bootguard backoff after 8 |
 | C3 | events_demo | A (`tower events`) | `EVENT measurement count=… temp_c=… unit=cdeg` each second + periodic `heartbeat`; interleaves with logs in `tower logs` | field cap 6; value/name length clip on char boundary; events apply backpressure (never dropped) |
-| C4 | shell_demo | S | `tower exec` of `system resource print`, `system settings print`; set/get all 5 kinds (Str/Uint/Int/Bool/Enum); app cmds merged under `system`; nested `radio …`; `export` | out-of-range rejected (`R_BAD_ARG`); unknown cmd (`R_NOT_FOUND`); TAB ambiguous vs unique (`tower complete`); enum/bool value completion; **persistence across reset**; chunked `resource print` (>192 B → multi-frame); its `uid:` line shows three 8-hex-digit words that differ between boards and match the ID a J-Link reads at 0x1FF80050 / 0x1FF80054 / 0x1FF80064 (`tower logs` of a paired push button shows the same ID in `JOINED gateway … (SAS …, uid …)`) |
+| C4 | shell_demo | S | `tower exec` of `system resource print`, `system settings print`; set/get all 5 kinds (Str/Uint/Int/Bool/Enum); app cmds merged under `system`; nested `radio …`; `export` | out-of-range rejected (`R_BAD_ARG`); unknown cmd (`R_NOT_FOUND`); TAB ambiguous vs unique (`tower complete`); enum/bool value completion; **persistence across reset**; chunked `resource print` (>192 B → multi-frame); its `uid:` line shows three 8-hex-digit words that differ between boards and match the ID a J-Link reads at 0x1FF80050 / 0x1FF80054 / 0x1FF80064 (`tower logs` of a paired push button shows the same ID in `node: paired with gateway 0x…, SAS … (uid …)`) |
 | C5 | console_full | X (TUI) / S | `tower console` shows 3 live panes (Events / Interactive Shell / Logs); or drive shell via `tower exec` | pane focus/zoom/pause; rapid updates no flicker |
 | C6 | blinky + a `tower` from another checkout | S / A | the schema mismatch path: with the firmware flashed from this checkout, run a `tower` built from another one (e.g. one installed before a wire change, or this tree with one field appended to `msg::Print`): `tower exec system resource print` exits **125** and stderr carries the `SCHEMA MISMATCH` banner naming both console tags and the firmware (`blinky v0.1.0`) read from its `Hello`; `tower logs` counts every frame as undecodable instead of rendering it. Then the reverse: this `tower` against a board flashed from the other tree, same outcome. `system resource print` (matching pair) shows `wire: console 0x… radio 0x…` equal to the `hello:` line's `schema 0x…` | a `tower` from before the schema tags (a version-byte header) still refuses the new firmware (it reads the type byte as another version) and the new `tower` refuses old firmware (its seq bytes read as a foreign tag); a framing change (simulate with a firmware whose CRC is computed differently) gives one `every frame fails its CRC: likely a different framing …` line, not a banner |
 
 ### D. Crypto & frame KATs (single board, no peer; mode B)
 | ID | Example | Pass | Vector / edge |
 |---|---|---|---|
-| D1 | crypto_aes_kat | `AES-128 ECB FIPS-197 vector: MATCH ***`; `got` == `69c4e0d8…c55a` | FIPS-197 App. B; mismatch ⇒ key/word/byte order or AES clock |
-| D2 | crypto_ccm_kat | `AES-128-CCM RFC 3610 #1 + tamper: ALL PASS ***`; tag `…17e8d12cfdf926e0` | seal CT+tag match; open recovers PT; tampered byte ⇒ REJECTED |
-| D3 | crypto_frame_loopback | `frame codec + nonce + CCM loopback: ALL PASS ***` | DATA hdr round-trip + tamper + wrong-key reject; BULK 3-byte index in nonce |
-| D4 | edge_frame_limits | `edge_frame_limits: ALL PASS ***` (12 checks) | MTU 74/64 accept, 75/65 reject `PayloadTooLong`; `BadFormat`/`BadType`/`TooShort`/`AuthFail` |
-| D5 | crypto_x25519_kat | `x25519_kat: ALL PASS ***` (re-emitted every 5 s, so mode A works too) after 11 `MATCH` lines (RFC 7748 §5.2 vectors 1+2, iterated ×1, §6.1 both public keys + shared secret from both sides, the pairing-v3 commitment golden, the commitment opening / refusing a changed nonce, the link key + SAS + tags golden, both sides agreeing); record the `timing:` line (scalar multiplication ms (1175 measured), commitment ms, key schedule ms, handshake critical path vs the 1500 ms `PEER_KEX_TIME` budget (1185 measured): must say `OK`) and the verdict's stack high-water | ~12 s of blocking compute before the verdict (each scalar multiplication ~1.2 s); a handshake over budget means pairing waits too short: raise `PEER_KEX_TIME`; a golden `MISMATCH` means the on-target SHA-256 / HMAC / HKDF disagree with the host's |
+| D1 | crypto_aes_kat | `FIPS-197 vector MATCH (AES-128 ECB)`; the `got` line reads `69c4e0d8…c55a` | FIPS-197 App. B; mismatch ⇒ key/word/byte order or AES clock |
+| D2 | crypto_ccm_kat | `RFC 3610 vector #1 and tamper, all checks PASS`; `tag 17e8d12cfdf926e0 (expected 17e8d12cfdf926e0)` | seal CT+tag `MATCH`; open recovers PT; tampered byte ⇒ `refusal of a tampered ciphertext PASS` |
+| D3 | crypto_frame_loopback | `codec, nonce and CCM loopback, all checks PASS` | DATA hdr round-trip + tamper + wrong-key reject; BULK 3-byte index in nonce |
+| D4 | edge_frame_limits | `frame limits, all checks PASS` (12 checks; each logs only when it fails, `<check> FAIL`) | MTU 74/64 accept, 75/65 reject `PayloadTooLong`; `BadFormat`/`BadType`/`TooShort`/`AuthFail` |
+| D5 | crypto_x25519_kat | `x25519: all checks PASS (…)` (re-emitted every 5 s, so mode A works too) after 11 check lines, 9 ending `MATCH` (RFC 7748 §5.2 vectors 1+2, iterated ×1, §6.1 both public keys + shared secret from both sides, the pairing-v3 commitment golden, the link key + SAS + tags golden) and 2 ending `PASS` (only the revealed nonce opens the commitment; both sides agree); record the `timing:` line (scalar mult ms (1175 measured), commitment ms, key schedule ms, handshake critical path vs the 1500 ms `PEER_KEX_TIME` budget (1185 measured): must say `within`) and the verdict's `stack peak` | ~12 s of blocking compute before the verdict (each scalar multiplication ~1.2 s); a handshake over budget means pairing waits too short: raise `PEER_KEX_TIME`; a golden `MISMATCH` means the on-target SHA-256 / HMAC / HKDF disagree with the host's |
 
 ### E. Storage / counter persistence
 | ID | Example | Mode | Pass | Edge |
 |---|---|---|---|---|
 | E1 | storage | B×2 | see B7: boot counter increments across resets | none |
-| E2 | net_persist | B×2 | boot 1 `resumed tx_counter=1 reserve_watermark=1025`; advance to ~1025; **after reset**: `resumed tx_counter≥1025 reserve_watermark=2049` (never reuses) | counter must not start at 0 or go backward; watermark jumps by RESERVE=1024 |
+| E2 | net_persist | B×2 | boot 1 `TX counter resumed at 1, reserve watermark 1025`; advance to ~1025; **after reset**: `TX counter resumed at` ≥1025, `reserve watermark 2049` (never reuses) | counter must not start at 0 or go backward; watermark jumps by RESERVE=1024 |
 
 ### F. Radio bring-up (single board; mode B)
 | ID | Example | Pass | Edge |
 |---|---|---|---|
-| F1 | radio_id | `partnum=0x01 version=0x30 … SPIRIT1 verified` | all-0x00/0xFF ⇒ SPI/CS/SDN wiring |
-| F2 | radio_state | `-> READY ok (STATE=0x03…)`, `-> STANDBY ok (STATE=0x40…)`, `nIRQ asserted…`/`released` | nIRQ stuck ⇒ PA7/EXTI; state stuck ⇒ wedged |
-| F3 | radio_regdump | register read-backs match `expect`; no `MISMATCH` | all 0xFF/0x00 ⇒ SPI read; field mismatch ⇒ config::apply |
-| F4 | edge_recovery | `edge_recovery: ALL PASS *** (state machine never wedged)` (10/10 RX-timeouts→READY, FIFO flush 0/0, RX→READY cycle, device ID ok) | SABORT path; flush; chip responsive after abuse |
-| F5 | fhss_sweep | `F1 PASS *** all FHSS channels lock`; reports `max retune+lock` + recommended GUARD | band edges 903/926.7 MHz lock; lock-time spread |
+| F1 | radio_id | `device ID MATCH (partnum 0x01, version 0x30: SPIRIT1, part 304)` | all-0x00/0xFF ⇒ SPI/CS/SDN wiring |
+| F2 | radio_state | `to ready: state 0x03 MATCH`, `to standby: state 0x40 MATCH`, `nIRQ on ready PASS (…)` / `nIRQ released after the status read` | nIRQ stuck ⇒ PA7/EXTI; state stuck ⇒ wedged |
+| F3 | radio_regdump | every register line ends in `MATCH` (SYNT3 is informational); no `MISMATCH` | all 0xFF/0x00 ⇒ SPI read; field mismatch ⇒ config::apply |
+| F4 | edge_recovery | `recovery, all checks PASS (state machine never wedged)` after `RX timeout recovery PASS (10 of 10 back in ready)`, `FIFO flush PASS`, `RX to ready cycle PASS`, `device ID read PASS` | SABORT path; flush; chip responsive after abuse |
+| F5 | fhss_sweep | `F1 channel lock PASS (all 80 channels)`; reports `retune and lock max … µs` + the recommended guard | band edges 903/926.7 MHz lock; lock-time spread |
 
 ### G. Radio RF link (two boards; mode A both ends)
 | ID | Example | Pass (node / gateway) | Edge |
 |---|---|---|---|
-| G1 | radio_cw | TX: `CW ON: state=0x5F`; RX RSSI jumps floor (~−110) → carrier (~−40 dBm) | RSSI stuck at floor ⇒ no emission; `error_lock=true` ⇒ synth |
-| G2 | radio_linkdiag | TX: `fifo_loaded=16 … states=03→4F→5F→03 … tx_sent=true fifo_after=0` | FIFO load/drain; IRQ path; state trace |
-| G3 | radio_beacon | TX `tx seq=N ok`; RX `rx len=16 seq=N rssi=… pqi=… sqi=… afc=…`; gap-free seq | data-rate/deviation/filter; gaps = loss; large AFC = drift |
-| G4 | radio_csma | jammer `carrier ON/OFF`; sender `Busy: CCA backed off` during jam, `ok (channel clear)` after | never goes Busy ⇒ CCA broken; backoff jitter 0-100 ms |
-| G5 | radio_sleep | node `→ SLEEP/SHUTDOWN`, `woke … in N µs`; GW monotonic `rx seq` re-links after each | SLEEP wake ≪ SHUTDOWN wake; never wakes ⇒ SDN/RCO |
+| G1 | radio_cw | TX: `carrier on, state 0x5f (TX, emitting)`; RX RSSI jumps floor (~−110) → carrier (~−40 dBm) | RSSI stuck at floor ⇒ no emission; `synth lock error` ⇒ synth |
+| G2 | radio_linkdiag | TX: `#N: FIFO 16 of 16 B, states 03 4f 5f 03, IRQ … (sent), FIFO after 0 B` | FIFO load/drain; IRQ path; state trace |
+| G3 | radio_beacon | TX `#N sent`; RX `rx #N, 16 B, … dBm (raw …), PQI …, SQI …, AFC …`; gap-free (no `(n missed)`) | data-rate/deviation/filter; gaps = loss; large AFC = drift |
+| G4 | radio_csma | jammer `carrier on` / `carrier off`; sender `not sent, channel busy: CCA backed off` during jam, `sent, channel clear` after | never busy ⇒ CCA broken; backoff jitter 0-100 ms |
+| G5 | radio_sleep | node `radio in sleep` / `radio in shutdown`, `woke from … in N µs`; GW monotonic `rx #N` (`re-linked after sleep`) after each | SLEEP wake ≪ SHUTDOWN wake; never wakes ⇒ SDN/RCO |
 
 ### H. Network layer (two boards; mode A both ends)
 | ID | Example | Pass | Edge |
 |---|---|---|---|
-| H4 | net_secure_ping | RX `AUTH OK: src=… cnt=… "ping NNN"`; forged ⇒ `CCM auth FAIL (dropped)` | nonce uniqueness; key mismatch |
-| H5 | net_confirmed | node `seq=N Delivered (ms)`; GW `…(ACKed, per-node key)`; retransmit doesn't double-deliver | NotDelivered storms ⇒ ACK path; replay (cnt≤last_seen) dropped |
+| H4 | net_secure_ping | RX `authenticated from 0x…, counter …, … dBm: "ping NNN"`; forged ⇒ `frame dropped: authentication failed` | nonce uniqueness; key mismatch |
+| H5 | net_confirmed | node `#N delivered (… ms)`; GW `rx from 0x…, counter …, … dBm: "msg NNN" (ACKed)`; retransmit doesn't double-deliver | `not delivered` storms ⇒ ACK path; replay (cnt≤last_seen) dropped |
 | H6 | net_channel | same as H5 but on **ch2** (868.5 MHz); both ends must set CHANNEL=2 | per-channel VCO lock |
-| H7 | radio_gateway+radio_node | node `seq=N Delivered … vbat=… temp=…`; GW decodes telemetry | marginal link ⇒ high NotDelivered |
+| H7 | radio_gateway+radio_node | node `#N delivered (… ms): … mV, … °C`; GW `node 0x… #N: … mV, … °C` | marginal link ⇒ many `not delivered` |
 
 ### I. Bulk transfer (two boards; mode A)
 | ID | Example | Pass | Edge |
 |---|---|---|---|
-| I1 | net_bulk | requester `fetched 200 bytes (… chunks), verify OK ***` | chunk order; nonce per chunk; 30 s session timeout |
-| I2 | net_bulk_stream | `… B in … chunks, … ms, … bps, PASS ***` cycling 4/16/32/64 KB (US915, fast) | constant RAM across sizes (streaming); 64 KB exceeds a whole-transfer buffer (~6 KB) |
-| I3 | net_bulk_stress | `fetched 4096 bytes (64 chunks), verify OK ***`; later `DutyLimited` as EU bucket drains | duty enforcement on bulk; CRC-32 |
+| I1 | net_bulk | requester `fetched 200 B in 4 chunks, pattern MATCH` | chunk order; nonce per chunk; 30 s session timeout |
+| I2 | net_bulk_stream | `round N PASS (… B in … chunks, … ms, … bps, CRC …)` cycling 4/16/32/64 KB (US915, fast) | constant RAM across sizes (streaming); 64 KB exceeds a whole-transfer buffer (~6 KB) |
+| I3 | net_bulk_stress | `round N PASS (2048 B in 32 chunks, …)`; later `round N: fetch failed or timed out` as the EU bucket drains | duty enforcement on bulk; CRC-32 |
 
 ### J. Pairing & topologies (two boards; mode A)
 | ID | Example | Pass | Edge |
 |---|---|---|---|
-| J1 | net_pairing | host `PAIRED *** node addr=… key[..4]=…`; joiner `JOINED *** … key[..4]=…` with the same 4 key bytes; both consoles `net: pairing: SAS dddddd` with the **same** 6 digits; no `does not open its commitment` / `failed key confirmation` line on the joiner | joiner picks own address; no key on air (a sniffer sees only the two public keys, the commitment and the two nonces: five frames, JOIN_REQ / JOIN_RESP / JOIN_NONCE / JOIN_REVEAL / JOIN_CONFIRM); a joiner attempt ~1.5 s unanswered, ~3.8 s for a whole handshake; host refusal lines `pairing: JOIN_REQ from … refused (already registered / invalid address / not a pairing v3 request)` (the last one for a joiner flashed from an older checkout); TRNG unavailable → `pairing: hardware TRNG unavailable, refusing to pair` on either end and no frame sent; 60 s window |
-| J1b | net_keyed_join | host `JOINED *** node 000000BB (keyed …)`; joiner `JOINED *** gw=22222222` then `uplink: Delivered` (repeats every ~5 s, each join on a fresh counter) | no window; key never on air; a node under another key: host logs `keyed join from … refused: does not open under its registered key`, joiner `keyed join failed: no host answered`; reboot the joiner mid-run: it re-joins (fresh counter across the reboot); a captured JOIN_REQ replayed: host logs `refused: stale counter` and sends nothing; on a gateway app `keyed-join=off`: `refused: keyed joins are switched off` |
+| J1 | net_pairing | host `paired node 0x…, key xxxxxxxx (…)`; joiner `joined host 0x… as 0x…, key xxxxxxxx (…)` with the same 4 key bytes and the same node address; both consoles `net: pairing: SAS dddddd` with the **same** 6 digits; no `does not open its commitment` / `failed key confirmation` line on the joiner | joiner picks own address; no key on air (a sniffer sees only the two public keys, the commitment and the two nonces: five frames, JOIN_REQ / JOIN_RESP / JOIN_NONCE / JOIN_REVEAL / JOIN_CONFIRM); a joiner attempt ~1.5 s unanswered, ~3.8 s for a whole handshake; host refusal lines `net: pairing: join request from 0x… refused (already registered / invalid address / not a pairing v3 request)` (the last one for a joiner flashed from an older checkout); TRNG unavailable → `net: pairing: refused, TRNG unavailable (…)` on either end and no frame sent; 60 s window |
+| J1b | net_keyed_join | host `node 0x000000bb joined (keyed, no key on air)`; joiner `joined host 0x22222222` then `uplink delivered` (repeats every ~5 s, each join on a fresh counter) | no window; key never on air; a node under another key: host logs `net: keyed join from 0x… refused: does not open under its registered key`, joiner `keyed join failed: no host answered`; reboot the joiner mid-run: it re-joins (fresh counter across the reboot); a captured JOIN_REQ replayed: host logs `refused: stale counter` and sends nothing; on a gateway app `keyed-join=off`: `refused: keyed joins are switched off` |
 | J1c | apps `radio_dongle_gateway` + `radio_push_button` (product OTA pairing; `tower gateway` on the dongle, node console on USB) | `tower nodes add --ota` prints `paired 0x… (SAS dddddd)` with the same 6 digits as the node's `net: pairing: SAS dddddd` and `node: paired with gateway 0x…, SAS dddddd (uid …)`; the gateway logs `gateway: node 0x… paired, SAS dddddd`; the node's first `NodeInfo` arrives as an `Uplink` (auto-named), with no `node: pairing: commit uplink` failure after the first attempt in the common case | **lost confirm**: suppress the JOIN_CONFIRM (e.g. a debug build that skips its TX) → node logs `node: pairing: gateway 0x… did not confirm (no ACK), key discarded, hold the button to retry`, LED back to the unpaired double-blink, gateway window still open, a second hold pairs; **full registry** (16 nodes) → `PairingOpen` answers `FULL`, no node half-paired; **re-pair hold** on a paired node (12 s, or `button simulate 13000`) into an open window without removing it on the gateway → gateway logs `refused (already registered …)`, node's join times out, the old pairing keeps working; after `tower nodes remove` + a new window the same hold re-pairs; **late JOIN_REQ** in the last ~3.9 s of a window → `refused (the window closes before a handshake could finish)`; the `Paired`/`MGMT_TIMEOUT` reaches the host within window + 15 s; no `watchdog: main loop unresponsive` during any of it |
-| J2 | net_star | GW `2 peers registered`; `rx node A … "hello_a"`, `rx node B … "hello_b"` each under its own key | per-peer key + replay lane; B undecodable under A's key |
-| J3 | net_p2p | both `PING/PONG … Delivered`; bidirectional | shared LINK_KEY; RX-window timing |
+| J2 | net_star | GW `2 peers registered`; `rx node A (0x0a0a0a0a) … "A:nnn"`, `rx node B (0x0b0b0b0b) … "B:nnn"` each under its own key | per-peer key + replay lane; B undecodable under A's key |
+| J3 | net_p2p | `A: PING n delivered` and `B: PONG n delivered`; bidirectional | shared LINK_KEY; RX-window timing |
 
 ### K. Spectrum access: band / AFA / FHSS
 | ID | Example | Mode | Pass | Regulatory |
 |---|---|---|---|---|
-| K1 | net_duty_kat | B | `duty governor KAT: ALL PASS ***` (ToA 30B=18 ms/96B=45 ms; bucket consume/refill/cap) | EN 300 220 1 %/h token bucket |
-| K2 | fhss_kat | B | `fhss_kat: ALL PASS ***` (F5 permutation, F4 dwell ≤300 ms/20 s, F3 beacon round-trip) | FCC §15.247 dwell + ≥50 ch |
-| K3 | fhss_compliance | B (≥30 s) | `F10 COMPLIANCE: PASS *** (80 ch, max …ms ≤ 400ms)`; `channels used = 80/80`; band edges used | §15.247(a)(1)(i) evidence |
-| K4 | radio_band | A (2 brd) | node `now on 868/915 MHz`; GW `Delivered (868 tag)` + `(915 tag)` | runtime retune; 915 single-ch is bench-only |
-| K5 | radio_afa | A (2 brd) | node `seq=N ch=X Delivered`; channel varies under contention; GW follows | EN 300 220 LBT+AFA, CCA −90 dBm |
-| K6 | radio_fhss | A (2 brd) | master `beaconing slot=… ch=…`; node `LOCKED` then `tx seq=N ch=… Delivered`; re-sync after master restart | 80-ch, 300 ms slot, 24 s cycle |
+| K1 | net_duty_kat | B | `time on air and token bucket, all checks PASS` (time on air of 30 B = 18 ms / 96 B = 45 ms; bucket consume/refill/cap) | EN 300 220 1 %/h token bucket |
+| K2 | fhss_kat | B | `hop permutation, dwell and beacon, all checks PASS` (F5 permutation, F4 dwell ≤300 ms/20 s, F3 beacon round-trip) | FCC §15.247 dwell + ≥50 ch |
+| K3 | fhss_compliance | B (≥30 s) | `F10 compliance, all checks PASS (80 channels, airtime max … of 400 ms)`; `channels used PASS (80 of 80, …)`; `band edges used PASS` | §15.247(a)(1)(i) evidence |
+| K4 | radio_band | A (2 brd) | node `now on 868 MHz` / `now on 915 MHz`; GW `rx on 868 MHz … node tag 0` + `rx on 915 MHz … node tag 1` | runtime retune; 915 single-ch is bench-only |
+| K5 | radio_afa | A (2 brd) | node `#N delivered on channel X`; channel varies under contention; GW follows | EN 300 220 LBT+AFA, CCA −90 dBm |
+| K6 | radio_fhss | A (2 brd) | master `beaconing, slot … on channel …`; node `locked to the hop schedule` then `#N delivered on channel …`; re-sync after master restart | 80-ch, 300 ms slot, 24 s cycle |
 
 ### L. Stress / recovery / soak (two boards; mode A)
 | ID | Example | Pass | Edge |
 |---|---|---|---|
-| L1 | edge_rapid | node `sent N (delivered=N other=0)`; GW `violations=0 (monotonic OK)`, never `ORDER VIOLATION` | back-to-back confirms; strict-monotonic accept; no double-accept |
-| L2 | radio_interop | GW `VERDICT: PASS`; node logs `seed=…` (replayable); invariants: CRC, order, duty, confirm-resolution, oversize-rejected | run long (minutes to hours); `LATCHED FAIL` lights LED solid |
+| L1 | edge_rapid | node `send #N: N delivered, 0 not delivered`; GW `… accepted, last counter …, counters monotonic PASS`, never `counters monotonic FAIL` | back-to-back confirms; strict-monotonic accept; no double-accept |
+| L2 | radio_interop | GW `invariants PASS (…)`; node logs `seed 0x…` (replayable); invariants: CRC, order, duty, confirm-resolution, oversize-rejected | run long (minutes to hours); a latched failure (`invariants FAIL`) lights the LED solid |
 
 ---
 

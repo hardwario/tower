@@ -69,18 +69,23 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "pair", "net init: {e}");
+            error!(target: "pair", "net init failed: {e}");
             return;
         }
     };
 
     #[cfg(not(feature = "role-node"))]
     {
-        info!(target: "pair", "HOST {:08X}: opening pairing window (1 min)", HOST_ADDR);
+        info!(
+            target: "pair",
+            "host 0x{:08x}: opening pairing windows, {} s each",
+            HOST_ADDR,
+            PAIRING_WINDOW.as_secs()
+        );
         loop {
             // A fresh window, a fresh precomputed ephemeral (TRNG only; refused without it).
             let Some(mut host) = PairingHost::prepare(PAIRING_WINDOW) else {
-                error!(target: "pair", "no hardware TRNG: pairing refused");
+                error!(target: "pair", "pairing refused, TRNG unavailable");
                 Timer::after_secs(10).await;
                 continue;
             };
@@ -88,10 +93,10 @@ async fn run(b: Board) {
                 // The joiner brought its own address; the host installs (peer.addr, peer.key).
                 Some(peer) => info!(
                     target: "pair",
-                    "PAIRED *** node addr={:08X} (joiner-chosen) key[..4]={:02x}{:02x}{:02x}{:02x}",
+                    "paired node 0x{:08x}, key {:02x}{:02x}{:02x}{:02x} (first 4 bytes; address chosen by the node)",
                     peer.addr, peer.key[0], peer.key[1], peer.key[2], peer.key[3]
                 ),
-                None => warn!(target: "pair", "pairing window closed (no joiner / lost confirm)"),
+                None => warn!(target: "pair", "window closed unpaired (no joiner, or the confirm was lost)"),
             }
             Timer::after_secs(2).await;
         }
@@ -99,15 +104,20 @@ async fn run(b: Board) {
 
     #[cfg(feature = "role-node")]
     {
-        info!(target: "pair", "JOINER: requesting to join with my own address {:08X} (1 min)", MY_ADDR);
+        info!(
+            target: "pair",
+            "joiner 0x{:08x} (its own address): looking for a pairing window, {} s",
+            MY_ADDR,
+            PAIRING_WINDOW.as_secs()
+        );
         loop {
             match net.join(MY_ADDR, PAIRING_WINDOW).await {
                 Some(peer) => info!(
                     target: "pair",
-                    "JOINED *** addr={:08X} (mine) gw={:08X} key[..4]={:02x}{:02x}{:02x}{:02x} (expect the host's) uid {}",
-                    MY_ADDR, peer.addr, peer.key[0], peer.key[1], peer.key[2], peer.key[3], tower::board::UniqueId::read()
+                    "joined host 0x{:08x} as 0x{:08x}, key {:02x}{:02x}{:02x}{:02x} (first 4 bytes; uid {})",
+                    peer.addr, MY_ADDR, peer.key[0], peer.key[1], peer.key[2], peer.key[3], tower::board::UniqueId::read()
                 ),
-                None => warn!(target: "pair", "join failed (no host in range)"),
+                None => warn!(target: "pair", "join failed: no host in range"),
             }
             Timer::after_secs(3).await;
         }

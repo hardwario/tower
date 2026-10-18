@@ -72,8 +72,8 @@ line speaks in one voice; `docs/console.md` (*Logging*) shows the same rules to 
   123456`).
 - **Lowercase, no trailing period.** Words keep their case only when they have one of their own:
   acronyms and part names (ACK, SAS, TRNG, EEPROM, I2C, IWDG, USB, TMP112). No capitals for
-  emphasis or state (`PAIRED`, `JOIN`), no decorative characters (an ellipsis, arrows, dashes);
-  unit symbols such as `°C` are fine.
+  emphasis or state (`PAIRED`, `JOIN`; the verdict words below are the one exception), no
+  decorative characters (an ellipsis, arrows, dashes, `***`); unit symbols such as `°C` are fine.
 - **The event or the state first, then the facts**, short (aim under 72 characters; the TUI's log
   pane is narrow): `click #3`, `paired with gateway 0x0000ab12, SAS 123456`, `pairing window
   open, 60 s`.
@@ -90,9 +90,18 @@ line speaks in one voice; `docs/console.md` (*Logging*) shows the same rules to 
   something failed or was refused and the device carries on (an undelivered uplink, a refused
   frame, a backoff); `info` for state changes and the events a user acts on; `debug` for
   developer detail. A warning that can repeat is rate-limited and reports its count.
-- **Lines that tools read are an interface:** the examples' verdict lines (`ALL PASS`, `MATCH`,
-  `JOINED ***`) and `net: pairing: SAS n` are matched by the HIL bench (`hil/tests`) and the
-  hwtest scripts (`tools/hwtest`); change them together with their readers.
+- **Verdicts.** A self-checking example (a known-answer test, an edge test, a bench tool) states
+  each result as a verdict: the last word of its line (only context in parentheses may follow),
+  one of the capital tokens `PASS`, `FAIL`, `MATCH` (a value equals its reference) and
+  `MISMATCH`, the only capital words a message may hold apart from acronyms and part names:
+  `aes: FIPS-197 vector MATCH (AES-128 ECB)`, `edge: RX timeout recovery FAIL (7 of 10 back in
+  ready)`. It ends with one summary verdict, `all checks PASS` (the phrase the bench waits for)
+  or `some checks FAIL`: `edge: frame limits, all checks PASS`. A `PASS` or `MATCH` line is
+  `info`, a `FAIL` or `MISMATCH` line `error`.
+- **Lines that tools read are an interface:** the verdicts, `net: pairing: SAS n` and the few
+  example lines the bench parses (`pair: paired node 0x…, key …`, `persist: TX counter resumed at
+  …`, `confirmed: #n delivered`) are matched by the HIL bench (`hil/tests`) and the hwtest
+  scripts (`tools/hwtest`); change them together with their readers.
 
 ## Writing style
 

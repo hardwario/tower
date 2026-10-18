@@ -25,7 +25,7 @@ async fn run(b: Board) {
 
     let mut beat = 0u32;
     loop {
-        info!(target: "wdg", "alive: heartbeat {beat} (watchdog fed by the feeder task)");
+        info!(target: "wdg", "alive, heartbeat #{beat} (the feeder task pets the watchdog)");
         beat += 1;
         Timer::after(Duration::from_secs(2)).await;
     }

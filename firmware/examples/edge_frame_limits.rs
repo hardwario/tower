@@ -1,6 +1,7 @@
 //! edge_frame_limits: MTU + malformed/forged-frame rejection KAT (docs/radio.md).
 //! Single board, no radio link: drives the frame codec + AES-CCM at its
-//! boundaries and asserts each accept/reject, printing one PASS/FAIL verdict.
+//! boundaries and asserts each accept/reject, printing one verdict (`all checks PASS`, or a
+//! FAIL line per failed check and `some checks FAIL`).
 //!
 //!   just flash example edge_frame_limits
 //!
@@ -52,7 +53,7 @@ async fn run(_b: Board) {
     // end. The verdict is the answer; per-check detail appears only when something breaks.
     let mut check = |name: &str, ok: bool| {
         if !ok {
-            error!(target: "edge", "  {} ✗ FAIL", name);
+            error!(target: "edge", "{} FAIL", name);
         }
         pass &= ok;
     };
@@ -61,27 +62,27 @@ async fn run(_b: Board) {
 
     // --- MTU accept/reject (seal side) ---
     check(
-        "seal 1 B accepted",
+        "seal of a 1 B payload",
         frame::seal_frame(&mut ccm, &KEY, &data_hdr(1), &[0x5A], &mut buf).is_ok(),
     );
     let p74 = [0xA5u8; 74];
     check(
-        "seal 74 B accepted",
+        "seal of a 74 B payload",
         frame::seal_frame(&mut ccm, &KEY, &data_hdr(2), &p74, &mut buf).is_ok(),
     );
     let p75 = [0xA5u8; 75];
     check(
-        "seal 75 B rejected (PayloadTooLong)",
+        "refusal of a 75 B payload as too long",
         frame::seal_frame(&mut ccm, &KEY, &data_hdr(3), &p75, &mut buf) == Err(FrameError::PayloadTooLong),
     );
     let c64 = [0x33u8; 64];
     check(
-        "bulk seal 64 B accepted",
+        "seal of a 64 B bulk chunk",
         frame::seal_frame(&mut ccm, &KEY, &bulk_hdr(4, 0), &c64, &mut buf).is_ok(),
     );
     let c65 = [0x33u8; 65];
     check(
-        "bulk seal 65 B rejected (PayloadTooLong)",
+        "refusal of a 65 B bulk chunk as too long",
         frame::seal_frame(&mut ccm, &KEY, &bulk_hdr(5, 0), &c65, &mut buf) == Err(FrameError::PayloadTooLong),
     );
 
@@ -94,14 +95,14 @@ async fn run(_b: Board) {
         let mut b = buf;
         let r = frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]);
         let ok = matches!(&r, Ok((h, range)) if h.counter == 42 && b[range.clone()] == payload[..]);
-        check("valid frame opens + round-trips", ok);
+        check("open and round-trip of a genuine frame", ok);
     }
     // Another format marker: flip a marker bit (bits[7:5]).
     {
         let mut b = buf;
         b[0] ^= 0x20;
         check(
-            "other format marker → BadFormat",
+            "refusal of another format marker",
             frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadFormat),
         );
     }
@@ -111,7 +112,7 @@ async fn run(_b: Board) {
         let mut b = buf;
         b[0] = (b[0] & 0xE0) | 0x0A;
         check(
-            "unknown type → BadType",
+            "refusal of an unknown frame type",
             frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::BadType),
         );
     }
@@ -119,7 +120,7 @@ async fn run(_b: Board) {
     {
         let mut b = buf;
         check(
-            "truncated → TooShort",
+            "refusal of a truncated frame as too short",
             frame::open_frame(&mut ccm, &KEY, &mut b[..8]) == Err(FrameError::TooShort),
         );
     }
@@ -128,7 +129,7 @@ async fn run(_b: Board) {
         let mut b = buf;
         b[16] ^= 0x01;
         check(
-            "tampered ciphertext → AuthFail",
+            "refusal of a tampered ciphertext",
             frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::AuthFail),
         );
     }
@@ -137,7 +138,7 @@ async fn run(_b: Board) {
         let mut b = buf;
         b[good_len - 1] ^= 0x80;
         check(
-            "tampered tag → AuthFail",
+            "refusal of a tampered tag",
             frame::open_frame(&mut ccm, &KEY, &mut b[..good_len]) == Err(FrameError::AuthFail),
         );
     }
@@ -145,15 +146,15 @@ async fn run(_b: Board) {
     {
         let mut b = buf;
         check(
-            "wrong key → AuthFail",
+            "refusal under a wrong key",
             frame::open_frame(&mut ccm, &KEY2, &mut b[..good_len]) == Err(FrameError::AuthFail),
         );
     }
 
     if pass {
-        info!(target: "edge", "edge_frame_limits: ALL PASS ***");
+        info!(target: "edge", "frame limits, all checks PASS");
     } else {
-        error!(target: "edge", "edge_frame_limits: FAIL");
+        error!(target: "edge", "frame limits, some checks FAIL");
     }
     loop {
         embassy_time::Timer::after_secs(5).await;

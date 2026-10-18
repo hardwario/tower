@@ -13,7 +13,8 @@
 //! The sender cycles **firmware-sized** blobs (4 / 16 / 32 / 64 KB) and the
 //! requester is purely announce-driven (it verifies whatever length the announce
 //! declares against the reference pattern + a streamed CRC-32, so it self-syncs to
-//! the sender's size each round). Per round it logs bytes / chunks / ms / bps / PASS.
+//! the sender's size each round). Per round it logs a PASS or FAIL verdict with bytes /
+//! chunks / ms / bps.
 //!
 //! Uses **Us915** (unrestricted bench duty) so the 64 KB blob completes in ~1.5 min
 //! rather than the ~12 min an EU 868 1 % duty cycle would impose. This is a
@@ -22,16 +23,16 @@
 #![no_std]
 #![no_main]
 
-use log::{error, info};
+use log::{error, info, warn};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
 use tower::{app, board::Board};
 
+#[cfg(feature = "role-node")]
+use embassy_time::Instant;
 #[cfg(not(feature = "role-node"))]
 use embassy_time::Timer;
-#[cfg(feature = "role-node")]
-use {embassy_time::Instant, log::warn};
 
 const NODE_ADDR: u32 = 0x1111_1111;
 const GW_ADDR: u32 = 0x2222_2222;
@@ -164,21 +165,32 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "stream", "net init: {e}");
+            error!(target: "stream", "net init failed: {e}");
             return;
         }
     };
 
     #[cfg(not(feature = "role-node"))]
     {
-        info!(target: "stream", "SENDER: streaming {:?} B to {:08X} (constant RAM, no blob buffer)", SIZES, NODE_ADDR);
+        info!(
+            target: "stream",
+            "sender 0x{:08x}: streaming {} to {} B to 0x{:08x} (constant RAM, no blob buffer)",
+            GW_ADDR, SIZES[0], SIZES[SIZES.len() - 1], NODE_ADDR
+        );
         let mut i = 0usize;
         loop {
             let size = SIZES[i % SIZES.len()];
             let mut src = PatternSource { len: size };
-            info!(target: "stream", "serving {} B ({} chunks) crc=0x{:08x}", size, size.div_ceil(64), crc32_pattern(size));
-            let ok = net.bulk_serve_from(NODE_ADDR, &mut src).await;
-            info!(target: "stream", "served {} B (served_last={})", size, ok);
+            info!(
+                target: "stream",
+                "serving {} B ({} chunks, CRC 0x{:08x})",
+                size, size.div_ceil(64), crc32_pattern(size)
+            );
+            if net.bulk_serve_from(NODE_ADDR, &mut src).await {
+                info!(target: "stream", "{} B served", size);
+            } else {
+                warn!(target: "stream", "{} B not served to the end (session idled out)", size);
+            }
             i = i.wrapping_add(1);
             Timer::after_secs(2).await;
         }
@@ -186,7 +198,11 @@ async fn run(b: Board) {
 
     #[cfg(feature = "role-node")]
     {
-        info!(target: "stream", "REQUESTER: streaming-fetch from {:08X} (constant RAM, verify-on-the-fly)", GW_ADDR);
+        info!(
+            target: "stream",
+            "requester 0x{:08x}: streaming from 0x{:08x} (constant RAM, verified on the fly)",
+            NODE_ADDR, GW_ADDR
+        );
         let mut sink = CrcCheckSink::new();
         let mut round: u32 = 0;
         loop {
@@ -199,14 +215,17 @@ async fn run(b: Board) {
                     let ok = n == sink.total && sink.received == n && sink.byte_errors == 0 && crc == expect;
                     let bps = (n as u64 * 8 * 1000) / ms;
                     if ok {
-                        info!(target: "stream", "round {} OK *** {} B ({} chunks) in {} ms = {} bps, crc=0x{:08x}",
+                        info!(target: "stream", "round {} PASS ({} B in {} chunks, {} ms, {} bps, CRC 0x{:08x})",
                             round, n, n.div_ceil(64), ms, bps, crc);
                     } else {
-                        error!(target: "stream", "round {} FAIL: n={} recv={} errs={} crc=0x{:08x} expect=0x{:08x}",
-                            round, n, sink.received, sink.byte_errors, crc, expect);
+                        error!(
+                            target: "stream",
+                            "round {} FAIL ({} B, {} received, {} byte errors, CRC 0x{:08x}, expected 0x{:08x})",
+                            round, n, sink.received, sink.byte_errors, crc, expect
+                        );
                     }
                 }
-                None => warn!(target: "stream", "round {} fetch failed/timeout", round),
+                None => warn!(target: "stream", "round {}: fetch failed or timed out", round),
             }
             round = round.wrapping_add(1);
         }

@@ -6,8 +6,8 @@
 //! Like `net_bulk` but a **multi-KB** blob over many chunks, to stress the pull
 //! state machine (24-bit chunk index, per-chunk req/resp + retries, session-counter
 //! nonces) and exercise sustained TX/RX at the 4 MHz SPI. The requester reassembles,
-//! checks every byte against the pattern AND a CRC-32, and reports bytes / chunks /
-//! elapsed / throughput / PASS-FAIL each round.
+//! checks every byte against the pattern AND a CRC-32, and reports a PASS or FAIL verdict
+//! with bytes / chunks / elapsed / throughput each round.
 //!
 //! Hardware-measured on two boards (4 MHz SPI):
 //! - 2 KB / 32 chunks completes reliably, CRC OK every round, ~2-4 kbps effective
@@ -28,15 +28,15 @@
 #![no_std]
 #![no_main]
 
-use log::{error, info};
+use log::{error, info, warn};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
 use tower::{app, board::Board};
 
-use embassy_time::Timer;
 #[cfg(feature = "role-node")]
-use {embassy_time::Instant, log::warn};
+use embassy_time::Instant;
+use embassy_time::Timer;
 
 const NODE_ADDR: u32 = 0x1111_1111;
 const GW_ADDR: u32 = 0x2222_2222;
@@ -100,7 +100,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "bulk", "net init: {e}");
+            error!(target: "bulk", "net init failed: {e}");
             return;
         }
     };
@@ -111,17 +111,24 @@ async fn run(b: Board) {
         for (i, x) in blob.iter_mut().enumerate() {
             *x = pat(i);
         }
-        info!(target: "bulk", "SENDER: serving a {}-byte blob ({} chunks), crc=0x{:08x}", BLOB_LEN, BLOB_LEN.div_ceil(64), crc32(&blob));
+        info!(
+            target: "bulk",
+            "sender 0x{:08x}: serving a {} B blob ({} chunks, CRC 0x{:08x})",
+            GW_ADDR, BLOB_LEN, BLOB_LEN.div_ceil(64), crc32(&blob)
+        );
         loop {
-            let ok = net.bulk_serve(NODE_ADDR, &blob).await;
-            info!(target: "bulk", "bulk_serve done (served_last={})", ok);
+            if net.bulk_serve(NODE_ADDR, &blob).await {
+                info!(target: "bulk", "blob served");
+            } else {
+                warn!(target: "bulk", "blob not served to the end (session idled out)");
+            }
             Timer::after_secs(1).await;
         }
     }
 
     #[cfg(feature = "role-node")]
     {
-        info!(target: "bulk", "REQUESTER: pulling {} B from {:08X}", BLOB_LEN, GW_ADDR);
+        info!(target: "bulk", "requester 0x{:08x}: pulling {} B from 0x{:08x}", NODE_ADDR, BLOB_LEN, GW_ADDR);
         let mut out = [0u8; BLOB_LEN];
         let mut round: u32 = 0;
         loop {
@@ -134,14 +141,14 @@ async fn run(b: Board) {
                     let crc_ok = crc == crc32_pattern();
                     let bps = (n as u64 * 8 * 1000) / ms;
                     if bytes_ok && crc_ok {
-                        info!(target: "bulk", "round {} OK *** {} B ({} chunks) in {} ms = {} bps, crc=0x{:08x}",
+                        info!(target: "bulk", "round {} PASS ({} B in {} chunks, {} ms, {} bps, CRC 0x{:08x})",
                             round, n, n.div_ceil(64), ms, bps, crc);
                     } else {
-                        error!(target: "bulk", "round {} FAIL: n={} bytes_ok={} crc_ok={} (crc=0x{:08x})",
-                            round, n, bytes_ok, crc_ok, crc);
+                        error!(target: "bulk", "round {} FAIL ({} B, pattern {}, CRC 0x{:08x} {})",
+                            round, n, if bytes_ok { "ok" } else { "wrong" }, crc, if crc_ok { "ok" } else { "wrong" });
                     }
                 }
-                None => warn!(target: "bulk", "round {} bulk_fetch failed/timeout", round),
+                None => warn!(target: "bulk", "round {}: fetch failed or timed out", round),
             }
             round = round.wrapping_add(1);
             Timer::after_secs(1).await;

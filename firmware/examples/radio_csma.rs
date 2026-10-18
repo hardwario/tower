@@ -7,8 +7,8 @@
 //! repeating. The sender transmits a small frame every 600 ms with CSMA/CCA
 //! enabled: while the carrier is up its RSSI exceeds the −90 dBm threshold, so the
 //! radio backs off and (after MAX_NB attempts) reports `Busy`; it never blocks.
-//! When the carrier drops, the very next CSMA TX goes out `ok`. Watch the sender:
-//! it should print runs of `Busy` during the jam and `ok` when the channel clears.
+//! When the carrier drops, the very next CSMA TX goes out. Watch the sender: it
+//! should print runs of `channel busy` during the jam and `channel clear` when it clears.
 
 #![no_std]
 #![no_main]
@@ -33,10 +33,10 @@ async fn run(b: Board) {
         b.radio_irq,
     );
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "csma", "exit_shutdown: {e}");
+        error!(target: "csma", "shutdown exit failed: {e}");
     }
     if let Err(e) = radio.read_device_id() {
-        error!(target: "csma", "device id: {e}");
+        error!(target: "csma", "device ID check failed: {e}");
     }
     if let Err(e) = config::apply(
         &mut radio,
@@ -47,7 +47,7 @@ async fn run(b: Board) {
     )
     .await
     {
-        error!(target: "csma", "config: {e}");
+        error!(target: "csma", "RF config failed: {e}");
     }
 
     #[cfg(feature = "role-node")]
@@ -58,7 +58,7 @@ async fn run(b: Board) {
 
 #[cfg(feature = "role-node")]
 async fn sender(radio: &mut Spirit1) -> ! {
-    info!(target: "csma", "SENDER: CSMA TX every 600 ms on ch{} (expect Busy while jammed)", CHANNEL);
+    info!(target: "csma", "sender: TX every 600 ms with carrier sense on channel {} (busy while jammed)", CHANNEL);
     let mut seq: u32 = 0;
     let (mut ok, mut busy) = (0u32, 0u32);
     loop {
@@ -70,13 +70,13 @@ async fn sender(radio: &mut Spirit1) -> ! {
         {
             Ok(()) => {
                 ok += 1;
-                info!(target: "csma", "seq={} ok (channel clear) [ok={} busy={}]", seq, ok, busy);
+                info!(target: "csma", "#{} sent, channel clear ({} sent, {} busy)", seq, ok, busy);
             }
             Err(RadioError::Busy) => {
                 busy += 1;
-                warn!(target: "csma", "seq={} Busy: CCA backed off (channel held) [ok={} busy={}]", seq, ok, busy);
+                warn!(target: "csma", "#{} not sent, channel busy: CCA backed off ({} sent, {} busy)", seq, ok, busy);
             }
-            Err(e) => warn!(target: "csma", "seq={} {e}", seq),
+            Err(e) => warn!(target: "csma", "#{} failed: {e}", seq),
         }
         seq = seq.wrapping_add(1);
         Timer::after_millis(600).await;
@@ -85,12 +85,12 @@ async fn sender(radio: &mut Spirit1) -> ! {
 
 #[cfg(not(feature = "role-node"))]
 async fn jammer(radio: &mut Spirit1) -> ! {
-    info!(target: "csma", "JAMMER: holding CW carrier 3 s on / 3 s off on ch{}", CHANNEL);
+    info!(target: "csma", "jammer: carrier on for 3 s, off for 3 s, on channel {}", CHANNEL);
     loop {
-        info!(target: "csma", "carrier ON (channel busy)");
+        info!(target: "csma", "carrier on (channel busy)");
         let _ = radio.cw_test(true).await;
         Timer::after_secs(3).await;
-        info!(target: "csma", "carrier OFF (channel clear)");
+        info!(target: "csma", "carrier off (channel clear)");
         let _ = radio.cw_test(false).await;
         Timer::after_secs(3).await;
     }

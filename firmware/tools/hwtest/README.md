@@ -31,7 +31,7 @@ just test
 # a one-shot KAT (mode B): flash + capture-from-reset + grep the verdict
 tools/hwtest/build.sh crypto_ccm_kat /tmp/ccm.bin
 tower -d "$P1" flash /tmp/ccm.bin
-python3 tools/hwtest/cap.py 5 tower -d "$P1" logs --reset --color never | grep -iE 'PASS|FAIL'
+python3 tools/hwtest/cap.py 5 tower -d "$P1" logs --reset --color never | grep -E 'PASS|FAIL|MATCH'
 
 # a continuous example (mode A): flash, then decoded logs
 tower -d "$P1" flash /tmp/x.bin

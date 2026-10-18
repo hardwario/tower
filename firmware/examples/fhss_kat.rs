@@ -47,7 +47,11 @@ async fn run(_b: Board) {
             }
         }
     }
-    info!(target: "fhss_kat", "F5 hop permutation ({} channels, 3 seeds x 5 cycles): {}", FHSS_N, if perm_ok { "PASS" } else { "FAIL" });
+    if perm_ok {
+        info!(target: "fhss", "F5 hop permutation PASS ({} channels, 3 seeds x 5 cycles)", FHSS_N);
+    } else {
+        error!(target: "fhss", "F5 hop permutation FAIL ({} channels, 3 seeds x 5 cycles)", FHSS_N);
+    }
     pass &= perm_ok;
 
     // --- F4: per-channel dwell governor worst-case ≤ 300 ms / 20 s ---
@@ -63,7 +67,11 @@ async fn run(_b: Board) {
             total += 10;
         }
     }
-    info!(target: "fhss_kat", "F4 dwell worst-case 20 s spend = {} ms (expect 300, limit 400)", total);
+    if total == 300 {
+        info!(target: "fhss", "F4 dwell worst case PASS ({} ms in 20 s, expected 300, limit 400)", total);
+    } else {
+        error!(target: "fhss", "F4 dwell worst case FAIL ({} ms in 20 s, expected 300, limit 400)", total);
+    }
     pass &= total == 300 && total <= 400;
     // Independence: a fresh channel bucket is unaffected.
     let mut g2 = DutyGovernor::fhss_channel();
@@ -88,13 +96,17 @@ async fn run(_b: Board) {
         },
         Err(_) => false,
     };
-    info!(target: "fhss_kat", "F3 beacon frame round-trip: {}", if beacon_ok { "PASS" } else { "FAIL" });
+    if beacon_ok {
+        info!(target: "fhss", "F3 beacon frame round-trip PASS");
+    } else {
+        error!(target: "fhss", "F3 beacon frame round-trip FAIL");
+    }
     pass &= beacon_ok;
 
     if pass {
-        info!(target: "fhss_kat", "fhss_kat: ALL PASS ***");
+        info!(target: "fhss", "hop permutation, dwell and beacon, all checks PASS");
     } else {
-        error!(target: "fhss_kat", "fhss_kat: FAIL");
+        error!(target: "fhss", "hop permutation, dwell and beacon, some checks FAIL");
     }
     loop {
         embassy_time::Timer::after_secs(5).await;

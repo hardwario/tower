@@ -73,7 +73,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "afa", "net init: {e}");
+            error!(target: "afa", "net init failed: {e}");
             return;
         }
     };
@@ -82,25 +82,25 @@ async fn run(b: Board) {
     {
         net.add_peer(GW_ADDR, &KEY);
         if let Err(e) = net.enable_afa(AfaRole::Node, AfaConfig { primary: 0 }).await {
-            error!(target: "afa", "enable_afa: {e}");
+            error!(target: "afa", "enabling failed: {e}");
             return;
         }
-        info!(target: "afa", "NODE: LBT+AFA over 8 EU channels (865.2-868.0 MHz)");
+        info!(target: "afa", "node 0x{:08x}: LBT and agility over 8 EU channels, 865.2 to 868.0 MHz", NODE_ADDR);
         let mut seq: u32 = 0;
         loop {
             // 1) Confirmed: LBT + delivery + ACK (node camps a channel; GW scans onto it).
             match net.afa_send(GW_ADDR, &seq.to_le_bytes(), true, 6).await {
                 SendResult::Delivered => {
-                    info!(target: "afa", "seq={} ch={} Delivered", seq, net.afa_channel())
+                    info!(target: "afa", "#{} delivered on channel {}", seq, net.afa_channel())
                 }
-                r => warn!(target: "afa", "seq={} ch={} {r}", seq, net.afa_channel()),
+                r => warn!(target: "afa", "#{} on channel {}: {r}", seq, net.afa_channel()),
             }
             seq = seq.wrapping_add(1);
 
             // 2) Unconfirmed burst: the per-channel off-time forces agility; watch ch sweep.
             for _ in 0..4 {
                 let _ = net.afa_send(GW_ADDR, &seq.to_le_bytes(), false, 1).await;
-                info!(target: "afa", "  agility burst seq={} ch={}", seq, net.afa_channel());
+                info!(target: "afa", "agility burst #{} on channel {}", seq, net.afa_channel());
                 seq = seq.wrapping_add(1);
             }
             Timer::after_secs(2).await;
@@ -111,15 +111,15 @@ async fn run(b: Board) {
     {
         net.add_peer(NODE_ADDR, &KEY);
         if let Err(e) = net.enable_afa(AfaRole::Gateway, AfaConfig { primary: 0 }).await {
-            error!(target: "afa", "enable_afa: {e}");
+            error!(target: "afa", "enabling failed: {e}");
             return;
         }
-        info!(target: "afa", "GATEWAY: scanning 8 EU AFA channels, auto-ACK");
+        info!(target: "afa", "gateway 0x{:08x}: scanning the 8 EU channels, ACKing confirmed frames", GW_ADDR);
         loop {
             if let Some(rx) = net.afa_serve(Duration::from_secs(10)).await {
                 info!(
                     target: "afa",
-                    "rx seq={} on ch={} src={:08X} rssi={}dBm{}",
+                    "rx #{} on channel {} from 0x{:08x}, {} dBm{}",
                     seq_of(rx.data()), net.afa_channel(), rx.src, rx.rssi,
                     if rx.confirmed { " (ACKed)" } else { "" }
                 );

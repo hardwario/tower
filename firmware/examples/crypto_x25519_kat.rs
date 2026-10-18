@@ -4,7 +4,8 @@
 //!
 //! Runs the two RFC 7748 §5.2 test vectors, the first step of its iterated test, and the §6.1
 //! Diffie-Hellman test (both public keys and the shared secret from both sides), through the
-//! same `tower_net::handshake` kernel the pairing uses, logging MATCH / MISMATCH per check.
+//! same `tower_net::handshake` kernel the pairing uses, logging a MATCH / MISMATCH (a value
+//! against its reference) or PASS / FAIL (a property) verdict per check.
 //! Then the pairing-v3 handshake between those two keys (node = Alice, gateway = Bob, fixed
 //! nonces): the gateway's commitment, the transcript's link key, SAS and both confirmation tags
 //! must equal the golden values `crates/net` pins against an independent reference (so the
@@ -16,8 +17,8 @@
 //! JOIN_CONFIRM waits) with the `PEER_KEX_TIME` budget, and reports the stack high-water mark
 //! (`tower::stack`, painted at boot).
 //!
-//! The verdict line `x25519_kat: ALL PASS ***` (or an `error!` with FAILURES) is re-emitted every
-//! 5 s with the measurements, so a `tower logs` attached late still sees it.
+//! The verdict line `x25519: all checks PASS (...)` (or an `error!` ending `some checks FAIL`) is
+//! re-emitted every 5 s with the measurements, so a `tower logs` attached late still sees it.
 //!
 //!   just flash example crypto_x25519_kat    (watch with: tower logs)
 
@@ -96,19 +97,23 @@ const GOLDEN_SAS: u32 = 211_658;
 const GOLDEN_TAG_GW: [u8; 8] = [0xa2, 0xd3, 0x49, 0xdb, 0x39, 0x94, 0xf7, 0x14];
 const GOLDEN_TAG_NODE: [u8; 8] = [0x13, 0xd3, 0x91, 0xcc, 0x78, 0x72, 0x4b, 0x93];
 
-/// Log one check and fold it into the verdict.
-fn check(pass: &mut bool, what: &str, ok: bool) {
+/// The verdict words of a check: a value against its reference, or a property.
+const VALUE: [&str; 2] = ["MATCH", "MISMATCH"];
+const PROPERTY: [&str; 2] = ["PASS", "FAIL"];
+
+/// Log one check (its verdict the last word, as the bench reads it) and fold it into the verdict.
+fn check(pass: &mut bool, what: &str, ok: bool, words: [&str; 2]) {
     if ok {
-        info!(target: "x25519_kat", "{}: MATCH", what);
+        info!(target: "x25519", "{} {}", what, words[0]);
     } else {
-        error!(target: "x25519_kat", "{}: MISMATCH", what);
+        error!(target: "x25519", "{} {}", what, words[1]);
     }
     *pass &= ok;
 }
 
 async fn run(_b: Board) {
     let mut pass = true;
-    info!(target: "x25519_kat", "running RFC 7748 vectors (each scalar multiplication takes ~1 s)");
+    info!(target: "x25519", "running RFC 7748 vectors (each scalar multiplication takes ~1 s)");
     // Let the boot backlog drain first: the computations below block the executor.
     Timer::after_millis(200).await;
 
@@ -118,13 +123,14 @@ async fn run(_b: Board) {
         } else {
             "RFC 7748 5.2 vector 2"
         };
-        check(&mut pass, what, shared_secret(k, u) == Some(*out));
+        check(&mut pass, what, shared_secret(k, u) == Some(*out), VALUE);
         Timer::after_millis(10).await; // let the console flush between the blocking computations
     }
     check(
         &mut pass,
         "RFC 7748 5.2 iterated, 1 iteration",
         shared_secret(&BASEPOINT, &BASEPOINT) == Some(ITER_1),
+        VALUE,
     );
     Timer::after_millis(10).await;
 
@@ -136,21 +142,29 @@ async fn run(_b: Board) {
         &mut pass,
         "RFC 7748 6.1 Alice public key",
         alice.public() == &ALICE_PK,
+        VALUE,
     );
     Timer::after_millis(10).await;
     let bob = Ephemeral::from_parts(&BOB_SK, &N_GW);
-    check(&mut pass, "RFC 7748 6.1 Bob public key", bob.public() == &BOB_PK);
-    Timer::after_millis(10).await;
     check(
         &mut pass,
-        "RFC 7748 6.1 shared secret (Alice side)",
-        shared_secret(&ALICE_SK, bob.public()) == Some(SHARED),
+        "RFC 7748 6.1 Bob public key",
+        bob.public() == &BOB_PK,
+        VALUE,
     );
     Timer::after_millis(10).await;
     check(
         &mut pass,
-        "RFC 7748 6.1 shared secret (Bob side)",
+        "RFC 7748 6.1 shared secret, Alice side",
+        shared_secret(&ALICE_SK, bob.public()) == Some(SHARED),
+        VALUE,
+    );
+    Timer::after_millis(10).await;
+    check(
+        &mut pass,
+        "RFC 7748 6.1 shared secret, Bob side",
         shared_secret(&BOB_SK, alice.public()) == Some(SHARED),
+        VALUE,
     );
     Timer::after_millis(10).await;
 
@@ -162,17 +176,19 @@ async fn run(_b: Board) {
     let t_commit = t0.elapsed();
     check(
         &mut pass,
-        "handshake: commitment (golden)",
+        "handshake: commitment vs the golden",
         commit == GOLDEN_COMMIT,
+        VALUE,
     );
     let mut changed = N_GW;
     changed[0] ^= 1;
     check(
         &mut pass,
-        "handshake: revealed nonce opens the commitment, a changed one does not",
+        "handshake: only the revealed nonce opens the commitment",
         commitment_matches(&commit, &N_GW, &ALICE_PK, &BOB_PK, NODE, GW)
             && !commitment_matches(&commit, &changed, &ALICE_PK, &BOB_PK, NODE, GW)
             && commitment(&changed, &ALICE_PK, &BOB_PK, NODE, GW) != commit,
+        PROPERTY,
     );
     Timer::after_millis(10).await;
 
@@ -191,11 +207,12 @@ async fn run(_b: Board) {
     let t_schedule = t0.elapsed();
     check(
         &mut pass,
-        "handshake: link key, SAS and both tags (golden)",
+        "handshake: link key, SAS and both tags vs the golden",
         schedule.link_key() == &GOLDEN_LINK_KEY
             && schedule.sas() == GOLDEN_SAS
             && schedule.tag(Role::Gateway) == &GOLDEN_TAG_GW
             && schedule.tag(Role::Node) == &GOLDEN_TAG_NODE,
+        VALUE,
     );
     Timer::after_millis(10).await;
     let t0 = Instant::now();
@@ -215,29 +232,31 @@ async fn run(_b: Board) {
     };
     check(
         &mut pass,
-        "handshake: both sides derive the same key and SAS and accept each other's tag",
+        "handshake: both sides agree on key and SAS, accept each other's tag",
         agree,
+        PROPERTY,
     );
 
     let ms = |d: Duration| d.as_micros() / 1000;
     let budget_ok = t_handshake < PEER_KEX_TIME;
     info!(
-        target: "x25519_kat",
-        "timing: scalar multiplication {} ms, commitment {} ms, key schedule {} ms, handshake critical path {} ms (PEER_KEX_TIME budget {} ms: {})",
+        target: "x25519",
+        "timing: scalar mult {} ms, commitment {} ms, key schedule {} ms, handshake {} ms ({} the {} ms budget{})",
         ms(t_mult),
         ms(t_commit),
         ms(t_schedule),
         ms(t_handshake),
+        if budget_ok { "within" } else { "over" },
         ms(PEER_KEX_TIME),
-        if budget_ok { "OK" } else { "EXCEEDED, raise it" }
+        if budget_ok { "" } else { ": raise PEER_KEX_TIME" }
     );
 
     loop {
         let (used, total) = (stack::used(), stack::total());
         if pass {
             info!(
-                target: "x25519_kat",
-                "x25519_kat: ALL PASS *** (scalar mult {} ms, handshake {} ms, stack high-water {} B of {} B)",
+                target: "x25519",
+                "all checks PASS (scalar mult {} ms, handshake {} ms, stack peak {} of {} B)",
                 ms(t_mult),
                 ms(t_handshake),
                 used,
@@ -245,8 +264,8 @@ async fn run(_b: Board) {
             );
         } else {
             error!(
-                target: "x25519_kat",
-                "x25519_kat: FAILURES above (scalar mult {} ms, stack high-water {} B of {} B)",
+                target: "x25519",
+                "some checks FAIL (scalar mult {} ms, stack peak {} of {} B)",
                 ms(t_mult),
                 used,
                 total

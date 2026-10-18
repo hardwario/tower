@@ -76,7 +76,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "band", "net init: {e}");
+            error!(target: "band", "net init failed: {e}");
             return;
         }
     };
@@ -84,22 +84,22 @@ async fn run(b: Board) {
     #[cfg(feature = "role-node")]
     {
         net.add_peer(GW_ADDR, &KEY);
-        info!(target: "band", "NODE: cycling 868 ↔ 915 at runtime (4 s/band)");
+        info!(target: "band", "node 0x{:08x}: switching between 868 and 915 MHz at runtime, 4 s each", NODE_ADDR);
         let mut seq: u32 = 0;
         loop {
             for &band in &BANDS {
                 if let Err(e) = net.set_band(band, 0).await {
-                    error!(target: "band", "set_band {}: {e}", band_mhz(band));
+                    error!(target: "band", "switch to {} MHz failed: {e}", band_mhz(band));
                     continue;
                 }
-                info!(target: "band", "NODE now on {} MHz", band_mhz(band));
+                info!(target: "band", "now on {} MHz", band_mhz(band));
                 for _ in 0..8 {
                     let payload = [band_tag(band)];
                     match net.send(GW_ADDR, &payload, true, 2).await {
                         SendResult::Delivered => {
-                            info!(target: "band", "  {} MHz seq={} Delivered", band_mhz(band), seq)
+                            info!(target: "band", "#{} delivered on {} MHz", seq, band_mhz(band))
                         }
-                        r => warn!(target: "band", "  {} MHz seq={} {r}", band_mhz(band), seq),
+                        r => warn!(target: "band", "#{} on {} MHz: {r}", seq, band_mhz(band)),
                     }
                     seq = seq.wrapping_add(1);
                     Timer::after_millis(500).await;
@@ -111,7 +111,11 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-node"))]
     {
         net.add_peer(NODE_ADDR, &KEY);
-        info!(target: "band", "GATEWAY: scanning 868/915 at runtime (set_band per hop)");
+        info!(
+            target: "band",
+            "gateway 0x{:08x}: scanning 868 and 915 MHz at runtime (set_band per hop)",
+            GW_ADDR
+        );
         loop {
             for &band in &BANDS {
                 if net.set_band(band, 0).await.is_err() {
@@ -121,7 +125,7 @@ async fn run(b: Board) {
                     let tag = rx.data().first().copied().unwrap_or(0xFF);
                     info!(
                         target: "band",
-                        "rx on {} MHz: src={:08X} cnt={} node_tag={} rssi={}dBm (ACKed)",
+                        "rx on {} MHz from 0x{:08x}, counter {}, node tag {}, {} dBm (ACKed)",
                         band_mhz(band), rx.src, rx.counter, tag, rx.rssi
                     );
                 }

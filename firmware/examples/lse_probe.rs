@@ -9,12 +9,12 @@
 //!   - `lseon/lserdy/rtcsel/rtcen/drv`: the RTC-domain state inherited from before the
 //!     reset. A full match with the wanted config means embassy skipped the LSE cold start;
 //!     a mismatch forces an RTC-domain reset + crystal restart (seconds).
-//!   - `rst=[...]`: which hardware reset happened (pin/por/sft/iwdg/…), per-boot (flags are
-//!     cleared after sampling).
+//!   - `reset ...`: which hardware reset happened (pin, por, sft, iwdg and so on, joined by
+//!     `+`), per-boot (flags are cleared after sampling).
 //!
 //! History: written for the 2026-07-05 bimodal-boot investigation, where it RULED the LSE
 //! OUT: every ~5.2 s boot inherited a fully-matched domain (`lseon=1 lserdy=1 rtcsel=1
-//! rtcen=1`) with `rst=[pin]`, and a Low/MediumHigh/High drive sweep showed no effect. The
+//! rtcen=1`) with a pin reset, and a Low/MediumHigh/High drive sweep showed no effect. The
 //! proven cause (flip-counter 1:1 with slow boots) is the EEPROM KV **compaction CPU stall**
 //! in `init_session`'s session bump (see docs/storage.md).
 //!
@@ -53,14 +53,14 @@ async fn run(_b: Board) {
     }
     info!(
         target: "lse",
-        "csr={:#010x} lseon={} lserdy={} rtcsel={} rtcen={} drv={} rst=[{}]",
+        "inherited RCC_CSR {:#010x}: lseon={} lserdy={} rtcsel={} rtcen={} drv={}, reset {}",
         raw,
         csr.lseon() as u8,
         csr.lserdy() as u8,
         csr.rtcsel() as u8,
         csr.rtcen() as u8,
         csr.lsedrv() as u8,
-        flags
+        if flags.is_empty() { "cause unknown" } else { flags.as_str() }
     );
 
     loop {

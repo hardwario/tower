@@ -529,8 +529,8 @@ in lockstep, re-aligning on each beacon. `net.enable_fhss(role, cfg)` →
 Compliance is **structural**: N=80, cycle 24 s > 20 s ⇒ each channel is tuned at
 most once per 20 s ⇒ ≤ one 300 ms slot occupancy (25 % under the 0.4 s/20 s limit),
 no per-channel governor needed; a light `[u16; 80]` airtime counter feeds the
-compliance histogram. Examples `radio_fhss` (verified: node LOCKED then confirmed
-delivery on hopping channels; LOST→rescan→relock on gateway loss) and
+compliance histogram. Examples `radio_fhss` (verified: node `locked to the hop schedule`, then
+confirmed delivery on hopping channels; `sync lost, rescanning` and a relock on gateway loss) and
 `fhss_compliance` (≥50 channels used, max per-channel airtime ≪ 0.4 s, band edges
 exercised). The hop seed is key-derived (not sent on air).
 

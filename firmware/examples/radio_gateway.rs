@@ -50,7 +50,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "gw", "net init: {e}");
+            error!(target: "gw", "net init failed: {e}");
             return;
         }
     };
@@ -59,7 +59,7 @@ async fn run(b: Board) {
     // CCM/ACK (the default lane would otherwise accept anything sealed under `NetConfig::key`).
     net.set_default_lane(false);
 
-    info!(target: "gw", "GATEWAY {:08X}: listening ({} node(s) registered)", GW_ADDR, net.peer_count());
+    info!(target: "gw", "0x{:08x} listening, {} node(s) registered", GW_ADDR, net.peer_count());
     loop {
         if let Some(rx) = net.recv(Duration::from_secs(15)).await {
             let d = rx.data();
@@ -69,11 +69,18 @@ async fn run(b: Board) {
                 let temp = i16::from_le_bytes([d[6], d[7]]);
                 info!(
                     target: "gw",
-                    "src={:08X} cnt={} seq={} vbat={}mV temp={}.{}°C rssi={}dBm (ACKed)",
-                    rx.src, rx.counter, seq, vbat, temp / 10, (temp % 10).abs(), rx.rssi
+                    "node 0x{:08x} #{}: {} mV, {}.{} °C ({} dBm, counter {}, ACKed)",
+                    rx.src, seq, vbat, temp / 10, (temp % 10).abs(), rx.rssi, rx.counter
                 );
             } else {
-                info!(target: "gw", "src={:08X} cnt={} {} B rssi={}dBm (ACKed)", rx.src, rx.counter, d.len(), rx.rssi);
+                info!(
+                    target: "gw",
+                    "node 0x{:08x}: {} B, not telemetry ({} dBm, counter {}, ACKed)",
+                    rx.src,
+                    d.len(),
+                    rx.rssi,
+                    rx.counter
+                );
             }
         }
     }

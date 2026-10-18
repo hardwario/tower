@@ -15,7 +15,7 @@
 #![no_std]
 #![no_main]
 
-use log::{error, info, warn};
+use log::{error, info};
 use tower::radio::{Spirit1, regs};
 use tower::{app, board::Board};
 
@@ -31,11 +31,11 @@ async fn run(b: Board) {
     );
 
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "radio_state", "exit_shutdown: {e}");
+        error!(target: "radio", "shutdown exit failed: {e}");
     }
     match radio.read_device_id() {
-        Ok(id) => info!(target: "radio_state", "SPIRIT1 ok (part_number={})", id.part_number()),
-        Err(e) => error!(target: "radio_state", "device id: {e}"),
+        Ok(id) => info!(target: "radio", "SPIRIT1 found, part number {}", id.part_number()),
+        Err(e) => error!(target: "radio", "device ID check failed: {e}"),
     }
 
     // Route nIRQ to GPIO0 and enable the READY event; clear any pending status.
@@ -46,7 +46,7 @@ async fn run(b: Board) {
     let mut cycle = 0u32;
     loop {
         cycle += 1;
-        info!(target: "radio_state", "--- cycle {} ---", cycle);
+        info!(target: "radio", "cycle {}", cycle);
 
         transition(&mut radio, Transition::Standby).await;
 
@@ -57,17 +57,18 @@ async fn run(b: Board) {
         let asserted = radio.irq_asserted();
         let status = radio.irq_status().unwrap_or(0); // read-and-reset
         if asserted && status & regs::IRQ_READY != 0 {
-            info!(target: "radio_state", "nIRQ asserted on READY (IRQ_STATUS=0x{:08X})", status);
+            info!(target: "radio", "nIRQ on ready PASS (asserted, IRQ status 0x{:08x})", status);
         } else {
-            warn!(
-                target: "radio_state",
-                "nIRQ check: asserted={} IRQ_STATUS=0x{:08X} (expected READY bit + asserted)",
-                asserted, status
+            error!(
+                target: "radio",
+                "nIRQ on ready FAIL (asserted {}, IRQ status 0x{:08x}; expected asserted with the ready bit)",
+                if asserted { "yes" } else { "no" },
+                status
             );
         }
         // After clearing the status, nIRQ should release.
         if !radio.irq_asserted() {
-            info!(target: "radio_state", "nIRQ released after status read");
+            info!(target: "radio", "nIRQ released after the status read");
         }
 
         embassy_time::Timer::after_secs(3).await;
@@ -81,18 +82,19 @@ enum Transition {
 
 async fn transition(radio: &mut Spirit1, t: Transition) {
     let (name, expect, res) = match t {
-        Transition::Ready => ("READY", regs::STATE_READY, radio.to_ready().await),
-        Transition::Standby => ("STANDBY", regs::STATE_STANDBY, radio.to_standby().await),
+        Transition::Ready => ("ready", regs::STATE_READY, radio.to_ready().await),
+        Transition::Standby => ("standby", regs::STATE_STANDBY, radio.to_standby().await),
     };
     match res {
         Ok(()) => {
             let st = radio.mc_state().unwrap_or(0xFF);
-            info!(
-                target: "radio_state",
-                "-> {} ok (STATE=0x{:02X}, expected 0x{:02X})", name, st, expect
-            );
+            if st == expect {
+                info!(target: "radio", "to {}: state 0x{:02x} MATCH", name, st);
+            } else {
+                error!(target: "radio", "to {}: state 0x{:02x}, expected 0x{:02x} MISMATCH", name, st, expect);
+            }
         }
-        Err(e) => error!(target: "radio_state", "-> {} failed: {e}", name),
+        Err(e) => error!(target: "radio", "to {} failed: {e}", name),
     }
 }
 

@@ -35,7 +35,7 @@ async fn run(b: Board) {
         &BTN_CH,
     );
 
-    info!("press / release / click / hold the button...");
+    info!("press, click or hold the button");
     loop {
         let event = btn.next_event().await;
         info!(target: "button", "{event}");

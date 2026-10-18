@@ -28,10 +28,10 @@ async fn run(b: Board) {
         b.radio_irq,
     );
     if let Err(e) = radio.exit_shutdown().await {
-        error!(target: "sweep", "exit_shutdown: {e}");
+        error!(target: "sweep", "shutdown exit failed: {e}");
     }
     if let Err(e) = radio.read_device_id() {
-        error!(target: "sweep", "device id: {e}");
+        error!(target: "sweep", "device ID check failed: {e}");
     }
     // Bring up the band-independent RF config (US 915 base; we override the carrier).
     if let Err(e) = config::apply(
@@ -43,10 +43,10 @@ async fn run(b: Board) {
     )
     .await
     {
-        error!(target: "sweep", "config: {e}");
+        error!(target: "sweep", "RF config failed: {e}");
     }
 
-    info!(target: "sweep", "sweeping {} FHSS channels {}-{} MHz",
+    info!(target: "sweep", "sweeping {} FHSS channels, {} to {} MHz",
         FHSS_N, fhss_freq_hz(0) / 1_000_000, fhss_freq_hz(FHSS_N - 1) / 1_000_000);
 
     let mut lock_errors = 0u32;
@@ -73,17 +73,28 @@ async fn run(b: Board) {
             }
         } else {
             lock_errors += 1;
-            warn!(target: "sweep", "ch {} ({} Hz): reached_rx={} error_lock={}", k, fhss_freq_hz(k), reached, err);
+            warn!(
+                target: "sweep",
+                "channel {} ({} Hz) not locked (RX reached {}, lock error {})",
+                k,
+                fhss_freq_hz(k),
+                if reached { "yes" } else { "no" },
+                if err { "yes" } else { "no" }
+            );
         }
     }
 
     let guard_ms = (((max_lock_us / 1000) as u32) * 3).max(10);
-    info!(target: "sweep", "swept {} channels: {} lock errors", FHSS_N, lock_errors);
-    info!(target: "sweep", "max retune+lock = {} us → recommended GUARD = max(3x,10ms) = {} ms", max_lock_us, guard_ms);
+    info!(target: "sweep", "swept {} channels, {} lock errors", FHSS_N, lock_errors);
+    info!(
+        target: "sweep",
+        "retune and lock max {} µs, recommended guard {} ms (3 times that, at least 10 ms)",
+        max_lock_us, guard_ms
+    );
     if lock_errors == 0 {
-        info!(target: "sweep", "F1 PASS *** all FHSS channels lock");
+        info!(target: "sweep", "F1 channel lock PASS (all {} channels)", FHSS_N);
     } else {
-        error!(target: "sweep", "F1 FAIL: {} channels failed to lock", lock_errors);
+        error!(target: "sweep", "F1 channel lock FAIL ({} channels not locked)", lock_errors);
     }
     loop {
         Timer::after_secs(5).await;

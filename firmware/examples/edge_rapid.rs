@@ -60,7 +60,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "rapid", "net init: {e}");
+            error!(target: "rapid", "net init failed: {e}");
             return;
         }
     };
@@ -68,7 +68,7 @@ async fn run(b: Board) {
     #[cfg(feature = "role-node")]
     {
         net.add_peer(GW_ADDR, &KEY);
-        info!(target: "rapid", "NODE: back-to-back confirmed sends (no delay)");
+        info!(target: "rapid", "node 0x{:08x}: confirmed sends back to back, no delay", NODE_ADDR);
         let mut seq: u32 = 0;
         let (mut ok, mut fail) = (0u32, 0u32);
         loop {
@@ -77,7 +77,7 @@ async fn run(b: Board) {
                 _ => fail += 1,
             }
             if seq.is_multiple_of(20) {
-                info!(target: "rapid", "sent {} (delivered={} other={})", seq, ok, fail);
+                info!(target: "rapid", "send #{}: {} delivered, {} not delivered", seq, ok, fail);
             }
             seq = seq.wrapping_add(1);
         }
@@ -86,7 +86,7 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-node"))]
     {
         net.add_peer(NODE_ADDR, &KEY);
-        info!(target: "rapid", "GATEWAY: checking strict-monotonic accepted counters");
+        info!(target: "rapid", "gateway 0x{:08x}: checking that accepted counters only rise", GW_ADDR);
         let mut last: Option<u32> = None;
         let (mut accepted, mut violations) = (0u32, 0u32);
         loop {
@@ -96,16 +96,23 @@ async fn run(b: Board) {
                     && rx.counter <= p
                 {
                     violations += 1;
-                    error!(target: "rapid", "ORDER VIOLATION: counter {} after {} ✗", rx.counter, p);
+                    error!(target: "rapid", "counters monotonic FAIL (counter {} accepted after {})", rx.counter, p);
                 }
                 last = Some(rx.counter);
                 if accepted.is_multiple_of(20) {
-                    info!(
-                        target: "rapid",
-                        "accepted={} last_cnt={} violations={} {}",
-                        accepted, rx.counter, violations,
-                        if violations == 0 { "(monotonic OK)" } else { "(FAILED)" }
-                    );
+                    if violations == 0 {
+                        info!(
+                            target: "rapid",
+                            "{} accepted, last counter {}, counters monotonic PASS",
+                            accepted, rx.counter
+                        );
+                    } else {
+                        error!(
+                            target: "rapid",
+                            "{} accepted, last counter {}, {} out of order, counters monotonic FAIL",
+                            accepted, rx.counter, violations
+                        );
+                    }
                 }
             }
         }

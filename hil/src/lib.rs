@@ -766,7 +766,7 @@ impl Console {
     }
 
     /// Wait until a frame satisfies `pred` (returning it), or `timeout` elapses (`Ok(None)`).
-    /// The canonical smoke assertion: "await the `ALL PASS` verdict line."
+    /// The canonical smoke assertion: "await the `all checks PASS` verdict line."
     ///
     /// On a timeout with corrupt frames dropped during the wait, says so on stderr (shown with the
     /// failing test's output); the caller's "no verdict" message alone would hide the cause.

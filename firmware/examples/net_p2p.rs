@@ -6,7 +6,7 @@
 //! Two boards as symmetric peers: each registers the other with add_peer under
 //! the shared per-link key and exchanges confirmed messages BOTH directions.
 //! A pings B (confirmed, gets B's ACK), then listens; B receives (auto-ACKs) and
-//! pongs back confirmed (gets A's ACK). Both should report Delivered each round
+//! pongs back confirmed (gets A's ACK). Both should report `delivered` each round
 //! and print the peer's payload, demonstrating bidirectional confirmed P2P over
 //! the half-duplex radio plus the peer table (each side holds one peer).
 
@@ -59,12 +59,18 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "p2p", "net init: {e}");
+            error!(target: "p2p", "net init failed: {e}");
             return;
         }
     };
     net.add_peer(peer_addr, &LINK_KEY);
-    info!(target: "p2p", "{:08X}: peer {:08X} registered ({} peer)", addr, peer_addr, net.peer_count());
+    info!(
+        target: "p2p",
+        "0x{:08x}: peer 0x{:08x} registered ({} in the table)",
+        addr,
+        peer_addr,
+        net.peer_count()
+    );
 
     // Peer A is the initiator; peer B is the responder. Both directions are
     // confirmed, so each round produces an ACK in each direction.
@@ -78,13 +84,13 @@ async fn run(b: Board) {
             msg[5] = b'0' + ((seq / 10) % 10) as u8;
             msg[6] = b'0' + (seq % 10) as u8;
             match net.send(peer_addr, &msg, true, 3).await {
-                SendResult::Delivered => info!(target: "p2p", "A: PING {} Delivered", seq),
+                SendResult::Delivered => info!(target: "p2p", "A: PING {} delivered", seq),
                 r => warn!(target: "p2p", "A: PING {} {r}", seq),
             }
             // Listen for B's PONG (it auto-ACKs us via recv).
             if let Some(rx) = net.recv(Duration::from_millis(1500)).await {
                 let text = core::str::from_utf8(rx.data()).unwrap_or("<bin>");
-                info!(target: "p2p", "A: rx \"{}\" from {:08X} rssi={}dBm", text, rx.src, rx.rssi);
+                info!(target: "p2p", "A: rx \"{}\" from 0x{:08x}, {} dBm", text, rx.src, rx.rssi);
             }
             seq = seq.wrapping_add(1);
             Timer::after_secs(2).await;
@@ -97,7 +103,7 @@ async fn run(b: Board) {
         loop {
             if let Some(rx) = net.recv(Duration::from_secs(5)).await {
                 let text = core::str::from_utf8(rx.data()).unwrap_or("<bin>");
-                info!(target: "p2p", "B: rx \"{}\" from {:08X} rssi={}dBm (ACKed)", text, rx.src, rx.rssi);
+                info!(target: "p2p", "B: rx \"{}\" from 0x{:08x}, {} dBm (ACKed)", text, rx.src, rx.rssi);
                 // Pong back, confirmed.
                 let mut msg = [0u8; 8];
                 msg[..4].copy_from_slice(b"PONG");
@@ -105,7 +111,7 @@ async fn run(b: Board) {
                 msg[5] = b'0' + ((seq / 10) % 10) as u8;
                 msg[6] = b'0' + (seq % 10) as u8;
                 match net.send(peer_addr, &msg, true, 3).await {
-                    SendResult::Delivered => info!(target: "p2p", "B: PONG {} Delivered", seq),
+                    SendResult::Delivered => info!(target: "p2p", "B: PONG {} delivered", seq),
                     r => warn!(target: "p2p", "B: PONG {} {r}", seq),
                 }
                 seq = seq.wrapping_add(1);

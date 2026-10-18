@@ -23,13 +23,13 @@
 use embassy_time::Duration;
 #[cfg(feature = "role-node")]
 use embassy_time::Timer;
-#[cfg(feature = "role-node")]
-use log::warn;
 use log::{error, info};
 use tower::radio::Spirit1;
 use tower::radio::config::Band;
 use tower::radio::net::{Net, NetConfig};
 use tower::{app, board::Board};
+#[cfg(feature = "role-node")]
+use {log::warn, tower::radio::net::SendResult};
 
 #[cfg(not(feature = "role-node"))]
 const HOST_ADDR: u32 = 0x2222_2222;
@@ -71,7 +71,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "kjoin", "net init: {e}");
+            error!(target: "kjoin", "net init failed: {e}");
             return;
         }
     };
@@ -82,33 +82,35 @@ async fn run(b: Board) {
         // node's address and key are known up front.
         net.set_keyed_join(true);
         if !net.add_peer(NODE_ADDR, &NODE_KEY) {
-            error!(target: "kjoin", "peer table full");
+            error!(target: "kjoin", "node 0x{:08x} not registered: peer table full", NODE_ADDR);
             return;
         }
-        info!(target: "kjoin", "HOST {:08X}: node {:08X} registered, listening", HOST_ADDR, NODE_ADDR);
+        info!(target: "kjoin", "host 0x{:08x}: node 0x{:08x} registered, listening", HOST_ADDR, NODE_ADDR);
         loop {
             if let Some(rx) = net.recv(Duration::from_secs(1)).await {
-                info!(target: "kjoin", "uplink from {:08X} ({} B)", rx.src, rx.data().len());
+                info!(target: "kjoin", "uplink from 0x{:08x}, {} B", rx.src, rx.data().len());
             }
             if let Some(node) = net.take_keyed_join() {
-                info!(target: "kjoin", "JOINED *** node {:08X} (keyed, no key on air)", node);
+                info!(target: "kjoin", "node 0x{:08x} joined (keyed, no key on air)", node);
             }
         }
     }
 
     #[cfg(feature = "role-node")]
     {
-        info!(target: "kjoin", "JOINER {:08X}: keyed join", NODE_ADDR);
+        info!(target: "kjoin", "joiner 0x{:08x}: joining under its registered key every 5 s", NODE_ADDR);
         loop {
             match net
                 .join_keyed(NODE_ADDR, &NODE_KEY, Duration::from_secs(10))
                 .await
             {
                 Ok(gw_addr) => {
-                    info!(target: "kjoin", "JOINED *** gw={:08X}", gw_addr);
+                    info!(target: "kjoin", "joined host 0x{:08x}", gw_addr);
                     let _ = net.add_peer(gw_addr, &NODE_KEY);
-                    let r = net.send(gw_addr, b"hello", true, 3).await;
-                    info!(target: "kjoin", "uplink: {:?}", r);
+                    match net.send(gw_addr, b"hello", true, 3).await {
+                        SendResult::Delivered => info!(target: "kjoin", "uplink delivered"),
+                        r => warn!(target: "kjoin", "uplink {r}"),
+                    }
                 }
                 Err(e) => warn!(target: "kjoin", "keyed join failed: {e}"),
             }

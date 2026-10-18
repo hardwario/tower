@@ -98,7 +98,7 @@ async fn run(_b: Board) {
     // Logs keep flowing alongside the shell on the same framed link.
     let mut n: u32 = 0;
     loop {
-        info!("heartbeat {}", n);
+        info!("heartbeat #{}", n);
         n = n.wrapping_add(1);
         Timer::after_secs(5).await;
     }

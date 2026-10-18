@@ -25,7 +25,7 @@ async fn run(b: Board) {
         channel: 0,
     };
     if let Err(e) = config::apply(&mut radio, &cfg).await {
-        error!(target: "regdump", "config: {e}");
+        error!(target: "regdump", "RF config failed: {e}");
     }
 
     // (addr, expected): expected is what config::apply should have written.
@@ -52,7 +52,7 @@ async fn run(b: Board) {
         (0x37, 0x62, "SYNC3"),
         (0x38, 0x47, "SYNC2"),
         (0x39, 0x15, "SYNC1"),
-        (0x50, 0x02, "PROTOCOL2 (VCO auto-cal ON, bit1=1)"), // kept on by design (config.rs leaves the reset default)
+        (0x50, 0x02, "PROTOCOL2 (VCO auto-cal on, bit 1)"), // kept on by design (config.rs leaves the reset default)
     ];
 
     let spi = radio.spi();
@@ -61,32 +61,32 @@ async fn run(b: Board) {
     // queue and most of the dump (drop-newest) is lost. A short delay per line lets the
     // UART flush each frame (~5 ms at 115200) so the whole table is observable.
     let pace = || embassy_time::Timer::after_millis(8);
-    info!(target: "regdump", "addr  read  expect  name");
+    info!(target: "regdump", "reading back {} registers after config", checks.len());
     pace().await;
     for &(addr, expect, name) in checks {
         match spi.read_reg(addr) {
             Ok((v, _)) => {
-                let mark = if addr == 0x08 {
-                    "?" // SYNT3 high bits depend on synt; just informational
+                if addr == 0x08 {
+                    // SYNT3 high bits depend on synt; just informational
+                    info!(target: "regdump", "0x{:02x} {}: 0x{:02x} (expected 0x{:02x}, informational)", addr, name, v, expect);
                 } else if v == expect {
-                    "ok"
+                    info!(target: "regdump", "0x{:02x} {}: 0x{:02x} MATCH", addr, name, v);
                 } else {
-                    "<<< MISMATCH"
-                };
-                info!(target: "regdump", "0x{:02X}  0x{:02X}  0x{:02X}    {} {}", addr, v, expect, name, mark);
+                    error!(target: "regdump", "0x{:02x} {}: 0x{:02x}, expected 0x{:02x} MISMATCH", addr, name, v, expect);
+                }
             }
-            Err(e) => error!(target: "regdump", "0x{:02X} read err {e}", addr),
+            Err(e) => error!(target: "regdump", "0x{:02x} read failed: {e}", addr),
         }
         pace().await;
     }
     // Also dump full SYNT3..0 + PROTOCOL2..0 + VCO cal IN words.
     let mut synt = [0u8; 4];
     let _ = spi.read_regs(0x08, &mut synt);
-    info!(target: "regdump", "SYNT3..0 = {:02X} {:02X} {:02X} {:02X}", synt[0], synt[1], synt[2], synt[3]);
+    info!(target: "regdump", "SYNT3 to SYNT0: {:02x} {:02x} {:02x} {:02x}", synt[0], synt[1], synt[2], synt[3]);
     pace().await;
     let mut vcal = [0u8; 3];
     let _ = spi.read_regs(0x6D, &mut vcal);
-    info!(target: "regdump", "VCO_CALIBR_IN2..0 = {:02X} {:02X} {:02X}", vcal[0], vcal[1], vcal[2]);
+    info!(target: "regdump", "VCO_CALIBR_IN2 to IN0: {:02x} {:02x} {:02x}", vcal[0], vcal[1], vcal[2]);
 
     loop {
         embassy_time::Timer::after_secs(5).await;

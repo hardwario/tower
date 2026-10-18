@@ -64,7 +64,7 @@ async fn run(b: Board) {
     {
         Ok(n) => n,
         Err(e) => {
-            error!(target: "chan", "net init on ch{}: {e}", CHANNEL);
+            error!(target: "chan", "net init on channel {} failed: {e}", CHANNEL);
             return;
         }
     };
@@ -72,12 +72,17 @@ async fn run(b: Board) {
     #[cfg(feature = "role-node")]
     {
         net.add_peer(GW_ADDR, &KEY);
-        info!(target: "chan", "NODE: confirmed sends on ch{} (VCO calibrated for this channel)", CHANNEL);
+        info!(
+            target: "chan",
+            "node 0x{:08x}: confirmed sends on channel {} (VCO calibrated for it)",
+            NODE_ADDR,
+            CHANNEL
+        );
         let mut seq: u32 = 0;
         loop {
             match net.send(GW_ADDR, &seq.to_le_bytes(), true, 3).await {
-                SendResult::Delivered => info!(target: "chan", "ch{} seq={} Delivered", CHANNEL, seq),
-                r => warn!(target: "chan", "ch{} seq={} {r}", CHANNEL, seq),
+                SendResult::Delivered => info!(target: "chan", "#{} delivered on channel {}", seq, CHANNEL),
+                r => warn!(target: "chan", "#{} on channel {}: {r}", seq, CHANNEL),
             }
             seq = seq.wrapping_add(1);
             Timer::after_secs(2).await;
@@ -87,7 +92,7 @@ async fn run(b: Board) {
     #[cfg(not(feature = "role-node"))]
     {
         net.add_peer(NODE_ADDR, &KEY);
-        info!(target: "chan", "GATEWAY: receiving on ch{}", CHANNEL);
+        info!(target: "chan", "gateway 0x{:08x}: receiving on channel {}", GW_ADDR, CHANNEL);
         loop {
             if let Some(rx) = net.recv(Duration::from_secs(10)).await {
                 let seq = if rx.data().len() >= 4 {
@@ -95,7 +100,11 @@ async fn run(b: Board) {
                 } else {
                     0
                 };
-                info!(target: "chan", "ch{} rx src={:08X} seq={} cnt={} rssi={}dBm (ACKed)", CHANNEL, rx.src, seq, rx.counter, rx.rssi);
+                info!(
+                    target: "chan",
+                    "rx #{} from 0x{:08x}, counter {}, {} dBm (channel {}, ACKed)",
+                    seq, rx.src, rx.counter, rx.rssi, CHANNEL
+                );
             }
         }
     }
