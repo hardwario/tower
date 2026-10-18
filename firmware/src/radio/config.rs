@@ -162,6 +162,23 @@ fn write_band_regs(spi: &mut Spirit1Spi, band: Band, channel: u8) -> Result<(), 
     Ok(())
 }
 
+/// PA ramp top index for full power (~+12 dBm: the reset PA table ramps -30..+12 dBm over its 8
+/// slots, about 6 dB a slot).
+pub const PA_INDEX_FULL: u8 = 7;
+/// PA ramp top index for a short-range fixed-channel exchange on US 915 (OTA pairing): about
+/// -6 dBm, under FCC §15.249's 50 mV/m at 3 m (about -1.2 dBm EIRP) with margin for the antenna.
+/// An estimate from the table's ramp: measure the EIRP before any compliance claim.
+pub const PA_INDEX_LOW: u8 = 4;
+
+/// Set the PA ramp's top index (`0..=7`, [`PA_INDEX_FULL`] / [`PA_INDEX_LOW`]): the TX power of
+/// every following frame. Prefer [`Net::set_tx_power`](crate::radio::net::Net::set_tx_power).
+pub async fn set_pa_index(radio: &mut Spirit1, index: u8) -> Result<(), RadioError> {
+    radio.to_ready().await?;
+    // Ramping enabled (bit 5), the top slot in bits 2..0, as `apply` writes it.
+    radio.spi().write_reg(regs::PA_POWER0, 0x20 | (index & 0x07))?;
+    Ok(())
+}
+
 /// Retune the radio to a different `band`/`channel` at **runtime**: bring the part
 /// to READY, rewrite only the synthesizer registers, and let the VCO recalibrate
 /// on the next TX/RX entry (auto-cal). All other RF settings are band-independent

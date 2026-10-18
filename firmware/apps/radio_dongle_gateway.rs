@@ -45,7 +45,10 @@ use log::{info, warn};
 use tower::led::{self, LedChannel, Pattern, Polarity, Step};
 use tower::radio::Spirit1;
 use tower::radio::config::{self, Band};
-use tower::radio::net::{Net, NetConfig, PairedPeer, PairingHost, SendResult, peer_addr_valid};
+use tower::radio::net::{
+    Access, FhssConfig, FhssRole, Net, NetConfig, PairedPeer, PairingHost, Received, SendResult,
+    gateway_network_key, peer_addr_valid,
+};
 use tower::storage::{NS_APP, NS_SHELL, Nv, Scoped};
 use tower::{app, board::Board, console, shell, watchdog};
 use tower_gateway::queue::{PushError, Queue};
@@ -143,6 +146,12 @@ static STAT_ID: AtomicU32 = AtomicU32::new(0);
 static STAT_NODES: AtomicU32 = AtomicU32::new(0);
 static STAT_UPLINKS: AtomicU32 = AtomicU32::new(0);
 static STAT_QUEUED: AtomicU32 = AtomicU32::new(0);
+/// US 915 hopping evidence (FCC §15.247), refreshed every `HOP_STAT_EVERY` by the main loop:
+/// channels transmitted on since boot (`u32::MAX` = not hopping), and the largest and mean
+/// per-channel transmit airtime (ms) since boot.
+static STAT_HOP_USED: AtomicU32 = AtomicU32::new(u32::MAX);
+static STAT_HOP_MAX_MS: AtomicU32 = AtomicU32::new(0);
+static STAT_HOP_MEAN_MS: AtomicU32 = AtomicU32::new(0);
 
 fn cmd_status(ctx: &mut shell::Ctx<'_>, _args: &[&str]) -> shell::Outcome {
     let _ = write!(
@@ -153,8 +162,24 @@ fn cmd_status(ctx: &mut shell::Ctx<'_>, _args: &[&str]) -> shell::Outcome {
         STAT_UPLINKS.load(Ordering::Relaxed),
         STAT_QUEUED.load(Ordering::Relaxed),
     );
+    let used = STAT_HOP_USED.load(Ordering::Relaxed);
+    if used != u32::MAX {
+        // Each channel is tuned for one 300 ms slot per 24 s cycle, so its occupancy in any 20 s
+        // window is one slot at most; the airtime spread shows the even use (docs/radio.md).
+        let _ = write!(
+            ctx,
+            "hopping: {} of {} channels used, airtime per channel max {} ms, mean {} ms (since boot)\r\n",
+            used,
+            config::FHSS_N,
+            STAT_HOP_MAX_MS.load(Ordering::Relaxed),
+            STAT_HOP_MEAN_MS.load(Ordering::Relaxed),
+        );
+    }
     shell::Outcome::ok()
 }
+
+/// How often the main loop refreshes the hopping evidence for `gateway status`.
+const HOP_STAT_EVERY: Duration = Duration::from_secs(10);
 
 // --- timing ------------------------------------------------------------------------
 
@@ -171,6 +196,9 @@ const DOWNLINK_TURNAROUND: Duration = Duration::from_millis(20);
 /// single-owner loop out of `recv` while a mid-response node is uplinking its next
 /// shell chunk.
 const DOWNLINK_REPS: u8 = 2;
+/// US 915: how long the gateway stays on the pairing carrier after a commit, so the new node's
+/// commit uplinks (confirmed NodeInfo, retried for up to ~15 s) are ACKed before it hops again.
+const COMMIT_GRACE: Duration = Duration::from_secs(15);
 /// Default downlink TTL when the host passes `ttl == 0`.
 const DEFAULT_TTL_S: u16 = 3600;
 /// How often the main loop re-reads the `keyed-join` setting, so `system settings set
@@ -183,23 +211,6 @@ static CH: LedChannel = LedChannel::new();
 static HEARTBEAT: Pattern = &[Step::on(30), Step::off(1970)];
 /// Fast blink while the OTA pairing window is open.
 static PAIRING: Pattern = &[Step::on(100), Step::off(150)];
-
-/// The net layer's `NetConfig::key` for the gateway. **Not a secret, and it must never
-/// authenticate anything:** it is derived from the gateway's own address, which rides in
-/// clear in every frame, with a public constant, so anyone can compute it. (An earlier note
-/// here claimed unregistered traffic "must simply fail CCM auth, which any value achieves". That was
-/// wrong: an attacker sealed DATA frames from unregistered addresses under this key and the
-/// gateway ACKed them and forwarded them to the host as genuine uplinks.) The gateway therefore
-/// runs **registered peers only** (`set_default_lane(false)` right after `Net::new`): no
-/// default lane, so this key is never used to open a frame. It only exists because `NetConfig`
-/// requires one; no legitimate node uses it (each has its own key; pairing derives one by X25519).
-fn default_lane_key(addr: u32) -> [u8; 16] {
-    let mut k = [0u8; 16];
-    for (i, chunk) in k.chunks_mut(4).enumerate() {
-        chunk.copy_from_slice(&(addr ^ (0x9E37_79B9u32.rotate_left(i as u32 * 8))).to_le_bytes());
-    }
-    k
-}
 
 /// RAM-only per-node link stats. Packed to 12 B/entry (16 entries = 192 B of the app
 /// future); deliberately NOT persisted; per-uplink EEPROM writes would burn the part
@@ -454,7 +465,9 @@ async fn run(b: Board) {
         kv,
         NetConfig {
             addr,
-            key: default_lane_key(addr),
+            // Public, address-derived (`gateway_network_key`): it opens no data frame (registered
+            // peers only, below) and seals only the US 915 hop beacons.
+            key: gateway_network_key(addr),
             band,
             channel,
             // Registered nodes mean this store held a TX watermark before: if it is gone now,
@@ -479,7 +492,7 @@ async fn run(b: Board) {
     };
     // Registered peers only: a frame from any address not in the peer table (never paired, or
     // removed) is dropped on its clear header: no CCM, no ACK, no uplink to the host, no
-    // default-lane EEPROM writes. See `default_lane_key` for why this is not optional.
+    // default-lane EEPROM writes. See `gateway_network_key` for why this is not optional.
     net.set_default_lane(false);
     net.set_keyed_join(read_bool_setting(kv, SET_KEYED_JOIN, true));
 
@@ -508,6 +521,25 @@ async fn run(b: Board) {
         match band { Band::Eu868 => "eu868", Band::Us915 => "us915" },
         channel
     );
+
+    // US 915 runs FCC §15.247 frequency hopping as the hop master; the `channel` setting does
+    // not apply there (the schedule covers all 80 channels).
+    let hopping = band == Band::Us915;
+    if hopping {
+        if let Err(e) = net.enable_fhss(FhssRole::Master, FhssConfig::default()).await {
+            log::error!(target: "gateway", "hopping failed to start ({e}), gateway down");
+            loop {
+                watchdog::checkin();
+                Timer::after(Duration::from_secs(5)).await;
+            }
+        }
+        info!(target: "gateway", "hopping over {} channels (us915, FCC 15.247)", config::FHSS_N);
+    }
+    // Off the hop schedule for a pairing window (and the commit grace after it): see the radio
+    // branch below.
+    let mut parked = false;
+    let mut park_until: Option<Instant> = None;
+    let mut last_hop_stat = Instant::now();
 
     let mut queue = Queue::new();
     let mut stats = Stats::new();
@@ -562,6 +594,15 @@ async fn run(b: Board) {
         // 2. Radio: either a pairing-window slice or a receive slice; the two share
         //    the one radio, and pairing mode is explicit + short-lived.
         if let Some(sess) = pairing.as_mut() {
+            if hopping && !parked {
+                // US 915: OTA pairing is a fixed-channel exchange, so it runs off the hop schedule,
+                // on the rendezvous carrier (915.0 MHz) at FCC §15.249 power, which needs no
+                // hopping. Nodes' uplinks wait for the window to end, as on EU 868.
+                let _ = net.fhss_suspend(Band::Us915).await;
+                let _ = net.set_tx_power(config::PA_INDEX_LOW).await;
+                parked = true;
+                park_until = None;
+            }
             if registry::count(&buckets) >= registry::CAPACITY {
                 // The registry filled while the window was open (a concurrent cable
                 // NodeAdd): close early instead of letting a node complete the JOIN,
@@ -592,48 +633,55 @@ async fn run(b: Board) {
                     led.set_background(Some(HEARTBEAT));
                     pairing = None;
                     commit_pairing(peer, req_id, &mut net, &mut buckets).await;
+                    if hopping {
+                        park_until = Some(Instant::now() + COMMIT_GRACE);
+                    }
                 }
             }
-        } else if let Some(rx) = net.recv(RECV_SLICE).await {
-            // 3. One authenticated uplink: account, forward verbatim, then deliver a
-            //    queued downlink into the node's post-uplink RX window (if any).
-            stats.on_uplink(rx.src, rx.rssi);
-            STAT_UPLINKS.store(
-                STAT_UPLINKS.load(Ordering::Relaxed).wrapping_add(1),
-                Ordering::Relaxed,
-            );
-            console::uplink(rx.src, rx.counter, rx.rssi, rx.lqi, rx.data()).await;
-
-            if let Some(item) = queue.peek_for(rx.src, now_ms) {
-                let (item_id, mut data, len) = (item.id, [0u8; 74], item.data().len());
-                data[..len].copy_from_slice(item.data());
-                Timer::after(DOWNLINK_TURNAROUND).await;
-                let result = net.send(rx.src, &data[..len], true, DOWNLINK_REPS).await;
-                let outcome = match result {
-                    SendResult::Delivered => {
-                        queue.pop(item_id);
-                        mgmt::TX_DELIVERED
-                    }
-                    SendResult::NotDelivered => mgmt::TX_NOT_DELIVERED,
-                    SendResult::Busy => mgmt::TX_BUSY,
-                    SendResult::DutyLimited => mgmt::TX_DUTY_LIMITED,
-                    _ => mgmt::TX_ERROR,
-                };
-                console::radio_stat(RadioStat::Tx {
-                    dest: rx.src,
-                    item: item_id,
-                    outcome,
-                    ack_rssi: net.last_ack().map(|m| m.rssi),
-                })
-                .await;
+        } else if hopping && parked && park_until.is_some_and(|t| Instant::now() < t) {
+            // US 915, just after a pairing committed: the new node's commit uplinks (confirmed, on
+            // the same fixed carrier at the same low power) still need their ACK here.
+            if let Some(rx) = net.recv(RECV_SLICE).await {
+                on_uplink(&rx, &mut net, &mut stats, &mut queue, now_ms).await;
             }
-            net.set_pending(rx.src, queue.count_for(rx.src) > 0);
-            STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
+        } else if hopping {
+            if parked {
+                // Back to hopping, on the clock that ran on meanwhile: nodes that slept through
+                // the window still find the schedule by prediction.
+                let _ = net.set_tx_power(config::PA_INDEX_FULL).await;
+                net.fhss_resume();
+                parked = false;
+                park_until = None;
+            }
+            // 3. One hop slot (FCC §15.247): beacon at the boundary, then listen on the slot's
+            //    channel; an uplink is ACKed inside and a queued downlink follows in the slot.
+            if let Some(slot) = net.fhss_master_tick().await
+                && let Some(rx) = slot.received
+            {
+                on_uplink(&rx, &mut net, &mut stats, &mut queue, now_ms).await;
+            }
+        } else if let Some(rx) = net.recv(RECV_SLICE).await {
+            // 3. One authenticated uplink.
+            on_uplink(&rx, &mut net, &mut stats, &mut queue, now_ms).await;
         }
         // A registered node's keyed join (E4) was answered inside recv(): nothing to
         // install (its key and lane already are), just say so.
         if let Some(node_addr) = net.take_keyed_join() {
             info!(target: "gateway", "node 0x{:08x} joined (keyed)", node_addr);
+        }
+
+        if hopping && last_hop_stat.elapsed() >= HOP_STAT_EVERY {
+            last_hop_stat = Instant::now();
+            let (mut used, mut max, mut sum) = (0u32, 0u32, 0u32);
+            for ch in 0..config::FHSS_N {
+                let ms = net.fhss_channel_airtime_ms(ch);
+                used += u32::from(ms > 0);
+                max = max.max(ms);
+                sum += ms;
+            }
+            STAT_HOP_USED.store(used, Ordering::Relaxed);
+            STAT_HOP_MAX_MS.store(max, Ordering::Relaxed);
+            STAT_HOP_MEAN_MS.store(sum / u32::from(config::FHSS_N), Ordering::Relaxed);
         }
 
         // 4. Housekeeping: TTL expiry (reported as TX_EXPIRED) + the ambient-RSSI tick.
@@ -667,9 +715,58 @@ async fn run(b: Board) {
             && let Some(rssi) = net.take_idle_rssi()
         {
             last_stat = Instant::now();
+            // Hopping, the sample is from the slot just listened on: its hop channel (0..80).
+            let channel = if hopping {
+                net.fhss_current_channel()
+            } else {
+                channel
+            };
             console::radio_stat(RadioStat::Channel { channel, rssi }).await;
         }
     }
+}
+
+/// One authenticated uplink: account it, forward it to the host verbatim, then deliver a queued
+/// downlink into the node's post-uplink RX window. Hopping, that window is the rest of the uplink's
+/// slot (the node listens on that slot's channel; one attempt, `fhss_send` refuses it if the slot
+/// has no room left), else the duty-mode window with `DOWNLINK_REPS`.
+async fn on_uplink(rx: &Received, net: &mut Net, stats: &mut Stats, queue: &mut Queue, now_ms: u64) {
+    stats.on_uplink(rx.src, rx.rssi);
+    STAT_UPLINKS.store(
+        STAT_UPLINKS.load(Ordering::Relaxed).wrapping_add(1),
+        Ordering::Relaxed,
+    );
+    console::uplink(rx.src, rx.counter, rx.rssi, rx.lqi, rx.data()).await;
+
+    if let Some(item) = queue.peek_for(rx.src, now_ms) {
+        let (item_id, mut data, len) = (item.id, [0u8; 74], item.data().len());
+        data[..len].copy_from_slice(item.data());
+        Timer::after(DOWNLINK_TURNAROUND).await;
+        let result = if net.access() == Access::Fhss {
+            net.fhss_send(rx.src, &data[..len], true).await
+        } else {
+            net.send(rx.src, &data[..len], true, DOWNLINK_REPS).await
+        };
+        let outcome = match result {
+            SendResult::Delivered => {
+                queue.pop(item_id);
+                mgmt::TX_DELIVERED
+            }
+            SendResult::NotDelivered => mgmt::TX_NOT_DELIVERED,
+            SendResult::Busy => mgmt::TX_BUSY,
+            SendResult::DutyLimited => mgmt::TX_DUTY_LIMITED,
+            _ => mgmt::TX_ERROR,
+        };
+        console::radio_stat(RadioStat::Tx {
+            dest: rx.src,
+            item: item_id,
+            outcome,
+            ack_rssi: net.last_ack().map(|m| m.rssi),
+        })
+        .await;
+    }
+    net.set_pending(rx.src, queue.count_for(rx.src) > 0);
+    STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
 }
 
 /// Commit a joined node: persist it (UNNAMED: the host auto-names from the first

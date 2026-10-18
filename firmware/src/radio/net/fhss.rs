@@ -2,7 +2,7 @@
 //! [`super::Net`].
 //!
 //! Star topology, gateway = hop time-master. The gateway runs a free-running hop
-//! clock (an [`Instant`] epoch) and, each 300 ms slot, retunes to that slot's
+//! clock (a crystal-time epoch, see [`Lse`]) and, each 300 ms slot, retunes to that slot's
 //! pseudo-random channel and broadcasts a **Beacon** (slot index), then listens.
 //! A node blind-rendezvous: it parks on a fixed channel ([`FHSS_RENDEZVOUS_CH`]),
 //! and since the permutation visits every channel exactly once per cycle, the
@@ -24,13 +24,17 @@
 //! (Exact §15.247 numbers are FCC-KDB config to **verify** before any product claim.)
 
 use embassy_time::{Duration, Instant, Timer};
+
+use crate::clock;
 // The beacon-epoch acceptance machine (reject-backwards epochs, the two-beacon acquisition
 // consistency guard, prediction-slack re-anchoring, the miss/rescan rule) lives in the
 // host-testable `tower_net::epoch` kernel, together with its tuning constants
 // (`ACQUIRE_SLOT_SLACK`, `FHSS_RESYNC_SLACK`, `REACQUIRE_LIMIT`). This module keeps the radio,
-// the `Instant`-based slot clock and the EEPROM epoch persistence, and delegates each
+// the crystal-time slot clock and the EEPROM epoch persistence, and delegates each
 // accept/reject/lock decision there. Zero behavioural change on target.
-use tower_net::epoch::{EpochGate, MissVerdict, ScanVerdict, TrackVerdict, next_master_epoch};
+use tower_net::epoch::{
+    EpochGate, MissVerdict, ScanVerdict, TrackVerdict, next_master_epoch, reacquire_slack_ms,
+};
 
 use super::{Access, KEY_FHSS_EPOCH, NS_NET, Net, Received, SendResult, TX_TIMEOUT, read_u32};
 use crate::radio::ccm::TAG_LEN;
@@ -47,6 +51,14 @@ const FHSS_SLOT_MS: u64 = 300;
 /// is armed before the gateway transmits (covers `rx()` setup latency; without it a
 /// late-armed RX can miss the beacon preamble and drop sync).
 const GUARD: Duration = Duration::from_millis(10);
+/// Time the master leaves its caller between two slots: [`Net::fhss_master_tick`] stops listening
+/// this long (plus [`GUARD`]) before the slot ends, so the app's loop (management requests, console
+/// writes, housekeeping) runs before the next boundary instead of across it. A loop that ran past
+/// the boundary skipped that slot (no beacon, no listening): a product gateway beaconed only ~85 %
+/// of its slots with a 10 ms margin, and a node scanning for two consecutive passes over the
+/// rendezvous channel lost a whole 24 s cycle per skipped pass. [`Net::fhss_send`]'s slot-straddle
+/// rule keeps the same margin, so no exchange runs into the master's cut.
+const MASTER_LOOP_BUDGET: Duration = Duration::from_millis(40);
 /// Node RX window for the per-slot beacon: opened `GUARD` early, so it spans
 /// `[boundary − GUARD, boundary − GUARD + BEACON_RX_MS]`, generously covering the
 /// beacon ToA (~16 ms) + retune/clock jitter (drift ≪ GUARD even across MISS_LIMIT).
@@ -89,32 +101,85 @@ pub enum FhssState {
 /// FHSS configuration.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FhssConfig {
-    /// Hop-sequence seed shared by both ends. `0` (default) ⇒ derive from the link key.
+    /// Hop-sequence seed shared by both ends. `0` (default) ⇒ derive from the network key.
     pub seed: u32,
+    /// The network key beacons are sealed (master) and opened (node) under, and the default
+    /// seed is derived from. `None` ⇒ this device's default key. A product node runs registered
+    /// peers only with no default key, so it passes its gateway's
+    /// ([`gateway_network_key`](super::gateway_network_key)).
+    pub network_key: Option<[u8; 16]>,
+}
+
+/// A point in crystal time (ms, [`clock::now_ms`]): the slot clock's timebase. embassy's
+/// `Instant` runs off HSI16 while awake (±1 %, 2500 ppm between two boards measured), which a
+/// sleeping node's prediction cannot bridge; the LSE crystal (±20 ppm) can. Waits stay embassy
+/// timers, each shorter than a slot ([`wait_until`]).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Lse(u64);
+
+impl Lse {
+    fn now() -> Self {
+        Lse(clock::now_ms())
+    }
+
+    fn saturating_duration_since(self, earlier: Lse) -> Duration {
+        Duration::from_millis(self.0.saturating_sub(earlier.0))
+    }
+
+    fn checked_sub(self, d: Duration) -> Option<Lse> {
+        self.0.checked_sub(d.as_millis()).map(Lse)
+    }
+}
+
+impl core::ops::Add<Duration> for Lse {
+    type Output = Lse;
+    fn add(self, d: Duration) -> Lse {
+        Lse(self.0 + d.as_millis())
+    }
+}
+
+impl core::ops::Sub<Duration> for Lse {
+    type Output = Lse;
+    fn sub(self, d: Duration) -> Lse {
+        Lse(self.0.saturating_sub(d.as_millis()))
+    }
+}
+
+/// Wait until crystal time `t` (at once if it passed), with an embassy timer for the remainder.
+async fn wait_until(t: Lse) {
+    let rest = t.saturating_duration_since(Lse::now());
+    if rest.as_ticks() > 0 {
+        Timer::after(rest).await;
+    }
 }
 
 /// FHSS runtime state, held on [`Net`] (inert unless `access == Fhss`).
 pub(crate) struct Fhss {
     role: FhssRole,
+    /// FHSS was enabled (and may be suspended for a fixed-channel exchange, see
+    /// [`Net::fhss_suspend`]).
+    enabled: bool,
     seed: u32,
+    /// The network key beacons are sealed / opened under ([`FhssConfig::network_key`]).
+    key: [u8; 16],
     state: FhssState,
     /// Slot-clock anchor `(slot, boundary_instant)`: slot `anchor.0` started at
     /// `anchor.1` on *this device's* clock. Re-anchored each beacon (node) or set
     /// once at enable (master, anchor = `(0, epoch)`). Using an anchor of small
     /// time-deltas (rather than an absolute epoch reconstructed by subtracting
-    /// `slot·SLOT`) avoids `Instant` underflow when the gateway's slot count far
+    /// `slot·SLOT`) avoids underflow when the gateway's slot count far
     /// exceeds the node's uptime.
-    anchor: Option<(u32, Instant)>,
-    last_beacon: Instant,
+    anchor: Option<(u32, Lse)>,
+    last_beacon: Lse,
     cur_channel: u8,
     /// The epoch/freshness decision machine (`tower_net::epoch`): the session epoch
     /// (master boot-id / node highest-seen), the miss counter, and the `(epoch, slot)` of the
     /// held acquisition candidate.
     gate: EpochGate,
     /// Arrival time of the gate's held acquisition candidate (the kernel is time-free, so the
-    /// `Instant` stays here; elapsed slots are measured against it and passed in). `Some` iff
+    /// time stays here; elapsed slots are measured against it and passed in). `Some` iff
     /// the gate holds a candidate.
-    acquire_t0: Option<Instant>,
+    acquire_t0: Option<Lse>,
     /// Per-channel transmitted airtime (ms) accumulated this session: a light
     /// *measurement* for the §15.247 compliance histogram. Occupancy itself is
     /// bounded *structurally* (N=80, cycle 24 s > 20 s ⇒ each channel tuned ≤ once
@@ -128,10 +193,12 @@ impl Fhss {
     pub(crate) fn disabled() -> Self {
         Self {
             role: FhssRole::Node,
+            enabled: false,
             seed: 0,
+            key: [0; 16],
             state: FhssState::Scanning,
             anchor: None,
-            last_beacon: Instant::now(),
+            last_beacon: Lse(0),
             cur_channel: FHSS_RENDEZVOUS_CH,
             gate: EpochGate::new(),
             acquire_t0: None,
@@ -190,18 +257,16 @@ impl Net {
     /// `Master` starts the free-running hop clock now; `Node` starts Scanning. The
     /// seed defaults to a key-derived value so both ends agree without sending it.
     pub async fn enable_fhss(&mut self, role: FhssRole, cfg: FhssConfig) -> Result<(), RadioError> {
+        let key = cfg.network_key.unwrap_or(self.default_key);
         let seed = if cfg.seed != 0 {
             cfg.seed
         } else {
-            u32::from_le_bytes([
-                self.default_key[0],
-                self.default_key[1],
-                self.default_key[2],
-                self.default_key[3],
-            ]) | 1
+            u32::from_le_bytes([key[0], key[1], key[2], key[3]]) | 1
         };
         self.fhss.role = role;
+        self.fhss.enabled = true;
         self.fhss.seed = seed;
+        self.fhss.key = key;
         self.fhss.acquire_t0 = None;
         self.fhss.airtime_ms = [0; FHSS_N as usize];
         self.access = Access::Fhss;
@@ -217,7 +282,7 @@ impl Net {
                 let _ = nkv.set_bytes(KEY_FHSS_EPOCH, &next.to_le_bytes());
                 self.fhss.gate.reset(next);
                 self.fhss.state = FhssState::Synced;
-                self.fhss.anchor = Some((0, Instant::now()));
+                self.fhss.anchor = Some((0, Lse::now()));
             }
             FhssRole::Node => {
                 self.fhss.gate.reset(0); // no gateway epoch seen yet this session
@@ -232,7 +297,58 @@ impl Net {
     /// Leave FHSS → plain duty mode. The caller selects the next band via `set_band`.
     pub async fn disable_fhss(&mut self) -> Result<(), RadioError> {
         self.access = Access::Duty;
+        self.fhss.enabled = false;
         config::set_band(&mut self.radio, Band::Eu868, 0).await
+    }
+
+    /// Step out of hopping for a short fixed-channel exchange (OTA pairing on US 915, at
+    /// §15.249 power: see [`Net::set_tx_power`]): plain duty mode on `band` channel 0, which on
+    /// US 915 is the rendezvous carrier (915.0 MHz, [`FHSS_RENDEZVOUS_CH`]). The hop state is
+    /// kept: the master's clock runs on, and [`fhss_resume`](Self::fhss_resume) carries on with
+    /// the same schedule, so nodes that were asleep meanwhile still find it by prediction. No-op
+    /// unless FHSS is enabled and active.
+    pub async fn fhss_suspend(&mut self, band: Band) -> Result<(), RadioError> {
+        if !self.fhss.enabled || self.access != Access::Fhss {
+            return Ok(());
+        }
+        self.access = Access::Duty;
+        self.set_band(band, 0).await
+    }
+
+    /// Back to hopping after [`fhss_suspend`](Self::fhss_suspend). The next tick retunes.
+    pub fn fhss_resume(&mut self) {
+        if self.fhss.enabled {
+            self.access = Access::Fhss;
+        }
+    }
+
+    /// Whether FHSS is enabled (active, or suspended by [`fhss_suspend`](Self::fhss_suspend)).
+    #[must_use]
+    pub fn fhss_enabled(&self) -> bool {
+        self.fhss.enabled
+    }
+
+    /// Time left in the current slot's active window (to its end less the guard): how long a
+    /// node may listen for a downlink on the channel it just sent on. Zero without a clock.
+    #[must_use]
+    pub fn fhss_slot_left(&self) -> Duration {
+        let Some(anchor) = self.fhss.anchor else {
+            return Duration::from_ticks(0);
+        };
+        let now = Lse::now();
+        let end = Self::fhss_slot_start(anchor, Self::fhss_cur_slot(anchor, now) + 1);
+        end.checked_sub(GUARD)
+            .map_or(Duration::from_ticks(0), |e| e.saturating_duration_since(now))
+    }
+
+    /// How long ago this node last heard a beacon it re-anchored on, while it holds a clock
+    /// anchor (`None` before acquisition and after an anchor went stale), in crystal time. A
+    /// sleeping node schedules its resync from it: past [`reacquire_slack_ms`]'s bound only a
+    /// rescan finds the schedule.
+    #[must_use]
+    pub fn fhss_since_beacon(&self) -> Option<Duration> {
+        (self.fhss.role == FhssRole::Node && self.fhss.anchor.is_some())
+            .then(|| Lse::now().saturating_duration_since(self.fhss.last_beacon))
     }
 
     /// Current FHSS sync state (diagnostics).
@@ -263,13 +379,13 @@ impl Net {
 
     /// Current absolute slot index from the anchor `(slot, time)` at `now`
     /// (`anchor.slot + elapsed_since_anchor / SLOT`). Small deltas only.
-    fn fhss_cur_slot(anchor: (u32, Instant), now: Instant) -> u32 {
+    fn fhss_cur_slot(anchor: (u32, Lse), now: Lse) -> u32 {
         let elapsed_ms = now.saturating_duration_since(anchor.1).as_millis();
         anchor.0 + (elapsed_ms / FHSS_SLOT_MS) as u32
     }
 
     /// Boundary instant of slot `slot_abs` (≥ `anchor.slot`) from the anchor.
-    fn fhss_slot_start(anchor: (u32, Instant), slot_abs: u32) -> Instant {
+    fn fhss_slot_start(anchor: (u32, Lse), slot_abs: u32) -> Lse {
         anchor.1 + Duration::from_millis((slot_abs - anchor.0) as u64 * FHSS_SLOT_MS)
     }
 
@@ -287,7 +403,7 @@ impl Net {
         }
         let seed = self.fhss.seed;
         let anchor = self.fhss.anchor?;
-        let now = Instant::now();
+        let now = Lse::now();
         let slot = Self::fhss_cur_slot(anchor, now) + 1; // beacon the upcoming slot at its boundary
         let ch = Self::fhss_channel_for(seed, slot);
         let t_start = Self::fhss_slot_start(anchor, slot);
@@ -295,7 +411,7 @@ impl Net {
         // Retune during the guard, then wait for the exact boundary.
         let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(ch)).await;
         self.fhss.cur_channel = ch;
-        Timer::at(t_start).await;
+        wait_until(t_start).await;
 
         self.fhss_tx_beacon(slot, ch).await;
 
@@ -305,8 +421,8 @@ impl Net {
         // its DATA + turnaround + ACK end ≥ GUARD before the slot does, so legitimate uplinks are
         // complete well inside the window and only a foreign frame can stretch it. The existing
         // ACK path (turnaround + ACK after a late frame) already had a comparable tail.)
-        let listen_until = t_start + Duration::from_millis(FHSS_SLOT_MS) - GUARD;
-        let now = Instant::now();
+        let listen_until = t_start + Duration::from_millis(FHSS_SLOT_MS) - GUARD - MASTER_LOOP_BUDGET;
+        let now = Lse::now();
         let received = if listen_until > now {
             self.recv(listen_until.saturating_duration_since(now)).await
         } else {
@@ -335,18 +451,33 @@ impl Net {
     pub async fn fhss_node_tick(&mut self) -> NodeSlot {
         let seed = self.fhss.seed;
 
-        if let Some(anchor) = self.fhss.anchor {
-            // Track by prediction (initial Synced *and* fast re-acquire after a fade).
-            let now = Instant::now();
+        // A sleeping node ticks only when it has something to send (or its periodic resync), so
+        // its clock may have drifted since the last beacon: widen the window by that drift, or
+        // drop an anchor too stale to predict the right slot and rescan (`reacquire_slack_ms`).
+        let slack = self.fhss.anchor.and_then(|_| {
+            let since = Lse::now().saturating_duration_since(self.fhss.last_beacon);
+            let max = (FHSS_SLOT_MS / 2).saturating_sub(GUARD.as_millis() + beacon_toa_ms());
+            reacquire_slack_ms(since.as_millis(), max)
+        });
+        if slack.is_none() && self.fhss.anchor.is_some() {
+            self.fhss.anchor = None;
+            self.fhss.state = FhssState::Scanning;
+        }
+
+        if let (Some(anchor), Some(slack)) = (self.fhss.anchor, slack) {
+            // Track by prediction (initial Synced *and* fast re-acquire after a fade or a sleep).
+            let now = Lse::now();
             let slot = Self::fhss_cur_slot(anchor, now) + 1;
             let ch = Self::fhss_channel_for(seed, slot);
             let t_start = Self::fhss_slot_start(anchor, slot);
+            let slack = Duration::from_millis(slack);
 
             let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(ch)).await;
             self.fhss.cur_channel = ch;
             // Open RX a guard *before* the boundary so it's armed before the gateway
-            // transmits (covers rx() setup latency).
-            Timer::at(t_start.checked_sub(GUARD).unwrap_or(t_start)).await;
+            // transmits (covers rx() setup latency), earlier still by the drift slack.
+            let open = t_start.checked_sub(GUARD + slack).unwrap_or(t_start);
+            wait_until(open).await;
 
             // Re-anchor only to a beacon the gate accepts ([`EpochGate::offer_tracked`]): not
             // from an older gateway session (a replayed capture is ignored) and consistent with
@@ -354,8 +485,9 @@ impl Net {
             // the full argument. A genuinely restarted gateway carries a higher epoch but a slot
             // near 0, so it fails the prediction check here and is recovered via the rescan path
             // (below).
-            if let Some((epoch, slot_abs, t_rx)) =
-                self.fhss_rx_beacon(Duration::from_millis(BEACON_RX_MS)).await
+            if let Some((epoch, slot_abs, t_rx)) = self
+                .fhss_rx_beacon(Duration::from_millis(BEACON_RX_MS) + slack + slack)
+                .await
                 && self.fhss.gate.offer_tracked(epoch, slot_abs, slot) == TrackVerdict::ReAnchor
             {
                 self.fhss_lock(slot_abs, t_rx); // → Synced, re-anchored (gate reset the misses)
@@ -408,7 +540,7 @@ impl Net {
         // The reject/hold/lock decision (the older-session replay reject and the two-beacon
         // consistency guard) is the gate's ([`EpochGate::offer_scanning`]; see the kernel docs
         // for the full argument). We measure the elapsed wall-time since the held candidate in
-        // whole slots and keep its `Instant` here (the kernel is time-free).
+        // whole slots and keep its time here (the kernel is time-free).
         let elapsed_slots = self
             .fhss
             .acquire_t0
@@ -476,7 +608,7 @@ impl Net {
         // allocated (the sealed length is fixed: header + payload + tag), so a "no room, retry
         // next slot" refusal burns no counter.
         let n = HDR_LEN + data.len() + TAG_LEN;
-        let now = Instant::now();
+        let now = Lse::now();
         let cur = Self::fhss_cur_slot(anchor, now);
         let ch = Self::fhss_channel_for(self.fhss.seed, cur);
         let slot_end = Self::fhss_slot_start(anchor, cur + 1);
@@ -486,7 +618,8 @@ impl Net {
             data_toa + 20 + beacon_toa_ms()
         } else {
             data_toa
-        } + GUARD.as_millis();
+        } + GUARD.as_millis()
+            + MASTER_LOOP_BUDGET.as_millis();
         if room.as_millis() < need {
             return SendResult::DutyLimited; // no room this slot; caller retries next slot
         }
@@ -524,12 +657,23 @@ impl Net {
         }
     }
 
+    /// **Node:** back off before retrying an unacknowledged [`fhss_send`](Self::fhss_send): let a
+    /// random 0..=3 slots pass (ticking, so the clock stays aligned). Nodes synced to one schedule
+    /// all send right after the slot's beacon, so two with something to say in the same slot
+    /// collide, and would collide again on every retry, as after a gateway restart when every node
+    /// locks onto the same rendezvous pass. (Duty mode backs off a random 0-100 ms instead.)
+    pub async fn fhss_retry_backoff(&mut self) {
+        for _ in 0..(self.rand_u32() % 4) {
+            let _ = self.fhss_node_tick().await;
+        }
+    }
+
     /// Lock/re-align the node clock from a beacon for `slot_abs` received at `t_rx`:
     /// the beacon was sent at that slot's boundary, so the boundary instant on the
     /// node's clock is `t_rx − beacon_toa`. Anchor at `(slot_abs, boundary)`: small
     /// subtraction only, never `slot·SLOT` (which would underflow). (The miss counter
     /// was already reset by the gate decision that admitted this beacon.)
-    fn fhss_lock(&mut self, slot_abs: u32, t_rx: Instant) {
+    fn fhss_lock(&mut self, slot_abs: u32, t_rx: Lse) {
         let boundary = t_rx
             .checked_sub(Duration::from_millis(beacon_toa_ms()))
             .unwrap_or(t_rx);
@@ -562,7 +706,7 @@ impl Net {
             bulk_index: None,
         };
         let mut buf = [0u8; MAX_FRAME];
-        let key = self.default_key;
+        let key = self.fhss.key;
         if let Ok(n) = frame::seal_frame(&mut self.ccm, &key, &hdr, &pl, &mut buf) {
             self.fhss.airtime_ms[ch as usize] =
                 self.fhss.airtime_ms[ch as usize].saturating_add(duty::frame_toa_ms(n) as u16);
@@ -576,14 +720,14 @@ impl Net {
     /// two-beacon acquisition consistency check. Listens until a valid beacon arrives or the
     /// window elapses, ignoring any non-beacon frame in between (so a stray frame in the
     /// widened/early window doesn't count as a miss). Returns `(epoch, slot_abs, t_rx)`.
-    async fn fhss_rx_beacon(&mut self, timeout: Duration) -> Option<(u32, u32, Instant)> {
+    async fn fhss_rx_beacon(&mut self, timeout: Duration) -> Option<(u32, u32, Lse)> {
         let deadline = Instant::now().checked_add(timeout)?;
-        let key = self.default_key;
+        let key = self.fhss.key;
         let mut buf = [0u8; MAX_FRAME];
         loop {
             let remaining = deadline.checked_duration_since(Instant::now())?;
             let (len, _) = self.radio.rx(&mut buf, remaining).await.ok()?;
-            let t_rx = Instant::now();
+            let t_rx = Lse::now();
             // Only a frame that parses, is a Beacon, and CCM-opens counts; otherwise
             // keep listening for the rest of the window.
             if let Ok((peek, _)) = frame::Header::parse(&buf[..len])

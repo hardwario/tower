@@ -28,8 +28,9 @@ SPIRIT1 ↔ STM32L083CZ wiring (from the board, see `src/board.rs`):
 
 Crystal is **50 MHz** (not a TCXO). Band is runtime-selectable via the `Band` abstraction:
 **EU 868** (ch0/1/2 = 868.1/868.3/868.5 MHz, 1 % duty) and **US 915** (ch0/1/2 =
-915.0/915.2/915.4 MHz). 915 single-channel is bench-only; FCC §15.247 compliance comes from
-the FHSS mode (see *Spectrum-access modes* below).
+915.0/915.2/915.4 MHz). 915 single-channel at full power is bench-only; FCC §15.247 compliance
+comes from the FHSS mode (see *Spectrum-access modes* below), which the product apps run on
+US 915.
 
 ## Building & flashing
 
@@ -541,8 +542,48 @@ confirmed delivery on hopping channels; `sync lost, rescanning` and a relock on 
 `fhss_compliance` (≥50 channels used, max per-channel airtime ≪ 0.4 s, band edges
 exercised). The hop seed is key-derived (not sent on air).
 
+**In the product apps** (`radio_dongle_gateway` + `radio_push_button` on `us915`, docs/gateway.md):
+the gateway is the hop master, its main loop one `fhss_master_tick` per slot; a queued downlink
+goes out in the slot of the node's uplink, right after the ACK (`fhss_send` from the master). The
+node is a sleeping sensor, which the SDK serves with:
+
+- **Crystal time.** embassy's `Instant` runs off HSI16 while the MCU is awake (a general-purpose
+  timer; the RTC only bridges STOP), about ±1 %: two boards measured 2500 ppm apart, and a
+  gateway on USB never sleeps. The slot clock (anchors, beacon arrival, slot boundaries) runs on
+  `clock::now_ms`, the RTC calendar clocked by the LSE crystal (±20 ppm), with the RTC sub-second
+  counter at 1024 Hz (`board::init`); waits stay embassy timers, each shorter than a slot.
+- **Re-acquisition by prediction after a sleep.** `fhss_node_tick` widens its beacon window by the
+  drift the clocks may have collected since the last beacon (100 ppm, `tower_net::epoch::
+  reacquire_slack_ms`), and drops the anchor for a rescan once that exceeds what still predicts
+  the right slot (about 20 min). A node with nothing to send re-anchors after 15 min
+  (`FHSS_RESYNC` in the app); `fhss_since_beacon` tells it when.
+- **A loop budget for the master.** `fhss_master_tick` stops listening `MASTER_LOOP_BUDGET` (40 ms)
+  plus the guard before the slot ends, and `fhss_send`'s slot-straddle rule keeps the same margin.
+  With only the 10 ms guard, an app loop that ran longer skipped the next slot (no beacon, no
+  listening): a product gateway beaconed ~85 % of its slots, and a scanning node lost a whole
+  24 s cycle per missed rendezvous pass.
+- **A random retry backoff.** Every synced node sends right after the slot's beacon, so two with
+  something to say in the same slot collide, and would again on every retry (after a gateway
+  restart every node locks onto the same rendezvous pass); `fhss_retry_backoff` lets a random
+  0..=3 slots pass first.
+- **Suspend for a fixed-channel exchange.** `fhss_suspend(band)` steps into duty mode on channel 0,
+  which on US 915 is the rendezvous carrier (915.0 MHz); `fhss_resume` carries on with the same
+  schedule. The products pair this way, at `config::PA_INDEX_LOW` (`Net::set_tx_power`, about
+  -6 dBm, under FCC §15.249's field-strength limit), which needs no hopping.
+- **The network key.** Beacons are sealed under `gateway_network_key(gw_addr)`, derived from the
+  gateway's address (public): `FhssConfig::network_key` gives it to a node that runs registered
+  peers only. It proves nothing cryptographically: a forged beacon can push a scanning node onto
+  a wrong schedule until its misses send it back to rescan (a desync, like jamming); the epoch
+  gate still refuses replays.
+
+Costs: the first uplink after pairing or a reboot scans for the schedule (two passes over the
+rendezvous channel, 24-48 s, receiving; the push button scans at most one cycle per send and
+finishes on the next, since the gate keeps the first beacon); afterwards an uplink waits for the
+next slot's beacon (about 0.3 s) and a remote-shell reply takes one slot per chunk.
+
 > **Verify before any product claim:** the exact §15.247 channel/dwell numbers
-> (FCC KDB) and that the implementation meets them under your antenna/power.
+> (FCC KDB) and that the implementation meets them under your antenna/power, the EIRP of
+> `PA_INDEX_LOW` against §15.249, and the receive cost of re-acquisition on the PPK2.
 
 ## Examples
 
@@ -613,7 +654,7 @@ separate ~20 ms deaf window.
 | Device ID / crystal | part 304 / version 48 · **50 MHz** (not a TCXO) |
 | Bands / channels | EU 868 & US 915 · 3 per band |
 | EU 868 channels | 868.1 / 868.3 / 868.5 MHz (200 kHz spacing; "g1" ≤ +14 dBm ERP, ≤ 1 % duty) |
-| US 915 channels | 915.0 / 915.2 / 915.4 MHz (200 kHz spacing). Single-channel is **bench-only**; use FHSS for a compliant US link |
+| US 915 channels | 915.0 / 915.2 / 915.4 MHz (200 kHz spacing). Single-channel at full power is **bench-only**; use FHSS for a compliant US link (the products do) |
 | Modulation / bit rate / deviation / BT | GFSK / 19 200 bps / 20 kHz / 1 |
 | RX bandwidth | ~216 kHz (wide; narrow via AFC_CORR, see Design rationale) |
 | Sync / CRC / preamble | `0xDB624715` / 16-bit `0x1021` / 4 B |
@@ -705,9 +746,10 @@ a practical limit). EEPROM key storage is only as safe as the chip's readout pro
   if nobody compares. Keep windows short and user-initiated; enable flash RDP for production key
   storage. Where the key can be provisioned out of band, the keyed join (E4) needs no window at
   all.
-- **US 915 single-channel `Us915` is bench-test only** (runtime-switchable via
+- **US 915 single-channel `Us915` at full power is bench-test only** (runtime-switchable via
   `set_band`, hardware-verified, but **not** FCC 15.247-compliant; use FHSS for a
-  compliant US link). EU 868 (duty or LBT+AFA) is the compliant default region.
+  compliant US link, as the product apps do, pairing at low power on the rendezvous carrier).
+  EU 868 (duty or LBT+AFA) is the compliant default region.
 - **FHSS sync** is robust. The node opens its beacon RX a guard *before* each slot
   boundary (armed before the gateway transmits), listens a wide window that ignores
   stray frames, and (crucially) **rides through a fade by predicting the channel

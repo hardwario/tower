@@ -68,10 +68,10 @@ use log::{info, warn};
 use tower::board::{GuardedI2c, UniqueId};
 use tower::lis2dh12::{self, Lis2dh12, Sensitivity, TiltConfig};
 use tower::radio::Spirit1;
-use tower::radio::config::Band;
+use tower::radio::config::{self, Band};
 use tower::radio::net::{
-    COMMIT_SETTLE_MS, CommitStep, Net, NetConfig, PAIRING_WINDOW, SendResult, commit_step, is_reserved_addr,
-    peer_addr_valid,
+    Access, COMMIT_SETTLE_MS, CommitStep, FhssConfig, FhssRole, FhssState, Net, NetConfig, PAIRING_WINDOW,
+    SendResult, commit_step, gateway_network_key, is_reserved_addr, peer_addr_valid,
 };
 use tower::shell::ShellSink;
 use tower::storage::{NS_APP, NS_SHELL, Nv};
@@ -105,6 +105,8 @@ const SET_THERM_PERIOD: u8 = 0x10;
 const SET_THERM_DELTA: u8 = 0x11;
 const SET_ACCEL: u8 = 0x12;
 const SET_HEARTBEAT: u8 = 0x13;
+/// The band an unpaired node pairs on (`eu868` / `us915`); a paired node runs its gateway's.
+const SET_BAND: u8 = 0x14;
 
 // Per-button-event master enable: a disabled event is ignored entirely: NOT reported
 // over radio and no LED. Each of the four events is independently switchable.
@@ -212,7 +214,25 @@ static BTN_SETTINGS: &[shell::Setting] = &[
         },
         default: "1000",
     },
+    // The band an unpaired node pairs on (boot-applied); a paired node runs its gateway's band
+    // from the pairing record. On `us915` it pairs on 915.0 MHz at low power and then hops.
+    shell::Setting {
+        key: SET_BAND,
+        name: "band",
+        kind: shell::Kind::Enum(&["eu868", "us915"]),
+        default: "eu868",
+    },
 ];
+
+/// The `band` setting: `us915` only for exactly that value, so a record another app left at the
+/// key (the data EEPROM survives a reflash) falls back to EU 868.
+fn read_band_setting(kv: Nv) -> Band {
+    let mut b = [0u8; 8];
+    match kv.scope(NS_SHELL).get_bytes(SET_BAND, &mut b) {
+        Ok(Some(n)) if &b[..n] == b"us915" => Band::Us915,
+        _ => Band::Eu868,
+    }
+}
 
 // --- synthetic button press (the console "finger" / HIL bench) ---------------------
 
@@ -444,7 +464,7 @@ async fn run(b: Board) {
             },
             p.channel,
         ),
-        None => (Band::DEFAULT, 0),
+        None => (read_band_setting(kv), 0),
     };
     let mut net = match Net::new(
         radio,
@@ -496,6 +516,11 @@ async fn run(b: Board) {
         );
         provision = None;
     }
+    if let Some(p) = provision
+        && band == Band::Us915
+    {
+        start_hopping(&mut net, p.gw_addr).await;
+    }
     let _ = net.sleep().await; // radio sleeps between events from the start
 
     match provision {
@@ -533,6 +558,8 @@ async fn run(b: Board) {
     // face of the motion coalesced meanwhile, sent when it passes.
     let mut accel_hold: Option<Instant> = None;
     let mut accel_pending: Option<u8> = None;
+    // US 915: no resync before this instant (pushed out a minute after a resync heard nothing).
+    let mut resync_after = Instant::MIN;
 
     loop {
         let repair_due = pressed_at
@@ -546,6 +573,16 @@ async fn run(b: Board) {
                 Some(_) => accel_hold.unwrap_or(Instant::MIN),
                 None => Instant::MAX,
             });
+        // US 915: re-anchor to the hop schedule `FHSS_RESYNC` after the last beacon, whatever
+        // the heartbeat, so a send always finds the schedule by prediction.
+        let resync_due = net
+            .fhss_since_beacon()
+            .filter(|_| net.access() == Access::Fhss)
+            .map(|since| {
+                let rest = FHSS_RESYNC.checked_sub(since).unwrap_or(Duration::from_ticks(0));
+                (Instant::now() + rest).max(resync_after)
+            });
+        let timer_due = timer_due.min(resync_due.unwrap_or(Instant::MAX));
         let accel_wait = async {
             if let Some(t) = accel_quiet {
                 Timer::at(t).await;
@@ -640,6 +677,9 @@ async fn run(b: Board) {
             // --- periodic: temperature and/or heartbeat due; the re-pair gesture; the end of the
             // unpaired cue ---
             Either4::Second(()) => {
+                if resync_due.is_some_and(|t| Instant::now() >= t) && !fhss_resync(&mut net).await {
+                    resync_after = Instant::now() + Duration::from_secs(60);
+                }
                 if repair_due.is_some() && !btn.is_pressed() {
                     // Released, but the Release was lost to a full button queue while the loop
                     // was busy: no gesture, so no re-pair the user never made.
@@ -787,6 +827,94 @@ async fn run(b: Board) {
     }
 }
 
+/// US 915: follow gateway `gw_addr`'s hop schedule (FCC §15.247). Its beacons are sealed under
+/// its address-derived network key, which also seeds the schedule; the first send scans for it.
+async fn start_hopping(net: &mut Net, gw_addr: u32) {
+    let cfg = FhssConfig {
+        network_key: Some(gateway_network_key(gw_addr)),
+        ..FhssConfig::default()
+    };
+    if let Err(e) = net.enable_fhss(FhssRole::Node, cfg).await {
+        warn!(target: "node", "hopping not started ({e})");
+    }
+}
+
+/// Hop-slot ticks one send may spend scanning for the schedule when the node holds none (after
+/// pairing, or a sleep past the drift bound): ~28 s (a tick parks ~350 ms), one 24 s cycle, so one
+/// pass of the gateway over the rendezvous channel. Acquisition takes two passes, but the first
+/// beacon is kept between sends, so the next send completes it. A scan blocks the main loop
+/// (buttons queue, the cable host waits), which a gateway that is gone must not make long.
+const FHSS_SCAN_TICKS: u16 = 80;
+/// Slots in a row a synced send may miss the beacon in before it gives up (the gateway is gone
+/// or out of range); the next send predicts again, then rescans.
+const FHSS_MISSED_BEACONS: u8 = 8;
+/// A hopping node with nothing to send re-anchors this long after its last beacon, so that a
+/// long heartbeat never lets its clock drift past what prediction can bridge (the SDK gives up
+/// at ~20 min at 100 ppm; a rescan costs up to ~48 s of receive).
+const FHSS_RESYNC: Duration = Duration::from_secs(900);
+
+/// A confirmed send to the gateway, `reps` tries. Hopping (US 915), each try goes out on a hop
+/// slot whose beacon the node just heard, on that slot's channel (the gateway listens there for
+/// the rest of the slot); a slot with too little time left is skipped. Else the duty-mode send.
+async fn radio_send(net: &mut Net, dest: u32, data: &[u8], reps: u8) -> SendResult {
+    if net.access() != Access::Fhss {
+        return net.send(dest, data, true, reps).await;
+    }
+    let (mut tries, mut scans, mut missed) = (0u8, 0u16, 0u8);
+    loop {
+        let slot = net.fhss_node_tick().await;
+        match slot.state {
+            FhssState::Scanning => {
+                scans += 1;
+                // The cable host is asking (a `Describe`, a provisioning): serve it, not the scan.
+                if scans >= FHSS_SCAN_TICKS || console::mgmt_pending() {
+                    return SendResult::NotSynced;
+                }
+                continue;
+            }
+            FhssState::Synced if !slot.got_beacon => {
+                missed += 1;
+                if missed >= FHSS_MISSED_BEACONS {
+                    return SendResult::NotDelivered;
+                }
+                continue;
+            }
+            FhssState::Synced => {}
+        }
+        match net.fhss_send(dest, data, true).await {
+            SendResult::Delivered => return SendResult::Delivered,
+            SendResult::DutyLimited => {} // no room left in this slot: the next one
+            SendResult::NotDelivered => {
+                tries += 1;
+                if tries >= reps.max(1) {
+                    return SendResult::NotDelivered;
+                }
+                net.fhss_retry_backoff().await; // or the same collision every retry
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Re-anchor to the hop schedule with nothing to send ([`FHSS_RESYNC`]): a few slots of beacon
+/// receive. `false` if no beacon was heard (the gateway is gone; the next send rescans).
+async fn fhss_resync(net: &mut Net) -> bool {
+    let _ = net.wake().await;
+    let mut heard = false;
+    for _ in 0..4 {
+        let slot = net.fhss_node_tick().await;
+        if slot.state == FhssState::Synced && slot.got_beacon {
+            heard = true;
+            break;
+        }
+        if slot.state == FhssState::Scanning {
+            break; // the anchor went stale: leave the scan to the next send
+        }
+    }
+    let _ = net.sleep().await;
+    heard
+}
+
 /// Count one uplink outcome into the consecutive-miss counter the periodic uplink backs off on.
 fn note(misses: &mut u8, delivered: bool) {
     *misses = if delivered { 0 } else { misses.saturating_add(1) };
@@ -831,6 +959,42 @@ enum PairOutcome {
 /// dead there.
 #[allow(clippy::too_many_arguments)]
 async fn pair(
+    net: &mut Net,
+    addr: u32,
+    band: Band,
+    channel: u8,
+    kv: Nv,
+    led: &led::Led,
+    window: Duration,
+    current: Option<Provisioned>,
+) -> PairOutcome {
+    // US 915: pairing is a fixed-channel exchange, so it runs off the hop schedule, on the
+    // rendezvous carrier (channel 0 = 915.0 MHz) at FCC §15.249 power, which needs no hopping;
+    // the gateway parks there for its window. The commit round goes out the same way.
+    let us915 = band == Band::Us915;
+    if us915 {
+        let _ = net.fhss_suspend(Band::Us915).await;
+        let _ = net.set_band(Band::Us915, 0).await;
+        let _ = net.set_tx_power(config::PA_INDEX_LOW).await;
+    }
+    let outcome = pair_on_air(net, addr, band, channel, kv, led, window, current).await;
+    if us915 {
+        let _ = net.set_tx_power(config::PA_INDEX_FULL).await;
+        match &outcome {
+            // A new gateway (or the same one under a new key): its schedule, from scratch.
+            PairOutcome::Paired { rec, .. } => start_hopping(net, rec.gw_addr).await,
+            // The pairing in force before stays, and so does its schedule.
+            _ if current.is_some() => net.fhss_resume(),
+            _ => {}
+        }
+        let _ = net.sleep().await;
+    }
+    outcome
+}
+
+/// [`pair`]'s exchange itself, on whatever channel the radio is on.
+#[allow(clippy::too_many_arguments)]
+async fn pair_on_air(
     net: &mut Net,
     addr: u32,
     band: Band,
@@ -1124,7 +1288,7 @@ async fn uplink(net: &mut Net, provision: Option<Provisioned>, msg: &NodeMsg<'_>
         return false;
     };
     let _ = net.wake().await;
-    let result = net.send(p.gw_addr, &buf[..n], true, reps).await;
+    let result = radio_send(net, p.gw_addr, &buf[..n], reps).await;
     let delivered = matches!(result, SendResult::Delivered);
     if delivered {
         UNACKED.store(0, Ordering::Relaxed);
@@ -1174,7 +1338,14 @@ static LAST_REMOTE_EPOCH: core::sync::atomic::AtomicU32 = core::sync::atomic::At
 /// Hold RX open for one queued downlink; execute it and stream the response. Returns
 /// whether a downlink actually arrived (false = window expired, stop chaining).
 async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
-    let deadline = Instant::now() + DOWNLINK_WINDOW;
+    // Hopping, the gateway sends the downlink in the uplink's own slot, on its channel (the next
+    // slot is another channel): listen to the end of the slot.
+    let deadline = Instant::now()
+        + if net.access() == Access::Fhss {
+            net.fhss_slot_left()
+        } else {
+            DOWNLINK_WINDOW
+        };
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.as_ticks() == 0 {
@@ -1287,7 +1458,7 @@ impl<'a> RadioSink<'a> {
             return false;
         };
         let delivered = matches!(
-            self.net.send(self.gw_addr, &wire[..n], true, CHUNK_REPS).await,
+            radio_send(self.net, self.gw_addr, &wire[..n], CHUNK_REPS).await,
             SendResult::Delivered
         );
         self.buf.clear();

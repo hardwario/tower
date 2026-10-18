@@ -250,6 +250,11 @@ pub fn init() -> Peripherals {
     config.rcc.hsi = true;
     config.rcc.sys = Sysclk::HSI;
     config.rcc.ls = LsConfig::default_lse();
+    // The RTC's sub-second counter at 1024 Hz (embassy's default 256 Hz is ~3.9 ms): the
+    // resolution of `clock::now_ms`, the crystal time the US 915 hop schedule runs on. The
+    // asynchronous prescaler drops from 127 to 31; ck_spre stays exactly 1 Hz. (A smaller
+    // asynchronous prescaler costs a little STOP current: re-measure the floor on the PPK2.)
+    config.rtc.frequency = embassy_stm32::time::Hertz(1024);
     // LSE crystal drive strength, selectable per build (TOWER_FEATURES=lse-drive-…). Default =
     // embassy's default_lse() = MediumHigh. Higher drive trades ~0.1-0.5 µA of STOP current
     // for oscillation robustness. (Swept Low/MediumHigh/High on the bench 2026-07-05: drive

@@ -33,6 +33,22 @@ pub const FHSS_RESYNC_SLACK: u32 = 2;
 /// then recovered via the rendezvous channel.
 pub const REACQUIRE_LIMIT: u32 = 24;
 
+/// Worst-case relative drift between a node's and its gateway's slot clocks (ppm): both run off
+/// a 32.768 kHz crystal, ±20 ppm at 25 °C plus the parabolic temperature term (about -0.034
+/// ppm/°C²: some 70 ppm at -20 °C on an outdoor node against an indoor gateway). 100 ppm covers it.
+pub const DRIFT_PPM: u64 = 100;
+
+/// A sleeping node re-acquires the hop schedule by prediction, without the blind rendezvous scan
+/// (up to two 24 s cycles): it opens its beacon RX window early and long by the drift its clock
+/// may have collected since the last beacon it heard. Returns that slack (ms, each side), or `None`
+/// once it exceeds `max_ms` (the slack that still keeps the predicted slot right: half a slot less
+/// the guard and the beacon's airtime), when only a rescan can find the schedule.
+#[must_use]
+pub fn reacquire_slack_ms(since_beacon_ms: u64, max_ms: u64) -> Option<u64> {
+    let slack = since_beacon_ms.saturating_mul(DRIFT_PPM).div_ceil(1_000_000);
+    (slack <= max_ms).then_some(slack)
+}
+
 /// Master epoch bump rule: the next session's epoch is the stored one + 1 (starting from 1 on a
 /// virgin store), saturating, strictly newer than any previous session's, so nodes reject the
 /// older sessions' beacons as replays.
@@ -204,6 +220,20 @@ impl EpochGate {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reacquire_slack_grows_with_the_sleep_and_gives_up_past_the_bound() {
+        use super::reacquire_slack_ms;
+        assert_eq!(reacquire_slack_ms(0, 120), Some(0));
+        // A beacon a slot ago: under a millisecond either way.
+        assert_eq!(reacquire_slack_ms(300, 120), Some(1));
+        // The node's 15 min resync: 90 ms either way, inside the bound.
+        assert_eq!(reacquire_slack_ms(900_000, 120), Some(90));
+        assert_eq!(reacquire_slack_ms(1_200_000, 120), Some(120));
+        // Longer, and the predicted slot may be the wrong one: rescan.
+        assert_eq!(reacquire_slack_ms(1_200_001, 120), None);
+        assert_eq!(reacquire_slack_ms(u64::MAX, 120), None);
+    }
+
     use super::*;
 
     /// FHSS channel count the firmware uses (`config::FHSS_N`), mirrored so the acquisition

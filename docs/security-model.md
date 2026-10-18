@@ -299,8 +299,15 @@ registered address by design (an authenticated host action: the re-provision pat
 7. **EU duty-cycle budget starts full on each boot**, so a forced reboot loop can exceed 1 %/h
    (bounded by the boot-loop backoff); acknowledgements in AFA mode skip listen-before-talk (to be
    checked against EN 300 220's acknowledgement provisions).
-8. **US 915 single-channel operation is bench-only** (not FCC 15.247 compliant); the product
-   apps do not yet use FHSS (see firmware/TODO.md).
+8. **US 915 hop beacons authenticate nothing.** The product apps hop on US 915 (FCC §15.247),
+   and the beacons that carry the schedule are sealed under `gateway_network_key(gw_addr)`, which
+   anyone can compute from the gateway's address (the node has no shared secret to use instead:
+   its link key is per node). A forged beacon can push a *scanning* node onto a wrong schedule
+   until its missed beacons send it back to rescan, a desync no worse than jamming; a tracking
+   node ignores beacons off its prediction and the epoch gate refuses replays. Data frames are
+   unaffected (per-node CCM). OTA pairing on US 915 runs on one fixed carrier at reduced power
+   (FCC §15.249, the EIRP still to be measured), so it reaches only a few meters: no wider
+   window than on EU 868. US 915 single-channel operation at full power stays bench-only.
 9. **Lane eviction**: after more distinct peers than the 16 lane slots have ever been registered,
    a removed peer's lane can be evicted; re-adding that peer under the same key restarts its
    replay window. Re-add under a fresh key.

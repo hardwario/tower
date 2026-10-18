@@ -26,6 +26,7 @@
 pub mod board;
 pub mod bootguard;
 pub mod button;
+pub mod clock;
 pub mod console;
 pub mod crashlog;
 pub mod led;

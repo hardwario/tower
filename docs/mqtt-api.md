@@ -180,7 +180,7 @@ the dongle's.
 | `uplinks` | number | Uplinks published since the bridge started |
 | `queued` | number | Remote shell commands this bridge has pending, all nodes (queued on the dongle, or delivered and awaiting the reply) |
 | `rssi` | number or `null` | Last ambient channel RSSI sample, dBm; `null` before the first |
-| `channel` | number or `null` | Radio channel of that sample; `null` before the first |
+| `channel` | number or `null` | Radio channel of that sample (on US 915, band `1`, the hop channel, `0` to `79`); `null` before the first |
 
 ```json
 {"uptime":3600,"nodes":2,"uplinks":42,"queued":1,"rssi":-98,"channel":3}
@@ -329,7 +329,7 @@ Not retained, diagnostic. The dongle's ambient channel RSSI, sampled every `stat
 | Field | Type | Meaning |
 |-------|------|---------|
 | `dbm` | number | Ambient RSSI, dBm |
-| `channel` | number | Radio channel |
+| `channel` | number | Radio channel (on US 915 the hop channel of the sample, `0` to `79`) |
 | `ts` | number | Unix time, seconds |
 
 ```json
@@ -467,7 +467,7 @@ The gateway's network parameters. No params.
 |--------------|---------|
 | `gateway` | The dongle's radio address |
 | `band` | `0` = EU 868 MHz, `1` = US 915 MHz |
-| `channel` | Radio channel, `0` to `2` |
+| `channel` | Radio channel, `0` to `2` (the `channel` setting; on US 915, band `1`, the gateway hops over 80 channels and it is not used) |
 
 ```json
 {"id":"u-d","op":"describe"}

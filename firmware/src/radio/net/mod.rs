@@ -30,6 +30,24 @@ mod pairing;
 pub use afa::{AfaConfig, AfaRole};
 pub use bulk::{BULK_CHUNK, BulkSink, BulkSource};
 pub use fhss::{FhssConfig, FhssRole, FhssState, MasterSlot, NodeSlot, hop_channel};
+
+/// A gateway's network key, derived from its address. **Public, never a secret:** the address
+/// rides in clear in every frame and the derivation is a fixed constant, so anyone can compute
+/// it. The product gateway passes it as its `NetConfig::key` and runs registered peers only, so it
+/// never opens a data frame. Its one use is US 915 hopping: FHSS beacons are sealed under it (the
+/// gateway's default key, and a node's [`FhssConfig::network_key`]), so a node that knows its
+/// gateway's address can follow the schedule, and the hop seed derives from it. Beacons therefore
+/// prove nothing cryptographically: a forged one can only push a scanning node onto a wrong
+/// schedule until its misses send it back to rescan (a desync, no worse than jamming; a tracking
+/// node ignores beacons off its prediction, and the epoch gate refuses replays).
+#[must_use]
+pub fn gateway_network_key(addr: u32) -> [u8; 16] {
+    let mut k = [0u8; 16];
+    for (i, chunk) in k.chunks_mut(4).enumerate() {
+        chunk.copy_from_slice(&(addr ^ (0x9E37_79B9u32.rotate_left(i as u32 * 8))).to_le_bytes());
+    }
+    k
+}
 pub use pairing::{
     HOST_HANDSHAKE_TIME, JOIN_FRAME_KEY, JoinError, PAIRING_WINDOW, PEER_KEX_TIME, PairedPeer, PairingHost,
 };
@@ -954,6 +972,12 @@ impl Net {
             self.lane(src).last_seen(),
             n
         );
+    }
+
+    /// Set the TX power of every following frame: the PA ramp's top index,
+    /// [`config::PA_INDEX_FULL`] (the default) or [`config::PA_INDEX_LOW`] (US 915 OTA pairing).
+    pub async fn set_tx_power(&mut self, index: u8) -> Result<(), RadioError> {
+        config::set_pa_index(&mut self.radio, index).await
     }
 
     /// Retune to a different `band`/`channel` at runtime (both ends must agree).

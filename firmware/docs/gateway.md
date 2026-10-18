@@ -134,6 +134,7 @@ of it is remote-shell reconfigurable (`system settings set …`).
 | `debounce-release` | uint ms | `30` | 1..1000 | release debounce (**boot-applied**) |
 | `click-timeout` | uint ms | `500` | 50..5000 | max press length still counted a click (**boot-applied**) |
 | `hold-time` | uint ms | `1000` | 100..10000 | press length that becomes a hold (**boot-applied**) |
+| `band` | enum | `eu868` | eu868 / us915 | the band an **unpaired** node pairs on (**boot-applied**); a paired node runs the band of its pairing |
 | `addr` | addr | `auto` | hex / auto / random | SDK base: the node's 32-bit radio address |
 | `identity` | str | *(empty)* | ≤ 32 chars | SDK base: friendly device name |
 
@@ -161,6 +162,27 @@ define what the physical input *means*; the LED feedback is a separate fixed ind
   press, or a management request on the cable, shows it again for 3 minutes. Pairing (the
   handshake and the commit round) = a fast blink; afterwards the background goes dark when
   paired, or back to the double-blink (for 3 minutes) when the attempt left the node unpaired.
+
+### US 915 (frequency hopping)
+
+On `us915` the node follows its gateway's FCC §15.247 hop schedule (80 channels, 300 ms slots,
+docs/radio.md *Spectrum-access modes*); every send goes out in a slot whose beacon it just heard,
+on that slot's channel, and the downlink window is the rest of that slot.
+
+- **Pairing.** Set `band=us915` while unpaired (the default is `eu868`). OTA pairing runs off the
+  hop schedule, on the rendezvous carrier (915.0 MHz) at low power (about -6 dBm, under §15.249),
+  so hold the node near the gateway; the gateway parks there for its window and for 15 s after a
+  commit (the commit uplinks), then hops again on the same clock. Cable pairing is unchanged (the
+  `channel` it copies is not used on `us915`).
+- **The first uplink after pairing or a reboot** waits for the schedule: two passes over the
+  rendezvous channel, 24 to 48 s of receive. One send scans for at most one 24 s cycle (the main
+  loop waits meanwhile: button events queue, up to 16), so acquisition may finish on the next
+  send; a management request on the cable ends a scan at once.
+- **Afterwards** an uplink goes out within one slot (about 0.3 s), even after a long sleep: the
+  node predicts the schedule on the crystal clock, widening its beacon window by the drift since
+  its last beacon, and re-anchors (receive only) 15 min after its last beacon if it has sent
+  nothing. A retry skips a random 0 to 3 slots (two nodes in the same slot collide).
+- **Remote shell** replies go up one chunk per slot.
 
 ### Radio duty and backoff
 
@@ -301,8 +323,8 @@ uplink cycle.
 | setting | kind | default | range / values | effect |
 |---|---|---|---|---|
 | `stats-period` | uint ms | `500` | 0..60000 | ambient channel-RSSI cadence; `0` = off. `StatsConfig` overrides at runtime. The sample is the RSSI latched by the latest idle receive-slice timeout (no separate deaf measuring window); a tick with no fresh idle sample (every slice caught a frame) is skipped |
-| `band` | enum | `eu868` | eu868 / us915 | radio band (**boot-applied**) |
-| `channel` | uint | `0` | 0..2 | radio channel (**boot-applied**); a stored value outside 0..2 (another app's record: the data EEPROM survives a reflash) is ignored with `gateway: channel setting out of range (n), using channel 0` |
+| `band` | enum | `eu868` | eu868 / us915 | radio band (**boot-applied**); `us915` runs FCC §15.247 frequency hopping as the hop master (80 channels; `gateway status` shows the channels used and the per-channel airtime) |
+| `channel` | uint | `0` | 0..2 | radio channel (**boot-applied**; not used on `us915`, which hops); a stored value outside 0..2 (another app's record: the data EEPROM survives a reflash) is ignored with `gateway: channel setting out of range (n), using channel 0` |
 | `keyed-join` | bool | `on` | on/off | answer keyed joins (E4) from registered nodes; off = refuse them (logged). Re-read every 2 s, no reboot needed |
 | `addr` | addr | `auto` | hex / auto / random | SDK base: the coordinator's radio address |
 | `identity` | str | *(empty)* | ≤ 32 chars | SDK base: friendly name |

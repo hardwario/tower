@@ -3,36 +3,26 @@
 Planned work that is decided but not scheduled yet. Keep entries concrete: what, why, and how
 we'll know it's done.
 
-## FHSS in the product apps (US 915 compliance)
+## FHSS in the product apps (US 915 compliance): remaining verification
 
-**Why.** `radio_push_button` and `radio_dongle_gateway` accept `band=us915`, but they run it as
-a single fixed channel (~+12 dBm, ~216 kHz). `docs/radio.md` already calls that mode
-bench-only: it is not FCC §15.247-compliant (that needs FHSS or ≥500 kHz wideband), and at
-this power it also exceeds §15.249. Until this lands, **don't deploy either app on `us915`
-outside the bench.** (Decided 2026-10-17: fix by wiring FHSS in, not by gating the band.)
+**Done 2026-10-18.** `radio_dongle_gateway` and `radio_push_button` hop on `us915` (FCC
+§15.247): the gateway is the hop master, the node follows the schedule with every send, pairs on
+the rendezvous carrier at low power (§15.249) and re-acquires after a sleep by prediction on the
+crystal clock (`clock::now_ms`; embassy's `Instant` runs on HSI16, ±1 %). docs/radio.md
+(*Spectrum-access modes*, "In the product apps") and docs/gateway.md (*US 915*) describe it.
+Bench (Radio Dongle + two Core Modules, `us915`): OTA pairing of both nodes at low power;
+clicks delivered within one slot; remote shell downlink in the uplink's slot, the reply one chunk
+per slot; both nodes booting at once (a collision, then the random retry backoff); the gateway
+beaconing every slot (all 80 channels, even per-channel airtime in `gateway status`).
 
-**What exists.** The SDK's FHSS mode is implemented and hardware-verified: `Net::enable_fhss`
-(`FhssRole::Master` on the gateway, `FhssRole::Node` on nodes), `fhss_master_tick` /
-`fhss_node_tick` + `fhss_send`, the beacon epoch, and the `radio_fhss` / `fhss_compliance`
-examples (80 channels, 300 ms slot, 24 s cycle; see *Spectrum-access modes* in
-`docs/radio.md`).
-
-**What's needed.**
-- Gateway: on `us915`, `enable_fhss(Master, …)` instead of a fixed channel; drive
-  `fhss_master_tick` from the main loop alongside `recv()`; keep the EU path unchanged.
-- Push-button node: `enable_fhss(Node, …)`, `fhss_node_tick` + `fhss_send` for uplinks,
-  and a sleep strategy that still re-acquires sync after STOP (the node is a sleeping sensor;
-  re-acquisition cost per wake is the open design question; measure it on the PPK2).
-- Pairing, ACK, downlink-queue/remote-shell and RadioStat paths under FHSS (today they assume
-  a fixed channel).
-- `channel` setting semantics on us915 (ignored or rejected under FHSS) + MQTT/CLI
-  `describe` reporting.
-
-**Done when.** Two-board on-air test: push-button ↔ gateway on `us915` deliver confirmed
-uplinks and remote-shell downlinks with FHSS locked; `fhss_compliance` evidence (≥50
-channels, max per-channel dwell ≪ 0.4 s / 20 s) recorded for the product images; RAM budget
-guard still OK; `docs/radio.md` + `docs/gateway.md` updated and the bench-only warning above
-removed.
+**Still to verify** (needs the PPK2 and a lab, not the code):
+- The receive cost of re-acquisition (a predicted beacon catch after a sleep, the 15 min resync,
+  the 24-48 s rescan after pairing or a reboot) and the STOP floor with the RTC sub-second counter
+  at 1024 Hz (`board::init`; the asynchronous prescaler dropped from 127 to 31).
+- The EIRP of `config::PA_INDEX_LOW` (about -6 dBm estimated from the PA ramp) against §15.249,
+  with the product antenna.
+- The §15.247 numbers (channel count, dwell, bandwidth) against the current FCC KDB, with an
+  accredited lab, before any product claim. Until then: no US deployment claims.
 
 ## Provisioned ATSHA204A as a secure element (manufacturing)
 

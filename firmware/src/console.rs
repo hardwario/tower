@@ -732,6 +732,12 @@ pub async fn mgmt_next() -> Vec<u8, RX_COPY> {
     MGMT_RX.receive().await
 }
 
+/// Whether a host→device management frame is waiting, without taking it: a long radio
+/// operation (an FHSS schedule scan) can end early to let its loop serve the cable host.
+pub fn mgmt_pending() -> bool {
+    !MGMT_RX.is_empty()
+}
+
 /// Non-blocking [`mgmt_next`], for a main loop that polls between radio slices.
 pub fn mgmt_try_next() -> Option<Vec<u8, RX_COPY>> {
     MGMT_RX.try_receive().ok()
