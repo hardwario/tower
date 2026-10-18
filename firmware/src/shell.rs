@@ -55,10 +55,8 @@ const MAX_LINE: usize = 96;
 /// Max whitespace/`/`-separated tokens a command line may hold. An over-long line is rejected
 /// rather than having its tail silently dropped (see [`tokenize`] and the `ShellCommand` handler).
 const MAX_TOKENS: usize = 8;
-/// Shell-response build buffer. Must stay equal to `console::MAX_RESP` (the transport's
-/// per-message cap): `console::shell_response` re-clips to that, so if this grew larger the
-/// excess would be silently dropped there. Public because [`run_line`] callers (the radio
-/// remote shell) allocate the response buffer themselves.
+/// The paging window: a response is captured [`RESP_CAP`] bytes per handler run and paged out
+/// window by window (see [`stream_line`]), so no response is ever cut at this size.
 pub const RESP_CAP: usize = 256;
 /// Largest value (bytes) a setting can hold (and a `Str` setting's `max`).
 pub const MAX_SETTING: usize = 64;
@@ -68,15 +66,8 @@ pub const R_OK: u8 = 0;
 pub const R_NOT_FOUND: u8 = 1;
 pub const R_BAD_ARG: u8 = 2;
 pub const R_STORAGE: u8 = 3;
-/// The response exceeded the buffer and was truncated; the body is incomplete. Set by the
-/// **console** (single-window) dispatcher when the handler wrote past one [`RESP_CAP`] window
-/// ([`Ctx`]'s [`Window`] reports [`more`](Window::more)), so a caller doesn't mistake a cut-off
-/// `/export` / `settings print` for a complete, successful one. The **streaming** transport
-/// ([`stream_line`]) never truncates (it re-runs the handler to capture every window), so it
-/// never returns this.
-pub const R_TRUNCATED: u8 = 4;
 /// Refused because the line arrived over a **remote** transport (the radio remote shell,
-/// [`stream_line`] / [`run_line`]) and the command (or, for `settings set`, an address
+/// [`stream_line`]) and the command (or, for `settings set`, an address
 /// setting) is **console-only**: destructive or link-breaking operations (a factory wipe,
 /// re-addressing a node) need physical access to the cable, never just a queued MQTT command.
 /// See [`Entry::cmd_console_only`] and [`Ctx::is_remote`].
@@ -220,9 +211,8 @@ impl Outcome {
 ///
 /// A handler always writes its **whole** response, obliviously: the `Ctx` keeps only the one
 /// [`Window`] `[skip, skip+RESP_CAP)` its driver asked for and discards the rest (while still
-/// counting the total). The console dispatcher uses a single `skip = 0` window (and flags
-/// [`R_TRUNCATED`] if the response spilled past it); the streaming transport re-runs the handler
-/// with an advancing `skip` to page the whole response out (see [`stream_line`]).
+/// counting the total). Both transports re-run the handler with an advancing `skip` to page the
+/// whole response out (see [`stream_line`]).
 pub struct Ctx<'a> {
     /// The shell's namespace-scoped EEPROM handle (`NS_SHELL`); settings are keyed by `u8` local.
     pub kv: Scoped,
@@ -525,9 +515,10 @@ async fn handle(kv: Scoped, app: &'static [Entry], settings: SettingsTable, inne
 }
 
 async fn dispatch(kv: Scoped, app: &'static [Entry], settings: SettingsTable, cmd_id: u16, line: &str) {
-    let mut out = String::<RESP_CAP>::new();
-    let (result, reboot) = run_line_with(kv, app, settings, line, &mut out, Origin::Console);
-    console::shell_response(cmd_id, result, out.as_str()).await;
+    // Paged like the radio transport (see `stream_line`): a response of any length reaches the
+    // host whole, one RESP_CAP window per handler run.
+    let mut sink = ConsoleSink { cmd_id, chunk: 0 };
+    let (_, reboot) = stream_with(kv, app, settings, line, &mut sink, Origin::Console).await;
     if reboot {
         // Wait for the response to actually leave the wire before resetting, instead of a
         // fixed sleep shorter than a full TX queue at 115200 baud (which truncated the
@@ -541,42 +532,9 @@ async fn dispatch(kv: Scoped, app: &'static [Entry], settings: SettingsTable, cm
     }
 }
 
-/// Run one command line against the shell registered by [`serve`]/[`serve_ext`]: the
-/// transport-independent core powering **both** the console dispatcher and the radio
-/// remote shell (one dispatcher, two transports). The response body is written into
-/// `out`; the return is `(result_code, reboot_requested)`. A reboot request is NOT
-/// acted on here; the caller owns its transport and must flush its response (over
-/// radio: send the final chunk) before resetting.
-///
-/// Synchronous: nothing in the resolve/run path awaits (handlers are plain fns).
-/// If no shell was served (`no_shell` apps), answers [`R_NOT_FOUND`].
-///
-/// The line is treated as **remote** (fail-safe: this entry point can't prove it came over the
-/// cable): [console-only](Entry::cmd_console_only) commands and address settings answer
-/// [`R_DENIED`].
-pub fn run_line(line: &str, out: &mut String<RESP_CAP>) -> (u8, bool) {
-    let Some((kv, app_commands, app_settings)) = critical_section::with(|cs| SHELL_PARAMS.borrow(cs).get())
-    else {
-        let _ = out.push_str("no shell served");
-        return (R_NOT_FOUND, false);
-    };
-    let settings = SettingsTable {
-        base: BASE_SETTINGS,
-        app: app_settings,
-    };
-    run_line_with(
-        kv.scope(NS_SHELL),
-        app_commands,
-        settings,
-        line,
-        out,
-        Origin::Remote,
-    )
-}
-
-/// An async sink for a **streamed** shell response, the unbounded counterpart to the
-/// [`RESP_CAP`]-buffered [`run_line`], used by the radio remote-shell transport so a
-/// large reply (`/export`, `settings print`) is never truncated at 256 B. The producer
+/// An async sink for a **streamed** shell response, so a large reply (`/export`, `settings
+/// print`) is never truncated at [`RESP_CAP`]: the console's `ConsoleSink` and the radio
+/// remote shell's sink (in the product apps) both implement it. The producer
 /// calls [`push`](ShellSink::push) for body text of any length and [`done`](ShellSink::done)
 /// exactly once; the sink owns chunk framing (numbering + the `last` flag). Either
 /// returns `false` on a transport error, and streaming stops.
@@ -591,8 +549,8 @@ pub trait ShellSink {
     async fn done(&mut self, result: u8) -> bool;
 }
 
-/// Stream one command line's response through `sink`, like [`run_line`] but with **no
-/// `RESP_CAP` ceiling**, and with **no per-command knowledge**. It streams *every* command
+/// Stream one command line's response through `sink`, with **no `RESP_CAP` ceiling** and **no
+/// per-command knowledge**. It streams *every* command
 /// uniformly by **windowed re-run**: run the handler capturing one `RESP_CAP`-wide output
 /// [`Window`], push it, and if the handler wrote more, re-run with `skip` advanced to the next
 /// window, until the whole response has been paged out. A terse response (the common case)
@@ -612,17 +570,6 @@ pub trait ShellSink {
 /// (`/system/eeprom wipe`) and `settings set` of an address setting (`addr`) are refused with
 /// [`R_DENIED`]; everything else (including `/system reboot`) runs as on the console.
 pub async fn stream_line<S: ShellSink>(line: &str, sink: &mut S) -> (u8, bool) {
-    // Same guards as `run_line_with`: reject rather than silently truncate.
-    if line.len() > MAX_LINE {
-        sink.push("line too long").await;
-        sink.done(R_BAD_ARG).await;
-        return (R_BAD_ARG, false);
-    }
-    if line.split(['/', ' ', '\t']).filter(|s| !s.is_empty()).count() > MAX_TOKENS {
-        sink.push("too many arguments").await;
-        sink.done(R_BAD_ARG).await;
-        return (R_BAD_ARG, false);
-    }
     let Some((kv, app_commands, app_settings)) = critical_section::with(|cs| SHELL_PARAMS.borrow(cs).get())
     else {
         sink.push("no shell served").await;
@@ -633,14 +580,78 @@ pub async fn stream_line<S: ShellSink>(line: &str, sink: &mut S) -> (u8, bool) {
         base: BASE_SETTINGS,
         app: app_settings,
     };
-    let kv = kv.scope(NS_SHELL);
+    stream_with(
+        kv.scope(NS_SHELL),
+        app_commands,
+        settings,
+        line,
+        sink,
+        Origin::Remote,
+    )
+    .await
+}
+
+/// The console transport's [`ShellSink`]: every pushed piece goes out at once as
+/// [`console::SHELL_CHUNK`]-sized frames numbered on from the previous ones, and
+/// [`done`](ShellSink::done) sends a final empty frame carrying `last` and the result (the
+/// host reads the result on `last` only). No buffering: the shell's paging window is the only
+/// copy of the text.
+struct ConsoleSink {
+    cmd_id: u16,
+    /// The next frame's number.
+    chunk: u16,
+}
+
+impl ShellSink for ConsoleSink {
+    async fn push(&mut self, text: &str) -> bool {
+        let mut rest = text;
+        while !rest.is_empty() {
+            let mut take = rest.len().min(console::SHELL_CHUNK);
+            while !rest.is_char_boundary(take) {
+                take -= 1;
+            }
+            let (head, tail) = rest.split_at(take);
+            console::shell_response_frame(self.cmd_id, R_OK, self.chunk, false, head).await;
+            self.chunk = self.chunk.wrapping_add(1);
+            rest = tail;
+        }
+        true
+    }
+
+    async fn done(&mut self, result: u8) -> bool {
+        console::shell_response_frame(self.cmd_id, result, self.chunk, true, "").await;
+        true
+    }
+}
+
+/// [`stream_line`] against explicit shell state, for either transport (`origin` decides what a
+/// remote line may not do).
+async fn stream_with<S: ShellSink>(
+    kv: Scoped,
+    app_commands: &'static [Entry],
+    settings: SettingsTable,
+    line: &str,
+    sink: &mut S,
+    origin: Origin,
+) -> (u8, bool) {
+    // Reject an over-long line or too many tokens rather than run a silently truncated one.
+    if line.len() > MAX_LINE {
+        sink.push("line too long").await;
+        sink.done(R_BAD_ARG).await;
+        return (R_BAD_ARG, false);
+    }
+    if line.split(['/', ' ', '\t']).filter(|s| !s.is_empty()).count() > MAX_TOKENS {
+        sink.push("too many arguments").await;
+        sink.done(R_BAD_ARG).await;
+        return (R_BAD_ARG, false);
+    }
     let toks = tokenize(line);
     let Resolved::Cmd(cmd, arg_start) = resolve(&toks, app_commands) else {
         sink.push("no such command").await;
         sink.done(R_NOT_FOUND).await;
         return (R_NOT_FOUND, false);
     };
-    if cmd.console_only {
+    if cmd.console_only && origin == Origin::Remote {
         sink.push(DENIED_MSG).await;
         sink.done(R_DENIED).await;
         return (R_DENIED, false);
@@ -653,7 +664,7 @@ pub async fn stream_line<S: ShellSink>(line: &str, sink: &mut S) -> (u8, bool) {
     let mut skip = 0usize;
     loop {
         let (outcome, window) = {
-            let mut ctx = Ctx::new(kv, settings, &mut out, skip, Origin::Remote);
+            let mut ctx = Ctx::new(kv, settings, &mut out, skip, origin);
             let outcome = (cmd.run)(&mut ctx, &toks[arg_start..]);
             (outcome, ctx.window)
         };
@@ -670,59 +681,6 @@ pub async fn stream_line<S: ShellSink>(line: &str, sink: &mut S) -> (u8, bool) {
 
 /// Reply text for a [console-only](Entry::cmd_console_only) command refused over a remote link.
 const DENIED_MSG: &str = "console-only command: refused over the radio (use the USB console)";
-
-/// [`run_line`] against explicit shell state (the console path already holds it).
-fn run_line_with(
-    kv: Scoped,
-    app: &'static [Entry],
-    settings: SettingsTable,
-    line: &str,
-    out: &mut String<RESP_CAP>,
-    origin: Origin,
-) -> (u8, bool) {
-    // Reject an over-long line instead of silently executing a truncated prefix. The
-    // wire allows ~240-byte lines but the shell buffer is MAX_LINE; clipping mid-value
-    // could store a truncated setting and still report success (silent corruption).
-    if line.len() > MAX_LINE {
-        let _ = out.push_str("line too long");
-        return (R_BAD_ARG, false);
-    }
-    // Likewise reject more tokens than `tokenize` holds, rather than dropping the tail.
-    if line.split(['/', ' ', '\t']).filter(|s| !s.is_empty()).count() > MAX_TOKENS {
-        let _ = out.push_str("too many arguments");
-        return (R_BAD_ARG, false);
-    }
-    let toks = tokenize(line);
-    match resolve(&toks, app) {
-        Resolved::Cmd(cmd, _) if cmd.console_only && origin == Origin::Remote => {
-            let _ = out.push_str(DENIED_MSG);
-            (R_DENIED, false)
-        }
-        Resolved::Cmd(cmd, arg_start) => {
-            // One `skip = 0` window: the console transport caps a response at RESP_CAP.
-            let (outcome, window) = {
-                let mut ctx = Ctx::new(kv, settings, out, 0, origin);
-                let outcome = (cmd.run)(&mut ctx, &toks[arg_start..]);
-                (outcome, ctx.window)
-            };
-            // A response that spilled past the single window would otherwise report R_OK on a
-            // silently truncated body; surface it as R_TRUNCATED so a scripting caller
-            // (`tower exec`) can tell the output is incomplete. Don't mask a handler's own
-            // non-zero result. (The streaming transport pages the rest out instead (see
-            // `stream_line`), so it never hits this.)
-            let result = if window.more() && outcome.result == R_OK {
-                R_TRUNCATED
-            } else {
-                outcome.result
-            };
-            (result, outcome.reboot)
-        }
-        _ => {
-            let _ = out.push_str("no such command");
-            (R_NOT_FOUND, false)
-        }
-    }
-}
 
 // ---- built-in command handlers ----------------------------------------------
 

@@ -70,17 +70,12 @@ bind_interrupts!(pub struct ConsoleIrqs {
 const MAX_MSG: usize = 192;
 /// Max module-name length carried per log record.
 const MOD_LEN: usize = 24;
-/// Max shell-response text buffered per message. Longer than one frame holds: the
-/// writer splits it into [`SHELL_CHUNK`]-sized frames (`chunk`/`last`), which the
-/// host reassembles by `cmd_id`. Must equal [`crate::shell::RESP_CAP`] (asserted): if
-/// this shrank alone, responses would silently clip AFTER the shell already computed
-/// its `R_OK`/`R_TRUNCATED` verdict: a "complete" `/export` that isn't.
-const MAX_RESP: usize = 256;
-const _: () = assert!(MAX_RESP == crate::shell::RESP_CAP);
 /// Shell-response text bytes per frame. Kept well under the 247-byte payload budget
 /// (`tower_protocol::MAX_PAYLOAD`; a [`ShellResponse`] header is ≤ 10 bytes) so a frame never
-/// fails to encode (asserted below).
-const SHELL_CHUNK: usize = 192;
+/// fails to encode (asserted below). A response of any length goes out as a run of these
+/// frames (`chunk`-numbered, `last` on the final one) that the host reassembles by `cmd_id`;
+/// the shell pages it ([`crate::shell`]'s console sink), so nothing here caps its length.
+pub(crate) const SHELL_CHUNK: usize = 192;
 // cmd_id (≤3) + result (1) + chunk (≤3) + last (1) + the text's length varint (2) + the text.
 const _: () = assert!(3 + 1 + 3 + 1 + 2 + SHELL_CHUNK <= MAX_PAYLOAD);
 /// Max firmware-name string in `Hello` (the baked-in app/example name).
@@ -139,10 +134,13 @@ enum Outgoing {
         name: String<EV_NAME>,
         fields: Vec<(String<EV_KEY>, String<EV_VAL>), EV_FIELDS>,
     },
+    /// One frame of a shell response (the shell numbers and splits them).
     ShellResponse {
         cmd_id: u16,
         result: u8,
-        text: String<MAX_RESP>,
+        chunk: u16,
+        last: bool,
+        text: String<SHELL_CHUNK>,
     },
     /// Completion result; all fields borrow the `'static` command tree, so no copy.
     Completions(ShellCompletions<'static>),
@@ -184,7 +182,7 @@ pub(crate) static SHELL_RX: Channel<CriticalSectionRawMutex, Vec<u8, RX_COPY>, 2
 static MGMT_RX: Channel<CriticalSectionRawMutex, Vec<u8, RX_COPY>, 1> = Channel::new();
 /// Whether the console is up (USB present, UART built, [`writer_loop`] draining). Set by
 /// [`manager`] around the writer's lifetime. The "async, never dropped" producers
-/// ([`event`], [`shell_response`], …) apply queue backpressure only while this is true; while
+/// ([`event`], [`shell_response_frame`], …) apply queue backpressure only while this is true; while
 /// it is false they fall back to drop-newest, so a task emitting events on a battery node with
 /// USB unplugged is never parked forever on a full queue that has no writer to drain it.
 static CONSOLE_UP: AtomicBool = AtomicBool::new(false);
@@ -242,7 +240,7 @@ fn try_enqueue(item: Outgoing) {
 }
 
 /// Enqueue an outgoing message for the "async, never dropped" producers ([`event`],
-/// [`shell_response`], [`shell_completions`]).
+/// [`shell_response_frame`], [`shell_completions`]).
 ///
 /// While the console is up ([`CONSOLE_UP`]) this applies real backpressure, awaiting a free
 /// slot so a burst is never dropped. While it is **down** it falls back to non-blocking
@@ -570,8 +568,26 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
                 )
                 .await
             }
-            Outgoing::ShellResponse { cmd_id, result, text } => {
-                send_shell_response(tx, &mut seq, *cmd_id, *result, text.as_str()).await
+            Outgoing::ShellResponse {
+                cmd_id,
+                result,
+                chunk,
+                last,
+                text,
+            } => {
+                send(
+                    tx,
+                    &mut seq,
+                    MsgType::ShellResponse,
+                    &ShellResponse {
+                        cmd_id: *cmd_id,
+                        result: *result,
+                        chunk: *chunk,
+                        last: *last,
+                        text: text.as_str(),
+                    },
+                )
+                .await
             }
             Outgoing::Completions(c) => send(tx, &mut seq, MsgType::ShellCompletions, c).await,
             Outgoing::Uplink {
@@ -708,47 +724,6 @@ async fn send<T: Serialize>(tx: &mut UartTx<'static, Async>, seq: &mut u16, msg_
     }
 }
 
-/// Send a shell response as one or more `chunk`-indexed frames (`last` marks the
-/// final one), splitting `text` at char boundaries no larger than [`SHELL_CHUNK`] so
-/// each frame fits the wire budget. Empty text still sends one (empty, `last`) frame
-/// so the host always completes the response. The host reassembles by `cmd_id`.
-async fn send_shell_response(
-    tx: &mut UartTx<'static, Async>,
-    seq: &mut u16,
-    cmd_id: u16,
-    result: u8,
-    text: &str,
-) {
-    let mut rest = text;
-    let mut chunk: u16 = 0;
-    loop {
-        let mut take = rest.len().min(SHELL_CHUNK);
-        while take > 0 && !rest.is_char_boundary(take) {
-            take -= 1;
-        }
-        let (head, tail) = rest.split_at(take);
-        let last = tail.is_empty();
-        send(
-            tx,
-            seq,
-            MsgType::ShellResponse,
-            &ShellResponse {
-                cmd_id,
-                result,
-                chunk,
-                last,
-                text: head,
-            },
-        )
-        .await;
-        if last {
-            break;
-        }
-        rest = tail;
-        chunk = chunk.wrapping_add(1);
-    }
-}
-
 /// Emit a self-describing event (key=value pairs) to the host, rendered by
 /// `tower events` without any per-app schema. **Async**: while USB is present it applies
 /// backpressure (never dropped); while unplugged (no host, no writer) it drops (counted in
@@ -770,14 +745,17 @@ pub async fn event(name: &str, fields: &[(&str, &str)]) {
     .await;
 }
 
-/// Send a shell command response. The writer splits `text` into `chunk`/`last` frames
-/// the host reassembles, so it may exceed one frame (up to [`MAX_RESP`], clipped past
-/// that). Async: backpressured while USB is present (a shell command only arrives over a
-/// live console, so the writer is up to drain it). Used by the shell engine ([`crate::shell`]).
-pub async fn shell_response(cmd_id: u16, result: u8, text: &str) {
+/// Send one frame of a shell command response: `text` (at most [`SHELL_CHUNK`] bytes, clipped
+/// past that) as frame number `chunk`, `last` on the final one, whose `result` is the
+/// authoritative one. Async: backpressured while USB is present (a shell command only arrives
+/// over a live console, so the writer is up to drain it). Used by the shell engine's console
+/// sink ([`crate::shell`]), which pages and splits a response of any length.
+pub(crate) async fn shell_response_frame(cmd_id: u16, result: u8, chunk: u16, last: bool, text: &str) {
     enqueue(Outgoing::ShellResponse {
         cmd_id,
         result,
+        chunk,
+        last,
         text: clip(text),
     })
     .await;

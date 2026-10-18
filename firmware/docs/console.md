@@ -330,12 +330,12 @@ remote lines with result **5 (`R_DENIED`)** and run only from the USB console:
 address setting (`Kind::Addr`, i.e. `addr`). Everything else (including `/system reboot`,
 `settings print/get`, `/export`, and setting non-address values) works over the radio.
 App commands opt in with `Entry::cmd_console_only(..)`; a handler that is only partly
-sensitive checks `ctx.is_remote()` itself. `shell::run_line` (no transport context) is
-treated as remote.
+sensitive checks `ctx.is_remote()` itself.
 
-Responses longer than one frame are **chunked** (192-byte `chunk`/`last` frames) and
-reassembled by the host into one response; `/system/resource print` is a 7-line
-example.
+A response of any length reaches the host whole: the shell pages it out 256 bytes per handler
+run (`shell::RESP_CAP`, the handler re-run with an advancing window, the same on the console and
+over the radio) as 192-byte `chunk`/`last` frames that the host reassembles; `/export` and
+`settings print` are the long ones.
 
 ---
 
@@ -598,7 +598,6 @@ is a framing difference the tags can't see; `tower` reports that pattern once.
 | 1 | `R_NOT_FOUND` | no such command / setting |
 | 2 | `R_BAD_ARG` | bad / out-of-range value |
 | 3 | `R_STORAGE` | EEPROM write failed |
-| 4 | `R_TRUNCATED` | response body overflowed the cap and was truncated |
 | 5 | `R_DENIED` | console-only command / address setting refused over the radio remote shell |
 
 ---
@@ -617,7 +616,7 @@ is a framing difference the tags can't see; `tower` reports that pattern once.
   `Setting`, `Kind`, `SettingsTable`, `Ctx`, `Outcome` (`::ok` / `::code`), `Handler`
 - `Entry::cmd_console_only` / `Ctx::is_remote`: keep a command (or part of one) off the radio
   remote shell
-- constants: `MAX_SETTING`, `R_OK`/`R_NOT_FOUND`/`R_BAD_ARG`/`R_STORAGE`/`R_TRUNCATED`/`R_DENIED`
+- constants: `MAX_SETTING`, `R_OK`/`R_NOT_FOUND`/`R_BAD_ARG`/`R_STORAGE`/`R_DENIED`
 
 `tower_protocol`: `encode_frame`, `decode_frame`, `FrameDecoder`, `MsgType`, the payload
 structs, `CONSOLE_TAG`, `radio::RADIO_TAG`, `MAX_FRAME`, `MAX_PAYLOAD`, `MAX_WIRE`,
@@ -680,5 +679,7 @@ host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firmware
   `crates/protocol/AGENTS.md`); there is nothing to bump. Both ends build the change together;
   then reflash the board and reinstall the `tower` CLI, or the stale side's frames carry
   another schema tag and are refused (`SchemaMismatch`).
-- **A response is capped at `MAX_SETTING`/`MAX_RESP`-sized text** before chunking; very
-  large dumps are clipped. Raise the caps (and `MAX_RESP`) if you need more.
+- **A handler whose output can exceed one 256-byte window runs once per window**: the shell
+  pages long responses by re-running the handler, so such a handler must be deterministic and
+  free of side effects (the SDK's long ones, `/export`, `settings print`, `resource print`, are
+  read-only; commands that change state print a few bytes and run once).

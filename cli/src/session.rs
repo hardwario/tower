@@ -161,7 +161,6 @@ pub(crate) fn result_tag(code: u8) -> String {
         1 => "not found",
         2 => "bad argument",
         3 => "storage error",
-        4 => "truncated",
         5 => "denied (console-only command)",
         _ => return format!("[result {code}]"),
     };
