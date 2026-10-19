@@ -1,6 +1,7 @@
-//! tower-flasher: the flasher of HARDWARIO TOWER boards, around the STM32 ROM UART
-//! bootloader (AN3155): flash / erase / verify, chip info, the opt-in readout
-//! protection, and the NRST/BOOT0 reset pulses.
+//! tower-flasher: the flasher of HARDWARIO TOWER boards, around the STM32 ROM bootloader: its
+//! UART protocol (AN3155) for flash / erase / verify, chip info, the opt-in readout protection
+//! and the NRST/BOOT0 reset pulses, and its USB DFU protocol (AN3156, [`dfu`]) for flash /
+//! erase / verify on a board without a USB-UART bridge (the Core Module r1.x).
 //!
 //! A UI-free library. The `tower` CLI (`tower flash` / `erase` / `reset` / `chip`) and the HIL
 //! harness drive it directly:
@@ -37,6 +38,7 @@
 
 pub mod bootloader;
 pub mod chip;
+pub mod dfu;
 pub mod error;
 #[cfg(test)]
 mod fake_stm32;

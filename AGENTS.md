@@ -20,7 +20,8 @@ TOWER is HARDWARIO's wireless, modular IoT kit. The Core Module is an **STM32L08
 915 MHz, AES-128-CCM secured network with confirmed delivery, replay protection, OTA pairing).
 The firmware streams a **framed serial console** to a host, where the `tower` CLI decodes and
 renders it. Firmware is loaded over the wire (the STM32 ROM UART bootloader via `tower flash`,
-or SWD); there is no over-the-air update path, by design.
+its USB DFU interface on the bridge-less Core Module r1.x, or SWD); there is no over-the-air
+update path, by design.
 
 ## Layout and naming
 
@@ -35,7 +36,7 @@ prefixed packages; the Rust crate name is `tower_X`).
 | `crates/radio` | `tower-radio` | Radio timing / CCM / compliance logic (duty token buckets, time-on-air, FHSS hop permutation). Not the SPIRIT1 driver (`tower::radio`). |
 | `crates/gateway` | `tower-gateway` | Decision core of the Radio Dongle gateway firmware (node-registry codec, downlink queue). Not the host `tower gateway` MQTT bridge (that is in `cli`). |
 | `crates/shell` | `tower-shell` | Pure kernels behind the device shell (`addr` parser + PRNG, pagination window, TAB completion). Not the shell itself (`tower::shell`). |
-| `crates/flasher` | `tower-flasher` | The flasher, around the STM32 ROM UART bootloader (AN3155): flash / erase / verify, chip info, readout protection, NRST/BOOT0 reset pulses. Library only; its front end is `tower`. |
+| `crates/flasher` | `tower-flasher` | The flasher, around the STM32 ROM bootloader: UART (AN3155) flash / erase / verify, chip info, readout protection, NRST/BOOT0 reset pulses; USB DFU (AN3156) for the Core Module r1.x, which has no USB-UART bridge. Library only; its front end is `tower`. |
 | `firmware/` | `tower-sdk` (lib `tower`) | Embassy firmware SDK for the Core Module, `examples/` (demos) and `apps/` (TOWER IoT Kit products). Its **own Cargo workspace** (thumbv6m + flip-link). |
 | `cli/` | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip, the `tower gateway` radio-to-MQTT bridge, `tower nodes` / `tower net`. Version 1.1.0. |
 | `hil/` | `tower-hil` | Hardware-in-the-loop bench harness: builds images from `../firmware`, flashes real boards, decodes the console natively, measures power (PPK2). |

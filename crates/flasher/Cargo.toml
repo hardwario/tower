@@ -6,10 +6,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The flasher of HARDWARIO TOWER boards, around the STM32 ROM UART bootloader (AN3155): flash / erase / verify, chip info, opt-in readout protection (RDP level 1, never level 2), NRST/BOOT0 reset pulses. A UI-free library; the `tower` CLI and the HIL harness drive it."
+description = "The flasher of HARDWARIO TOWER boards, around the STM32 ROM bootloader: UART (AN3155) flash / erase / verify, chip info, opt-in readout protection (RDP level 1, never level 2), NRST/BOOT0 reset pulses; USB DFU (AN3156) flash / erase / verify for boards without a USB-UART bridge. A UI-free library; the `tower` CLI and the HIL harness drive it."
 
 # Library only: no binary, no UI dependencies. Progress is reported through a callback
 # (`flash::Progress`); the `tower` CLI renders it.
 [dependencies]
 serialport.workspace = true
 thiserror = "2.0.18"
+# USB DFU (`dfu`): the ROM DFU bootloader of a board whose STM32 USB pins go straight to the
+# connector (the Core Module r1.x, which has no USB-UART bridge). Pure Rust on every platform
+# (usbfs on Linux, IOKit on macOS, WinUSB on Windows), so there is no libusb to build or ship.
+nusb = "0.2.8"

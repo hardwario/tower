@@ -11,6 +11,8 @@
 #
 # Override the serial device: TOWER_DEVICE=/dev/cu.usbserial-XXXX just flash example blinky
 # Pass cargo features:        TOWER_FEATURES=role-gateway just flash example net_confirmed
+# Build for the rev 1.3 Core Module (native USB, no USB-UART bridge; flashed over USB DFU):
+#                             TOWER_FEATURES=core-module-r1 just flash app radio_push_button
 #
 # Flashing + console use the `tower` CLI (../cli): it programs the STM32L0 over the UART
 # bootloader (the tower-flasher engine, ../crates/flasher) AND decodes the firmware's framed console
@@ -176,6 +178,13 @@ run kind name: (flash kind name)
 check *args:
     cargo build --locked --release --lib --bins --examples {{args}}
 
+# The rev 1.3 Core Module (feature `core-module-r1`: the console is a USB CDC-ACM port on the
+# STM32's own USB, see docs/console.md) shares every source file but the console transport, so a
+# change that compiles for the default r2 board can still break it; CI builds it too.
+# Compile the library, apps and examples for the rev 1.3 board (feature core-module-r1).
+check-r1:
+    cargo build --locked --release --lib --bins --examples --features core-module-r1
+
 # The firmware itself is no_std (thumbv6m, no libtest), so its logic is tested through the shared
 # crates it builds on, in the repo's HOST workspace: `tower-protocol` (the console wire format),
 # `tower-kv` (the EEPROM key-value codec), `tower-net` (the network-layer security decision
@@ -193,10 +202,13 @@ test *args:
 
 # flip-link puts the stack BELOW the statics on the 20 KB part, so each product bin must
 # leave enough stack (floor 8 KB; measured peaks ~6.8 KB node / est ~7.5 KB gateway; see
-# docs/gateway.md "RAM budget"). Builds the bins, then checks the ELF layout. Run in CI.
+# docs/gateway.md "RAM budget"). Builds the bins, then checks the ELF layout, for the default
+# r2 board and then the rev 1.3 board (its USB console takes ~0.7 KB more statics). Run in CI.
 # Guard the RAM budget: fail if any product bin's statics leave too little stack.
 ram-budget:
     cargo build --locked --release --bins
+    python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor
+    cargo build --locked --release --bins --features core-module-r1
     python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor
 
 # rustfmt house style: the repo-root rustfmt.toml (110 cols) covers this workspace too.
@@ -214,6 +226,7 @@ fmt-check:
 # Lint the library, apps and examples (default features + every role variant), -D warnings.
 clippy:
     cargo clippy --locked --lib --examples --bins -- -D warnings
+    cargo clippy --locked --lib --examples --bins --features core-module-r1 -- -D warnings
     cargo clippy --locked --examples --features role-gateway -- -D warnings
     cargo clippy --locked --examples --features role-node -- -D warnings
     cargo clippy --locked --examples --features role-node,node-2 -- -D warnings
@@ -240,6 +253,7 @@ roles:
 [env("RUSTDOCFLAGS", "-D warnings -A rustdoc::private-intra-doc-links")]
 doc:
     cargo doc --locked --no-deps --lib --document-private-items
+    cargo doc --locked --no-deps --lib --document-private-items --features core-module-r1
 
 # `examples` / `apps` are hand-maintained (OS-independent recipes, no ls/sed); this fails when
 # they drift from the files on disk so the lists can't silently go stale.
@@ -261,8 +275,8 @@ lists:
 
 # Every hardware-free firmware gate, the same set CI's `firmware` job runs (needs flip-link on
 # PATH; no cargo-binutils, no hardware). The repo-root `just check` runs this too.
-# Run all firmware gates: fmt, MCU build, RAM budget, clippy, role variants, rustdoc, list drift.
-ci: fmt-check check ram-budget clippy roles doc lists
+# Run all firmware gates: fmt, MCU build (both boards), RAM budget, clippy, role variants, rustdoc, list drift.
+ci: fmt-check check check-r1 ram-budget clippy roles doc lists
 
 
 # === Maintenance ==================================================================================

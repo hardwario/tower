@@ -9,48 +9,67 @@
 //! (PA9 TX / PA10 RX) and, gated on USB presence (`VBUS_SENSE`/PA12), builds a **DMA-backed
 //! `Uart`** while plugged and **drops** it on unplug, releasing embassy's STOP refcount so an
 //! unplugged node idles at µA. TX runs on DMA1 channel 4, RX on a **circular DMA buffer** on
-//! channel 5 ([`RingBufferedUartRx`]), a different channel group from the WS2812 strip's channel
+//! channel 5 (`RingBufferedUartRx`), a different channel group from the WS2812 strip's channel
 //! 3, so both use DMA at once. While up it splits the UART and runs two halves:
 //!
 //! * producers (the `log` backend, `print!`, `event`, ...) serialize their message on the spot
 //!   and push the postcard payload into [`TX`], a byte ring that stores each message at its real
 //!   size ([`PayloadRing`]); the `log` backend and `print!` drop the newest message when it has no
 //!   room (a dropped count is reported by the writer), the async producers wait for room;
-//!   [`writer_loop`] owns the [`UartTx`], pops the oldest payload, assigns the per-frame `seq` (so
+//!   [`writer_loop`] owns the `UartTx`, pops the oldest payload, assigns the per-frame `seq` (so
 //!   a gap means real wire loss, not a queue drop), frames it and DMA-writes, holding a
 //!   `WakeGuard` across each burst so the low-power executor uses WFI instead of STOP
 //!   mid-transfer;
-//! * [`rx_loop`] reads the [`RingBufferedUartRx`] and [`route_frame`]s decoded frames into the
+//! * [`rx_loop`] reads the RX ring and [`route_frame`]s decoded frames into the
 //!   console-owned RX channels by type: shell frames to [`SHELL_RX`]; the shell drains its
 //!   channel on its own task. The console never calls up into that layer, so the transport
 //!   depends only on `tower-protocol`. Because the RX DMA fills the ring in hardware, an incoming
 //!   byte is never lost to receiver overrun while a burst or critical section delays the reader;
 //! * the **panic** path can't use the (dead) executor, so it quiesces the USART's DMA requests +
 //!   interrupts and blocking-writes one frame straight to the USART1 registers via the PAC.
+//!
+//! **The rev 1.3 board** (feature `core-module-r1`) has no USB-UART bridge: the same framed link
+//! runs over a USB CDC-ACM serial port on the STM32's own USB peripheral (PA11/PA12), and
+//! [`manager`] is the USB one in `console::usb`, which brings the USB device up only while a host is
+//! there (the board has no VBUS sense line; see that module). The queue, the producers, the
+//! writer and the RX router are shared: the writer and the router drive the link through two
+//! small transport traits (`LinkTx` / `LinkRx`), implemented by the UART halves here and by the
+//! CDC endpoints there. The panic path's USART write is a no-op on that board (USART1 is never
+//! enabled); the crash breadcrumb reports the crash on the next boot instead.
 
 use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
 use core::future::poll_fn;
 use core::panic::PanicInfo;
+#[cfg(not(feature = "core-module-r1"))]
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::task::Poll;
 
 use critical_section::Mutex;
+#[cfg(not(feature = "core-module-r1"))]
 use embassy_futures::select::{select, select3};
+#[cfg(not(feature = "core-module-r1"))]
 use embassy_stm32::dma::InterruptHandler as DmaInterruptHandler;
+#[cfg(not(feature = "core-module-r1"))]
 use embassy_stm32::exti::ExtiInput;
+#[cfg(not(feature = "core-module-r1"))]
 use embassy_stm32::mode::Async;
+#[cfg(not(feature = "core-module-r1"))]
 use embassy_stm32::peripherals::{DMA1_CH4, DMA1_CH5, PA9, PA10, USART1};
 use embassy_stm32::rcc::{StopMode, WakeGuard};
+#[cfg(not(feature = "core-module-r1"))]
 use embassy_stm32::usart::{
     Config as UartConfig, InterruptHandler as UsartInterruptHandler, RingBufferedUartRx, Uart, UartTx,
 };
+#[cfg(not(feature = "core-module-r1"))]
 use embassy_stm32::{Peri, bind_interrupts};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::waitqueue::{MultiWakerRegistration, WakerRegistration};
-use embassy_time::{Duration, Instant, Timer, with_timeout};
+#[cfg(not(feature = "core-module-r1"))]
+use embassy_time::with_timeout;
+use embassy_time::{Duration, Instant, Timer};
 use heapless::{String, Vec};
 use log::{LevelFilter, Metadata, Record};
 use serde::Serialize;
@@ -66,14 +85,56 @@ use tower_protocol::{
 
 use crate::storage::{NS_SYS, Nv};
 
+#[cfg(feature = "core-module-r1")]
+mod usb;
+#[cfg(feature = "core-module-r1")]
+pub use usb::manager;
+
 // Interrupts for the DMA-backed console UART. USART1 covers idle/error events; TX runs on DMA1
 // channel 4 and the RX ring on channel 5, both on the shared `DMA1_CHANNEL4_5_6_7` vector, so
 // BOTH channel handlers are bound to it. This is a DIFFERENT channel group from the WS2812 strip's
 // `DMA1_CH3` (`DMA1_CHANNEL2_3`), so the strip and console coexist on DMA (USART1_RX maps to CH3|CH5).
+#[cfg(not(feature = "core-module-r1"))]
 bind_interrupts!(pub struct ConsoleIrqs {
     USART1 => UsartInterruptHandler<USART1>;
     DMA1_CHANNEL4_5_6_7 => DmaInterruptHandler<DMA1_CH4>, DmaInterruptHandler<DMA1_CH5>;
 });
+
+/// The transmit half of the console link, as [`writer_loop`] drives it: the USART of the r2
+/// board, or the CDC-ACM IN endpoint of the rev 1.3 board (`console::usb`).
+trait LinkTx {
+    /// Queue `bytes` on the link. Failures are not reported: a frame lost on the way shows on the
+    /// host as a `seq` gap, as on any lossy wire.
+    async fn write(&mut self, bytes: &[u8]);
+    /// Wait (bounded) until what was written has left, so a `WakeGuard` held across a burst
+    /// covers the whole transfer.
+    async fn drain(&mut self);
+}
+
+/// The receive half of the console link, as [`rx_loop`] reads it.
+trait LinkRx {
+    /// Read what has arrived into `buf`: `Some(n)` bytes, or `None` after a link error (the
+    /// caller just reads again).
+    async fn read(&mut self, buf: &mut [u8]) -> Option<usize>;
+}
+
+#[cfg(not(feature = "core-module-r1"))]
+impl LinkTx for UartTx<'static, Async> {
+    async fn write(&mut self, bytes: &[u8]) {
+        let _ = UartTx::write(self, bytes).await;
+    }
+
+    async fn drain(&mut self) {
+        flush_bounded(self).await;
+    }
+}
+
+#[cfg(not(feature = "core-module-r1"))]
+impl LinkRx for RingBufferedUartRx<'static> {
+    async fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
+        RingBufferedUartRx::read(self, buf).await.ok()
+    }
+}
 
 /// Max log-line / print-text length (clipped past this; fine for a debug console).
 const MAX_MSG: usize = 192;
@@ -237,11 +298,13 @@ pub(crate) static SHELL_RX: Channel<CriticalSectionRawMutex, Vec<u8, RX_COPY>, 2
 /// request/response: one outstanding op; a drop just makes the host retry, and the
 /// 20 KB part wants every spare `MAX_WIRE` buffer back for stack).
 static MGMT_RX: Channel<CriticalSectionRawMutex, Vec<u8, RX_COPY>, 1> = Channel::new();
-/// Whether the console is up (USB present, UART built, [`writer_loop`] draining). Set by
-/// [`manager`] around the writer's lifetime. The "async, never dropped" producers
-/// ([`event`], [`shell_response_frame`], …) apply queue backpressure only while this is true; while
-/// it is false they fall back to drop-newest, so a task emitting events on a battery node with
-/// USB unplugged is never parked forever on a full queue that has no writer to drain it.
+/// Whether the console is up (a host link is there and [`writer_loop`] is draining: on the r2
+/// board USB present and the UART built, on the rev 1.3 board the USB device configured and a
+/// host program holding the port open). Set by [`manager`] around the writer's lifetime, through
+/// [`set_console_up`]. The "async, never dropped" producers ([`event`], [`shell_response_frame`],
+/// …) apply queue backpressure only while this is true; while it is false they fall back to
+/// drop-newest, so a task emitting events on a battery node with USB unplugged is never parked
+/// forever on a full queue that has no writer to drain it.
 static CONSOLE_UP: AtomicBool = AtomicBool::new(false);
 /// Count of messages dropped (a full [`TX`], an encode failure, a frame cut by an unplug);
 /// reported by the writer as a [`Dropped`] marker where the drop-marker placeholder sits.
@@ -258,9 +321,37 @@ static SESSION_ID: AtomicU32 = AtomicU32::new(0);
 /// ~36 h wrap at 32 kHz ticks is harmless.
 static LAST_HOST_RX: AtomicU32 = AtomicU32::new(0);
 
-/// Whether the console is currently up (USB present, UART built). Cheap atomic read.
+/// Whether the console is currently up (a host link is there, see [`CONSOLE_UP`]). Cheap atomic
+/// read.
 pub fn is_up() -> bool {
     CONSOLE_UP.load(Ordering::Relaxed)
+}
+
+/// Raise or drop [`CONSOLE_UP`]. Dropping it also wakes the producers parked on a full ring in
+/// [`enqueue`]: with the writer gone they fall back to drop-newest at once, instead of waiting for
+/// room that only the next link would free.
+fn set_console_up(up: bool) {
+    CONSOLE_UP.store(up, Ordering::Relaxed);
+    if !up {
+        critical_section::with(|cs| TX.borrow_ref_mut(cs).writers.wake());
+    }
+}
+
+/// Empty the queue while there is no writer, counting what it held as dropped, and wake the
+/// producers waiting for room. Frees room so a producer that raced the link going down (checked
+/// [`CONSOLE_UP`] just before it cleared) can't stay parked on a full ring.
+fn drain_queue() {
+    let (drained, had_marker) = critical_section::with(|cs| {
+        let mut q = TX.borrow_ref_mut(cs);
+        let had_marker = q.marker_queued;
+        let n = q.ring.clear() - u32::from(had_marker);
+        q.marker_queued = false;
+        q.writers.wake();
+        (n, had_marker)
+    });
+    if drained > 0 || had_marker {
+        add_dropped(drained); // and the marker's placeholder again, for the next link
+    }
 }
 
 /// Ticks since the last decoded host→device frame (u32::MAX before the first one).
@@ -317,9 +408,9 @@ fn try_enqueue<T: Serialize>(msg_type: MsgType, payload: &T) {
 /// ring so a burst is never dropped. While it is **down** it falls back to non-blocking
 /// drop-newest: with no [`writer_loop`] draining [`TX`], waiting on a full ring would park the
 /// calling task until the next USB plug-in, silently stalling e.g. a battery node's measure loop.
-/// If USB is unplugged *during* a backpressured wait, [`manager`]'s unplugged poll empties the
-/// ring (counting drops) and wakes the waiters within one poll cycle, so the stall is bounded,
-/// never indefinite.
+/// If the link goes down *during* a backpressured wait, [`set_console_up`] wakes the waiters and
+/// they drop instead of waiting on (and [`manager`]'s unplugged poll still empties the ring,
+/// counting drops), so the stall is bounded, never indefinite.
 async fn enqueue(e: Option<Encoded>) {
     let Some(e) = e else {
         return;
@@ -330,11 +421,13 @@ async fn enqueue(e: Option<Encoded>) {
         }
         return;
     }
-    poll_fn(|cx| {
+    let dropped = poll_fn(|cx| {
         critical_section::with(|cs| {
             let mut q = TX.borrow_ref_mut(cs);
             if q.push(&e) {
-                Poll::Ready(())
+                Poll::Ready(false)
+            } else if !CONSOLE_UP.load(Ordering::Relaxed) {
+                Poll::Ready(true) // the writer went away while we waited: drop-newest
             } else {
                 q.writers.register(cx.waker());
                 Poll::Pending
@@ -342,6 +435,9 @@ async fn enqueue(e: Option<Encoded>) {
         })
     })
     .await;
+    if dropped {
+        bump_dropped(); // outside the borrow of `TX` (it re-borrows to queue the marker)
+    }
 }
 
 /// `s` clipped to at most `n` bytes, at a char boundary.
@@ -438,7 +534,8 @@ pub fn install_logger(max_level: LevelFilter) {
 // buffer in hardware, so a byte is never lost to receiver overrun while an ISR / critical section /
 // TX flood delays the reader (the old interrupt-per-byte path's ~1% loss). A fresh `&'static mut`
 // per build is sound because [`manager`] keeps at most one console alive at a time. TX DMAs from
-// the per-frame buffer in [`send`], so no persistent TX buffer is needed.
+// the per-frame buffer of each [`Frame`], so no persistent TX buffer is needed.
+#[cfg(not(feature = "core-module-r1"))]
 static mut RX_DMA_BUF: [u8; 256] = [0; 256];
 
 /// USB-presence-gated **dynamic** console. Owns USART1 + PA9/PA10 for the whole run.
@@ -451,6 +548,7 @@ static mut RX_DMA_BUF: [u8; 256] = [0; 256];
 ///
 /// `usart1`/`tx_pin`/`rx_pin` are held to reserve the peripherals; each build
 /// re-acquires them with `steal()` (sound: exactly one instance is alive at a time).
+#[cfg(not(feature = "core-module-r1"))]
 #[embassy_executor::task]
 pub async fn manager(
     usart1: Peri<'static, USART1>,
@@ -483,17 +581,7 @@ pub async fn manager(
             // Drain anything left in the queue while there's no writer (counting it as dropped):
             // frees room so a producer that raced the unplug (checked CONSOLE_UP just before it
             // cleared) can't stay parked on a full ring; it wakes within one poll cycle.
-            let (drained, had_marker) = critical_section::with(|cs| {
-                let mut q = TX.borrow_ref_mut(cs);
-                let had_marker = q.marker_queued;
-                let n = q.ring.clear() - u32::from(had_marker);
-                q.marker_queued = false;
-                q.writers.wake();
-                (n, had_marker)
-            });
-            if drained > 0 || had_marker {
-                add_dropped(drained); // and the marker's placeholder again, for the next plug-in
-            }
+            drain_queue();
         }
         Timer::after(Duration::from_millis(50)).await; // debounce
         if !vbus.is_high() {
@@ -523,7 +611,7 @@ pub async fn manager(
 
         // Console is up: the writer below drains TX, so producers may now apply
         // backpressure (see `enqueue`). Set this before the Hello so it takes the same path.
-        CONSOLE_UP.store(true, Ordering::Relaxed);
+        set_console_up(true);
 
         // The writer synthesizes the session `Hello` as its own first frame (see `writer_loop`),
         // so the host resyncs its per-link `seq` on every plug-in WITHOUT the Hello ever riding
@@ -539,7 +627,7 @@ pub async fn manager(
         let _ = select3(writer_loop(&mut tx), rx_loop(&mut rx), unplug).await;
         // Console is down: no writer will drain the queue until the next plug-in, so producers
         // must fall back to drop-newest (see `enqueue`). Clear this before dropping the UART.
-        CONSOLE_UP.store(false, Ordering::Relaxed);
+        set_console_up(false);
         // tx/rx drop → USART1 disabled → STOP re-enabled while unplugged.
     }
 }
@@ -555,15 +643,16 @@ pub async fn manager(
 /// IWDG still fed. Bench casualty 2026-07-13 (dongle wedged after hours; NRST recovered it).
 /// A full ~270 B frame drains in ~24 ms at 115200, so the 50 ms ceiling never truncates a real
 /// drain; on a consumed TC it merely releases the STOP `WakeGuard` a frame-time early.
+#[cfg(not(feature = "core-module-r1"))]
 async fn flush_bounded(tx: &mut UartTx<'static, Async>) {
     let _ = with_timeout(Duration::from_millis(50), tx.flush()).await;
 }
 
 /// Scope guard that counts `.0` dropped frames if destroyed while still armed. [`writer_loop`]
 /// arms it after dequeuing an item so that if the writer is cancelled (USB unplug via `select3`)
-/// before the item reaches the UART, the loss is still reflected in the host's Dropped
+/// before the item reaches the link, the loss is still reflected in the host's Dropped
 /// accounting: one message, or the whole count a marker was about to report. It is disarmed
-/// (`.0 = 0`) once the item's bytes are in the UART ring.
+/// (`.0 = 0`) once the item's bytes are in the link (the UART ring, the USB endpoint).
 struct OnCancelDrop(u32);
 
 impl Drop for OnCancelDrop {
@@ -578,14 +667,17 @@ impl Drop for OnCancelDrop {
 /// burst so the low-power executor stays in WFI (clocks live) while the async DMA write awaits its
 /// transfer-complete interrupt, rather than dropping into STOP mid-transfer.
 ///
-/// This is now **redundant**: the RX ring ([`RingBufferedUartRx`]) calls `increment_stop_refcount`
+/// This is now **redundant**: the RX ring
+/// (`RingBufferedUartRx`) calls `increment_stop_refcount`
 /// for USART1 (whose `stop_mode` is `Stop1`), so `REFCOUNT_STOP1 ≥ 1` for the *entire* time the
 /// console is up → `rcc::get_stop_mode` returns `None` and the executor never enters STOP while
 /// plugged in (verified against embassy-stm32 0.6). The guard is kept deliberately as
 /// belt-and-braces: it makes the TX path's stop-safety **self-contained**, not silently dependent
 /// on an RX-side refcount that a future RX refactor could change. Cheap (one scope object per
-/// burst); between bursts no guard is held (docs/console.md).
-async fn writer_loop(tx: &mut UartTx<'static, Async>) {
+/// burst); between bursts no guard is held (docs/console.md). On the rev 1.3 board the USB
+/// session holds the same refcount for its whole life (embassy's USB driver enables the USB clock
+/// with `Stop1`), so there the guard is just as redundant.
+async fn writer_loop(tx: &mut impl LinkTx) {
     let mut seq: u16 = 0;
 
     // The writer emits the session's opening frames ITSELF, not via the shared producer queue,
@@ -602,85 +694,105 @@ async fn writer_loop(tx: &mut UartTx<'static, Async>) {
     // longer dropped during the flood. The host CLI's post-Hello settle stays as belt-and-braces.)
     {
         let _g = WakeGuard::new(StopMode::Stop1);
-        let _ = tx.write(&[0u8]).await;
-        flush_bounded(tx).await;
-        let name = firmware_name();
-        send(
-            tx,
-            &mut seq,
-            MsgType::Hello,
-            // The schema tag in this (and every) frame header is the lockstep check: a host built
-            // from another checkout refuses the frame before reading it, and names this firmware
-            // from these fields in its mismatch message.
-            &Hello {
-                firmware_name: &name,
-                firmware_version: FW_VERSION,
-                session_id: session_id(),
-            },
-        )
-        .await;
+        tx.write(&[0u8]).await;
+        tx.drain().await;
+        // Framed before the write (as every frame below), so the name and the message are not
+        // held across it.
+        let hello = {
+            let name = firmware_name();
+            Frame::new(
+                &mut seq,
+                MsgType::Hello,
+                // The schema tag in this (and every) frame header is the lockstep check: a host
+                // built from another checkout refuses the frame before reading it, and names this
+                // firmware from these fields in its mismatch message.
+                &Hello {
+                    firmware_name: &name,
+                    firmware_version: FW_VERSION,
+                    session_id: session_id(),
+                },
+            )
+        };
+        if let Some(frame) = &hello {
+            tx.write(frame.bytes()).await;
+        }
     }
 
     loop {
-        let mut payload = [0u8; MAX_PAYLOAD];
-        let (msg_type, len) = poll_fn(|cx| {
-            critical_section::with(|cs| {
-                let mut q = TX.borrow_ref_mut(cs);
-                match q.ring.pop(&mut payload) {
-                    Some(popped) => {
-                        if popped.0 == MsgType::Dropped {
-                            q.marker_queued = false;
+        // The record is framed as soon as it is popped, inside this block, so the write below
+        // holds only the frame and not the record as well: this future is part of the console
+        // manager's static task, where a second buffer would cost ~250 B of the 20 KB of RAM.
+        let (frame, _guard, mut cancel_guard) = {
+            let mut payload = [0u8; MAX_PAYLOAD];
+            let (msg_type, len) = poll_fn(|cx| {
+                critical_section::with(|cs| {
+                    let mut q = TX.borrow_ref_mut(cs);
+                    match q.ring.pop(&mut payload) {
+                        Some(popped) => {
+                            if popped.0 == MsgType::Dropped {
+                                q.marker_queued = false;
+                            }
+                            q.writers.wake(); // room freed for a producer waiting on a full ring
+                            Poll::Ready(popped)
                         }
-                        q.writers.wake(); // room freed for a producer waiting on a full ring
-                        Poll::Ready(popped)
+                        None => {
+                            q.reader.register(cx.waker());
+                            Poll::Pending
+                        }
                     }
-                    None => {
-                        q.reader.register(cx.waker());
-                        Poll::Pending
-                    }
-                }
+                })
             })
-        })
-        .await;
-        // Hold STOP off across the burst so the DMA write completes (redundant with the RX ring's
-        // stop refcount, see `writer_loop`; kept so the TX path is self-contained).
-        let _guard = WakeGuard::new(StopMode::Stop1);
-        // Count this dequeued item as dropped if the writer is cancelled (USB unplug via the
-        // manager's `select3`) before it is handed to the UART; this keeps the host's Dropped
-        // accounting exact even for the "never dropped" backpressured producers. Disarmed once
-        // the item's bytes are written into the UART ring.
-        let mut cancel_guard = OnCancelDrop(1);
-        if msg_type == MsgType::Dropped {
-            // The placeholder queued where messages went missing: report every drop counted so
-            // far right here, so the host shows the marker at the gap, not before the backlog.
-            let dropped = take_dropped();
-            cancel_guard.0 = dropped;
-            if dropped > 0 {
-                send(tx, &mut seq, MsgType::Dropped, &Dropped { count: dropped }).await;
-            }
-        } else {
-            send_payload(tx, &mut seq, msg_type, &payload[..len]).await;
+            .await;
+            // Hold STOP off across the burst so the DMA write completes (redundant with the RX ring's
+            // stop refcount, see `writer_loop`; kept so the TX path is self-contained).
+            let guard = WakeGuard::new(StopMode::Stop1);
+            // Count this dequeued item as dropped if the writer is cancelled (USB unplug via the
+            // manager's `select3`) before it is handed to the link; this keeps the host's Dropped
+            // accounting exact even for the "never dropped" backpressured producers. Disarmed once
+            // the item's bytes are written into the link (the UART ring, the USB endpoint).
+            let mut cancel_guard = OnCancelDrop(1);
+            let frame = if msg_type == MsgType::Dropped {
+                // The placeholder queued where messages went missing: report every drop counted so
+                // far right here, so the host shows the marker at the gap, not before the backlog.
+                let dropped = take_dropped();
+                cancel_guard.0 = dropped;
+                if dropped > 0 {
+                    Frame::new(&mut seq, MsgType::Dropped, &Dropped { count: dropped })
+                } else {
+                    None
+                }
+            } else {
+                Frame::from_payload(&mut seq, msg_type, &payload[..len])
+            };
+            (frame, guard, cancel_guard)
+        };
+        // Moved into the `if let`, so the frame is held across this write only: a buffer held
+        // across two awaits (the drain below as well) is laid out apart from every other state of
+        // the future, the Hello's frame included.
+        if let Some(frame) = frame {
+            tx.write(frame.bytes()).await;
         }
-        cancel_guard.0 = 0; // item's bytes are in the UART ring, not a drop
+        cancel_guard.0 = 0; // item's bytes are in the link, not a drop
         // Drain the ring (still under the guard) before idling, so the frames actually
         // leave the wire rather than sitting in the buffer when STOP is next allowed.
         // Bounded: an unbounded flush can lose its TC flag to the RX ring's status
         // sweep and park the writer (and the whole console) forever (see
         // `flush_bounded`).
-        flush_bounded(tx).await;
+        tx.drain().await;
     }
 }
 
 /// Read `rx` and route decoded frames (until cancelled): shell frames go to [`SHELL_RX`], a
 /// console-owned channel the shell drains on its own task. Owning RX here (instead of the
 /// shell owning it) is what lets the console be torn down and rebuilt across USB plug/unplug.
-async fn rx_loop(rx: &mut RingBufferedUartRx<'static>) {
+async fn rx_loop(rx: &mut impl LinkRx) {
     let mut dec = FrameDecoder::new();
+    // 64 bytes: also exactly one CDC-ACM packet on the rev 1.3 board (a packet read needs room for
+    // a whole max-size packet).
     let mut buf = [0u8; 64];
     loop {
-        let n = match rx.read(&mut buf).await {
-            Ok(n) => n,
-            Err(_) => continue,
+        let Some(n) = rx.read(&mut buf).await else {
+            continue;
         };
         for &b in &buf[..n] {
             if let Some(inner) = dec.push(b) {
@@ -743,30 +855,49 @@ pub fn mgmt_try_next() -> Option<Vec<u8, RX_COPY>> {
     MGMT_RX.try_receive().ok()
 }
 
-/// Encode `payload` with the next `seq` and write it over the buffered UART (the caller
-/// holds a `WakeGuard` for the burst). An encode failure (payload over budget) is
-/// counted as a drop rather than silently lost. The writer's own frames (`Hello`, `Dropped`);
-/// queued messages are already encoded ([`send_payload`]).
-async fn send<T: Serialize>(tx: &mut UartTx<'static, Async>, seq: &mut u16, msg_type: MsgType, payload: &T) {
-    let mut buf = [0u8; MAX_WIRE];
-    match encode_frame(msg_type, *seq, payload, &mut buf) {
-        Ok(n) => {
-            *seq = seq.wrapping_add(1);
-            let _ = tx.write(&buf[..n]).await;
-        }
-        Err(_) => bump_dropped(),
-    }
+/// One wire frame (COBS + CRC + header around a postcard payload), ready for the link. The
+/// writer frames a message before it awaits the write, so it never holds the message and its
+/// frame at once (see [`writer_loop`]).
+struct Frame {
+    buf: [u8; MAX_WIRE],
+    len: usize,
 }
 
-/// [`send`] for a payload that is already postcard-encoded (a message popped from [`TX`]).
-async fn send_payload(tx: &mut UartTx<'static, Async>, seq: &mut u16, msg_type: MsgType, payload: &[u8]) {
-    let mut buf = [0u8; MAX_WIRE];
-    match encode_frame_bytes(msg_type, *seq, payload, &mut buf) {
-        Ok(n) => {
-            *seq = seq.wrapping_add(1);
-            let _ = tx.write(&buf[..n]).await;
+impl Frame {
+    /// Frame `payload` as `msg_type` with the next `seq`. An encode failure (payload over budget)
+    /// is counted as a drop rather than silently lost, and yields `None`. The writer's own frames
+    /// (`Hello`, `Dropped`); queued messages are already encoded ([`Frame::from_payload`]).
+    fn new<T: Serialize>(seq: &mut u16, msg_type: MsgType, payload: &T) -> Option<Self> {
+        let mut buf = [0u8; MAX_WIRE];
+        Self::done(seq, encode_frame(msg_type, *seq, payload, &mut buf).ok(), buf)
+    }
+
+    /// [`Frame::new`] for a payload that is already postcard-encoded (a message popped from [`TX`]).
+    fn from_payload(seq: &mut u16, msg_type: MsgType, payload: &[u8]) -> Option<Self> {
+        let mut buf = [0u8; MAX_WIRE];
+        Self::done(
+            seq,
+            encode_frame_bytes(msg_type, *seq, payload, &mut buf).ok(),
+            buf,
+        )
+    }
+
+    /// Take the next `seq` for an encoded frame of `len` bytes, or count the failed one as a drop.
+    fn done(seq: &mut u16, len: Option<usize>, buf: [u8; MAX_WIRE]) -> Option<Self> {
+        match len {
+            Some(len) => {
+                *seq = seq.wrapping_add(1);
+                Some(Self { buf, len })
+            }
+            None => {
+                bump_dropped();
+                None
+            }
         }
-        Err(_) => bump_dropped(),
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
     }
 }
 

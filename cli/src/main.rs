@@ -31,6 +31,7 @@ mod mgmt;
 mod port;
 mod render;
 mod session;
+mod target;
 mod term;
 mod tui;
 
@@ -44,6 +45,7 @@ use session::{
     read_response, read_response_gated, read_some, request_completions, request_completions_gated,
     result_tag,
 };
+use target::Target;
 use term::sanitize_line;
 
 // ---- exit-code contract ---------------------------------------------------
@@ -264,7 +266,7 @@ enum Cmd {
         #[arg(long)]
         reset: bool,
     },
-    /// Flash a raw firmware `.bin` over the STM32 UART bootloader.
+    /// Flash a raw firmware `.bin` over the STM32 bootloader (UART, or USB DFU on a Core Module r1).
     Flash {
         /// Path to the raw firmware `.bin`.
         file: PathBuf,
@@ -277,14 +279,15 @@ enum Cmd {
         /// Do not reset/jump into the application after flashing.
         #[arg(long)]
         no_run: bool,
-        /// Use the bootloader Go command instead of a hardware reset to start the app.
+        /// Use the bootloader Go command instead of a hardware reset to start the app (USB DFU
+        /// always starts it that way).
         #[arg(long)]
         go: bool,
         /// Print bootloader connect diagnostics.
         #[arg(short, long)]
         verbose: bool,
     },
-    /// Erase the entire device flash over the STM32 UART bootloader.
+    /// Erase the entire device flash over the STM32 bootloader (UART, or USB DFU on a Core Module r1).
     Erase {
         /// Print bootloader connect diagnostics.
         #[arg(short, long)]
@@ -355,7 +358,14 @@ fn main() -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             eprintln!("[tower] error: {e:#}");
-            if cfg!(target_os = "linux") && permission_denied(&e) {
+            if cfg!(target_os = "linux") && usb_permission_denied(&e) {
+                eprintln!(
+                    "[tower] hint: allow your user to open the STM32 DFU bootloader with a udev rule, e.g. \
+                     /etc/udev/rules.d/50-stm32-dfu.rules containing \
+                     SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"0483\", ATTRS{{idProduct}}==\"df11\", TAG+=\"uaccess\" \
+                     (then `sudo udevadm control --reload` and replug)"
+                );
+            } else if cfg!(target_os = "linux") && permission_denied(&e) {
                 eprintln!(
                     "[tower] hint: the serial port belongs to the `dialout` group (`uucp` on Arch): \
                      `sudo usermod -aG dialout $USER`, then log out and back in"
@@ -381,6 +391,17 @@ fn permission_denied(e: &anyhow::Error) -> bool {
                 c.downcast_ref::<tower_flasher::error::Error>(),
                 Some(tower_flasher::error::Error::Io(e)) if e.kind() == PermissionDenied
             )
+    })
+}
+
+/// Whether any cause in `e` is a USB device the user may not open (the DFU bootloader).
+fn usb_permission_denied(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<tower_flasher::error::Error>(),
+            Some(tower_flasher::error::Error::Usb { source, .. })
+                if source.kind() == std::io::ErrorKind::PermissionDenied
+        )
     })
 }
 
@@ -956,13 +977,13 @@ fn monitor(port: Option<String>, hex: bool, reset: bool) -> Result<()> {
     }
 }
 
-// ---- firmware: flash / erase / reset / chip (STM32 UART bootloader, via tower-flasher) ----
+// ---- firmware: flash / erase / reset / chip (STM32 ROM bootloader, via tower-flasher) ----
 //
-// The console protocol above runs over the firmware's framed UART link; these
-// commands instead drive the STM32 system bootloader (toggling NRST/BOOT0 over
-// the bridge's RTS/DTR). The whole bootloader engine is the `tower-flasher` crate; we
-// only pick the port (reusing the same auto-detect as the other commands) and
-// hand off to it.
+// The console protocol above runs over the firmware's framed link; these commands instead
+// drive the STM32 system bootloader: its UART protocol behind the board's USB-UART bridge
+// (toggling NRST/BOOT0 over the bridge's RTS/DTR), or its USB DFU protocol on a Core Module
+// r1.x, which has no bridge (`target` picks which, and reboots a running r1 into DFU). The
+// whole bootloader engine is the `tower-flasher` crate; we only pick the target and hand off.
 
 fn flash_cmd(
     port: Option<String>,
@@ -973,7 +994,6 @@ fn flash_cmd(
     go: bool,
     verbose: bool,
 ) -> Result<()> {
-    let port = pick_port(port)?;
     let fw = tower_flasher::firmware::load(&file)?;
     if fw.len() as u32 > tower_flasher::target::MAX_FLASH_SIZE {
         bail!(
@@ -982,12 +1002,13 @@ fn flash_cmd(
             tower_flasher::target::MAX_FLASH_SIZE / 1024
         );
     }
+    let target = target::pick(port, target::Entry::Erasing)?;
     eprintln!(
-        "[tower] flashing {} ({} bytes) to {port}",
+        "[tower] flashing {} ({} bytes) to {}",
         file.display(),
-        fw.len()
+        fw.len(),
+        target.label()
     );
-    let mut sp = tower_flasher::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
     // tower-flasher's FlashOptions is #[non_exhaustive] (a new option won't break us): start from
     // Default and override. `verbose` moved out of the options into the progress sink below.
     let mut opts = tower_flasher::flash::FlashOptions::default();
@@ -997,8 +1018,24 @@ fn flash_cmd(
     opts.go = go;
     let mut report = flash_progress(verbose);
     let start = Instant::now();
-    tower_flasher::flash::flash(&mut sp, &fw, &opts, &mut report)
-        .map_err(|e| boot_err(e, "flashing firmware"))?;
+    match &target {
+        Target::Serial(port) => {
+            let mut sp = tower_flasher::port::Port::open(port).with_context(|| format!("opening {port}"))?;
+            tower_flasher::flash::flash(&mut sp, &fw, &opts, &mut report)
+                .map_err(|e| boot_err(e, "flashing firmware"))?;
+        }
+        Target::Dfu { device } => {
+            let mut dfu = target::open_dfu(device)?;
+            if let Err(e) = tower_flasher::dfu::flash(&mut dfu, &fw, &opts, &mut report) {
+                return Err(dfu_err(e, "flashing firmware"));
+            }
+            if !run {
+                eprintln!(
+                    "[tower] the board stays in its DFU bootloader (`tower reset` starts the application)"
+                );
+            }
+        }
+    }
     // A ~45 s flash prints only live progress above; without a terminal line the caller
     // can't tell success from a hang, so always confirm completion.
     eprintln!(
@@ -1010,15 +1047,43 @@ fn flash_cmd(
 }
 
 fn erase_cmd(port: Option<String>, verbose: bool) -> Result<()> {
-    let port = pick_port(port)?;
-    eprintln!("[tower] erasing {port}");
-    let mut sp = tower_flasher::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
+    let target = target::pick(port, target::Entry::Erasing)?;
+    eprintln!("[tower] erasing {}", target.label());
     let mut report = flash_progress(verbose);
-    let pages =
-        tower_flasher::flash::erase(&mut sp, &mut report).map_err(|e| boot_err(e, "erasing flash"))?;
-    eprintln!("[tower] erased {pages} page(s), reset into application");
+    match &target {
+        Target::Serial(port) => {
+            let mut sp = tower_flasher::port::Port::open(port).with_context(|| format!("opening {port}"))?;
+            let pages = tower_flasher::flash::erase(&mut sp, &mut report)
+                .map_err(|e| boot_err(e, "erasing flash"))?;
+            eprintln!("[tower] erased {pages} page(s), reset into application");
+        }
+        Target::Dfu { device } => {
+            let mut dfu = target::open_dfu(device)?;
+            let pages = match tower_flasher::dfu::erase(&mut dfu, &mut report) {
+                Ok(pages) => pages,
+                Err(e) => return Err(dfu_err(e, "erasing flash")),
+            };
+            eprintln!(
+                "[tower] erased {pages} page(s); the board stays in its DFU bootloader, ready for `tower flash`"
+            );
+        }
+    }
     Ok(())
 }
+
+/// A tower-flasher DFU error of `flash` / `erase` as [`boot_err`] words it. The board stays in
+/// its DFU bootloader, where a re-run finds it at once.
+fn dfu_err(e: tower_flasher::error::Error, context: &'static str) -> anyhow::Error {
+    if matches!(e, tower_flasher::error::Error::ReadoutProtected { .. }) {
+        return anyhow!(DFU_READOUT_PROTECTED_HINT);
+    }
+    eprintln!("[tower] the board is left in its DFU bootloader; re-run the command to retry");
+    boot_err(e, context)
+}
+
+/// [`READOUT_PROTECTED_HINT`] for a board reached over USB DFU, where `tower unprotect` (UART
+/// only) cannot go.
+const DFU_READOUT_PROTECTED_HINT: &str = "this board is readout-protected; removing the protection      erases it (flash + EEPROM) and is done over the UART bootloader (`tower unprotect`), which is not      available over USB DFU";
 
 /// What `tower flash` / `tower erase` say about a readout-protected board, instead of the
 /// library's generic description: the board can be opened again, but only by erasing it.
@@ -1042,7 +1107,10 @@ fn boot_err(e: tower_flasher::error::Error, context: &'static str) -> anyhow::Er
 /// data goes to stdout (one `Label   : value` line each, script-friendly); status lines go to
 /// stderr.
 fn chip_cmd(port: Option<String>, verbose: bool) -> Result<()> {
-    let port = pick_port(port)?;
+    let port = match target::pick(port, target::Entry::Refuse)? {
+        Target::Serial(port) => port,
+        Target::Dfu { device } => return dfu_chip_cmd(&device, verbose),
+    };
     eprintln!("[tower] reading chip info on {port} (enters the bootloader, then restores the app)");
     let mut sp = tower_flasher::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
     // Connect diagnostics only with --verbose; the id is printed from the result below.
@@ -1071,6 +1139,51 @@ fn chip_cmd(port: Option<String>, verbose: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `tower chip` over USB DFU: the memory layout, the bootloader version and the protection state
+/// ([`tower_flasher::dfu::info`]), read-only. DfuSe has no product id; the layout says which
+/// flash the bootloader serves. The board was put into DFU by hand and stays there (`tower reset`
+/// leaves it; it is usually about to be flashed).
+fn dfu_chip_cmd(device: &tower_flasher::dfu::DeviceInfo, verbose: bool) -> Result<()> {
+    let mut dfu = target::open_dfu(device)?;
+    let mut report = |p: tower_flasher::flash::Progress| {
+        if verbose {
+            eprintln!("[tower] {p:?}");
+        }
+    };
+    let info = tower_flasher::dfu::info(&mut dfu, &mut report).context("reading chip info")?;
+    print!(
+        "{}",
+        dfu_chip_report(&format!("dfu:{}", device.location()), &info)
+    );
+    eprintln!("[tower] the board stays in its DFU bootloader (`tower reset` starts the application)");
+    if info.readout_protected {
+        eprintln!("[tower] readout-protected: `tower flash` / `tower erase` refuse this board");
+    }
+    Ok(())
+}
+
+/// The `tower chip` stdout block for a DFU bootloader.
+fn dfu_chip_report(location: &str, info: &tower_flasher::dfu::DfuInfo) -> String {
+    let pages = info
+        .layout
+        .segments
+        .iter()
+        .map(|s| format!("{} x {} B", s.pages, s.page_size))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    format!(
+        "Device  : {location} (STM32 USB DFU bootloader)\nFlash   : {}, {} KiB at 0x{:08X} ({pages} pages)\n{}\
+         BL ver  : {}.{} (transfer {} B)\n",
+        info.layout.name,
+        info.layout.size() / 1024,
+        info.layout.start(),
+        readout_line(info.readout_protected),
+        info.bootloader_version >> 12,
+        (info.bootloader_version >> 8) & 0xF,
+        info.transfer_size
+    )
 }
 
 /// The `Readout : ...` line of `tower chip` (and of `protect` / `unprotect`, after the
@@ -1129,6 +1242,18 @@ fn unprotect_notice(port: &str) -> String {
          \n\
          Type \"erase\" to erase and unprotect this board: "
     )
+}
+
+/// `tower protect` / `unprotect` run over the UART bootloader only: a Core Module r1 USB console
+/// leads to the USB DFU bootloader, over which the protection is never changed.
+fn refuse_native_usb(port: &str) -> Result<()> {
+    if port::is_native_usb_console(port)? {
+        bail!(
+            "{port} is a Core Module r1 (USB console, no UART bridge): readout protection is set and removed \
+             over the UART bootloader only, never over USB DFU"
+        );
+    }
+    Ok(())
 }
 
 /// Refuse a protection change that cannot be confirmed: without `--yes`, stdin must be a
@@ -1197,6 +1322,7 @@ fn protect_cmd(port: Option<String>, yes: bool, verbose: bool) -> Result<()> {
     use std::io::IsTerminal;
     confirmation_gate(yes, std::io::stdin().is_terminal(), "enable readout protection")?;
     let port = pick_port(port)?;
+    refuse_native_usb(&port)?;
     if !yes {
         confirm(&protect_notice(&port), "yes")?;
     }
@@ -1230,6 +1356,7 @@ fn unprotect_cmd(port: Option<String>, yes: bool, verbose: bool) -> Result<()> {
         "remove readout protection (which erases the board)",
     )?;
     let port = pick_port(port)?;
+    refuse_native_usb(&port)?;
     if !yes {
         confirm(&unprotect_notice(&port), "erase")?;
     }
@@ -1324,6 +1451,9 @@ fn flash_progress(verbose: bool) -> impl FnMut(tower_flasher::flash::Progress) {
         }
         match p {
             Progress::ChipIdentified { id } => eprintln!("[tower] chip 0x{id:03x}"),
+            Progress::DfuLayout { name, flash_size } => {
+                eprintln!("[tower] DFU: {name}, {} KiB", flash_size / 1024)
+            }
             Progress::Erase {
                 pages_done,
                 pages_total,
@@ -1377,7 +1507,38 @@ fn flash_progress(verbose: bool) -> impl FnMut(tower_flasher::flash::Progress) {
 }
 
 fn reset_cmd(port: Option<String>, bootloader: bool) -> Result<()> {
-    let port = pick_port(port)?;
+    // A DFU bootloader has no reset line: "reset into the application" is leaving DFU, and it
+    // is already the bootloader. A Core Module r1 USB console takes the line pulses below (its
+    // firmware mirrors the r2 reset circuit), so it stays a serial target here.
+    let port = match target::pick(port, target::Entry::Console)? {
+        Target::Serial(port) => port,
+        Target::Dfu { device } => {
+            let location = device.location();
+            if bootloader {
+                eprintln!("[tower] dfu:{location} is the bootloader already");
+            } else {
+                target::open_dfu(&device)?
+                    .leave()
+                    .context("leaving DFU into the application")?;
+                eprintln!("[tower] dfu:{location} left DFU into the application");
+            }
+            return Ok(());
+        }
+    };
+    if bootloader && port::is_native_usb_console(&port)? {
+        // The console reboots in the middle of the sequence (see `target::request_bootloader`);
+        // whether it worked is whether its DFU bootloader appears.
+        let before: Vec<String> = target::list_or_warn().iter().map(|d| d.location()).collect();
+        let _ = target::request_bootloader(&port)?;
+        let dfu = target::wait_for_new_dfu(&before, &port)?;
+        eprintln!(
+            "[tower] {port} reset into its USB DFU bootloader, dfu:{}; the start of its application was \
+             erased on the way (a Core Module r1 enters it from the application no other way), so it \
+             starts again only once flashed (`tower flash`)",
+            dfu.location()
+        );
+        return Ok(());
+    }
     let mut sp = tower_flasher::port::Port::open(&port).with_context(|| format!("opening {port}"))?;
     if bootloader {
         sp.reset_into_bootloader().context("resetting into bootloader")?;
@@ -2266,6 +2427,25 @@ mod tests {
             "Device  : /dev/ttyUSB0 @ 115200 baud, 8E1\n\
              Chip id : 0x447 (STM32L07x/L08x (e.g. STM32L083CZ))\n\
              Readout : protected (RDP level 1)\n"
+        );
+    }
+
+    /// `tower chip` over USB DFU: the layout stands in for the chip id (DfuSe has none), and the
+    /// bootloader version is the high byte of `bcdDevice`.
+    #[test]
+    fn dfu_chip_report_lines() {
+        let info = tower_flasher::dfu::DfuInfo {
+            layout: tower_flasher::dfu::Layout::parse("@Internal Flash  /0x08000000/1536*128 g").unwrap(),
+            transfer_size: 2048,
+            bootloader_version: 0x2200,
+            readout_protected: false,
+        };
+        assert_eq!(
+            dfu_chip_report("dfu:1-2", &info),
+            "Device  : dfu:1-2 (STM32 USB DFU bootloader)\n\
+             Flash   : Internal Flash, 192 KiB at 0x08000000 (1536 x 128 B pages)\n\
+             Readout : not protected\n\
+             BL ver  : 2.2 (transfer 2048 B)\n"
         );
     }
 

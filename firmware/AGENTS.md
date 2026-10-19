@@ -29,6 +29,14 @@ no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`,
   of lib + apps + examples, the RAM budget, clippy + the five role-feature variants, role
   builds, rustdoc, and the `examples`/`apps` list drift check. `just check` is the MCU build
   alone.
+- **Two boards.** The default build is the Core Module r2 (FT231X bridge, console on USART1,
+  `VBUS_SENSE` on PA12). Feature `core-module-r1` builds for the first Core Module (rev 1.3:
+  native USB on PA11/PA12, no bridge): the console becomes a USB CDC-ACM port (`console::usb`,
+  host found by a pulse of the USB D+ pull-up, reset emulation over DTR/RTS, `sysboot` for the
+  ROM bootloader's USB DFU, which it enters by erasing the first page of each flash bank: the
+  L07x/L08x bootloader returns to valid code otherwise); everything else is shared. `just ci` builds, lints, documents and RAM-checks both
+  (`check-r1`, the r1 lines of `ram-budget` / `clippy` / `doc`); keep both green. Design and
+  limits: `docs/console.md`, "Core Module rev 1.3 (native USB)".
 - Host tests: the firmware itself is `no_std` and can't `cargo test`; its logic is tested
   through the shared crates it builds on. `just test` here (or `just fw test` from the repo
   root) runs those crates' host tests (`tower-protocol`, `tower-kv`, `tower-net`, `tower-radio`,

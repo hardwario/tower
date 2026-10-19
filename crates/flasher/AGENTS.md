@@ -1,15 +1,18 @@
 # tower-flasher: working notes for coding agents
 
-Library that drives the STM32 ROM UART bootloader (AN3155) of STM32L0 parts (the TOWER Core
-Module / Radio Dongle's STM32L083CZ): flash / erase / verify, read-only chip info, the opt-in
-readout protection (RDP level 1) of production units, and the NRST/BOOT0 reset pulses.
+Library that drives the STM32 ROM bootloader of STM32L0 parts (the TOWER Core Module / Radio
+Dongle's STM32L083CZ): over UART (AN3155) flash / erase / verify, read-only chip info, the opt-in
+readout protection (RDP level 1) of production units, and the NRST/BOOT0 reset pulses; over USB
+DFU (AN3156, the `dfu` module, for the Core Module r1.x that has no USB-UART bridge) flash /
+erase / verify / chip info.
 `crates/flasher` in the hardwario/tower monorepo (read the root `AGENTS.md` first). Modules
 (`src/lib.rs`): `bootloader` (the AN3155 protocol engine), `chip` (`chip::info`, read-only
 `ChipInfo` incl. `readout_protected`), `error`, `firmware` (raw image load + validation), `flash`
 (connect / flash / erase orchestration), `port` (the serial port + reset pulses), `rdp`
 (`rdp::protect` / `rdp::unprotect` and the protection probe; its module docs hold the RM0367 /
-AN3155 / AN2606 facts with citations), `target` (STM32L0 constants). User-facing docs are in
-`README.md`.
+AN3155 / AN2606 facts with citations), `target` (STM32L0 constants), `dfu` (the DfuSe engine and
+its memory-layout parser; `dfu/usb.rs` the nusb transport, `dfu/fake.rs` the simulated bootloader
+of its tests; the module docs hold the AN3156 facts). User-facing docs are in `README.md`.
 
 Its front end is the `tower` CLI (`tower flash` / `erase` / `reset` / `chip` / `protect` /
 `unprotect` / `devices`).
@@ -65,6 +68,19 @@ are updated).
   on hardware. `flash::connect` doubles the BOOT0 hold on each retry (50 ms up to
   `BOOT_RELEASE_HOLD_MAX`, 400 ms); the line sequence is pinned by a test.
 - Ports are opened exclusively (TIOCEXCL + flock).
+- **USB DFU keeps the same rules** (`src/dfu.rs`): only the alternate setting whose layout is the
+  main flash at `0x0800_0000` is selected (`Layout::check_main_flash`), and `Dfu::erase_page` /
+  `Dfu::write` / `Dfu::read` refuse anything outside it; only Set Address Pointer and the page
+  Erase with an address are ever built (no mass erase, no Read Unprotect `0x92`; a test scans the
+  source and the fake panics on any other command); the first transfer block (vector table) is
+  written last; the protection probe (`Dfu::readout_protected`: `errVENDOR` on a read of the flash
+  base, AN3156 4.1) runs before anything is modified and only `errVENDOR` counts as protected;
+  readout protection is never changed over DFU. Unlike the UART path the board is left in the
+  bootloader on failures (no reset line; restarting it costs a manual re-entry): only a successful
+  `dfu::flash` with `run` leaves DFU. `Dfu::leave` polls until the device is off the bus and
+  nudges the STM32L0's bootloader with a refused `DFU_ABORT` when it lingers in `dfuMANIFEST`
+  (seen on hardware); don't drop that. Verified on a rev 1.3 Core Module (2026-10-19): layout
+  `1536 x 128 B`, transfer 2048 B, bootloader v2.2.
 
 ## Checks
 
@@ -78,8 +94,9 @@ cargo test -p tower-flasher
 
 The tests need no hardware (a scripted fake port drives `flash`, `erase`, `chip::info`,
 `rdp::protect` and `rdp::unprotect` end to end; `src/fake_stm32.rs` is a stateful simulated
-STM32L0 with fault injection for the wire-exact flash tests). Never open a real serial port,
-flash a board or change its protection unless the user asks.
+STM32L0 with fault injection for the wire-exact flash tests; `src/dfu/fake.rs` simulates the
+DfuSe bootloader for `dfu`). Never open a real serial port or USB device, flash a board or
+change its protection unless the user asks.
 
 ## Writing style
 

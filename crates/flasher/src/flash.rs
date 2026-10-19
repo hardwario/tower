@@ -32,6 +32,10 @@ pub enum Progress {
     ConnectError { attempt: u32, of: u32, error: String },
     /// The chip reported product id `id` (via `Get ID`).
     ChipIdentified { id: u16 },
+    /// The USB DFU bootloader's flash interface was found ([`crate::dfu`]): the name of its memory
+    /// layout and the size of the main flash it describes. The DFU path's counterpart of
+    /// [`ChipIdentified`](Self::ChipIdentified), as DfuSe has no `Get ID`.
+    DfuLayout { name: String, flash_size: u32 },
     /// Erase progress: `pages_done` of `pages_total` pages erased.
     Erase { pages_done: usize, pages_total: usize },
     /// Write progress: `bytes_done` of `bytes_total` bytes written.
@@ -105,7 +109,7 @@ fn pages_for_length(length: usize, max_pages: usize) -> usize {
 /// without noticing. Also rejects an image larger than the family maximum
 /// [`target::MAX_FLASH_SIZE`] (the real per-part flash may be smaller; that is
 /// checked by [`check_fits_chip`] once `Get ID` has identified the part).
-fn check_firmware_len(len: usize) -> Result<()> {
+pub(crate) fn check_firmware_len(len: usize) -> Result<()> {
     if len == 0 {
         return Err(Error::InvalidArgument {
             context: "firmware image is empty (nothing to flash)",
@@ -376,7 +380,7 @@ fn refuse_if_protected(
 
 /// Pad `chunk` up to a multiple of `align` with 0xFF. The pad bytes lie past the image and
 /// are never read back.
-fn pad_block(chunk: &[u8], align: usize) -> Vec<u8> {
+pub(crate) fn pad_block(chunk: &[u8], align: usize) -> Vec<u8> {
     let mut buf = chunk.to_vec();
     while !buf.len().is_multiple_of(align) {
         buf.push(0xFF);

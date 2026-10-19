@@ -17,6 +17,11 @@ Dongle** and the **TOWER Core Module**. On other boards, enter the bootloader ma
 Flash size is not assumed: a full-chip erase adapts to the connected part's density, so the
 whole STM32L0 range (16-192 KiB) is supported.
 
+The **Core Module r1.x** (the 2016 board) has no USB-UART bridge: its STM32 USB pins go straight
+to the connector. For it the crate also speaks the ROM bootloader's **USB DFU** protocol (ST
+AN3156, the `dfu` module): flash / erase / verify / chip info, with the same safety rules (see
+[USB DFU](#usb-dfu)).
+
 ## Front end
 
 The `tower` CLI drives the engine: `tower flash <bin> [--no-erase] [--no-verify] [--no-run]
@@ -26,7 +31,10 @@ and `tower protect` / `tower unprotect` (RDP level 1 on and off, see
 [Readout protection](#readout-protection)); `tower monitor --hex` dumps the raw serial bytes.
 
 Every serial-port `tower` command takes `-d/--device`, or auto-detects the port when exactly one
-USB serial device is present (see `cli/`). Install the CLI from the repo root with
+USB serial device is present (see `cli/`). `tower flash` / `erase` / `chip` / `reset` also reach
+a USB DFU bootloader: one attached is picked without `-d` (`-d dfu:<location>` picks one of
+several, as `tower devices` lists them), and a Core Module r1 running TOWER firmware is rebooted
+into it over its USB console first. Install the CLI from the repo root with
 `cargo install --locked --path cli` (or `just install-cli`).
 
 ## Library
@@ -126,6 +134,41 @@ chunk to find the exact density limit and erases every valid page below it (rath
 dropping the whole chunk and leaving up to 79 pages un-erased). A NACK to the erase *command
 byte* itself (line corruption) is treated as an error, not as the flash boundary.
 
+## USB DFU
+
+`dfu` drives the STM32 ROM bootloader's USB DFU interface (`0483:df11`, ST's DfuSe extensions of
+DFU 1.1a, AN3156) through [nusb](https://crates.io/crates/nusb) (pure Rust: no libusb).
+`dfu::list` finds the bootloaders attached, `dfu::Dfu::open` selects the alternate setting whose
+DfuSe memory layout is the main flash (`@Internal Flash /0x08000000/...`), and `dfu::flash`,
+`dfu::erase` and `dfu::info` mirror the UART entry points:
+
+- **Entering it:** hold BOOT, press and release RESET, release BOOT. TOWER firmware built for the
+  Core Module r1 (the SDK's `core-module-r1` feature) mirrors the r2 auto-reset circuit on its USB
+  CDC console's control lines, so `Port::reset_into_bootloader` on that port reboots it into the
+  ROM bootloader; the `tower` CLI does that by itself.
+- **Main flash only:** only the main-flash alternate setting is selected (the data EEPROM and the
+  option bytes are other alternate settings), and every erase and write is checked against its
+  layout and the 192 KiB maximum before it is sent. Only two DfuSe commands are ever built: Set
+  Address Pointer and the page Erase, always with an address. No mass erase, no Read Unprotect
+  (both would also reach the data EEPROM), and a test pins that.
+- **Vector table last**, as on the UART path: the first transfer block (2048 bytes) is written
+  after the rest is written and verified.
+- **Protection:** a read of 4 bytes at `0x0800_0000` before anything is modified. A protected
+  chip stalls it and reports `errVENDOR` (AN3156 4.1, Figure 4), which is
+  `Error::ReadoutProtected`; any other failure is an error. Protection is never changed over DFU.
+- **Where the board is left:** in the bootloader on every path except a successful `flash` with
+  `FlashOptions::run`, which leaves DFU into the new application (AN3156 5.5: a jump to the reset
+  vector, not a reset; the TOWER SDK resets the core when it finds itself started that way). There
+  is no reset line to restart the application on a failure, and a board put into DFU by hand would
+  need the buttons again for the retry. `Dfu::leave` starts the application; it waits for the
+  device to drop off the bus, nudging the STM32L0's bootloader, which can linger in `dfuMANIFEST`,
+  with a request it refuses.
+- **Verified** on a rev 1.3 Core Module (macOS): an `Internal Flash` layout of 1536 pages of
+  128 B at `0x0800_0000`, transfer 2048 B, bootloader v2.2; a 94 KB image in ~30 s, 174 KB in
+  ~55 s, a full erase in ~21 s.
+- **Access:** Linux needs a udev rule for `0483:df11` (the CLI prints one); Windows needs the
+  WinUSB driver bound to the device (e.g. with Zadig); macOS needs nothing.
+
 ## Readout protection
 
 TOWER dev boards stay **open** (RDP level 0). For production units, readout protection level 1
@@ -176,7 +219,10 @@ point sends Readout Protect / Unprotect). A simulated STM32L0 (`src/fake_stm32.r
 erases to 0x00 and refuses to program a non-erased byte, checksum and bounds checks, RDP, the
 NRST/BOOT0 lines, injectable NACKs and timeouts) runs `flash`, `erase` and the protection
 changes end to end and pins every Write Memory and Read Memory on the wire, the vector-table
-block last.
+block last. A simulated DfuSe bootloader (`src/dfu/fake.rs`: the DFU state machine, commands and
+writes executed on `DFU_GETSTATUS`, the same zero-erased flash, RDP, injectable faults) drives
+`dfu::flash`, `dfu::erase` and `dfu::info` the same way, and the layout parser is tested on
+STM32L0, F0 and F4 strings.
 Linux builds need `libudev-dev` + `pkg-config` (the `serialport` dependency).
 
 ## License

@@ -52,6 +52,11 @@ The link is **always framed** (binary COBS frames). A plain serial terminal (`sc
 `minicom`, or any raw monitor) shows gibberish; use the `tower` CLI (`tower logs`),
 which decodes the frames.
 
+That is the Core Module r2 (and the Radio Dongle), the default build. The first Core Module,
+**rev 1.3**, has no USB-UART bridge: build with `--features core-module-r1` and the same framed
+console runs over a USB CDC-ACM serial port on the STM32's own USB; see *Core Module rev 1.3
+(native USB)* below.
+
 ## Quick start
 
 ```sh
@@ -178,6 +183,93 @@ runs before the app's console.)
 - **Host reports a `seq` gap on re-plug** → should not occur: the writer's `seq` resets
   per USB session and `tower` resets its per-link `seq` tracking when it decodes the fresh
   `Hello`.
+
+### Core Module rev 1.3 (native USB)
+
+The first Core Module (BigClown rev 1.x, the 2016 "CORE MODULE rev 1.3" schematic) has no
+USB-UART bridge and no NRST/BOOT0 wiring to the host: its micro-USB D-/D+ go straight to the
+STM32's USB on **PA11/PA12** (through 33 Ω, with a TPD2E001 ESD array and 47 pF at the
+connector), and the board has RESET and BOOT buttons. Everything else (radio, sensors, button
+PA8, LED PH1, strip, I2C) is wired as on r2. Build for it with the feature `core-module-r1`:
+
+```sh
+TOWER_FEATURES=core-module-r1 just build app radio_push_button
+TOWER_FEATURES=core-module-r1 just flash app radio_push_button   # tower flash goes over USB DFU
+TOWER_FEATURES=core-module-r1,role-gateway just flash example net_confirmed
+```
+
+**The link.** A USB CDC-ACM serial port: VID:PID `0483:5740` (the pair the legacy TOWER SDK used
+on this board), manufacturer `HARDWARIO`, product `TOWER Core Module`, serial number
+`hio-core-module-r1-<the 96-bit unique ID in hex>`. It shows up as `/dev/ttyACM*` (Linux),
+`/dev/cu.usbmodem*` (macOS) or a `COM` port (Windows); the baud rate is ignored. The frames, the
+queue, the writer and the shell are the r2 ones (`console::usb` only supplies the link).
+
+**Console up = a program holds the port open.** While the USB device is configured and the host
+asserts DTR or RTS (opening a port does on Linux and macOS; `tower` drives both as its run
+baseline), the console is up, 100 ms later (an opening program may still be flushing its input:
+`tower` clears it 50 ms after setting its lines, which used to swallow the `Hello`), and each
+opening starts with a fresh `Hello`. While the port is
+closed the queue keeps its oldest lines (the boot backlog reaches you when you open it) and the
+newest are dropped. A program that opens the port but stops reading can't stall the app: each
+64-byte packet write gives up after 500 ms, the console goes down for the producers until the
+host reads again, and the next frame resyncs the decoder with a `0x00`.
+
+**Finding the host without VBUS.** Rev 1.3 has no VBUS line to the MCU, and simply enabling the
+USB device is not safe: its D+ pull-up held on with no cable feeds the VBUS net through the ESD
+array (whose VCC pin is on VBUS), which can switch the board's power path and assert `BAT_OFF` (a
+Battery Module then cuts its cells: a reboot loop). So a session starts only after a **pull-up
+probe** has seen a host: every 3 s, with the USB peripheral otherwise off, the transceiver is
+powered up, its 1.5 kΩ D+ pull-up goes on for ~1.5 µs, and D+ is read from `USB_FNR.RXDP`. With a
+host, its 15 kΩ pull-down only takes D+ to ~3.0 V (reads high; verified on a rev 1.3 board on a
+Mac); with no VBUS the ESD diode clamps D+ to under 1 V (reads low). The pulse is shorter than the
+2.5 µs a hub needs to register a connect, so a host never sees it. Two "present" probes 50 ms
+apart start a session; nobody configuring the device within 3 s (a charger, a sleeping host)
+ends it, and the next attempt waits 2 s, doubling to 30 s. Only a configuration counts as a host:
+the peripheral reports a bus reset of its own when it is enabled, and a suspend 3 ms later while
+the host is still debouncing the attach (seen on hardware, where it first ended every session
+after 4 ms). After the configuration, a bus suspend (the cable pulled, the host asleep) ends the
+session within a few ms.
+
+**Power.** With no host, the USB peripheral is off and the board STOPs between probes (a wake
+and a few µs of CPU every 3 s). During a session the USB clock holds the STOP refcount (WFI, like
+the r2 console's UART), the regulator stays in main mode in Sleep (the STOP tuning's `LPSDSR`
+would otherwise leave HSI48 and the transceiver on the low-power regulator), and the board runs
+from USB (the on-board LDO, with `BAT_OFF` disconnecting a Battery Module). HSI48 is trimmed to
+the host's SOF by the CRS, started per session (not through embassy's `sync_from_usb`, which
+would hold STOP off for good).
+
+**Resets and flashing.** The r2 board's bridge drives NRST/BOOT0 from RTS/DTR; rev 1.3 emulates
+that circuit in firmware from the CDC `SET_CONTROL_LINE_STATE` requests: (RTS, DTR) = (on, off)
+held at least 20 ms is "RESET", and on its release the board reboots, into the ROM bootloader if
+(off, on) ("BOOT0 high") follows within 30 ms, else into the application. So `tower reset`,
+`tower logs --reset`, `tower console --reset` and the bootloader entry of `tower flash` work on
+this board too; every reset re-enumerates the USB device (the port disappears and comes back,
+and the streaming commands follow it).
+
+Getting into the ROM bootloader from the application **erases the start of the application**
+(`sysboot`): the STM32L07x/L08x bootloader, started from software, runs its dual-bank boot check
+and jumps straight back to valid code in bank 1 (seen on hardware), and raising BOOT0 through
+PA8 (tied to the BOOT net by R3) does not outlast the software reset (C1 on NRST stretches it to
+milliseconds). So the board files a request in `.uninit` RAM, resets, erases the first page of
+each flash bank before any clock is set up, and jumps; with no valid code to return to, the
+bootloader stays and its USB DFU device (`0483:df11`) comes up. The `tower` CLI uses this only
+for the commands that rewrite the flash (`flash`, `erase`, `reset --bootloader`, which says so);
+`tower chip` asks for the buttons instead. By hand, with nothing erased: hold BOOT, press and
+release RESET, release BOOT. The DFU "leave" jumps into the new application; AN3156 (5.5) asks an
+application started that way to reset the core first, so every board restarts itself through a
+reset when it finds the bootloader's clocks still on (`__pre_init` in `sysboot`).
+
+**No live panic frame.** The panic path's blocking USART write has no USB counterpart (USB needs
+the interrupt-driven stack), so a crash is reported from the reset-surviving breadcrumb on the
+next boot (`crash` ERROR line, `system crash print`).
+
+**Verified on a rev 1.3 board (2026-10-19, macOS host):** enumeration and the framed console
+(`tower logs`, `tower exec`), the probe's "present" side, `tower reset` and `tower logs --reset`
+(re-enumeration followed), `tower flash` / `tower erase` both from DFU entered by hand and
+automatically over the console (blinky, 94 KB, and radio_push_button, 174 KB, which reaches into
+bank 2), the DFU leave into the new application. **Not yet:** the probe's "no VBUS" side and the
+battery current unplugged (a battery-powered board: the probe must read low and the board stay
+in STOP), a charger and a sleeping host (the back-off, no attach storm), Linux and Windows hosts.
 
 ### The panic path
 
@@ -718,6 +810,11 @@ the host; the crate itself is `no_std` and also builds for `thumbv6m`.) The firm
   console rebuilds), not on host connect. The TUI
   header otherwise shows the **`tower` CLI** version; the firmware version is in
   `system resource print`.
+- **Rev 1.3 (`core-module-r1`):** host detection is the pull-up probe, every 3 s (its "no VBUS"
+  side not yet measured on a battery-powered board); every reset re-enumerates the USB port;
+  entering the bootloader from the application erases the start of the application; a closed
+  port keeps the oldest queued lines; no live panic frame. See *Core Module rev 1.3 (native
+  USB)*.
 - **`VBUS_SENSE` (PA12):** the dynamic console gates on PA12 reading logic-high when USB
   is plugged. PA12 is driven by the FT231X's **CBUS3** pin (a push-pull ~3.3 V logic
   output configured in the FTDI EEPROM, e.g. `DRIVE1` on the Core Module, `SLEEP#` on the

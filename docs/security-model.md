@@ -247,6 +247,16 @@ registered address by design (an authenticated host action: the re-provision pat
   level 0, which mass-erases flash and EEPROM (keys and pairing are gone; the node must be
   re-flashed and re-paired). RDP level 2 (permanent) is unreachable from the tooling: the
   bootloader client refuses writes outside main flash, so option bytes cannot be written.
+- The USB DFU path (`crates/flasher/src/dfu.rs`, the Core Module r1.x) changes none of this: it
+  selects only the main-flash memory of the DFU bootloader (never the option bytes or the data
+  EEPROM), builds no Read Unprotect and no mass erase, and refuses a protected chip. A board in
+  its DFU bootloader (BOOT held at reset, or the r1 firmware's console reset) is as exposed as one
+  in its UART bootloader: physical access to an unprotected board reads every key either way.
+- The r1 firmware's USB console reboots into the ROM bootloader when its CDC control lines play
+  the reset-into-bootloader sequence (as the r2 bridge's lines do in hardware), erasing the first
+  page of each flash bank on the way (the L07x/L08x bootloader returns to valid code otherwise):
+  any program that may open the console may reflash the board, or leave it without a bootable
+  application, as on r2 it may reflash or erase it.
 - The MCU's 96-bit unique ID is shown for inventory only; it is public and authenticates nothing.
 
 ### 4.7 Supply chain and CI (`.github/`)

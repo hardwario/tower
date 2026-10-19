@@ -134,7 +134,10 @@ TOWER board is recognised by its USB serial number) and that serial number:
 ```
 
 On macOS each port appears once, as its `/dev/cu.*` call-out node (the `/dev/tty.*` dial-in
-twin is hidden).
+twin is hidden). A Core Module r1.x (the 2016 board, no USB-UART bridge) shows up as its
+firmware's own USB CDC console (`Core Module r1`, serial `hio-core-module-r1-<uid>`), and an STM32
+in its USB DFU bootloader as `dfu:<location>  STM32 DFU`; `-d dfu:<location>` picks it for the
+bootloader commands below.
 
 ### Gateway & MQTT bridge
 
@@ -360,7 +363,9 @@ checkout); rebuild both`.
 
 `tower` can program the device's STM32L0 over its UART bootloader (toggling
 NRST/BOOT0 through the USB-UART bridge), so a separate flashing tool isn't
-needed. The bootloader engine is the [`tower-flasher`](../crates/flasher) library:
+needed. A Core Module r1.x has no bridge; `flash`, `erase`, `chip` and `reset` reach it through
+the STM32's USB DFU bootloader instead (see [Core Module r1](#core-module-r1-usb-dfu)). The
+bootloader engine is the [`tower-flasher`](../crates/flasher) library:
 
 ```sh
 tower flash firmware.bin     # erase, write, verify, then reset into the app
@@ -392,6 +397,36 @@ The `Commands` line is what the bootloader implements, the same at every protect
 Firmware must be a raw `.bin` (convert an `.elf` with `rust-objcopy -O binary in.elf out.bin`
 from cargo-binutils, or `arm-none-eabi-objcopy`; `just fw build` does it for you). The device is auto-detected when
 exactly one USB serial device is present; otherwise pass `--device`.
+
+### Core Module r1 (USB DFU)
+
+The first Core Module (r1.x, 2016) has no USB-UART bridge: its STM32's USB pins go straight to
+the connector, next to a BOOT and a RESET button. Build its firmware with the SDK's
+`core-module-r1` feature (`TOWER_FEATURES=core-module-r1 just fw build app <name>`): the console
+then runs over USB CDC, and the board is flashed through the ROM bootloader's USB DFU interface
+(`0483:df11`, ST AN3156):
+
+- **A board running TOWER r1 firmware** needs nothing: `tower flash` sees its USB console,
+  reboots it into the DFU bootloader (the firmware mirrors the r2 reset circuit on the console's
+  control lines) and flashes it there. Getting there from the application erases the start of the
+  application (the STM32L083's bootloader, started from the application, returns to it while the
+  flash holds one), so only the commands that rewrite the flash do it: `flash`, `erase` and
+  `reset --bootloader` (which says so); `tower chip` asks for the buttons instead. `tower reset`
+  and `--reset` work on that console too; the board re-enumerates on every reset, which the
+  streaming commands follow.
+- **Any other board** (blank, other firmware): hold BOOT, press and release RESET, release BOOT.
+  The DFU bootloader is then picked without `-d` when it is the only one attached
+  (`-d dfu:<location>` otherwise, as `tower devices` lists it).
+
+`tower flash` leaves DFU into the new application when it is done (`--no-run` stays). `tower erase`
+and a failed flash leave the board in the bootloader, ready for the next `tower flash`; `tower
+chip` prints the flash layout instead of a chip id (DfuSe has none) and leaves the board in DFU.
+`tower reset` on a DFU bootloader starts the application. A 94 KB image takes ~30 s, a 174 KB
+one ~55 s (the 128-byte pages are erased one request at a time), a full erase ~21 s. Readout protection is never changed over USB DFU: `tower protect` / `unprotect` need
+the UART bootloader, and a protected r1 is refused by `flash` / `erase`.
+
+Access: macOS needs nothing; Linux needs a udev rule for `0483:df11` (on a permission error the
+CLI prints one); Windows needs the WinUSB driver bound to the DFU device (e.g. with Zadig).
 
 ### Readout protection (production units)
 

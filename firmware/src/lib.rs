@@ -8,7 +8,10 @@
 //! Blocks:
 //! - [`board`]: [`Board::take`](board::Board::take) + the [`app!`] macro: the common
 //!   one-line entry (clock, console, EXTI, radio pins, USB-aware low power).
-//! - [`console`]: serial console + `log` backend (level + uptime timestamp).
+//! - [`console`]: serial console + `log` backend (level + uptime timestamp); a USB CDC-ACM
+//!   port on the rev 1.3 board (feature `core-module-r1`).
+//! - [`sysboot`]: the ROM bootloader: the rev 1.3 board's reboot into its USB DFU, and a clean
+//!   start after the bootloader jumped to the application.
 //! - [`shell`]: RouterOS-style interactive shell + declarative EEPROM-backed settings
 //!   framework; pairs with [`console`] and the `tower` host CLI.
 //! - [`led`]: non-blocking single-LED blink dispatcher (background + instant).
@@ -37,6 +40,7 @@ pub mod shell;
 pub mod stack;
 pub mod storage;
 pub mod strip;
+pub mod sysboot;
 pub mod tmp112;
 pub mod watchdog;
 pub mod ws2812;

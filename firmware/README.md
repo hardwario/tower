@@ -23,10 +23,10 @@ Each subsystem has a guide: [`docs/console.md`](docs/console.md),
 | Button | PA8, active-high (external pull-down), EXTI |
 | I2C | I2C2, PB10/PB11 (AF6), 100 kHz; TMP112 @ `0x49`, LIS2DH12 @ `0x19` |
 | Accelerometer | LIS2DH12, INT1 → PB6 (EXTI); orientation/dice + tilt |
-| Console | USART1, TX PA9 / RX PA10, 115200 8N1; framed host↔target link (logs/events/shell), see [`docs/console.md`](docs/console.md) |
+| Console | USART1, TX PA9 / RX PA10, 115200 8N1 (behind the FT231X USB-UART bridge); framed host↔target link (logs/events/shell), see [`docs/console.md`](docs/console.md). Rev 1.3 board (`core-module-r1`): a USB CDC-ACM port on PA11/PA12 instead |
 | RGB strip | WS2812B/SK6812 on PA1 (TIM2_CH2 PWM + DMA1_CH3) |
 | EEPROM | 6 KB byte-addressable data EEPROM @ `0x0808_0000` (no erase, ~100k+ cycles) |
-| USB sense | VBUS on PA12; gates STOP (stay awake while plugged in) |
+| USB sense | VBUS on PA12; gates STOP (stay awake while plugged in). Rev 1.3 board: no VBUS line, a pulse of the USB D+ pull-up finds the host |
 | Radio | SPIRIT1 (SPSGRF), SPI1 on PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 (EXTI); EU 868 / US 915 (runtime-switchable); see [`docs/radio.md`](docs/radio.md) |
 
 ## Quick start
@@ -174,7 +174,10 @@ The radio stack adds the rest (`radio_*`, `net_*`, `crypto_*`, `edge_*`, `fhss_*
 reference apps `radio_gateway`/`radio_node` are the happy path; see the full table
 and protocol guide in [`docs/radio.md`](docs/radio.md). Two-board examples are one
 file built twice with a role feature, e.g. `TOWER_FEATURES=role-gateway just flash
-example net_confirmed`. The console examples (`console_demo`, `console_full`,
+example net_confirmed`. Every target also builds for the first Core Module (rev 1.3, native USB,
+no USB-UART bridge) with `TOWER_FEATURES=core-module-r1`; its console is then a USB CDC-ACM port
+and `tower flash` programs it over the ROM bootloader's USB DFU (see
+[`docs/console.md`](docs/console.md), "Core Module rev 1.3"). The console examples (`console_demo`, `console_full`,
 `console_panic`, `events_demo`, `shell_demo`) exercise the framed console / shell (see
 [`docs/console.md`](docs/console.md)), and three are bench/diagnostic tools: `kv_wipe`
 (factory-reset the EEPROM key-value store), `led_on` (a deliberately high-current anchor for

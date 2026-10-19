@@ -2,8 +2,10 @@
 
 The `tower` host CLI (`cli/` in the hardwario/tower monorepo; read the root `AGENTS.md` first):
 decodes the framed serial link from the TOWER firmware (logs / events / shell / TUI) and
-flashes/erases/resets/identifies the chip over the UART bootloader (`tower flash` / `erase` /
-`reset` / `chip`, via the `tower-flasher` library in `crates/flasher`), and sets or
+flashes/erases/resets/identifies the chip over the UART bootloader, or over USB DFU on a Core
+Module r1.x (`tower flash` / `erase` / `reset` / `chip`, via the `tower-flasher` library in
+`crates/flasher`; `src/target.rs` picks the route and reboots a running r1 into DFU through its
+USB console), and sets or
 clears the opt-in production readout protection (`tower protect` / `unprotect`: RDP level 1
 only, both confirmed interactively or by `--yes`; `unprotect` mass-erases flash + data EEPROM).
 It is also the gateway/MQTT host: `tower gateway` bridges a Radio Dongle's network to MQTT

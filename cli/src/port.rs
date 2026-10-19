@@ -12,7 +12,9 @@ use anyhow::{Context, Result, bail};
 
 /// A TOWER board, recognised by its USB bridge's serial number (the FTDI iSerial the factory
 /// programs: `hio-core-module-<id>` on a Core Module, `bc-usb-dongle-<rev>-<id>` on a Radio
-/// Dongle; older boards carry a `bc-` prefix instead of `hio-`).
+/// Dongle; older boards carry a `bc-` prefix instead of `hio-`). A Core Module r1.x has no
+/// bridge: its firmware's own USB CDC console carries `hio-core-module-r1-<uid>` (see
+/// [`NATIVE_USB_CONSOLE`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Board {
     CoreModule,
@@ -38,17 +40,30 @@ impl Board {
     }
 }
 
+/// USB vendor / product id of the USB CDC console of TOWER firmware built for the Core Module
+/// r1.x (the SDK's `core-module-r1` feature; the ids the legacy r1 SDK used). That console
+/// mirrors the r2 auto-reset circuit on its control lines, so the reset pulses work on it, and
+/// the reset into the bootloader brings up the ROM's USB DFU bootloader (see `target`).
+pub(crate) const NATIVE_USB_CONSOLE: (u16, u16) = (0x0483, 0x5740);
+
 /// One serial port as the OS enumerates it (cached USB descriptors; nothing is opened).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Port {
     name: String,
     usb: bool,
     usb_serial: Option<String>,
+    /// USB vendor / product id, for a USB port.
+    usb_id: Option<(u16, u16)>,
 }
 
 impl Port {
     fn board(&self) -> Option<Board> {
         self.usb_serial.as_deref().and_then(Board::from_usb_serial)
+    }
+
+    /// The USB CDC console of a Core Module r1.x (no USB-UART bridge).
+    fn native_usb(&self) -> bool {
+        self.usb_id == Some(NATIVE_USB_CONSOLE) && self.board() == Some(Board::CoreModule)
     }
 
     /// The kinds of port a TOWER board presents across platforms.
@@ -62,6 +77,7 @@ impl Port {
     /// `/dev/cu.usbserial-2110 (Core Module)`, for a choice the user has to make.
     fn label(&self) -> String {
         match self.board() {
+            Some(_) if self.native_usb() => format!("{} (Core Module r1)", self.name),
             Some(b) => format!("{} ({})", self.name, b.name()),
             None => self.name.clone(),
         }
@@ -78,11 +94,13 @@ fn enumerate(what: &str) -> Result<Vec<Port>> {
                 name: p.port_name,
                 usb: true,
                 usb_serial: info.serial_number,
+                usb_id: Some((info.vid, info.pid)),
             },
             _ => Port {
                 name: p.port_name,
                 usb: false,
                 usb_serial: None,
+                usb_id: None,
             },
         })
         .collect();
@@ -168,25 +186,58 @@ fn choose(ports: Vec<Port>, board: Option<Board>) -> Result<(String, bool)> {
     )
 }
 
+/// Whether `name` is the USB CDC console of a Core Module r1.x (looked up among the ports the OS
+/// lists now; a port that is not there is not one).
+pub(crate) fn is_native_usb_console(name: &str) -> Result<bool> {
+    Ok(enumerate("enumerating serial ports")?
+        .iter()
+        .any(|p| p.name == name && p.native_usb()))
+}
+
 /// `tower devices`: one port per line, macOS's dial-in twins folded away (see
 /// [`prefer_callout`]) so the list shows the names `--device` should be given. The path comes
 /// first (`awk '{print $1}'` keeps working); a USB port adds what it is (a TOWER board, by its
 /// USB serial number) and that serial number. It deliberately lists *all* ports, not just the
-/// USB ones auto-detect picks from.
+/// USB ones auto-detect picks from. STM32 ROM DFU bootloaders follow as `dfu:<location>` (what
+/// `-d` takes to pick one), with their serial number.
 pub(crate) fn devices() -> Result<()> {
     let ports = enumerate("listing serial ports")?;
-    let width = ports.iter().map(|p| p.name.len()).max().unwrap_or(0);
+    let dfu: Vec<(String, Option<String>)> = crate::target::list_or_warn()
+        .iter()
+        .map(|d| (format!("dfu:{}", d.location()), d.serial().map(String::from)))
+        .collect();
+    let width = ports
+        .iter()
+        .map(|p| p.name.len())
+        .chain(dfu.iter().map(|(n, _)| n.len()))
+        .max()
+        .unwrap_or(0);
     for p in &ports {
         println!("{}", device_line(p, width));
     }
+    for (name, serial) in &dfu {
+        println!("{}", dfu_line(name, serial.as_deref(), width));
+    }
     Ok(())
+}
+
+fn dfu_line(name: &str, serial: Option<&str>, width: usize) -> String {
+    let line = format!("{name:width$}  {:<12}", "STM32 DFU");
+    match serial {
+        Some(sn) => format!("{line}  {sn}"),
+        None => line.trim_end().to_string(),
+    }
 }
 
 fn device_line(p: &Port, width: usize) -> String {
     if !p.usb {
         return p.name.clone();
     }
-    let what = p.board().map_or("USB serial", Board::name);
+    let what = if p.native_usb() {
+        "Core Module r1"
+    } else {
+        p.board().map_or("USB serial", Board::name)
+    };
     let line = format!("{:width$}  {what:<12}", p.name);
     match &p.usb_serial {
         Some(sn) => format!("{line}  {sn}"),
@@ -289,13 +340,14 @@ pub(crate) fn open_console_responsive(port: &str, reset: bool) -> Result<Box<dyn
 
 #[cfg(test)]
 mod tests {
-    use super::{Board, Port, choose, device_line, prefer_callout};
+    use super::{Board, NATIVE_USB_CONSOLE, Port, choose, device_line, dfu_line, prefer_callout};
 
     fn port(name: &str, usb_serial: Option<&str>) -> Port {
         Port {
             name: name.into(),
             usb: true,
             usb_serial: usb_serial.map(String::from),
+            usb_id: Some((0x0403, 0x6015)),
         }
     }
 
@@ -345,8 +397,37 @@ mod tests {
             name: "/dev/cu.Bluetooth-Incoming-Port".into(),
             usb: false,
             usb_serial: None,
+            usb_id: None,
         };
         assert_eq!(device_line(&builtin, 40), "/dev/cu.Bluetooth-Incoming-Port");
+        assert_eq!(
+            dfu_line("dfu:1-2", Some("206E3A6B5048"), 7),
+            "dfu:1-2  STM32 DFU     206E3A6B5048"
+        );
+        assert_eq!(dfu_line("dfu:1-2", None, 7), "dfu:1-2  STM32 DFU");
+    }
+
+    /// The r1 USB CDC console is told apart from an r2 FTDI port by its USB id, and named so.
+    #[test]
+    fn a_core_module_r1_console_is_recognised() {
+        let r1 = Port {
+            usb_id: Some(NATIVE_USB_CONSOLE),
+            ..port(
+                "/dev/ttyACM0",
+                Some("hio-core-module-r1-0123456789ABCDEF01234567"),
+            )
+        };
+        assert!(r1.native_usb());
+        assert_eq!(r1.board(), Some(Board::CoreModule));
+        assert_eq!(r1.label(), "/dev/ttyACM0 (Core Module r1)");
+        assert!(device_line(&r1, 12).starts_with("/dev/ttyACM0  Core Module r1  hio-core-module-r1-"));
+        // An r2 board (FTDI) and some other ST virtual COM port are not.
+        assert!(!port("/dev/ttyUSB0", Some("hio-core-module-1")).native_usb());
+        let st_vcp = Port {
+            usb_id: Some(NATIVE_USB_CONSOLE),
+            ..port("/dev/ttyACM1", Some("00000000001A"))
+        };
+        assert!(!st_vcp.native_usb());
     }
 
     fn names(v: &[&str]) -> Vec<String> {

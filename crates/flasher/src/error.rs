@@ -96,6 +96,41 @@ pub enum Error {
     #[error("serial port disconnected while {context}")]
     Disconnected { context: &'static str },
 
+    /// A USB control transfer to the DFU bootloader ([`dfu`](crate::dfu)) failed below the
+    /// protocol: the device went away, a timeout, an OS error (a Linux user without access to
+    /// the device gets `PermissionDenied` here). A request the bootloader refuses is
+    /// [`UsbStall`](Self::UsbStall) on the wire and [`Dfu`](Self::Dfu) once its status is read.
+    #[error("USB error ({context}): {source}")]
+    Usb {
+        context: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The DFU bootloader stalled `request`: its way of refusing one, whose reason the next
+    /// `DFU_GETSTATUS` tells. The [`dfu`](crate::dfu) engine reads it and reports
+    /// [`Dfu`](Self::Dfu) instead, so this surfaces only from a transport.
+    #[error("the DFU bootloader stalled {request}")]
+    UsbStall { request: &'static str },
+
+    /// The DFU bootloader refused `context` or reported it failed: `status` and `state` are the
+    /// DFU 1.1 `bStatus` / `bState` codes of its `DFU_GETSTATUS` answer.
+    #[error(
+        "the DFU bootloader refused {context}: {} (state {})",
+        crate::dfu::status_name(*.status),
+        crate::dfu::state_name(*.state)
+    )]
+    Dfu {
+        context: &'static str,
+        status: u8,
+        state: u8,
+    },
+
+    /// No usable STM32 DFU bootloader: none attached, several, or one whose interface or memory
+    /// layout is not the STM32L0 main flash this crate writes.
+    #[error("{reason}")]
+    DfuDevice { reason: String },
+
     /// The chip has readout protection (RDP level 1) active, found by the probe in
     /// [`rdp`](crate::rdp) right after `Get ID` and before anything was modified. At level 1
     /// the ROM bootloader NACKs Read Memory, Write Memory, Go and both Erase commands

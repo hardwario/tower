@@ -16,6 +16,13 @@
 //! task; the gating lives entirely in the console manager, spawned by
 //! [`board::Board::take`](crate::board::Board::take).
 //!
+//! **The rev 1.3 board** (feature `core-module-r1`) keeps the same rule with a different link and
+//! a different detector: its console is a USB CDC-ACM port on the STM32's own USB, and with no
+//! VBUS line to the MCU the manager finds a host with a ~1.5 µs pulse of the USB D+ pull-up every
+//! 3 s while the USB peripheral is off (an RTC wake from STOP, re-asserting the STOP tuning as
+//! above). The USB clock holds the STOP refcount only while a host is attached; see
+//! `console::usb` for the probe and its limits.
+//!
 //! **STOP-mode tuning.** [`apply_stop_tuning`](crate::board::apply_stop_tuning) sets
 //! `PWR_CR.LPSDSR` (low-power regulator in deep sleep) + `ULP` (VREFINT off in Stop) for
 //! the datasheet µA STOP floor. embassy's wake path re-inits RCC and *clears* those bits,

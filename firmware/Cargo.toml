@@ -60,7 +60,19 @@ embassy-stm32 = { version = "0.6.0", features = [
 # channel (DMA1_CH3) is already owned by the WS2812 strip.
 
 cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
-cortex-m-rt = "0.7.0"
+# `set-vtor`: the reset handler points VTOR at our vector table. After a real reset VTOR is
+# already 0 (which aliases main flash when BOOT0 is low), but an app the ROM bootloader *jumps*
+# to (AN3155 `Go`, the USB DFU "leave" of a rev 1.3 board) inherits the bootloader's mapping,
+# and without this its interrupts would vector into the bootloader's table.
+cortex-m-rt = { version = "0.7.0", features = ["set-vtor"] }
+
+# USB device stack for the console of the rev 1.3 Core Module (feature `core-module-r1`): a
+# CDC-ACM serial port on the STM32's own USB peripheral. Two interfaces (CDC control + data) and
+# two control handlers (the class's own + the console's bus watcher), the minimum; no HID.
+embassy-usb = { version = "0.6.0", default-features = false, features = [
+    "max-interface-count-2",
+    "max-handler-count-2",
+], optional = true }
 # Panic handler is provided by the SDK itself (src/console.rs records a reset-surviving crash
 # breadcrumb, prints the panic to the console if it is up, then RESETS; it does not halt), so
 # no external panic-handler crate is needed.
@@ -156,6 +168,13 @@ node-2 = []
 lse-drive-low = []
 lse-drive-medium-low = []
 lse-drive-high = []
+# Board selection. The default build is the Core Module r2 (FT231X USB-UART bridge on USART1,
+# VBUS_SENSE on PA12). `core-module-r1` builds for the first Core Module (BigClown rev 1.x,
+# e.g. rev 1.3 of 2016): no bridge, the STM32's own USB on PA11/PA12, so the console is a USB
+# CDC-ACM serial port and the board is flashed over the ROM bootloader's USB DFU. Everything
+# else (radio, sensors, button, LED, strip) is wired the same. See docs/console.md, "Core
+# Module rev 1.3". `TOWER_FEATURES=core-module-r1 just build app radio_push_button`
+core-module-r1 = ["dep:embassy-usb"]
 
 # Ready-made product firmwares for the TOWER IoT Kit, distinct from the educational
 # `examples/` (which demonstrate one block each). These are full applications, so they are

@@ -5,6 +5,13 @@
 //! serial [`console`](crate::console), and putting the TMP112 into shutdown (one-shot)
 //! mode so it does not free-run and waste power. It then hands the app a [`Board`] of
 //! ready-to-use resources.
+//!
+//! Two board generations are supported, selected at build time. The default is the Core Module
+//! r2: its console is USART1 (PA9/PA10) behind the FT231X USB-UART bridge, gated on the bridge's
+//! `VBUS_SENSE` (PA12). Feature `core-module-r1` is the first Core Module (BigClown rev 1.x, e.g.
+//! rev 1.3): no bridge, the STM32's own USB on PA11/PA12 carries the console as a CDC-ACM serial
+//! port ([`console::manager`](crate::console::manager) is then the USB one). Everything else
+//! [`Board`] hands out is wired identically on both.
 
 use embassy_executor::Spawner;
 use embassy_stm32::exti::{ExtiInput, InterruptHandler};
@@ -25,13 +32,14 @@ use log::LevelFilter;
 use crate::storage::{Nv, Storage};
 use crate::tmp112::{self, Tmp112};
 
-// PA8 (button), PA12 (VBUS_SENSE) and PA7 (SPIRIT1 nIRQ) are EXTI lines 8/12/7,
+// PA8 (button), PA12 (VBUS_SENSE, r2 board only) and PA7 (SPIRIT1 nIRQ) are EXTI lines 8/12/7,
 // all on EXTI4_15, no line collision (PB6 accel INT1 is line 6, also here).
 bind_interrupts!(struct Irqs {
     EXTI4_15 => InterruptHandler<interrupt::typelevel::EXTI4_15>;
 });
 // The USART1 interrupt (console UART) is bound in `console` (`ConsoleIrqs`), which owns
-// the UART and rebuilds it dynamically as USB is plugged/unplugged.
+// the UART and rebuilds it dynamically as USB is plugged/unplugged. On the rev 1.3 board the
+// USB interrupt is bound in `console::usb` instead, which owns the USB peripheral.
 
 /// Default console verbosity set by [`Board::take`]; lower it at runtime with
 /// `log::set_max_level`.
@@ -145,11 +153,14 @@ impl Board {
     /// The USB-presence-gated [`console::manager`](crate::console::manager) is spawned
     /// automatically, so every app gets the same low-power policy without wiring it up:
     /// the console UART is up (and interrupts responsive) while USB is connected, and is
-    /// torn down when unplugged so the executor can reach STOP and idle at µA.
+    /// torn down when unplugged so the executor can reach STOP and idle at µA. On the rev 1.3
+    /// board (feature `core-module-r1`) the same holds for its USB CDC-ACM console.
     pub fn take(spawner: Spawner) -> Self {
         let mut p = init();
 
-        // Dynamic, USB-presence-gated console. On the STM32L0 an *enabled* USART holds
+        crate::console::install_logger(LOG_LEVEL);
+
+        // Dynamic, USB-presence-gated console (r2 board). On the STM32L0 an *enabled* USART holds
         // embassy's STOP refcount, so a permanently-on console would keep the low-power
         // executor out of STOP forever: an unplugged node would burn ~3.5 mA (WFI at
         // 16 MHz) instead of idling at µA. So the console UART is owned by
@@ -161,12 +172,21 @@ impl Board {
         // CBUS3 output (a push-pull ~3.3 V logic level, not a 5 V divider), but only tens
         // of ms after power-up; the manager's VBUS poll covers that late assertion. PA12 is
         // also the USB DP pin, used here purely as a VBUS_SENSE GPIO (no USB peripheral).
-        crate::console::install_logger(LOG_LEVEL);
-        let vbus = ExtiInput::new(p.PA12, p.EXTI12, Pull::Down, Irqs);
-        // DMA1_CH4 (TX) + DMA1_CH5 (RX) back the console UART, a different channel group from the
-        // WS2812 strip's DMA1_CH3, so both coexist on DMA (overrun-proof console RX).
-        spawner
-            .spawn(crate::console::manager(p.USART1, p.PA9, p.PA10, p.DMA1_CH4, p.DMA1_CH5, vbus).unwrap());
+        #[cfg(not(feature = "core-module-r1"))]
+        {
+            let vbus = ExtiInput::new(p.PA12, p.EXTI12, Pull::Down, Irqs);
+            // DMA1_CH4 (TX) + DMA1_CH5 (RX) back the console UART, a different channel group from
+            // the WS2812 strip's DMA1_CH3, so both coexist on DMA (overrun-proof console RX).
+            spawner.spawn(
+                crate::console::manager(p.USART1, p.PA9, p.PA10, p.DMA1_CH4, p.DMA1_CH5, vbus).unwrap(),
+            );
+        }
+        // Rev 1.3 board: no bridge and no VBUS line. The console is a USB CDC-ACM serial port on
+        // the STM32's own USB (PA11 = D-, PA12 = D+), brought up only while a host is there, found
+        // by probing D+ while the USB peripheral is off (`console::usb`). Same STOP policy: the
+        // USB clock holds the STOP refcount for a session, and between sessions it is released.
+        #[cfg(feature = "core-module-r1")]
+        spawner.spawn(crate::console::manager(p.USB, p.PA11, p.PA12).unwrap());
 
         // I2C2 sensor bus: quiesce every device on it so the bus costs ~no idle current
         // (each may be absent on some boards, so NACKs are ignored). Order matters: the
@@ -234,6 +254,11 @@ impl Board {
 /// - **`min_stop_pause = 0`**: any await length safely uses RTC-backed STOP.
 /// - **debug clock gated in STOP** for real low-power current.
 pub fn init() -> Peripherals {
+    // First of all (rev 1.3 board): a requested reboot into the ROM bootloader goes there now,
+    // from the reset state; see `sysboot`.
+    #[cfg(feature = "core-module-r1")]
+    crate::sysboot::on_boot();
+
     // Snapshot RCC_CSR (RTC-domain state + hardware reset-cause flags) BEFORE embassy's clock
     // init touches it, then clear the sticky reset flags so every boot reports its own cause.
     // Boot forensics: shows whether the LSE/RTC domain survived the reset and which hardware
@@ -278,6 +303,14 @@ pub fn init() -> Peripherals {
         {
             lse.mode = embassy_stm32::rcc::LseMode::Oscillator(embassy_stm32::rcc::LseDrive::High);
         }
+    }
+    // Rev 1.3 board: the USB console's 48 MHz comes from HSI48 (crystal-less USB; the CRS trims it
+    // to the host's SOF during a session, see `console::usb`). HSI48 itself is already on: the
+    // default `rcc.hsi48` is `Some` (see `trng_words`). Its CRS sync must stay off here
+    // (`sync_from_usb`): embassy would enable the CRS with a STOP refcount at every clock init.
+    #[cfg(feature = "core-module-r1")]
+    {
+        config.rcc.mux.clk48sel = embassy_stm32::rcc::mux::Clk48sel::HSI48;
     }
     config.min_stop_pause = Duration::from_ticks(0);
     config.enable_debug_during_sleep = false;
