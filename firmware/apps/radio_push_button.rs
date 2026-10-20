@@ -1334,6 +1334,10 @@ static LAST_REMOTE_CMD: core::sync::atomic::AtomicU32 = core::sync::atomic::Atom
 /// can't be mistaken for a re-delivery this node already ran. Two u32s, not one u64:
 /// thumbv6m has no 64-bit atomic, and single-task access needs no cross-word atomicity.
 static LAST_REMOTE_EPOCH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Whether the reply of the last remote command (`LAST_REMOTE_CMD`) all went up: 0 if it did,
+/// else its first undelivered chunk + 1 (the rest of that reply was dropped, see
+/// [`RadioSink::flush`]). A repeat must not then answer like a complete, empty reply.
+static LAST_REMOTE_LOST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Hold RX open for one queued downlink; execute it and stream the response. Returns
 /// whether a downlink actually arrived (false = window expired, stop chaining).
@@ -1378,8 +1382,25 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
                     && LAST_REMOTE_EPOCH.load(Relaxed) == epoch
                 {
                     let result = ((last >> 16) & 0xFF) as u8;
-                    info!(target: "node", "remote shell: command {} repeated, not run again", cmd_id);
-                    sink.done(result).await; // empty reply, cached result
+                    let lost = LAST_REMOTE_LOST.load(Relaxed);
+                    if lost == 0 {
+                        info!(target: "node", "remote shell: command {} repeated, not run again", cmd_id);
+                        sink.done(result).await; // empty reply, cached result
+                        return true;
+                    }
+                    // The first run's reply never all went up (its delivery ACK lost as well,
+                    // or the gateway would not have sent the command again): an empty `last`
+                    // frame at chunk 0 would read as a complete, empty reply (the host printed
+                    // nothing and exited 0; bench 2026-10-19, 4 of 60 replies in a two-node
+                    // soak). Number it past the lost chunk, and past the one after it in case
+                    // the lost one did get through without its ACK, so the host sees a chunk
+                    // gap whatever it holds and reports the reply truncated; say why.
+                    warn!(target: "node", "remote shell: command {} repeated, its reply was lost", cmd_id);
+                    sink.chunk = (lost as u16).wrapping_add(1);
+                    let _ = sink
+                        .push("(reply lost on the air: ran once, not run again)\r\n")
+                        .await;
+                    sink.done(result).await;
                     return true;
                 }
                 info!(target: "node", "remote shell: {}", line);
@@ -1390,6 +1411,7 @@ async fn downlink_window(net: &mut Net, gw_addr: u32) -> bool {
                 // Epoch first, then the valid-flagged CMD word: a reader that sees the
                 // valid bit has already seen this epoch (single task, but keep the order).
                 LAST_REMOTE_EPOCH.store(epoch, Relaxed);
+                LAST_REMOTE_LOST.store(sink.lost.map_or(0, |c| u32::from(c) + 1), Relaxed);
                 LAST_REMOTE_CMD.store((1 << 24) | ((result as u32) << 16) | cmd_id as u32, Relaxed);
                 if reboot {
                     // The response is on the air; the reboot request came over radio, so
@@ -1428,6 +1450,8 @@ struct RadioSink<'a> {
     chunk: u16,
     buf: heapless::String<RADIO_SHELL_CHUNK>,
     ok: bool,
+    /// The first chunk that was not delivered (the reply is cut there).
+    lost: Option<u16>,
 }
 
 impl<'a> RadioSink<'a> {
@@ -1439,6 +1463,7 @@ impl<'a> RadioSink<'a> {
             chunk: 0,
             buf: heapless::String::new(),
             ok: true,
+            lost: None,
         }
     }
 
@@ -1455,6 +1480,7 @@ impl<'a> RadioSink<'a> {
         let mut wire = [0u8; MAX_RADIO_PAYLOAD];
         let Ok(n) = encode_node_msg(&msg, &mut wire) else {
             self.ok = false;
+            self.lost.get_or_insert(self.chunk);
             return false;
         };
         let delivered = matches!(
@@ -1468,6 +1494,7 @@ impl<'a> RadioSink<'a> {
             // aborting beats streaming the tail of a response the host can't anchor.
             warn!(target: "node", "remote shell: response chunk {} not delivered, rest dropped", self.chunk - 1);
             self.ok = false;
+            self.lost.get_or_insert(self.chunk - 1);
         }
         delivered
     }

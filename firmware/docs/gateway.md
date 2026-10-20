@@ -103,6 +103,10 @@ the standard shell dispatcher and answers with `NodeMsg::Shell` chunks (≤ `RAD
 56 B) correlated by `cmd_id`. `epoch` is a random per-host-process tag: the queue is at-least-once,
 so the node de-duplicates re-deliveries on `(epoch, cmd_id)`: the random epoch stops a restarted
 host that reuses a low `cmd_id` from being mistaken for a re-delivery (the "empty checkmark" reply).
+A re-delivery is not run again: when the first run's reply all went up, the node answers with an
+empty `last` chunk and the cached result; when it did not (a chunk went undelivered and the rest
+was dropped), it numbers that answer past the lost chunk, so the host reports the reply truncated,
+with the text `(reply lost on the air: ran once, not run again)`, never an empty success.
 
 ### TX outcomes (`RadioStat::Tx.outcome`)
 
@@ -445,6 +449,10 @@ The full round-trip, node asleep between events:
    never truncated at a fixed buffer. The reply streams back as `NodeMsg::Shell` chunks (each
    reply's ACK re-flags pending, chaining the queue).
 4. The gateway forwards the chunks as `Uplink` frames and reports delivery via `RadioStat::Tx`.
+   A chunk proves the command delivered: if the gateway has not reported it so (the node's ACK of
+   the downlink was lost), the host drops the item from the gateway's queue (`QueueDrop`), or the
+   gateway would send it again after each of the node's uplinks, every chunk of the reply
+   included, out of receive for ~0.5 s each time (the node does not listen mid-reply).
 
 No tab completion over the air; completion is a per-transport feature the radio transport
 doesn't offer.

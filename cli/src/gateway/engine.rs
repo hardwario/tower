@@ -245,7 +245,9 @@ enum OpKind {
     QueueDrop {
         node: u32,
     },
-    /// Engine-internal drop of one stale item found by [`OpKind::QueueSync`].
+    /// Engine-internal best-effort drop of one item the device should not hold any more: a
+    /// stale one found by [`OpKind::QueueSync`], or one whose reply proves it delivered
+    /// ([`Engine::on_shell_chunk`]).
     QueueDropStale,
     StatsConfig,
 }
@@ -322,6 +324,9 @@ struct PendingShell {
     cmd_id: u16,
     /// Set once the gateway reports TX_DELIVERED (awaiting the node's reply chunks).
     delivered_tick: Option<u64>,
+    /// Still in the gateway's queue as far as this host knows: neither reported delivered
+    /// nor expired, nor dropped by [`Engine::on_shell_chunk`].
+    queued: bool,
     /// While undelivered: the tick past which the host stops waiting for the gateway's
     /// `TX_EXPIRED` report (queue TTL + grace).
     expires_tick: u64,
@@ -916,6 +921,28 @@ impl Engine {
             ))));
             return;
         };
+        // A reply chunk proves the command reached the node, whatever the gateway reported. When
+        // the node's ACK of the downlink was lost (another node transmitting over it), the
+        // gateway keeps the item and sends it again after every uplink of that node, each chunk
+        // of this reply included, though the node does not listen mid-reply: every attempt holds
+        // the gateway's single radio loop out of receive for up to ~0.5 s, long enough to starve
+        // the other nodes' uplinks (bench 2026-10-19: in a two-node soak 44 of 118 shell
+        // downlinks went unconfirmed, and the other node's clicks and replies were lost behind
+        // the retries). So drop it from the queue now (the node's dedup answers a copy that
+        // still gets through).
+        if self.nodes[i].pending[pi].queued {
+            self.nodes[i].pending[pi].queued = false;
+            let item = self.nodes[i].pending[pi].item;
+            self.issue(
+                out,
+                OpKind::QueueDropStale,
+                MgmtOp::QueueDrop {
+                    node_addr: src,
+                    item: Some(item),
+                },
+                None,
+            );
+        }
         let gap = self.nodes[i].pending[pi].next_chunk != chunk.chunk;
         if gap {
             self.nodes[i].pending[pi].truncated = true;
@@ -1002,6 +1029,7 @@ impl Engine {
             mgmt::TX_DELIVERED => {
                 if let Some(p) = self.nodes[i].pending.iter_mut().find(|p| p.item == item) {
                     p.delivered_tick = Some(self.tick);
+                    p.queued = false;
                 }
                 // Stays in `pending` until the node's reply completes (the dialog's
                 // "pending" marker covers queued *and* awaiting-reply).
@@ -1204,6 +1232,7 @@ impl Engine {
                                 line: origin.line.clone(),
                                 cmd_id: origin.cmd_id,
                                 delivered_tick: None,
+                                queued: true,
                                 expires_tick: self.tick + ttl + SHELL_TTL_GRACE_TICKS,
                                 next_chunk: 0,
                                 truncated: false,
@@ -2895,6 +2924,58 @@ mod tests {
             rsp.truncated,
             "a chunk-index gap must flag the response truncated"
         );
+    }
+
+    /// Whether `out`, or the requests waiting for the dongle's slot, carry a `QueueDrop`.
+    fn drops_queued(e: &Engine, out: &[Output]) -> Vec<String> {
+        out.iter()
+            .filter_map(sent_op)
+            .map(|(_, op)| op)
+            .chain(queued_ops(e))
+            .filter(|op| op.contains("QueueDrop"))
+            .collect()
+    }
+
+    #[test]
+    fn a_reply_to_an_unconfirmed_downlink_drops_it_from_the_queue() {
+        let mut e = engine();
+        queue_shell(&mut e, 0xAB12, 9, "u-1", "/x");
+        // The node's ACK of the downlink was lost: the gateway keeps the item for a retry.
+        let out = e.handle(Input::SerialFrame(SerialMsg::Stat(RadioStat::Tx {
+            dest: 0xAB12,
+            item: 9,
+            outcome: mgmt::TX_NOT_DELIVERED,
+            ack_rssi: None,
+        })));
+        assert!(drops_queued(&e, &out).is_empty());
+        // Its reply proves the delivery: the item is dropped, once, and the reply still
+        // completes the dialog.
+        let out = shell_chunk_uplink(&mut e, 0xAB12, 1, 0, false, "aa");
+        let drops = drops_queued(&e, &out);
+        assert_eq!(drops.len(), 1, "{drops:?}");
+        assert!(
+            drops[0].contains("node_addr: 43794") && drops[0].contains("item: Some(9)"),
+            "{drops:?}"
+        );
+        assert_eq!(last_shell_rsp(&out).text, "aa");
+        let out = shell_chunk_uplink(&mut e, 0xAB12, 1, 1, true, "bb");
+        assert!(drops_queued(&e, &out).is_empty(), "the drop is not repeated");
+        let rsp = last_shell_rsp(&out);
+        assert!(rsp.done && !rsp.truncated);
+    }
+
+    #[test]
+    fn a_reply_to_a_confirmed_downlink_drops_nothing() {
+        let mut e = engine();
+        queue_shell(&mut e, 0xAB12, 9, "u-1", "/x");
+        let _ = e.handle(Input::SerialFrame(SerialMsg::Stat(RadioStat::Tx {
+            dest: 0xAB12,
+            item: 9,
+            outcome: mgmt::TX_DELIVERED,
+            ack_rssi: Some(-50),
+        })));
+        let out = shell_chunk_uplink(&mut e, 0xAB12, 1, 0, true, "aa");
+        assert!(drops_queued(&e, &out).is_empty(), "the gateway already popped it");
     }
 
     // ---- TX outcomes on a queued shell command ----
