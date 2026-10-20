@@ -1131,7 +1131,8 @@ mod tests {
     #[test]
     fn only_set_address_and_page_erase_are_ever_sent() {
         let src = include_str!("dfu.rs");
-        let code: Vec<&str> = src[..src.find("#[cfg(test)]\nmod tests").unwrap()]
+        // `\nmod tests {`, not `#[cfg(test)]\nmod tests`: a Windows checkout has CRLF line ends.
+        let code: Vec<&str> = src[..src.find("\nmod tests {").unwrap()]
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect();
