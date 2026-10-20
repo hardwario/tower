@@ -23,6 +23,11 @@ use crate::port;
 const DFU_APPEAR: Duration = Duration::from_secs(5);
 /// Poll period while waiting for it.
 const DFU_POLL: Duration = Duration::from_millis(100);
+/// Bootloader requests `enter_dfu` makes before it gives up (a request is lost when the board
+/// reboots on its own in the middle of it).
+const DFU_ATTEMPTS: u32 = 3;
+/// How long `enter_dfu` waits for a rebooting console to come back before asking again.
+const CONSOLE_BACK: Duration = Duration::from_secs(5);
 
 /// How to put a Core Module r1.x into its USB DFU bootloader by hand (nothing is erased).
 const BUTTONS: &str = "hold BOOT, press and release RESET, release BOOT";
@@ -174,11 +179,41 @@ fn enter_dfu(path: &str) -> Result<DeviceInfo> {
         "[tower] {path} is a Core Module r1 USB console: rebooting it into its USB DFU bootloader \
          (this erases the start of its application, which is about to be rewritten)"
     );
-    // The console reboots ~30 ms after RESET is released, while the sequence still holds BOOT0,
-    // so the line writes after that fail on a port that is gone; whether it worked is whether the
-    // DFU bootloader appears.
-    let _ = request_bootloader(path)?;
-    wait_for_new_dfu(&before, path)
+    for attempt in 1..=DFU_ATTEMPTS {
+        // The console reboots ~30 ms after RESET is released, while the sequence still holds
+        // BOOT0, so the line writes after that fail on a port that is gone; whether it worked is
+        // whether the DFU bootloader appears. A request is lost when the board reboots on its own
+        // in the middle of it (a crash-looping image does every few seconds; seen with
+        // `console_panic`): then the console is waited for and asked again.
+        if console_back(path) {
+            let _ = request_bootloader(path);
+        }
+        match wait_for_new_dfu(&before, path) {
+            Ok(d) => return Ok(d),
+            Err(e) if attempt == DFU_ATTEMPTS => return Err(e),
+            Err(_) => eprintln!(
+                "[tower] {path} did not come up as a DFU bootloader (did it reboot on its own?); asking again \
+                 ({} of {DFU_ATTEMPTS})",
+                attempt + 1
+            ),
+        }
+    }
+    unreachable!("the last attempt returns")
+}
+
+/// Whether the serial port `path` is there, waiting up to [`CONSOLE_BACK`] for it (a console
+/// that is rebooting re-enumerates within about a second).
+fn console_back(path: &str) -> bool {
+    let deadline = Instant::now() + CONSOLE_BACK;
+    loop {
+        if port::usb_ports().is_ok_and(|ports| ports.iter().any(|p| p == path)) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(DFU_POLL);
+    }
 }
 
 /// Play the reset-into-bootloader line sequence on a Core Module r1 USB console. The firmware
