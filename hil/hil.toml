@@ -16,13 +16,15 @@
 # A VBUS-carrying USB back-feeds VDD through the LDO (the PPK2 then reads ~0 µA); the power test's plausibility
 # floor (median ≥ 1 µA) catches that and fails.
 [core]
-serial = "/dev/cu.usbserial-140"
+serial = "/dev/cu.usbserial-2110"
+usb_serial = "hio-core-module-2416969388"
 # usb_serial = "hio-core-module-…"
 
 # TOWER Radio Dongle: USB-powered, flashed over the UART bootloader with `tower flash`. The
 # smoke + radio-peer tests use this board (it can hold a KAT example or the gateway role).
 [dongle]
-serial = "/dev/cu.usbserial-120"
+serial = "/dev/cu.usbserial-DO00DEFS"
+usb_serial = "DO00DEFS"
 # usb_serial = "bc-usb-dongle-…"
 
 # Nordic PPK2 source-measure. The bench standardises on 1.8 V: the documented true STOP floor is 5.1 µA @ 1.8 V
