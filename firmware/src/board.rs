@@ -338,8 +338,11 @@ static PREINIT_CSR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU3
 const UID_BASE: usize = 0x1FF8_0050;
 /// Offsets of the three ID words `U_ID[31:0]`, `U_ID[63:32]`, `U_ID[95:64]` from [`UID_BASE`]. **Not
 /// contiguous on the L0**: the third word sits at `+0x14` (ST's `HAL_GetUIDw2`), with other
-/// factory data in between. embassy-stm32's generic `uid::uid()` copies 12 contiguous bytes, so
-/// on this family it returns the word at `+0x08` instead of `U_ID[95:64]`: don't use it here.
+/// factory data in between. embassy-stm32 0.6.0's `uid::uid()` (on stm32-metapac 21) reads 12
+/// contiguous bytes, so on this family it returns the word at `+0x08` instead of `U_ID[95:64]`:
+/// don't use it here. Fixed upstream in stm32-data (embassy-rs/stm32-data#893 gives the L0/L1 `UID`
+/// block these offsets); once the firmware is on an embassy-stm32 release built on it,
+/// `embassy_stm32::uid::uid()` returns the same 12 bytes and this can go.
 const UID_OFFSETS: [usize; 3] = [0x00, 0x04, 0x14];
 
 /// The MCU's 96-bit factory unique device ID as its three 32-bit words, `U_ID[31:0]` first (read
