@@ -65,7 +65,7 @@ impl Afa {
     }
 }
 
-impl Net {
+impl<const P: usize> Net<P> {
     /// Enable EU 868 LBT+AFA at runtime (mutually exclusive with other access modes,
     /// like `set_band`). Tunes to the `primary` channel; `role` selects
     /// [`afa_send`](Self::afa_send) (node) vs [`afa_serve`](Self::afa_serve) (gateway).

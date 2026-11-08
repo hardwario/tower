@@ -252,7 +252,7 @@ fn beacon_toa_ms() -> u64 {
     duty::frame_toa_ms(HDR_LEN + BEACON_PL_LEN + TAG_LEN) as u64
 }
 
-impl Net {
+impl<const P: usize> Net<P> {
     /// Enable US 915 FHSS at runtime (mutually exclusive with other access modes).
     /// `Master` starts the free-running hop clock now; `Node` starts Scanning. The
     /// seed defaults to a key-derived value so both ends agree without sending it.

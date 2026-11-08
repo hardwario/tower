@@ -148,6 +148,9 @@ tower-hmi = { path = "../crates/hmi" }
 # other `crates/`; `src/strip.rs` drives a WS2812B / SK6812 strip with it over `src/ws2812.rs`, and
 # `tower::strip` re-exports it. no_std, no dependencies.
 tower-strip = { path = "../crates/strip" }
+# The taf (TOWER Application Framework) kernels: report policy, wall clock, weekly program,
+# thermostat demand. Host-tested; the runtime is `tower::taf`.
+tower-taf = { path = "../crates/taf" }
 
 # Shared console wire protocol (framing + CRC + message schema): the same crates/protocol source
 # tree the `tower` CLI and the HIL harness build, so the two ends of the link cannot drift.
@@ -207,6 +210,10 @@ path = "apps/radio_button.rs"
 [[bin]]
 name = "radio_climate"
 path = "apps/radio_climate.rs"
+
+[[bin]]
+name = "radio_motion"
+path = "apps/radio_motion.rs"
 
 [[bin]]
 name = "lcd_games"

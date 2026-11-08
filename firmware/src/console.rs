@@ -932,6 +932,23 @@ pub async fn event(name: &str, fields: &[(&str, &str)]) {
     enqueue(e).await;
 }
 
+/// [`event`] without the wait: queued now, or dropped (and counted, like a log line) when the
+/// console queue is full. For a task whose RAM matters: the async form keeps an encoded payload
+/// in the caller's future for as long as it waits.
+pub fn event_now(name: &str, fields: &[(&str, &str)]) {
+    let mut wire: Vec<(&str, &str), 8> = Vec::new();
+    for &(k, v) in fields.iter().take(EV_FIELDS) {
+        let _ = wire.push((clip_str(k, EV_KEY), clip_str(v, EV_VAL)));
+    }
+    try_enqueue(
+        MsgType::Event,
+        &Event {
+            name: clip_str(name, EV_NAME),
+            fields: wire,
+        },
+    );
+}
+
 /// Send one frame of a shell command response: `text` (at most [`SHELL_CHUNK`] bytes, clipped
 /// past that) as frame number `chunk`, `last` on the final one, whose `result` is the
 /// authoritative one. Async: backpressured while USB is present (a shell command only arrives

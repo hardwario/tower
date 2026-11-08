@@ -12,9 +12,9 @@
 //! | `gateway/cmd`                   | →gw | no     | `RpcRequest`                  |
 //! | `gateway/rsp/{id}`              | gw→ | no     | `RpcResponse` (clients share the `gateway/rsp/+` filter) |
 //! | `nodes/{addr}`                    | gw→ | yes    | `Node` (empty = removed)      |
-//! | `nodes/{addr}/event/button`       | gw→ | no     | `ButtonEvent`                 |
-//! | `nodes/{addr}/event/accel`        | gw→ | no     | `AccelEvent`                  |
-//! | `nodes/{addr}/measure/temperature`| gw→ | yes    | `Temperature`                 |
+//! | `nodes/{addr}/state/{prop}`       | gw→ | yes    | `State` (a property's value)  |
+//! | `nodes/{addr}/event/{prop}`       | gw→ | no     | `PropEvent`                   |
+//! | `nodes/{addr}/set/{prop}`         | →gw | no     | a value (see `payload::parse_set`) |
 //! | `nodes/{addr}/uplink`             | gw→ | no     | `UplinkDebug`                 |
 //! | `nodes/{addr}/shell/req`          | →gw | no     | `ShellReq`                    |
 //! | `nodes/{addr}/shell/rsp`          | gw→ | no     | `ShellRsp`                    |
@@ -89,14 +89,18 @@ pub(crate) fn shell_req_filter(prefix: &str) -> String {
 pub(crate) fn node(prefix: &str, addr: u32) -> String {
     format!("{prefix}nodes/{}", node_hex(addr))
 }
-pub(crate) fn node_button(prefix: &str, addr: u32) -> String {
-    format!("{prefix}nodes/{}/event/button", node_hex(addr))
+/// A property's retained value (`nodes/{addr}/state/{prop}`), named by the node kind's table
+/// (`tower_protocol::props`).
+pub(crate) fn node_state(prefix: &str, addr: u32, prop: &str) -> String {
+    format!("{prefix}nodes/{}/state/{prop}", node_hex(addr))
 }
-pub(crate) fn node_accel(prefix: &str, addr: u32) -> String {
-    format!("{prefix}nodes/{}/event/accel", node_hex(addr))
+/// An event property (`nodes/{addr}/event/{prop}`).
+pub(crate) fn node_event(prefix: &str, addr: u32, prop: &str) -> String {
+    format!("{prefix}nodes/{}/event/{prop}", node_hex(addr))
 }
-pub(crate) fn node_temperature(prefix: &str, addr: u32) -> String {
-    format!("{prefix}nodes/{}/measure/temperature", node_hex(addr))
+/// The gateway's property-command subscription (`nodes/+/set/+`).
+pub(crate) fn set_filter(prefix: &str) -> String {
+    format!("{prefix}nodes/+/set/+")
 }
 pub(crate) fn node_uplink(prefix: &str, addr: u32) -> String {
     format!("{prefix}nodes/{}/uplink", node_hex(addr))
@@ -138,6 +142,8 @@ pub(crate) enum Inbound {
     Cmd,
     /// `nodes/{addr}/shell/req`: a remote-shell enqueue for `addr`.
     ShellReq(u32),
+    /// `nodes/{addr}/set/{prop}`: set the property `prop` of `addr`.
+    Set(u32, String),
     /// Anything else (our own publishes echoed back, foreign topics): ignore.
     Other,
 }
@@ -151,8 +157,8 @@ pub(crate) fn node_of(prefix: &str, topic: &str) -> Option<u32> {
     parse_node_hex(hex)
 }
 
-/// Classify an inbound topic (the engine subscribes to `gateway/cmd` and
-/// `nodes/+/shell/req`).
+/// Classify an inbound topic (the engine subscribes to `gateway/cmd`, `nodes/+/shell/req` and
+/// `nodes/+/set/+`).
 pub(crate) fn classify(prefix: &str, topic: &str) -> Inbound {
     let Some(rest) = topic.strip_prefix(prefix) else {
         return Inbound::Other;
@@ -165,6 +171,14 @@ pub(crate) fn classify(prefix: &str, topic: &str) -> Inbound {
         && let Some(addr) = parse_node_hex(hex)
     {
         return Inbound::ShellReq(addr);
+    }
+    if let Some(tail) = rest.strip_prefix("nodes/")
+        && let Some((hex, prop)) = tail.split_once("/set/")
+        && let Some(addr) = parse_node_hex(hex)
+        && !prop.is_empty()
+        && !prop.contains('/')
+    {
+        return Inbound::Set(addr, prop.to_string());
     }
     Inbound::Other
 }

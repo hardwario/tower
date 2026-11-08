@@ -290,4 +290,9 @@ pub const CONSOLE_HASH: u64 = console_hash();
 
 /// 64-bit structural hash of the radio application schema (`NodeMsg`, `NodeCmd`). Folded into
 /// [`RADIO_TAG`](crate::radio::RADIO_TAG).
-pub const RADIO_HASH: u64 = hash_types(FNV_BASIS, S_RADIO, &RADIO_TYPES);
+/// The property tables ([`props::PROPS_HASH`](crate::props::PROPS_HASH)) are part of it: their ids
+/// and types say what every `i32` in a report means.
+pub const RADIO_HASH: u64 = feed(
+    hash_types(FNV_BASIS, S_RADIO, &RADIO_TYPES),
+    &crate::props::PROPS_HASH.to_le_bytes(),
+);

@@ -1,0 +1,16 @@
+[package]
+name = "tower-taf"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "no_std, hardware-free kernels of taf, the TOWER Application Framework: the report policy (sample period, delta, heartbeat), the wall clock kept as an offset over the crystal clock, the weekly heating program and the thermostat's demand logic. Not the runtime (that is the SDK's `tower::taf`); split out so the logic is unit-tested on the host."
+
+[dependencies]
+# The weekly program is persisted as one postcard record in the node's EEPROM.
+serde.workspace = true
+
+[dev-dependencies]
+postcard.workspace = true

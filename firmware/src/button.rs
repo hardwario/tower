@@ -152,6 +152,11 @@ impl Button {
         self.ch.inner.receive().await
     }
 
+    /// The next queued event, if any, without waiting.
+    pub fn try_event(&self) -> Option<Event> {
+        self.ch.inner.try_receive().ok()
+    }
+
     /// Whether the button is down now (debounced), whatever the queue holds.
     pub fn is_pressed(&self) -> bool {
         self.ch.pressed.load(Ordering::Relaxed)

@@ -3887,6 +3887,14 @@ name = "tower-strip"
 version = "0.0.0"
 
 [[package]]
+name = "tower-taf"
+version = "0.0.0"
+dependencies = [
+ "postcard",
+ "serde",
+]
+
+[[package]]
 name = "tracing"
 version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"

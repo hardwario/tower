@@ -148,9 +148,10 @@ examples:
 apps:
     @echo lcd_games
     @echo led_strip
+    @echo radio_button
     @echo radio_climate
     @echo radio_dongle_gateway
-    @echo radio_button
+    @echo radio_motion
 
 # `kind` is example|app; set TOWER_FEATURES to pass cargo features (e.g. a radio example's role):
 #   just build example blinky
@@ -211,7 +212,7 @@ check-r1:
 # whole host workspace instead.
 # Run the host-side unit tests of the shared crates the firmware builds on.
 test *args:
-    cargo test --locked --manifest-path ../Cargo.toml --target {{host}} -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi -p tower-strip {{args}}
+    cargo test --locked --manifest-path ../Cargo.toml --target {{host}} -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi -p tower-strip -p tower-taf {{args}}
 
 
 # flip-link puts the stack BELOW the statics on the 20 KB part, so each product bin must
@@ -221,9 +222,9 @@ test *args:
 # Guard the RAM budget: fail if any product bin's statics leave too little stack.
 ram-budget:
     cargo build --locked --release --bins
-    python3 tools/check_ram_budget.py radio_button radio_dongle_gateway radio_climate lcd_games led_strip
+    python3 tools/check_ram_budget.py radio_button radio_dongle_gateway radio_climate radio_motion lcd_games led_strip
     cargo build --locked --release --bins --features core-module-r1
-    python3 tools/check_ram_budget.py radio_button radio_dongle_gateway radio_climate lcd_games led_strip
+    python3 tools/check_ram_budget.py radio_button radio_dongle_gateway radio_climate radio_motion lcd_games led_strip
 
 # rustfmt house style: the repo-root rustfmt.toml (110 cols) covers this workspace too.
 # Apply rustfmt to this workspace.

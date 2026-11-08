@@ -23,8 +23,9 @@ fn enc_cmd(c: &NodeCmd) -> Vec<u8> {
 /// An envelope is the 2-byte tag (little-endian) followed by exactly the postcard body.
 #[test]
 fn envelope_is_the_tag_then_the_postcard_body() {
-    let m = NodeMsg::Button {
-        kind: ButtonKind::Click,
+    let m = NodeMsg::Event {
+        id: 16,
+        value: 2,
         count: 42,
     };
     let bytes = enc_msg(&m);
@@ -86,9 +87,40 @@ fn max_node_info_fits_the_mtu() {
         firmware_version: &ver,
         session_id: u32::MAX,
         sleeping: true,
+        wants_time: true,
     });
     let mut buf = [0u8; MAX_RADIO_PAYLOAD];
     encode_node_msg(&m, &mut buf).expect("max NodeInfo must fit the radio MTU");
+}
+
+/// A full `Report` of the widest values, and the widest `Event`, `Set` and `Time`.
+#[test]
+fn max_report_and_commands_fit_the_mtu() {
+    let mut items = heapless::Vec::new();
+    for id in 0..MAX_REPORT as u8 {
+        items.push((u8::MAX - id, i32::MIN)).unwrap();
+    }
+    let mut buf = [0u8; MAX_RADIO_PAYLOAD];
+    encode_node_msg(&NodeMsg::Report(items), &mut buf).expect("a full report must fit the radio MTU");
+    let e = NodeMsg::Event {
+        id: u8::MAX,
+        value: i32::MIN,
+        count: u32::MAX,
+    };
+    encode_node_msg(&e, &mut buf).expect("an event must fit");
+    encode_node_cmd(
+        &NodeCmd::Set {
+            id: u8::MAX,
+            value: i32::MIN,
+        },
+        &mut buf,
+    )
+    .expect("a set must fit");
+    let t = NodeCmd::Time {
+        unix: u32::MAX,
+        utc_offset_min: i16::MIN,
+    };
+    encode_node_cmd(&t, &mut buf).expect("a time sync must fit");
 }
 
 // --- envelope guards --------------------------------------------------------------
@@ -97,7 +129,11 @@ fn max_node_info_fits_the_mtu() {
 /// is `TooShort`.
 #[test]
 fn foreign_tag_is_rejected() {
-    let mut bytes = enc_msg(&NodeMsg::Temperature { millic: 1 });
+    let mut bytes = enc_msg(&NodeMsg::Event {
+        id: 0,
+        value: 1,
+        count: 1,
+    });
     let forged = RADIO_TAG ^ 0x0100;
     bytes[..2].copy_from_slice(&forged.to_le_bytes());
     assert_eq!(
@@ -118,7 +154,7 @@ fn foreign_tag_is_rejected() {
     );
     let mut tiny = [0u8; 1];
     assert_eq!(
-        encode_node_msg(&NodeMsg::Temperature { millic: 0 }, &mut tiny),
+        encode_node_msg(&NodeMsg::Report(heapless::Vec::new()), &mut tiny),
         Err(Error::Overflow)
     );
 }
@@ -137,8 +173,9 @@ fn a_version_byte_envelope_from_an_older_tree_is_refused() {
 /// net layer delivers the exact payload length, so a legitimate envelope never has a tail.
 #[test]
 fn trailing_bytes_are_malformed() {
-    let mut msg = enc_msg(&NodeMsg::Button {
-        kind: ButtonKind::Hold,
+    let mut msg = enc_msg(&NodeMsg::Event {
+        id: 16,
+        value: 3,
         count: 7,
     });
     assert!(decode_node_msg(&msg).is_ok());
@@ -173,43 +210,36 @@ fn over_mtu_encode_is_rejected() {
 /// Every variant round-trips through encode → decode.
 #[test]
 fn every_variant_roundtrips() {
+    let mut report = heapless::Vec::new();
+    report
+        .extend_from_slice(&[(0, -1234), (17, 1), (20, 2_000_000)])
+        .unwrap();
     let msgs = [
         NodeMsg::Info(NodeInfo {
             firmware_name: "radio_button",
             firmware_version: "v0.1.0",
             session_id: 3,
             sleeping: true,
+            wants_time: false,
         }),
         NodeMsg::Info(NodeInfo {
-            firmware_name: "radio_climate",
+            firmware_name: "radio_control",
             firmware_version: "v1.2.3",
             session_id: 77,
             sleeping: false,
+            wants_time: true,
         }),
-        NodeMsg::Button {
-            kind: ButtonKind::Press,
-            count: 1,
-        },
-        NodeMsg::Button {
-            kind: ButtonKind::Release,
-            count: 2,
-        },
-        NodeMsg::Button {
-            kind: ButtonKind::Click,
+        NodeMsg::Report(report),
+        NodeMsg::Report(heapless::Vec::new()),
+        NodeMsg::Event {
+            id: 16,
+            value: 2,
             count: 3,
         },
-        NodeMsg::Button {
-            kind: ButtonKind::Hold,
-            count: 7,
-        },
-        NodeMsg::Temperature { millic: -12_345 },
-        NodeMsg::Accel {
-            kind: AccelKind::Motion,
-            face: 0,
-        },
-        NodeMsg::Accel {
-            kind: AccelKind::Orientation,
-            face: 6,
+        NodeMsg::Event {
+            id: 17,
+            value: -1,
+            count: u32::MAX,
         },
         NodeMsg::Shell(NodeShellChunk {
             cmd_id: 300,
@@ -224,12 +254,23 @@ fn every_variant_roundtrips() {
         let n = encode_node_msg(m, &mut buf).unwrap();
         assert_eq!(&decode_node_msg(&buf[..n]).unwrap(), m);
     }
-    let c = NodeCmd::Shell {
-        epoch: 42,
-        cmd_id: 3,
-        line: "/led on",
-    };
-    let mut buf = [0u8; MAX_RADIO_PAYLOAD];
-    let n = encode_node_cmd(&c, &mut buf).unwrap();
-    assert_eq!(decode_node_cmd(&buf[..n]).unwrap(), c);
+    let cmds = [
+        NodeCmd::Shell {
+            epoch: 42,
+            cmd_id: 3,
+            line: "/led on",
+        },
+        NodeCmd::Set { id: 16, value: 1 },
+        NodeCmd::Set { id: 3, value: -50 },
+        NodeCmd::Time {
+            unix: 1_794_200_000,
+            utc_offset_min: 60,
+        },
+        NodeCmd::Describe,
+    ];
+    for c in &cmds {
+        let mut buf = [0u8; MAX_RADIO_PAYLOAD];
+        let n = encode_node_cmd(c, &mut buf).unwrap();
+        assert_eq!(&decode_node_cmd(&buf[..n]).unwrap(), c);
+    }
 }

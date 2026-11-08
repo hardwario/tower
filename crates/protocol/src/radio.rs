@@ -38,27 +38,13 @@ pub const MAX_RADIO_PAYLOAD: usize = 74;
 /// MTU minus the worst-case envelope overhead, with margin. Pinned ≤ MTU by test.
 pub const RADIO_SHELL_CHUNK: usize = 56;
 
-/// Button event kinds. Variant order pinned by test.
-#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ButtonKind {
-    Press,
-    Release,
-    Click,
-    Hold,
-}
+/// The most property values one [`NodeMsg::Report`] carries.
+pub const MAX_REPORT: usize = 8;
 
-/// Accelerometer event kinds. Variant order pinned by test.
-#[derive(Serialize, Deserialize, Schema, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AccelKind {
-    /// Wake-on-motion (tilt interrupt) fired.
-    Motion,
-    /// The resting orientation changed; `face` says which side is up.
-    Orientation,
-}
-
-/// Node identity + health, sent at boot and every heartbeat period. The host uses
-/// `firmware_name` to auto-name unnamed nodes, and `session_id` to disambiguate a
-/// counter reset (reboot) from a wrapped counter.
+/// Node identity + health, sent at boot and every heartbeat period. The host derives the node's
+/// kind from `firmware_name` (`radio_<kind>`, see [`props::kind_of_firmware`](crate::props::kind_of_firmware)),
+/// auto-names unnamed nodes from it, and uses `session_id` to tell a counter reset (reboot) from a
+/// wrapped counter.
 #[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub struct NodeInfo<'a> {
     /// ≤ 24 bytes.
@@ -66,8 +52,12 @@ pub struct NodeInfo<'a> {
     /// ≤ 8 bytes.
     pub firmware_version: &'a str,
     pub session_id: u32,
-    /// The node sleeps between uplinks (downlinks must be queued on the gateway).
+    /// The node sleeps between uplinks (downlinks must be queued on the gateway); `false` for a
+    /// listening node, which keeps its receiver on.
     pub sleeping: bool,
+    /// The node has no wall-clock time, or its last sync is old: the host answers with
+    /// [`NodeCmd::Time`].
+    pub wants_time: bool,
 }
 
 /// One chunk of a remote-shell response (mirrors the console `ShellResponse`
@@ -88,19 +78,19 @@ pub struct NodeShellChunk<'a> {
 pub enum NodeMsg<'a> {
     #[serde(borrow)]
     Info(NodeInfo<'a>),
-    /// One button event with the per-kind running count since boot (RAM-only:
-    /// a reset means the node rebooted; see [`NodeInfo::session_id`]).
-    Button { kind: ButtonKind, count: u32 },
-    /// Temperature in millidegrees Celsius.
-    Temperature { millic: i32 },
-    /// `face` is the die side facing up (1..=6), 0 = unknown/moving.
-    Accel { kind: AccelKind, face: u8 },
+    /// Current values of properties, `(id, value)` (see [`props`](crate::props)): what changed,
+    /// and every state and setting on a heartbeat.
+    Report(heapless::Vec<(u8, i32), MAX_REPORT>),
+    /// The event property `id` happened; `value` is its detail, `count` the running count of this
+    /// event since boot (RAM-only: a reset means the node rebooted, see [`NodeInfo::session_id`]),
+    /// so the host can see events lost on the air.
+    Event { id: u8, value: i32, count: u32 },
     #[serde(borrow)]
     Shell(NodeShellChunk<'a>),
 }
 
-/// Host → node application messages, delivered from the gateway's downlink queue
-/// on the node's next uplink. Variant order is the wire; never reorder.
+/// Host → node application messages: from the gateway's downlink queue on a sleeping node's next
+/// uplink, or at once to a listening node. Variant order is the wire; never reorder.
 #[derive(Serialize, Deserialize, Schema, Clone, PartialEq, Eq, Debug)]
 pub enum NodeCmd<'a> {
     /// Run `line` in the node's shell dispatcher; respond with [`NodeMsg::Shell`]
@@ -110,6 +100,15 @@ pub enum NodeCmd<'a> {
     /// a re-delivery a node already ran (the "empty checkmark" bug). The reply chunks
     /// carry only `cmd_id`; correlation is within one host process.
     Shell { epoch: u32, cmd_id: u16, line: &'a str },
+    /// Set the control or setting property `id` to `value`. The node answers with a
+    /// [`NodeMsg::Report`] of the value it now holds (idempotent, so a re-delivery is harmless).
+    Set { id: u8, value: i32 },
+    /// Wall-clock time: Unix seconds (UTC) when the host sent it, and the host's UTC offset in
+    /// minutes then (local time = `unix + 60 * utc_offset_min`).
+    Time { unix: u32, utc_offset_min: i16 },
+    /// Send [`NodeMsg::Info`] and a full [`NodeMsg::Report`] (a host that does not know the
+    /// node's kind yet, after its own restart, asks rather than wait for the next heartbeat).
+    Describe,
 }
 
 fn encode_envelope<T: Serialize>(payload: &T, out: &mut [u8]) -> Result<usize, Error> {

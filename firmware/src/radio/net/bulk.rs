@@ -67,7 +67,7 @@ pub trait BulkSink {
     async fn consume(&mut self, offset: usize, chunk: &[u8]) -> bool;
 }
 
-impl Net {
+impl<const P: usize> Net<P> {
     /// Serve an in-RAM `data` slice as a bulk transfer to `dest`: a convenience
     /// wrapper over [`bulk_serve_from`](Self::bulk_serve_from). Returns whether the
     /// last chunk was served.

@@ -283,7 +283,7 @@ const KEYED_FRAME_LEN: usize = frame::HDR_LEN + 4 + TAG_LEN;
 /// [`Net::recv`]'s keyed-join responder: checks a keyed JOIN_REQ and, when it may be answered,
 /// returns the sealed JOIN_RESP ([`Net::prepare_keyed_answer`], installed by
 /// [`Net::set_keyed_join`]).
-pub(super) type KeyedResponder = fn(&mut Net, &mut [u8]) -> Option<KeyedAnswer>;
+pub(super) type KeyedResponder<const P: usize> = fn(&mut Net<P>, &mut [u8]) -> Option<KeyedAnswer>;
 
 /// A sealed keyed JOIN_RESP, ready to transmit after the turnaround.
 pub(super) struct KeyedAnswer {
@@ -352,7 +352,7 @@ impl core::fmt::Display for JoinError {
     }
 }
 
-impl Net {
+impl<const P: usize> Net<P> {
     /// Host: listen for a pairing JOIN_REQ for up to `slice` (one slice of the window `host`
     /// was prepared for; pass the whole window to listen through it in one call), answering with
     /// the precomputed ephemeral of `host` (create it with [`PairingHost::prepare`] when the

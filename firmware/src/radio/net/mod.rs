@@ -270,7 +270,7 @@ pub struct NetConfig {
 }
 
 /// The network layer over one SPIRIT1 radio.
-pub struct Net {
+pub struct Net<const P: usize = MAX_PEERS> {
     radio: Spirit1,
     ccm: Ccm,
     addr: u32,
@@ -282,7 +282,7 @@ pub struct Net {
     default_lane_enabled: bool,
     /// Per-peer (addr, key, last-seen) table; a registered peer overrides the
     /// default key and gets its own replay lane (docs/radio.md).
-    peers: [Option<Peer>; MAX_PEERS],
+    peers: [Option<Peer>; P],
     /// Replay lane for senders not in the peer table (the single-link lane).
     default_lane: ReplayLane,
     /// Lazy-persist period of every replay lane ([`set_lane_persist_period`](Self::set_lane_persist_period)).
@@ -315,7 +315,7 @@ pub struct Net {
     /// The keyed-join responder [`recv`](Self::recv) calls for a keyed JOIN_REQ: `None` until
     /// [`set_keyed_join`](Self::set_keyed_join) installs it. A function pointer, not code inlined
     /// into `recv`, so an image that never calls `set_keyed_join` (every node) does not link it.
-    keyed_responder: Option<pairing::KeyedResponder>,
+    keyed_responder: Option<pairing::KeyedResponder<P>>,
     /// The operator's switch for an installed responder ([`set_keyed_join`](Self::set_keyed_join)).
     keyed_join_enabled: bool,
     /// Keyed-join refusal warning rate limit.
@@ -325,11 +325,19 @@ pub struct Net {
 }
 
 impl Net {
+    /// Bring the network layer up with the full peer table ([`MAX_PEERS`], what a gateway or a P2P
+    /// node needs); see [`with_peers`](Net::with_peers) for a node that talks to one gateway.
+    pub async fn new(radio: Spirit1, kv: Nv, cfg: NetConfig) -> Result<Self, RadioError> {
+        Self::with_peers(radio, kv, cfg).await
+    }
+}
+
+impl<const P: usize> Net<P> {
     /// Bring the radio up, apply the RF config, and initialise counters from
     /// EEPROM (`kv`): resume the TX counter at the persisted reserve watermark and
     /// reserve the next block, and restore the default-lane last-seen (per-peer
     /// lanes are restored when their peer is registered via [`add_peer`](Self::add_peer)).
-    pub async fn new(mut radio: Spirit1, kv: Nv, cfg: NetConfig) -> Result<Self, RadioError> {
+    pub async fn with_peers(mut radio: Spirit1, kv: Nv, cfg: NetConfig) -> Result<Self, RadioError> {
         radio.exit_shutdown().await?;
         radio.read_device_id()?;
         config::apply(
@@ -385,7 +393,7 @@ impl Net {
             addr: cfg.addr,
             default_key: cfg.key,
             default_lane_enabled: true,
-            peers: [None; MAX_PEERS],
+            peers: [None; P],
             default_lane: ReplayLane::new(last_seen),
             lane_persist: tower_net::replay::P as u8,
             txc,

@@ -43,7 +43,7 @@ check-host: doc test-sha2-compact
     cargo clippy -p tower-hil --all-targets --features power --locked -- -D warnings
     cargo test --workspace --locked
     cargo test -p tower-hil --features power --no-run --locked
-    cargo build --locked --target thumbv6m-none-eabi -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi -p tower-strip
+    cargo build --locked --target thumbv6m-none-eabi -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi -p tower-strip -p tower-taf
 
 # Firmware gates: `ci` is exactly CI's firmware job; the blinky build also exercises the
 # `cargo objcopy` path `just fw flash` uses.

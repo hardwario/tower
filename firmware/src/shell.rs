@@ -85,6 +85,9 @@ pub enum Kind {
     Uint { min: u32, max: u32 },
     /// Signed integer constrained to `min..=max`. For offsets, tx-power dBm, calibration.
     Int { min: i32, max: i32 },
+    /// A decimal with `decimals` fraction digits (`21.5`), stored as the integer `value *
+    /// 10^decimals` (4 LE bytes) within `min..=max` (in those units). For temperatures, ratios.
+    Fixed { min: i32, max: i32, decimals: u8 },
     /// Boolean: accepts `true`/`false`, `on`/`off`, `1`/`0`; stored as one byte.
     Bool,
     /// One of a fixed set of string values (stored verbatim; the choices complete after
@@ -1034,6 +1037,14 @@ fn encode_value(kind: Kind, value: &str, buf: &mut [u8; MAX_SETTING]) -> Result<
             buf[..4].copy_from_slice(&v.to_le_bytes());
             Ok(4)
         }
+        Kind::Fixed { min, max, decimals } => {
+            let v = tower_protocol::props::parse_fixed(value, decimals).ok_or(())?;
+            if v < min || v > max {
+                return Err(());
+            }
+            buf[..4].copy_from_slice(&v.to_le_bytes());
+            Ok(4)
+        }
         Kind::Bool => {
             buf[0] = parse_bool(value).ok_or(())? as u8;
             Ok(1)
@@ -1076,6 +1087,11 @@ fn read_value(kv: Scoped, s: &Setting, out: &mut String<MAX_SETTING>) {
             Kind::Int { .. } if n >= 4 => {
                 let v = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
                 let _ = write!(out, "{v}");
+                return;
+            }
+            Kind::Fixed { decimals, .. } if n >= 4 => {
+                let v = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                let _ = tower_protocol::props::write_fixed(out, v, decimals);
                 return;
             }
             Kind::Bool if n >= 1 => {
@@ -1142,6 +1158,7 @@ impl tower_hmi::menu::Values for SettingsValues {
         match s.kind {
             Kind::Uint { .. } => text.parse::<u32>().map_or(0, |v| v.min(i32::MAX as u32) as i32),
             Kind::Int { .. } => text.parse().unwrap_or(0),
+            Kind::Fixed { decimals, .. } => tower_protocol::props::parse_fixed(&text, decimals).unwrap_or(0),
             Kind::Bool => parse_bool(&text).unwrap_or(false) as i32,
             Kind::Enum(choices) => choices.iter().position(|c| *c == text.as_str()).unwrap_or(0) as i32,
             Kind::Str { .. } | Kind::Addr => 0,
@@ -1154,6 +1171,9 @@ impl tower_hmi::menu::Values for SettingsValues {
         match s.kind {
             Kind::Uint { .. } | Kind::Int { .. } => {
                 let _ = write!(text, "{value}");
+            }
+            Kind::Fixed { decimals, .. } => {
+                let _ = tower_protocol::props::write_fixed(&mut text, value, decimals);
             }
             Kind::Bool => {
                 let _ = text.push_str(if value != 0 { "true" } else { "false" });
@@ -1184,6 +1204,12 @@ fn write_constraint(ctx: &mut Ctx<'_>, kind: Kind) {
         }
         Kind::Int { min, max } => {
             let _ = write!(ctx, "int {min}..={max}");
+        }
+        Kind::Fixed { min, max, decimals } => {
+            let _ = write!(ctx, "decimal ");
+            let _ = tower_protocol::props::write_fixed(ctx, min, decimals);
+            let _ = write!(ctx, "..=");
+            let _ = tower_protocol::props::write_fixed(ctx, max, decimals);
         }
         Kind::Bool => {
             let _ = write!(ctx, "bool");

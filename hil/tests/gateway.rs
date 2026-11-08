@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use tower_hil::{Bench, Console, Frame, Role, bench_or_fail, build_image, frame_text};
 use tower_protocol::mgmt::{self, DeviceInfo, DeviceRole, MgmtOp, Provision, QueueId};
+use tower_protocol::props;
 use tower_protocol::radio::{self, NodeCmd, NodeMsg};
 
 /// Build a product app (`just build app <name>`, TOWER_FEATURES explicitly empty) and flash it to
@@ -132,7 +133,7 @@ fn gateway_bridges_push_button_end_to_end() {
         .wait_for(Duration::from_secs(10), |f| {
             matches!(f, Frame::Uplink { src, data, .. }
                 if *src == node_addr
-                && matches!(radio::decode_node_msg(data), Ok(NodeMsg::Button { kind: radio::ButtonKind::Click, count: 1 })))
+                && matches!(radio::decode_node_msg(data), Ok(NodeMsg::Event { id: props::button::BUTTON, value: 2, count: 1 })))
         })
         .expect("gateway console read");
     assert!(uplink.is_some(), "gateway forwarded the click (count=1) verbatim");

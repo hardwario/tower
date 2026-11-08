@@ -55,6 +55,7 @@ pub mod crc;
 pub mod fingerprint;
 pub mod mgmt;
 pub mod msg;
+pub mod props;
 pub mod radio;
 pub mod ring;
 

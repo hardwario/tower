@@ -6,11 +6,12 @@
 //! carrying another schema tag.
 
 use serde::{Deserialize, Serialize};
+use tower_protocol::props;
 
 /// Version of this topic/payload tree, carried in the retained `gateway/status`; clients
 /// refuse a mismatch. Bump it with any change an external subscriber would notice (a topic or
 /// key renamed, removed or retyped). Units live in the field docs, not in the key names.
-pub(crate) const SCHEMA: u32 = 3;
+pub(crate) const SCHEMA: u32 = 4;
 
 /// `gateway/status` (retained). The LWT publishes only `{state:"offline", schema}`
 /// (the broker can't know the rest once we're gone), so every other field is
@@ -108,35 +109,74 @@ pub(crate) struct Node {
     pub queued: u8,
 }
 
-/// `nodes/{addr}/event/button`.
+/// `nodes/{addr}/state/{prop}` (retained): a property's current value, as its type says (`true`,
+/// `21.5`, `"auto"`; see [`prop_value`]).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub(crate) struct ButtonEvent {
-    /// `press` | `release` | `click` | `hold`.
-    pub event: String,
-    /// The node's running count for this event kind since its boot.
+pub(crate) struct State {
+    pub value: serde_json::Value,
+    pub ts: u64,
+}
+
+/// `nodes/{addr}/event/{prop}`: one event.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub(crate) struct PropEvent {
+    /// The event's detail, as its type says (`"click"`, a count).
+    pub value: serde_json::Value,
+    /// The node's running count of this event since its boot (a gap = events lost on the air).
     pub count: u32,
     /// Net-layer frame counter (dedup key for QoS-1 redelivery).
     pub counter: u32,
     pub ts: u64,
 }
 
-/// `nodes/{addr}/event/accel`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub(crate) struct AccelEvent {
-    /// `motion` | `orientation`.
-    pub event: String,
-    /// Die face up 1..=6; 0 = unknown/moving.
-    pub face: u8,
-    pub counter: u32,
-    pub ts: u64,
+/// A property's wire value as JSON: a boolean, a number (fixed-point values exact: `21.5`), or an
+/// enum's name (an out-of-range index stays a number).
+pub(crate) fn prop_value(ty: &props::Type, value: i32) -> serde_json::Value {
+    match *ty {
+        props::Type::Bool => serde_json::Value::Bool(value != 0),
+        props::Type::Number { decimals: 0, .. } => value.into(),
+        props::Type::Number { decimals, .. } => {
+            let mut text = String::new();
+            let _ = props::write_fixed(&mut text, value, decimals);
+            text.parse::<serde_json::Number>()
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|_| value.into())
+        }
+        props::Type::Enum(names) => usize::try_from(value)
+            .ok()
+            .and_then(|i| names.get(i))
+            .map_or_else(|| value.into(), |n| serde_json::Value::String((*n).to_string())),
+    }
 }
 
-/// `nodes/{addr}/measure/temperature` (retained last value).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub(crate) struct Temperature {
-    pub celsius: f64,
-    pub millic: i32,
-    pub ts: u64,
+/// Parse a `nodes/{addr}/set/{prop}` payload into the property's wire value: a JSON value
+/// (`21.5`, `true`, `"auto"`), an object `{"value": ...}`, or plain text (`on`, `21.5`, `auto`).
+pub(crate) fn parse_set(ty: &props::Type, data: &[u8]) -> Result<i32, String> {
+    let text = std::str::from_utf8(data)
+        .map_err(|_| "the payload is not UTF-8".to_string())?
+        .trim();
+    let value = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Object(mut map)) => map
+            .remove("value")
+            .ok_or_else(|| "an object payload needs a \"value\"".to_string())?,
+        Ok(v) => v,
+        Err(_) => serde_json::Value::String(text.to_string()),
+    };
+    let text = match value {
+        serde_json::Value::Bool(b) => (if b { "on" } else { "off" }).to_string(),
+        // JSON may spell an integer `20.0`: drop a zero fraction the type does not take.
+        serde_json::Value::Number(n) => {
+            let t = n.to_string();
+            match t.split_once('.') {
+                Some((int, frac)) if frac.bytes().all(|b| b == b'0') => int.to_string(),
+                _ => t,
+            }
+        }
+        serde_json::Value::String(s) => s,
+        _ => return Err("the value must be a number, a boolean or a string".into()),
+    };
+    ty.parse(&text)
+        .ok_or_else(|| format!("{text:?} is not a valid value"))
 }
 
 /// `nodes/{addr}/uplink`: the raw decoded envelope (debug feed).
@@ -421,21 +461,21 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&s).unwrap(),
-            r#"{"state":"online","schema":3,"gateway":"0x0000ab12","firmware":"radio_dongle_gateway","firmware_version":"v0.1.0","session_id":7,"wire":"console 0x1234 radio 0xabcd","serial_port":"/dev/ttyACM0","serial_up":true}"#
+            r#"{"state":"online","schema":4,"gateway":"0x0000ab12","firmware":"radio_dongle_gateway","firmware_version":"v0.1.0","session_id":7,"wire":"console 0x1234 radio 0xabcd","serial_port":"/dev/ttyACM0","serial_up":true}"#
         );
     }
 
     #[test]
-    fn golden_button_event() {
-        let e = ButtonEvent {
-            event: "click".into(),
+    fn golden_prop_event() {
+        let e = PropEvent {
+            value: "click".into(),
             count: 42,
             counter: 1234,
             ts: 1_700_000_000,
         };
         assert_eq!(
             serde_json::to_string(&e).unwrap(),
-            r#"{"event":"click","count":42,"counter":1234,"ts":1700000000}"#
+            r#"{"value":"click","count":42,"counter":1234,"ts":1700000000}"#
         );
     }
 
@@ -537,30 +577,83 @@ mod tests {
     }
 
     #[test]
-    fn golden_temperature() {
-        let t = Temperature {
-            celsius: 21.5,
-            millic: 21500,
+    fn golden_state() {
+        let t = State {
+            value: prop_value(&props::COMMON[0].ty, 2150),
             ts: 1_700_000_000,
         };
         assert_eq!(
             serde_json::to_string(&t).unwrap(),
-            r#"{"celsius":21.5,"millic":21500,"ts":1700000000}"#
+            r#"{"value":21.5,"ts":1700000000}"#
         );
     }
 
+    /// Property values in JSON, every type.
     #[test]
-    fn golden_accel_event() {
-        let e = AccelEvent {
-            event: "orientation".into(),
-            face: 3,
-            counter: 7,
-            ts: 1_700_000_000,
+    fn prop_values_follow_their_type() {
+        use tower_protocol::props::Type;
+        let n = |v| {
+            prop_value(
+                &Type::Number {
+                    min: -1000,
+                    max: 1000,
+                    decimals: 1,
+                    unit: "",
+                },
+                v,
+            )
+            .to_string()
         };
-        assert_eq!(
-            serde_json::to_string(&e).unwrap(),
-            r#"{"event":"orientation","face":3,"counter":7,"ts":1700000000}"#
+        assert_eq!(n(215), "21.5");
+        assert_eq!(n(-5), "-0.5");
+        let i = prop_value(
+            &Type::Number {
+                min: 0,
+                max: 100,
+                decimals: 0,
+                unit: "%",
+            },
+            42,
         );
+        assert_eq!(i.to_string(), "42");
+        assert_eq!(prop_value(&Type::Bool, 1), serde_json::Value::Bool(true));
+        let e = Type::Enum(&["auto", "manual"]);
+        assert_eq!(prop_value(&e, 1), serde_json::Value::String("manual".into()));
+        assert_eq!(prop_value(&e, 7).to_string(), "7");
+    }
+
+    /// `set` payloads: JSON values, an object with `value`, plain text; refusals.
+    #[test]
+    fn set_payloads_parse() {
+        use tower_protocol::props::Type;
+        let t = Type::Number {
+            min: 50,
+            max: 300,
+            decimals: 1,
+            unit: "",
+        };
+        assert_eq!(parse_set(&t, b"21.5"), Ok(215));
+        assert_eq!(parse_set(&t, b" 21 "), Ok(210));
+        assert_eq!(parse_set(&t, br#"{"value": 22.5}"#), Ok(225));
+        assert_eq!(parse_set(&t, br#""19.5""#), Ok(195));
+        assert!(parse_set(&t, b"99").is_err(), "out of range");
+        assert!(parse_set(&t, b"21.55").is_err(), "too fine");
+        assert!(parse_set(&t, br#"{"v": 1}"#).is_err());
+        let pct = Type::Number {
+            min: 0,
+            max: 100,
+            decimals: 0,
+            unit: "%",
+        };
+        assert_eq!(parse_set(&pct, b"20.0"), Ok(20), "a JSON integer spelled with .0");
+        assert_eq!(parse_set(&Type::Bool, b"true"), Ok(1));
+        assert_eq!(parse_set(&Type::Bool, b"off"), Ok(0));
+        assert!(parse_set(&Type::Bool, b"[1]").is_err());
+        let e = Type::Enum(&["auto", "manual", "off"]);
+        assert_eq!(parse_set(&e, b"manual"), Ok(1));
+        assert_eq!(parse_set(&e, br#""off""#), Ok(2));
+        assert!(parse_set(&e, b"eco").is_err());
+        assert!(parse_set(&e, &[0xff]).is_err());
     }
 
     #[test]

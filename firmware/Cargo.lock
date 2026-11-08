@@ -1239,6 +1239,7 @@ dependencies = [
  "tower-radio",
  "tower-shell",
  "tower-strip",
+ "tower-taf",
  "zeroize",
 ]
 
@@ -1249,6 +1250,13 @@ version = "0.0.0"
 [[package]]
 name = "tower-strip"
 version = "0.0.0"
+
+[[package]]
+name = "tower-taf"
+version = "0.0.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "tracing"

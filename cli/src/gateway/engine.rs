@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tower_protocol::mgmt::{self, MgmtOp, NodeEntry, NodeKey, Paired, QueueEntry, QueueId};
 use tower_protocol::msg::RadioStat;
+use tower_protocol::props;
 use tower_protocol::radio::{self, NodeCmd, NodeMsg};
 
 use crate::mgmt::{DeviceInfoOwned, NodeEntryOwned, encode_mgmt, parse_records};
@@ -314,7 +315,35 @@ struct NodeMirror {
     /// until the first, and again after a `node_add` re-key). An uplink at or below it is a
     /// replay and is dropped: see [`Engine::on_uplink`].
     last_counter: Option<u32>,
+    /// Property bookkeeping (taf): retained topics published, values waiting for the kind.
+    props: PropMirror,
 }
+
+/// The property side of a [`NodeMirror`].
+#[derive(Debug, Clone, Default)]
+struct PropMirror {
+    /// Retained `state/{prop}` topics published for the node, cleared when it leaves.
+    retained: Vec<String>,
+    /// Values that arrived before the node's kind was known (the bridge started after the
+    /// node's last `NodeInfo`): published once its `NodeInfo` arrives.
+    stash: Vec<Stashed>,
+    /// A `Describe` is queued for the node (cleared by its `NodeInfo`).
+    describe_asked: bool,
+}
+
+/// One property value held in [`PropMirror::stash`].
+#[derive(Debug, Clone, Copy)]
+struct Stashed {
+    id: u8,
+    value: i32,
+    /// `Some` for an event (its running count).
+    count: Option<u32>,
+    counter: u32,
+    ts: u64,
+}
+
+/// At most this many values wait for a node's kind.
+const STASH: usize = 16;
 
 #[derive(Debug, Clone)]
 struct PendingShell {
@@ -495,6 +524,7 @@ impl Engine {
         let mut out = vec![
             Output::Subscribe(topics::gateway_cmd(&self.prefix)),
             Output::Subscribe(topics::shell_req_filter(&self.prefix)),
+            Output::Subscribe(topics::set_filter(&self.prefix)),
         ];
         self.issue(&mut out, OpKind::NodeList, MgmtOp::NodeList, None);
         self.issue(
@@ -551,6 +581,7 @@ impl Engine {
                 self.mqtt_up = true;
                 out.push(Output::Subscribe(topics::gateway_cmd(&self.prefix)));
                 out.push(Output::Subscribe(topics::shell_req_filter(&self.prefix)));
+                out.push(Output::Subscribe(topics::set_filter(&self.prefix)));
                 // Retained world re-publish: reconnect-resync is free by design.
                 self.publish_status(&mut out);
                 self.publish_stats(&mut out);
@@ -779,50 +810,13 @@ impl Engine {
     fn on_node_msg(&mut self, src: u32, counter: u32, data: &[u8], out: &mut Vec<Output>) {
         let ts = now_ts();
         match radio::decode_node_msg(data) {
-            Ok(NodeMsg::Button { kind, count }) => {
-                let event = match kind {
-                    radio::ButtonKind::Press => "press",
-                    radio::ButtonKind::Release => "release",
-                    radio::ButtonKind::Click => "click",
-                    radio::ButtonKind::Hold => "hold",
-                };
-                out.push(Output::Publish {
-                    topic: topics::node_button(&self.prefix, src),
-                    payload: json(&payload::ButtonEvent {
-                        event: event.into(),
-                        count,
-                        counter,
-                        ts,
-                    }),
-                    retain: false,
-                });
+            Ok(NodeMsg::Report(items)) => {
+                for (id, value) in items {
+                    self.on_prop(src, id, value, None, counter, ts, out);
+                }
             }
-            Ok(NodeMsg::Temperature { millic }) => {
-                out.push(Output::Publish {
-                    topic: topics::node_temperature(&self.prefix, src),
-                    payload: json(&payload::Temperature {
-                        celsius: millic as f64 / 1000.0,
-                        millic,
-                        ts,
-                    }),
-                    retain: true,
-                });
-            }
-            Ok(NodeMsg::Accel { kind, face }) => {
-                let event = match kind {
-                    radio::AccelKind::Motion => "motion",
-                    radio::AccelKind::Orientation => "orientation",
-                };
-                out.push(Output::Publish {
-                    topic: topics::node_accel(&self.prefix, src),
-                    payload: json(&payload::AccelEvent {
-                        event: event.into(),
-                        face,
-                        counter,
-                        ts,
-                    }),
-                    retain: false,
-                });
+            Ok(NodeMsg::Event { id, value, count }) => {
+                self.on_prop(src, id, value, Some(count), counter, ts, out)
             }
             Ok(NodeMsg::Info(info)) => self.on_node_info(src, &info, out),
             Ok(NodeMsg::Shell(chunk)) => self.on_shell_chunk(src, &chunk, out),
@@ -902,6 +896,159 @@ impl Engine {
             }
         }
         self.publish_node(out, i);
+        // The kind is known now: publish what waited for it.
+        let stash = std::mem::take(&mut self.nodes[i].props.stash);
+        self.nodes[i].props.describe_asked = false;
+        for v in stash {
+            self.on_prop(src, v.id, v.value, v.count, v.counter, v.ts, out);
+        }
+        if info.wants_time {
+            self.queue_time(out, src);
+        }
+    }
+
+    /// One property value from node `src` (taf): a state or setting goes to its retained
+    /// `state/{prop}` topic, an event (with its `count`) to `event/{prop}`, named by the node
+    /// kind's table. Before the kind is known (the bridge started after the node's last
+    /// `NodeInfo`), the value waits in the mirror and the node is asked to describe itself.
+    #[allow(clippy::too_many_arguments)]
+    fn on_prop(
+        &mut self,
+        src: u32,
+        id: u8,
+        value: i32,
+        count: Option<u32>,
+        counter: u32,
+        ts: u64,
+        out: &mut Vec<Output>,
+    ) {
+        let Some(i) = self.nodes.iter().position(|n| n.entry.addr == src) else {
+            return;
+        };
+        let Some(kind) = props::kind(&self.nodes[i].kind) else {
+            let m = &mut self.nodes[i].props;
+            if m.stash.len() < STASH {
+                m.stash.push(Stashed {
+                    id,
+                    value,
+                    count,
+                    counter,
+                    ts,
+                });
+            }
+            if !m.describe_asked {
+                m.describe_asked = true;
+                self.queue_cmd(out, src, &NodeCmd::Describe);
+            }
+            return;
+        };
+        let Some(prop) = kind.prop(id) else {
+            out.push(Output::Event(Event::Log(format!(
+                "node {}: property {id} is not in the `{}` table; rebuild both ends from the same checkout",
+                topics::node_hex(src),
+                kind.name
+            ))));
+            return;
+        };
+        let json_value = payload::prop_value(&prop.ty, value);
+        match count {
+            Some(count) => out.push(Output::Publish {
+                topic: topics::node_event(&self.prefix, src, prop.name),
+                payload: json(&payload::PropEvent {
+                    value: json_value,
+                    count,
+                    counter,
+                    ts,
+                }),
+                retain: false,
+            }),
+            None => {
+                let topic = topics::node_state(&self.prefix, src, prop.name);
+                if !self.nodes[i].props.retained.contains(&topic) {
+                    self.nodes[i].props.retained.push(topic.clone());
+                }
+                out.push(Output::Publish {
+                    topic,
+                    payload: json(&payload::State {
+                        value: json_value,
+                        ts,
+                    }),
+                    retain: true,
+                });
+            }
+        }
+    }
+
+    /// Queue one command for `node` on the gateway (delivered after the node's next uplink, or at
+    /// once to a listening node). Its outcome is only logged: the node's reply (a `Report`, an
+    /// `Info`) is what confirms it.
+    fn queue_cmd(&mut self, out: &mut Vec<Output>, node: u32, cmd: &NodeCmd<'_>) -> bool {
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let Ok(n) = radio::encode_node_cmd(cmd, &mut env) else {
+            return false;
+        };
+        let op = MgmtOp::QueuePush {
+            node_addr: node,
+            ttl: 0,
+            data: &env[..n],
+        };
+        self.issue(out, OpKind::QueuePush { node, shell: None }, op, None)
+            .is_some()
+    }
+
+    /// Send `node` the wall-clock time (this host's clock and UTC offset), which it asked for in
+    /// its `NodeInfo`.
+    fn queue_time(&mut self, out: &mut Vec<Output>, node: u32) {
+        let now = chrono::Local::now();
+        let unix = u32::try_from(now.timestamp()).unwrap_or(0);
+        let utc_offset_min = (now.offset().local_minus_utc() / 60) as i16;
+        if self.queue_cmd(out, node, &NodeCmd::Time { unix, utc_offset_min }) {
+            out.push(Output::Event(Event::Log(format!(
+                "time sync queued for node {} (UTC{utc_offset_min:+} min)",
+                topics::node_hex(node)
+            ))));
+        }
+    }
+
+    /// `nodes/{addr}/set/{prop}`: validate against the node kind's table and queue a `Set`. The
+    /// node's next `Report` (on the property's `state` topic) confirms it; a refusal is logged.
+    fn on_set_req(&mut self, node: u32, name: &str, data: &[u8], out: &mut Vec<Output>) {
+        let refuse = |out: &mut Vec<Output>, why: &str| {
+            out.push(Output::Event(Event::Log(format!(
+                "refusing set {name} on {}: {why}",
+                topics::node_hex(node)
+            ))));
+        };
+        let Some(i) = self.nodes.iter().position(|n| n.entry.addr == node) else {
+            return refuse(out, "unknown node");
+        };
+        let Some(kind) = props::kind(&self.nodes[i].kind) else {
+            if !self.nodes[i].props.describe_asked {
+                self.nodes[i].props.describe_asked = true;
+                self.queue_cmd(out, node, &NodeCmd::Describe);
+            }
+            return refuse(
+                out,
+                "its kind is not known yet (it has been asked to describe itself)",
+            );
+        };
+        let Some(prop) = kind.prop_named(name) else {
+            return refuse(out, &format!("a `{}` has no property `{name}`", kind.name));
+        };
+        if !matches!(prop.access, props::Access::Control | props::Access::Param) {
+            return refuse(out, "not settable over the radio");
+        }
+        let value = match payload::parse_set(&prop.ty, data) {
+            Ok(v) => v,
+            Err(e) => return refuse(out, &e),
+        };
+        if self.queue_cmd(out, node, &NodeCmd::Set { id: prop.id, value }) {
+            out.push(Output::Event(Event::Log(format!(
+                "set {name} = {} queued for node {}",
+                prop.ty.display(value),
+                topics::node_hex(node)
+            ))));
+        }
     }
 
     /// One remote-shell response chunk from a node → the MQTT dialog + frontend.
@@ -1161,11 +1308,14 @@ impl Engine {
             }
             (OpKind::NodeRemove { id }, None) => {
                 let id = *id;
-                let pending = match self.nodes.iter().position(|n| n.entry.addr == id) {
-                    Some(i) => self.nodes.remove(i).pending,
-                    None => Vec::new(),
+                let (pending, retained) = match self.nodes.iter().position(|n| n.entry.addr == id) {
+                    Some(i) => {
+                        let gone = self.nodes.remove(i);
+                        (gone.pending, gone.props.retained)
+                    }
+                    None => (Vec::new(), Vec::new()),
                 };
-                self.node_gone(out, id, &pending);
+                self.node_gone(out, id, &pending, &retained);
                 self.emit_registry(out);
                 self.rpc_ok(out, &p, serde_json::Value::Null);
             }
@@ -1383,6 +1533,7 @@ impl Engine {
                 }
                 Err(e) => out.push(Output::Event(Event::Log(format!("bad shell request: {e}")))),
             },
+            topics::Inbound::Set(node, prop) => self.on_set_req(node, &prop, data, out),
             topics::Inbound::Other => {}
         }
     }
@@ -2103,6 +2254,7 @@ impl Engine {
             session_id: None,
             pending: Vec::new(),
             last_counter: None,
+            props: PropMirror::default(),
         });
     }
 
@@ -2172,15 +2324,17 @@ impl Engine {
     /// Node `id` left the registry, seen in the `NodeRemove` answer or in a listing without it:
     /// end each of its pending shell dialogs (`pending`, taken out of its dropped mirror row)
     /// with its one terminal `done`, and clear its retained topics (empty payloads).
-    fn node_gone(&self, out: &mut Vec<Output>, id: u32, pending: &[PendingShell]) {
+    fn node_gone(&self, out: &mut Vec<Output>, id: u32, pending: &[PendingShell], retained: &[String]) {
         for pd in pending {
             self.shell_error(out, id, pd, "node removed");
         }
         for topic in [
             topics::node(&self.prefix, id),
-            topics::node_temperature(&self.prefix, id),
             topics::node_shell_pending(&self.prefix, id),
-        ] {
+        ]
+        .into_iter()
+        .chain(retained.iter().cloned())
+        {
             out.push(Output::Publish {
                 topic,
                 payload: Vec::new(),
@@ -2219,6 +2373,7 @@ impl Engine {
                     session_id: o.session_id,
                     pending: std::mem::take(&mut o.pending),
                     last_counter: o.last_counter,
+                    props: std::mem::take(&mut o.props),
                 }),
                 None => next.push(NodeMirror {
                     entry,
@@ -2226,6 +2381,7 @@ impl Engine {
                     session_id: None,
                     pending: Vec::new(),
                     last_counter: None,
+                    props: PropMirror::default(),
                 }),
             }
         }
@@ -2236,7 +2392,7 @@ impl Engine {
             .iter()
             .filter(|o| self.nodes.iter().all(|n| n.entry.addr != o.entry.addr))
         {
-            self.node_gone(out, gone.entry.addr, &gone.pending);
+            self.node_gone(out, gone.entry.addr, &gone.pending, &gone.props.retained);
         }
         for i in 0..self.nodes.len() {
             self.publish_node(out, i);
@@ -2620,32 +2776,256 @@ mod tests {
         )
     }
 
+    /// An uplink carrying `msg` from `src`.
+    fn msg_uplink(src: u32, counter: u32, msg: &NodeMsg<'_>) -> Input {
+        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
+        let n = radio::encode_node_msg(msg, &mut env).unwrap();
+        Input::SerialFrame(SerialMsg::Uplink {
+            src,
+            counter,
+            rssi: -67,
+            lqi: 30,
+            data: env[..n].to_vec(),
+        })
+    }
+
+    /// Answer every management request in flight (and those it releases) with an empty OK, so
+    /// the dongle's one-deep inbox is free for the next one.
+    fn drain(e: &mut Engine, mut out: Vec<Output>) {
+        for _ in 0..16 {
+            let sent: Vec<(u16, String)> = out.iter().filter_map(sent_op).collect();
+            if sent.is_empty() {
+                return;
+            }
+            out = Vec::new();
+            for (id, op) in sent {
+                // A listing answers with the mirror as it stands (an empty one would remove the
+                // nodes).
+                let data: Vec<u8> = if op.contains("NodeList") {
+                    let nodes: Vec<(u32, String, u8)> = e
+                        .nodes
+                        .iter()
+                        .map(|n| (n.entry.addr, n.entry.name.clone(), n.entry.flags))
+                        .collect();
+                    nodes
+                        .iter()
+                        .flat_map(|(a, n, f)| node_entry_record(*a, n, *f))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                out.extend(reply(e, id, MGMT_OK, &data));
+            }
+        }
+    }
+
+    /// A registered node whose kind the bridge knows (its `NodeInfo` seen), with the requests
+    /// that triggered answered.
+    fn with_kind(e: &mut Engine, id: u32, fw: &str) {
+        with_node(e, id, "kitchen", 0);
+        let out = e.handle(info_uplink(id, 1, fw));
+        drain(e, out);
+    }
+
     #[test]
-    fn button_uplink_maps_to_topic() {
+    fn event_uplink_maps_to_its_topic() {
+        let mut e = engine();
+        with_kind(&mut e, 0xAB12, "radio_button");
+        let ev = NodeMsg::Event {
+            id: props::button::BUTTON,
+            value: 2,
+            count: 7,
+        };
+        let out = e.handle(msg_uplink(0xAB12, 42, &ev));
+        let raw = publishes(&out, "tower/nodes/0x0000ab12/event/button");
+        assert_eq!(raw.len(), 1);
+        let ev: payload::PropEvent = serde_json::from_slice(raw[0]).unwrap();
+        assert_eq!((ev.value.as_str(), ev.count, ev.counter), (Some("click"), 7, 42));
+        assert!(
+            out.iter().any(|o| matches!(o, Output::Publish { topic, retain: false, .. } if topic.ends_with("/event/button"))),
+            "events are not retained"
+        );
+        // The graph feed got an RX mark too.
+        assert!(!publishes(&out, "tower/radio/rx").is_empty());
+    }
+
+    #[test]
+    fn report_uplink_maps_to_retained_state_topics() {
+        let mut e = engine();
+        with_kind(&mut e, 0xAB12, "radio_thermostat");
+        let mut items = heapless::Vec::new();
+        items
+            .extend_from_slice(&[
+                (props::common::TEMPERATURE, 2150),
+                (props::thermostat::SETPOINT, 215),
+                (props::thermostat::MODE, 1),
+                (props::thermostat::DEMAND, 1),
+            ])
+            .unwrap();
+        let out = e.handle(msg_uplink(0xAB12, 3, &NodeMsg::Report(items)));
+        let value = |topic: &str| {
+            let raw = publishes(&out, topic);
+            assert_eq!(raw.len(), 1, "{topic}");
+            serde_json::from_slice::<payload::State>(raw[0])
+                .unwrap()
+                .value
+                .to_string()
+        };
+        assert_eq!(value("tower/nodes/0x0000ab12/state/temperature"), "21.5");
+        assert_eq!(value("tower/nodes/0x0000ab12/state/setpoint"), "21.5");
+        assert_eq!(value("tower/nodes/0x0000ab12/state/mode"), "\"manual\"");
+        assert_eq!(value("tower/nodes/0x0000ab12/state/demand"), "true");
+        assert!(
+            out.iter()
+                .filter(|o| matches!(o, Output::Publish { topic, .. } if topic.contains("/state/")))
+                .all(|o| matches!(o, Output::Publish { retain: true, .. })),
+            "states are retained"
+        );
+        // Removing the node clears every retained state it had.
+        let removed = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"r1","op":"node_remove","params":{"addr":"0x0000ab12"}}"#,
+        ));
+        let (req_id, op) = removed.iter().find_map(sent_op).expect("NodeRemove goes out");
+        assert!(op.contains("NodeRemove"), "{op}");
+        let out = reply(&mut e, req_id, MGMT_OK, &[]);
+        for leaf in ["temperature", "setpoint", "mode", "demand"] {
+            let topic = format!("tower/nodes/0x0000ab12/state/{leaf}");
+            assert!(
+                out.iter().any(|o| matches!(o, Output::Publish { topic: t, payload, retain: true } if *t == topic && payload.is_empty())),
+                "{topic} cleared"
+            );
+        }
+    }
+
+    /// A value from a node whose kind is not known yet waits; the node is asked to describe
+    /// itself, and its `NodeInfo` releases the value.
+    #[test]
+    fn values_before_the_kind_wait_for_describe() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let ev = NodeMsg::Event {
+            id: props::motion::MOTION,
+            value: 1,
+            count: 1,
+        };
+        let out = e.handle(msg_uplink(0xAB12, 5, &ev));
+        assert!(publishes(&out, "tower/nodes/0x0000ab12/event/motion").is_empty());
+        let (_, op) = out.iter().find_map(sent_op).expect("a Describe is queued");
+        assert!(op.contains("QueuePush"), "{op}");
+        // A second unknown value does not queue another Describe.
+        let out = e.handle(msg_uplink(0xAB12, 6, &ev));
+        assert!(out.iter().find_map(sent_op).is_none());
+        let out = e.handle(info_uplink(0xAB12, 7, "radio_motion"));
+        assert_eq!(publishes(&out, "tower/nodes/0x0000ab12/event/motion").len(), 2);
+    }
+
+    /// `QueuePush` ops one call issued: sent at once (in `out`), or newly waiting for the
+    /// dongle's one-deep inbox (`waiting` is the count before the call, updated).
+    fn pushes(e: &Engine, out: &[Output], waiting: &mut usize) -> usize {
+        let now = queued_ops(e).iter().filter(|op| op.contains("QueuePush")).count();
+        let sent = out
+            .iter()
+            .filter_map(sent_op)
+            .filter(|(_, op)| op.contains("QueuePush"))
+            .count();
+        let new = sent + now.saturating_sub(*waiting);
+        *waiting = now;
+        new
+    }
+
+    #[test]
+    fn set_requests_are_validated_and_queued() {
+        let mut e = engine();
+        with_kind(&mut e, 0xAB12, "radio_control");
+        let set = |e: &mut Engine, prop: &str, body: &str| {
+            e.handle(mqtt_in(
+                &format!("tower/nodes/0x0000ab12/set/{prop}"),
+                body.as_bytes(),
+            ))
+        };
+        let mut waiting = 0;
+        let out = set(&mut e, "relay", "on");
+        assert_eq!(pushes(&e, &out, &mut waiting), 1, "the set is queued");
+        for (prop, body) in [
+            ("relay", "maybe"),
+            ("pixels", "10"),
+            ("temperature", "20"),
+            ("nonsense", "1"),
+            ("brightness", "101"),
+        ] {
+            let out = set(&mut e, prop, body);
+            assert_eq!(
+                pushes(&e, &out, &mut waiting),
+                0,
+                "{prop} = {body} must be refused"
+            );
+            assert!(
+                out.iter()
+                    .any(|o| matches!(o, Output::Event(Event::Log(l)) if l.contains("refusing set"))),
+                "{prop}"
+            );
+        }
+        let out = set(&mut e, "effect", "\"fire\"");
+        assert_eq!(pushes(&e, &out, &mut waiting), 1);
+        // An unknown node.
+        let out = e.handle(mqtt_in("tower/nodes/0x00000001/set/relay", b"on"));
+        assert_eq!(pushes(&e, &out, &mut waiting), 0);
+    }
+
+    #[test]
+    fn a_node_that_wants_time_gets_a_sync() {
         let mut e = engine();
         with_node(&mut e, 0xAB12, "kitchen", 0);
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let n = radio::encode_node_msg(
-            &NodeMsg::Button {
-                kind: radio::ButtonKind::Click,
-                count: 7,
-            },
+            &NodeMsg::Info(radio::NodeInfo {
+                firmware_name: "radio_thermostat",
+                firmware_version: "v0.1.0",
+                session_id: 1,
+                sleeping: true,
+                wants_time: true,
+            }),
             &mut env,
         )
         .unwrap();
         let out = e.handle(Input::SerialFrame(SerialMsg::Uplink {
             src: 0xAB12,
-            counter: 42,
-            rssi: -67,
+            counter: 2,
+            rssi: -60,
             lqi: 30,
             data: env[..n].to_vec(),
         }));
-        let raw = publishes(&out, "tower/nodes/0x0000ab12/event/button");
-        assert_eq!(raw.len(), 1);
-        let ev: payload::ButtonEvent = serde_json::from_slice(raw[0]).unwrap();
-        assert_eq!((ev.event.as_str(), ev.count, ev.counter), ("click", 7, 42));
-        // The graph feed got an RX mark too.
-        assert!(!publishes(&out, "tower/radio/rx").is_empty());
+        assert!(pushes(&e, &out, &mut 0) >= 1);
+        assert!(
+            out.iter()
+                .any(|o| matches!(o, Output::Event(Event::Log(l)) if l.contains("time sync")))
+        );
+    }
+
+    // ---- review fixes -------------------------------------------------------------
+
+    fn mqtt_in(topic: &str, payload: &[u8]) -> Input {
+        Input::MqttIn {
+            topic: topic.into(),
+            payload: payload.to_vec(),
+            retain: false,
+        }
+    }
+
+    fn logs(out: &[Output]) -> Vec<&str> {
+        out.iter()
+            .filter_map(|o| match o {
+                Output::Event(Event::Log(l)) => Some(l.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rpc_rsp(out: &[Output], id: &str) -> RpcResponse {
+        let raw = publishes(out, &format!("tower/gateway/rsp/{id}"));
+        assert_eq!(raw.len(), 1, "one response for {id}");
+        serde_json::from_slice(raw[0]).unwrap()
     }
 
     #[test]
@@ -2659,6 +3039,7 @@ mod tests {
                 firmware_version: "v0.1.0",
                 session_id: 1,
                 sleeping: true,
+                wants_time: false,
             }),
             &mut env,
         )
@@ -3114,8 +3495,9 @@ mod tests {
     fn click_uplink(src: u32, counter: u32) -> Input {
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let n = radio::encode_node_msg(
-            &NodeMsg::Button {
-                kind: radio::ButtonKind::Click,
+            &NodeMsg::Event {
+                id: props::button::BUTTON,
+                value: 2,
                 count: 1,
             },
             &mut env,
@@ -3137,8 +3519,12 @@ mod tests {
     fn uplink_at_or_below_the_last_counter_is_dropped() {
         let mut e = engine();
         with_node(&mut e, 0xAB12, "kitchen", 0);
-        let button = "tower/nodes/0x0000ab12/event/button";
-        assert_eq!(publishes(&e.handle(click_uplink(0xAB12, 40)), button).len(), 1);
+        // Every accepted uplink shows on the raw feed, whatever the node's kind.
+        let button = "tower/nodes/0x0000ab12/uplink";
+        let first = e.handle(click_uplink(0xAB12, 40));
+        assert_eq!(publishes(&first, button).len(), 1);
+        // The first value of an unknown kind queued a Describe: answer it.
+        drain(&mut e, first);
         assert!(publishes(&e.handle(click_uplink(0xAB12, 40)), button).is_empty());
         assert!(publishes(&e.handle(click_uplink(0xAB12, 12)), button).is_empty());
         // A node reboot jumps its counter to the next reserved block: still published.
@@ -3165,13 +3551,9 @@ mod tests {
         let (req_id, op) = out.iter().find_map(sent_op).expect("NodeRemove issued");
         assert!(op.contains("NodeRemove"), "{op}");
         let out = reply(&mut e, req_id, MGMT_OK, &[]);
-        // An empty retained payload clears the node, its last temperature, and its pending
-        // queue for any subscriber that held the retained value.
-        for topic in [
-            "tower/nodes/0x0000ab12",
-            "tower/nodes/0x0000ab12/measure/temperature",
-            "tower/nodes/0x0000ab12/shell/pending",
-        ] {
+        // An empty retained payload clears the node and its pending queue for any subscriber that
+        // held the retained value (its `state/*` topics too: `report_uplink_maps_to_retained_state_topics`).
+        for topic in ["tower/nodes/0x0000ab12", "tower/nodes/0x0000ab12/shell/pending"] {
             let cleared = out.iter().any(|o| {
                 matches!(o, Output::Publish { topic: t, payload, retain: true }
                     if t == topic && payload.is_empty())
@@ -3301,87 +3683,6 @@ mod tests {
     }
 
     // ---- more uplink → topic mappings (alongside `button_uplink_maps_to_topic`) ----
-
-    #[test]
-    fn temperature_uplink_maps_to_retained_topic() {
-        let mut e = engine();
-        with_node(&mut e, 0xAB12, "kitchen", 0);
-        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
-        let n = radio::encode_node_msg(&NodeMsg::Temperature { millic: 21500 }, &mut env).unwrap();
-        let out = e.handle(Input::SerialFrame(SerialMsg::Uplink {
-            src: 0xAB12,
-            counter: 3,
-            rssi: -60,
-            lqi: 30,
-            data: env[..n].to_vec(),
-        }));
-        let topic = "tower/nodes/0x0000ab12/measure/temperature";
-        assert!(
-            out.iter()
-                .any(|o| matches!(o, Output::Publish { topic: t, retain: true, .. } if t == topic)),
-            "temperature is a retained last-value topic"
-        );
-        let raw = publishes(&out, topic);
-        let t: payload::Temperature = serde_json::from_slice(raw[0]).unwrap();
-        assert_eq!((t.celsius, t.millic), (21.5, 21500));
-    }
-
-    #[test]
-    fn accel_uplink_maps_to_event_topic() {
-        let mut e = engine();
-        with_node(&mut e, 0xAB12, "kitchen", 0);
-        let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
-        let n = radio::encode_node_msg(
-            &NodeMsg::Accel {
-                kind: radio::AccelKind::Motion,
-                face: 0,
-            },
-            &mut env,
-        )
-        .unwrap();
-        let out = e.handle(Input::SerialFrame(SerialMsg::Uplink {
-            src: 0xAB12,
-            counter: 4,
-            rssi: -60,
-            lqi: 30,
-            data: env[..n].to_vec(),
-        }));
-        let topic = "tower/nodes/0x0000ab12/event/accel";
-        let raw = publishes(&out, topic);
-        assert_eq!(raw.len(), 1);
-        let a: payload::AccelEvent = serde_json::from_slice(raw[0]).unwrap();
-        assert_eq!((a.event.as_str(), a.face, a.counter), ("motion", 0, 4));
-        // Accel events are transient (not retained).
-        assert!(
-            out.iter()
-                .any(|o| matches!(o, Output::Publish { topic: t, retain: false, .. } if t == topic))
-        );
-    }
-
-    // ---- review fixes -------------------------------------------------------------
-
-    fn mqtt_in(topic: &str, payload: &[u8]) -> Input {
-        Input::MqttIn {
-            topic: topic.into(),
-            payload: payload.to_vec(),
-            retain: false,
-        }
-    }
-
-    fn logs(out: &[Output]) -> Vec<&str> {
-        out.iter()
-            .filter_map(|o| match o {
-                Output::Event(Event::Log(l)) => Some(l.as_str()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn rpc_rsp(out: &[Output], id: &str) -> RpcResponse {
-        let raw = publishes(out, &format!("tower/gateway/rsp/{id}"));
-        assert_eq!(raw.len(), 1, "one response for {id}");
-        serde_json::from_slice(raw[0]).unwrap()
-    }
 
     #[test]
     fn describe_rpc_reports_band_and_channel() {
@@ -3714,8 +4015,9 @@ mod tests {
     fn button_uplink(src: u32) -> Input {
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let n = radio::encode_node_msg(
-            &NodeMsg::Button {
-                kind: radio::ButtonKind::Click,
+            &NodeMsg::Event {
+                id: props::button::BUTTON,
+                value: 2,
                 count: 1,
             },
             &mut env,
@@ -3762,7 +4064,7 @@ mod tests {
         assert!(out.is_empty(), "held, not dropped, before the mirror exists");
         let out = reply(&mut e, req_id, MGMT_OK, &node_entry_record(0xAB12, "k", 0));
         assert_eq!(
-            publishes(&out, "tower/nodes/0x0000ab12/event/button").len(),
+            publishes(&out, "tower/nodes/0x0000ab12/uplink").len(),
             1,
             "replayed once the registry landed"
         );
@@ -3792,6 +4094,7 @@ mod tests {
                 firmware_version: "v0.1.0",
                 session_id: 1,
                 sleeping: true,
+                wants_time: false,
             }),
             &mut env,
         )
@@ -3854,6 +4157,7 @@ mod tests {
                 firmware_version: "v0.1.0",
                 session_id: 1,
                 sleeping: true,
+                wants_time: false,
             }),
             &mut env,
         )
@@ -4006,6 +4310,7 @@ mod tests {
                 firmware_version: "v0.1.0",
                 session_id: 1,
                 sleeping: true,
+                wants_time: false,
             }),
             &mut env,
         )
@@ -4128,11 +4433,7 @@ mod tests {
             rsp.done && rsp.error.as_deref() == Some("node removed"),
             "{rsp:?}"
         );
-        for topic in [
-            "tower/nodes/0x0000ab12",
-            "tower/nodes/0x0000ab12/measure/temperature",
-            "tower/nodes/0x0000ab12/shell/pending",
-        ] {
+        for topic in ["tower/nodes/0x0000ab12", "tower/nodes/0x0000ab12/shell/pending"] {
             assert!(
                 out.iter().any(
                     |o| matches!(o, Output::Publish { topic: t, payload, retain: true }

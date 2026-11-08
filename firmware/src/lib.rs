@@ -28,6 +28,8 @@
 //! - [`lcd`]: the TOWER LCD Module (128 x 128 memory LCD, buttons, RGB LED, gesture sensor) with
 //!   the [`hmi`] framework: drawing, Spleen fonts, images, declarative menus, button gestures.
 //! - [`hmi`]: the hardware-free HMI core (`tower-hmi`, re-exported).
+//! - [`taf`]: the TOWER Application Framework: the runtime every standard radio app shares
+//!   (pairing, uplinks, downlinks, settings, time), driven by the property tables.
 //! - [`i2c`]: the board's I²C2 bus as a `Copy` handle shared by several drivers.
 //! - [`tca9534a`]: TCA9534A I/O expander driver; [`apds9960`]: APDS-9960 gesture sensor driver.
 
@@ -52,6 +54,7 @@ pub mod stack;
 pub mod storage;
 pub mod strip;
 pub mod sysboot;
+pub mod taf;
 pub mod tca9534a;
 pub mod tmp112;
 pub mod watchdog;
