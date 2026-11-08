@@ -91,7 +91,7 @@ fmt:
 install-cli:
     cargo install --locked --path cli
 
-# e.g. `just fw examples`, `just fw build example blinky`, `just fw flash app radio_push_button`.
+# e.g. `just fw examples`, `just fw build example blinky`, `just fw flash app radio_button`.
 # Run a firmware/justfile recipe (inside firmware/).
 fw *args:
     {{just}} -f firmware/justfile {{args}}

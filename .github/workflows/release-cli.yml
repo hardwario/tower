@@ -274,7 +274,7 @@ jobs:
         shell: bash
         working-directory: firmware
         run: |
-          apps=(radio_push_button radio_dongle_gateway)
+          apps=(radio_button radio_dongle_gateway)
           examples=(blinky)
           args=()
           for a in "${apps[@]}"; do args+=(--bin "$a"); done
@@ -291,7 +291,7 @@ jobs:
 
           Raw images for \`tower flash <image>.bin\` (the \`tower\` binary of the same release):
 
-          - \`radio_push_button.bin\`: the push-button node (Core Module)
+          - \`radio_button.bin\`: the push-button node (Core Module)
           - \`radio_dongle_gateway.bin\`: the gateway (Radio Dongle)
           - \`blinky.bin\`: the LED blink example
 
@@ -383,9 +383,9 @@ jobs:
 
             ### Firmware
             `tower-firmware-${{ github.ref_name }}.zip` holds the product firmware built from the
-            same commit (`radio_push_button.bin`, `radio_dongle_gateway.bin`, `blinky.bin`). This
+            same commit (`radio_button.bin`, `radio_dongle_gateway.bin`, `blinky.bin`). This
             `tower` talks only to firmware of the same sources: flash these images (`tower flash
-            radio_push_button.bin`) or build from the tag.
+            radio_button.bin`) or build from the tag.
 
       - name: Publish release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3

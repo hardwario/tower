@@ -105,7 +105,7 @@ MCU build, RAM budget, clippy + the five role variants, rustdoc, example / app l
 advisory DB.
 
 Firmware day to day (`just fw` lists everything): `just fw examples`, `just fw build example
-blinky`, `just fw flash example blinky` and `just fw run app radio_push_button` (these two need
+blinky`, `just fw flash example blinky` and `just fw run app radio_button` (these two need
 the `tower` CLI on `PATH` and a board), `just fw test` (host tests of the shared crates the
 firmware builds on). HIL: `just hil check` compiles the harness; `just hil bench`,
 `bench-power`, `bench-full` FLASH the bench: only when the user asks and the bench is cabled.

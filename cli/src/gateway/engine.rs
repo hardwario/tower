@@ -414,7 +414,7 @@ fn json<T: serde::Serialize>(v: &T) -> Vec<u8> {
     serde_json::to_vec(v).unwrap_or_default()
 }
 
-/// Firmware name → device kind: `radio_push_button` → `push-button`.
+/// Firmware name → device kind: `radio_button` → `button`.
 fn kind_of(firmware_name: &str) -> String {
     firmware_name
         .strip_prefix("radio_")
@@ -422,7 +422,7 @@ fn kind_of(firmware_name: &str) -> String {
         .replace('_', "-")
 }
 
-/// The auto-name `kind:n` (`push-button:0`), the kind clipped on a char boundary so the whole
+/// The auto-name `kind:n` (`button:0`), the kind clipped on a char boundary so the whole
 /// name fits [`mgmt::MAX_NODE_NAME`]: the dongle refuses a longer one, and the node, still
 /// unnamed, would be named again (and refused again) on every heartbeat. A clipped kind can
 /// match another one's, but the caller's search for a free `n` keeps the name unique.
@@ -845,7 +845,7 @@ impl Engine {
     }
 
     /// A `NodeInfo` heartbeat: enrich the mirror (kind/sleeping) and auto-name
-    /// unnamed nodes, `push-button:0` style, host-side by design (the gateway
+    /// unnamed nodes, `button:0` style, host-side by design (the gateway
     /// firmware never interprets payloads).
     fn on_node_info(&mut self, src: u32, info: &radio::NodeInfo<'_>, out: &mut Vec<Output>) {
         let kind = kind_of(info.firmware_name);
@@ -2655,7 +2655,7 @@ mod tests {
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let n = radio::encode_node_msg(
             &NodeMsg::Info(radio::NodeInfo {
-                firmware_name: "radio_push_button",
+                firmware_name: "radio_button",
                 firmware_version: "v0.1.0",
                 session_id: 1,
                 sleeping: true,
@@ -2672,7 +2672,7 @@ mod tests {
         }));
         let op = out.iter().find_map(sent_op).expect("a NodeUpdate goes out");
         assert!(op.1.contains("NodeUpdate"), "{}", op.1);
-        assert!(op.1.contains("push-button:0"), "auto-name in {}", op.1);
+        assert!(op.1.contains("button:0"), "auto-name in {}", op.1);
     }
 
     #[test]
@@ -3788,7 +3788,7 @@ mod tests {
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let n = radio::encode_node_msg(
             &NodeMsg::Info(radio::NodeInfo {
-                firmware_name: "radio_push_button",
+                firmware_name: "radio_button",
                 firmware_version: "v0.1.0",
                 session_id: 1,
                 sleeping: true,
@@ -3812,7 +3812,7 @@ mod tests {
             .into_iter()
             .find(|o| o.contains("NodeUpdate"))
             .expect("auto-name NodeUpdate");
-        assert!(op.contains("push-button:0"), "{op}");
+        assert!(op.contains("button:0"), "{op}");
     }
 
     /// `nodes add --ota --name` renames the node right after the join, while the join's registry
@@ -3850,7 +3850,7 @@ mod tests {
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let n = radio::encode_node_msg(
             &NodeMsg::Info(radio::NodeInfo {
-                firmware_name: "radio_push_button",
+                firmware_name: "radio_button",
                 firmware_version: "v0.1.0",
                 session_id: 1,
                 sleeping: true,
@@ -3866,7 +3866,7 @@ mod tests {
             data: env[..n].to_vec(),
         }));
         assert!(
-            !queued_ops(&e).iter().any(|o| o.contains("push-button")),
+            !queued_ops(&e).iter().any(|o| o.contains("button")),
             "no auto-name behind the rename: {:?}",
             queued_ops(&e)
         );
@@ -3880,7 +3880,7 @@ mod tests {
             let Some((id, op)) = out.iter().find_map(sent_op) else {
                 break;
             };
-            assert!(!op.contains("push-button"), "auto-named over the rename: {op}");
+            assert!(!op.contains("button"), "auto-named over the rename: {op}");
             out = reply(
                 &mut e,
                 id,
@@ -4172,9 +4172,9 @@ mod tests {
         // A request in flight holds the slot, so the auto-name waits.
         let out = e.handle(mqtt_in("tower/gateway/cmd", br#"{"id":"u-d","op":"describe"}"#));
         let (held, _) = out.iter().find_map(sent_op).unwrap();
-        let _ = e.handle(info_uplink(0xAB12, 1, "radio_push_button"));
+        let _ = e.handle(info_uplink(0xAB12, 1, "radio_button"));
         assert!(
-            queued_ops(&e).iter().any(|o| o.contains("push-button:0")),
+            queued_ops(&e).iter().any(|o| o.contains("button:0")),
             "{:?}",
             queued_ops(&e)
         );
@@ -4187,11 +4187,11 @@ mod tests {
             n.name.is_empty() && n.flags & NODE_FLAG_UNNAMED != 0,
             "the device's truth: {n:?}"
         );
-        let out = e.handle(info_uplink(0xAB12, 2, "radio_push_button"));
+        let out = e.handle(info_uplink(0xAB12, 2, "radio_button"));
         assert!(
             out.iter()
                 .filter_map(sent_op)
-                .any(|(_, op)| op.contains("push-button:0")),
+                .any(|(_, op)| op.contains("button:0")),
             "named again"
         );
     }
@@ -4280,10 +4280,10 @@ mod tests {
     fn auto_names_fit_the_name_limit() {
         let mut e = engine();
         with_node(&mut e, 0xAB12, "", NODE_FLAG_UNNAMED);
-        let out = e.handle(info_uplink(0xAB12, 1, "radio_climate_monitor"));
+        let out = e.handle(info_uplink(0xAB12, 1, "radio_greenhouse_monitor"));
         let (_, op) = out.iter().find_map(sent_op).expect("the auto-name goes out");
-        assert!(op.contains("\"climate-monito:0\""), "{op}");
-        assert_eq!(e.nodes[0].entry.name, "climate-monito:0");
+        assert!(op.contains("\"greenhouse-mon:0\""), "{op}");
+        assert_eq!(e.nodes[0].entry.name, "greenhouse-mon:0");
         for n in [0, 9, 10, 12345] {
             let name = auto_name("ěěěěěěěěěě", n);
             assert!(name.len() <= mgmt::MAX_NODE_NAME, "{name}");

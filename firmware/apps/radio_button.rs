@@ -1,4 +1,4 @@
-//! radio_push_button (TOWER IoT Kit product firmware): a wireless push button with
+//! radio_button (TOWER IoT Kit product firmware): a wireless push button with
 //! thermometer + accelerometer, built as a **sleeping node**.
 //!
 //! Every button press / release / click / hold sends a secured radio message carrying
@@ -50,8 +50,8 @@
 //! into reporting: the console "finger" for testing without a physical press, also
 //! used by the HIL bench (console only: refused over the radio).
 //!
-//!   just build app radio_push_button
-//!   just run   app radio_push_button   (then press the button)
+//!   just build app radio_button
+//!   just run   app radio_button   (then press the button)
 
 #![no_std]
 #![no_main]

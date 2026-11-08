@@ -483,10 +483,10 @@ mod tests {
         // Plain names still line up in their columns.
         let plain = Node {
             name: "kitchen".into(),
-            kind: "push-button".into(),
+            kind: "button".into(),
             ..n
         };
-        assert!(table_row(&plain).starts_with("0x0000ab12   kitchen          push-button "));
+        assert!(table_row(&plain).starts_with("0x0000ab12   kitchen          button "));
         assert_eq!(table_header().find("NAME"), table_row(&plain).find("kitchen"));
     }
 

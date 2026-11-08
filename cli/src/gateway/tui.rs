@@ -1280,7 +1280,7 @@ fn render_nodes(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
     let table = Table::new(
         rows,
         // 54 columns with the gaps: what a 100-column terminal leaves the pane (58 % of it, less
-        // the borders and padding). NAME takes whatever is wider; TYPE fits "push-button".
+        // the borders and padding). NAME takes whatever is wider; TYPE fits "button".
         [
             Constraint::Length(10),
             Constraint::Min(8),
@@ -2031,7 +2031,7 @@ mod tests {
         NodeView {
             addr: id,
             name: name.into(),
-            kind: "push-button".into(),
+            kind: "button".into(),
             sleeping: true,
             unnamed: false,
             last_seen: Some(3),
@@ -2065,7 +2065,7 @@ mod tests {
         let grid = render(&mut app);
         assert!(grid.contains("0x0000ab12"));
         assert!(grid.contains("kitchen"));
-        assert!(grid.contains("push-button"));
+        assert!(grid.contains("button"));
         assert!(grid.contains("⌛"), "pending marker in table + dialog");
         assert!(grid.contains("Shell: kitchen"));
     }

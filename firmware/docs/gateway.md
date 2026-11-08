@@ -1,7 +1,7 @@
 # TOWER Gateway: the wireless product guide
 
 > **Status:** shipped and HW-verified. The two product
-> apps, `apps/radio_push_button.rs` (a sleeping sensor node) and
+> apps, `apps/radio_button.rs` (a sleeping sensor node) and
 > `apps/radio_dongle_gateway.rs` (the network coordinator), are complete firmwares, not
 > skeletons. The host side (`tower gateway`, `tower nodes`, `tower net`, MQTT) lives in the
 > `tower` CLI (`cli/`); this guide is the **device** side and the wire contract between them.
@@ -19,11 +19,11 @@ the radio stack itself (framing, CCM, pairing handshake, FHSS, duty cycle) see
 
 ```
    push-button node  ──radio (CCM, NodeMsg schema)──▶  gateway dongle  ──serial──▶  tower gateway  ──▶ MQTT
-   apps/radio_push_button        transparent bridge       apps/radio_dongle_gateway       (cli/)          tower nodes / net
+   apps/radio_button        transparent bridge       apps/radio_dongle_gateway       (cli/)          tower nodes / net
    (STM32L083, sleeps)           forwards Uplink verbatim  registry + queue + pairing      TUI | --service
 ```
 
-1. **Node** (`radio_push_button`): a battery product. Button events (with per-kind counts),
+1. **Node** (`radio_button`): a battery product. Button events (with per-kind counts),
    periodic temperature, accelerometer tilt events. STOPs between events (µA); the SPIRIT1
    sleeps. Downlinks reach it through the gateway's queue on its next uplink.
 2. **Gateway** (`radio_dongle_gateway`): the USB Radio Dongle. A **transparent bridge**: it
@@ -115,7 +115,7 @@ with the text `(reply lost on the air: ran once, not run again)`, never an empty
 
 ---
 
-## The push-button node (`radio_push_button`)
+## The push-button node (`radio_button`)
 
 A sleeping node. Every enabled button event sends a secured `NodeMsg::Button` with that kind's
 running count; temperature is measured on a period and sent on-change or at latest every
@@ -409,7 +409,7 @@ flip-link splits the 20 KB SRAM into **statics at the top** (`.data`/`.bss`/`.un
 
 | App | Statics | Stack budget | Measured peak (SWD stack-paint, 2026-07-11) |
 |---|---:|---:|---|
-| `radio_push_button` | ~10.8 KB | ~9.4 KB | **~6.8 KB** (radio-send + button + KV; stable under compaction churn) |
+| `radio_button` | ~10.8 KB | ~9.4 KB | **~6.8 KB** (radio-send + button + KV; stable under compaction churn) |
 | `radio_dongle_gateway` | ~11.4 KB | ~8.6 KB | ~3.3 KB console-idle; deep registry/mgmt paths not bench-driveable standalone, **est. ~7.5 KB** |
 
 The statics are **~67 % async task futures**: Embassy stores each task's across-`await` state
@@ -471,8 +471,8 @@ that keeps a broker-level intruder from unpairing the fleet (see the access poli
 ## Building, flashing, testing
 
 ```bash
-just build app radio_push_button      # or radio_dongle_gateway
-just run   app radio_push_button      # build + flash + open the console TUI
+just build app radio_button      # or radio_dongle_gateway
+just run   app radio_button      # build + flash + open the console TUI
 just size  app radio_dongle_gateway   # on-chip footprint (watch the RAM budget)
 ```
 

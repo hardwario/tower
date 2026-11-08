@@ -92,7 +92,7 @@ pub(crate) fn sas_str(sas: u32) -> String {
 pub(crate) struct Node {
     pub addr: String,
     pub name: String,
-    /// Device kind derived from the node's reported firmware name (e.g. `push-button`);
+    /// Device kind derived from the node's reported firmware name (e.g. `button`);
     /// empty until the first `NodeInfo` heartbeat.
     pub kind: String,
     pub sleeping: bool,
@@ -444,7 +444,7 @@ mod tests {
         let n = Node {
             addr: "0x0000ab12".into(),
             name: "kitchen".into(),
-            kind: "push-button".into(),
+            kind: "button".into(),
             sleeping: true,
             unnamed: false,
             last_seen: Some(3),
@@ -454,7 +454,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&n).unwrap(),
-            r#"{"addr":"0x0000ab12","name":"kitchen","kind":"push-button","sleeping":true,"unnamed":false,"last_seen":3,"rssi":-67,"uplinks":12,"queued":1}"#
+            r#"{"addr":"0x0000ab12","name":"kitchen","kind":"button","sleeping":true,"unnamed":false,"last_seen":3,"rssi":-67,"uplinks":12,"queued":1}"#
         );
     }
 

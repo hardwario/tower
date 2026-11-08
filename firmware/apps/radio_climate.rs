@@ -1,4 +1,4 @@
-//! radio_climate_monitor: TOWER IoT Kit product firmware (SKELETON).
+//! radio_climate: TOWER IoT Kit product firmware (SKELETON).
 //!
 //! A battery climate node: it wakes on an interval, measures temperature (the on-board
 //! TMP112), (will) send a secured radio reading to the gateway, then returns to STOP
@@ -9,8 +9,8 @@
 //! pattern: build the radio with `Spirit1::new(b.radio_*)`, then `Net::new(radio, b.kv,
 //! NetConfig { .. })`, pair with a gateway, and `net.send(..)`.
 //!
-//!   just build app radio_climate_monitor
-//!   just run   app radio_climate_monitor
+//!   just build app radio_climate
+//!   just run   app radio_climate
 
 #![no_std]
 #![no_main]

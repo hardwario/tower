@@ -654,7 +654,7 @@ fn fuzz_single_bit_flip_is_always_detected() {
 #[test]
 fn a_foreign_hello_can_still_name_the_firmware() {
     let h = Hello {
-        firmware_name: "radio_push_button",
+        firmware_name: "radio_button",
         firmware_version: "v0.1.0",
         session_id: 3,
     };
@@ -673,7 +673,7 @@ fn a_foreign_hello_can_still_name_the_firmware() {
     let back = decode_foreign_hello(&inner).expect("reads as a Hello");
     assert_eq!(
         (back.firmware_name, back.firmware_version),
-        ("radio_push_button", "v0.1.0")
+        ("radio_button", "v0.1.0")
     );
 
     // Our own tag: not foreign. Another type: not a Hello. A body that is not a Hello: None.

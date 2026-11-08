@@ -306,7 +306,7 @@ fn every_message_roundtrips() {
         MsgType::Hello,
         0,
         &Hello {
-            firmware_name: "radio_push_button",
+            firmware_name: "radio_button",
             firmware_version: "v0.1.0",
             session_id: 0xABCD_0123,
         },

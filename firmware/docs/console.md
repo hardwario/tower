@@ -193,8 +193,8 @@ connector), and the board has RESET and BOOT buttons. Everything else (radio, se
 PA8, LED PH1, strip, I2C) is wired as on r2. Build for it with the feature `core-module-r1`:
 
 ```sh
-TOWER_FEATURES=core-module-r1 just build app radio_push_button
-TOWER_FEATURES=core-module-r1 just flash app radio_push_button   # tower flash goes over USB DFU
+TOWER_FEATURES=core-module-r1 just build app radio_button
+TOWER_FEATURES=core-module-r1 just flash app radio_button   # tower flash goes over USB DFU
 TOWER_FEATURES=core-module-r1,role-gateway just flash example net_confirmed
 ```
 
@@ -266,7 +266,7 @@ next boot (`crash` ERROR line, `system crash print`).
 **Verified on a rev 1.3 board (2026-10-19, macOS host):** enumeration and the framed console
 (`tower logs`, `tower exec`), the probe's "present" side, `tower reset` and `tower logs --reset`
 (re-enumeration followed), `tower flash` / `tower erase` both from DFU entered by hand and
-automatically over the console (blinky, 94 KB, and radio_push_button, 174 KB, which reaches into
+automatically over the console (blinky, 94 KB, and radio_button, 174 KB, which reaches into
 bank 2), the DFU leave into the new application. **Not yet:** the probe's "no VBUS" side and the
 battery current unplugged (a battery-powered board: the probe must read low and the board stay
 in STOP), a charger and a sleeping host (the back-off, no attach storm), Linux and Windows hosts.

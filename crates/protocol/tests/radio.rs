@@ -175,7 +175,7 @@ fn over_mtu_encode_is_rejected() {
 fn every_variant_roundtrips() {
     let msgs = [
         NodeMsg::Info(NodeInfo {
-            firmware_name: "radio_push_button",
+            firmware_name: "radio_button",
             firmware_version: "v0.1.0",
             session_id: 3,
             sleeping: true,

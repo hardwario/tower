@@ -52,7 +52,7 @@ sudo usermod -aG dialout $USER
 A `tower` binary talks only to firmware built from the same source: every frame carries a schema
 tag of the wire types, and a mismatch is refused (exit `125`). Each release therefore also ships
 `tower-firmware-cli-vX.Y.Z.zip`, the product firmware of the same commit
-(`radio_push_button.bin`, `radio_dongle_gateway.bin`, `blinky.bin`) for `tower flash`; to build
+(`radio_button.bin`, `radio_dongle_gateway.bin`, `blinky.bin`) for `tower flash`; to build
 firmware yourself with a release binary, build it from the release's tag (`git checkout
 cli-vX.Y.Z`). `tower --version` prints the tags it speaks.
 

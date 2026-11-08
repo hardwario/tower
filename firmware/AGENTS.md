@@ -6,12 +6,12 @@ Cortex-M0+), the `firmware/` directory of the hardwario/tower monorepo (read the
 (`[lib] name = "tower"`), so code writes `use tower::...`. The crate is a library; runnable
 programs come in two kinds: educational `examples/` (Cargo `--example`) and TOWER IoT Kit
 **products** in `apps/` (Cargo `[[bin]]`, `--bin`). Two apps are complete, HW-verified radio
-products: `radio_push_button` (sleeping sensor node) and `radio_dongle_gateway` (radio↔serial
-bridge + node coordinator); `radio_climate_monitor` is still a starter skeleton (non-radio logic
+products: `radio_button` (sleeping sensor node) and `radio_dongle_gateway` (radio↔serial
+bridge + node coordinator); `radio_climate` is still a starter skeleton (non-radio logic
 runs; radio send is a TODO); `lcd_games` is five games on the LCD Module (one file per game in
 `apps/lcd_games/`, pulled in with `#[path]`, so `just lists` still sees one `apps/*.rs`); `led_strip` is an
 LED strip controller (every effect, live `strip` shell commands, settings in EEPROM). Build/flash with `just`, which takes the kind then the name
-(`just flash example blinky`, `just build app radio_push_button`, `just run example <name>`)
+(`just flash example blinky`, `just build app radio_button`, `just run example <name>`)
 over the UART bootloader via the `tower` CLI (`../cli`). Standalone device control
 (logs/console/reset/erase/chip/devices) is the CLI's own job: call `tower` directly; there are
 no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`,

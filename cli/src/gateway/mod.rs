@@ -512,7 +512,7 @@ mod tests {
             node_count: 0,
             provisioned: true,
             gw_addr: 0xAB12,
-            firmware_name: "radio_push_button",
+            firmware_name: "radio_button",
             firmware_version: "v0.1.0",
         })
         .unwrap()

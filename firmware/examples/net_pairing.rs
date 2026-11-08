@@ -16,7 +16,7 @@
 //!
 //! This example stops at the handshake. A product node treats the joined key as provisional
 //! and commits it only once the gateway acknowledges a confirmed uplink under it (the commit
-//! round of `apps/radio_push_button.rs`, docs/radio.md "OTA pairing").
+//! round of `apps/radio_button.rs`, docs/radio.md "OTA pairing").
 
 #![no_std]
 #![no_main]

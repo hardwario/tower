@@ -61,7 +61,7 @@ impl Mismatch {
         });
     }
 
-    /// The device as the messages name it: `the device (radio_push_button v0.1.0)`.
+    /// The device as the messages name it: `the device (radio_button v0.1.0)`.
     pub(crate) fn device_label(&self) -> String {
         match &self.device {
             Some(d) => format!("the device ({d})"),

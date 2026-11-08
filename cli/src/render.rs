@@ -509,7 +509,7 @@ mod tests {
         // (a Hello with our tag) is rendered again.
         let mut st = RenderState::default();
         let h = Hello {
-            firmware_name: "radio_push_button",
+            firmware_name: "radio_button",
             firmware_version: "v0.1.0",
             session_id: 9,
         };
@@ -517,7 +517,7 @@ mod tests {
         assert!(st.warned_mismatch);
         let m = st.mismatch.clone().expect("a mismatch");
         assert_eq!(m.tag, FOREIGN);
-        assert_eq!(m.device.as_deref(), Some("radio_push_button v0.1.0"));
+        assert_eq!(m.device.as_deref(), Some("radio_button v0.1.0"));
         let l = Log {
             level: Level::Info,
             uptime_us: 0,
@@ -531,7 +531,7 @@ mod tests {
         // A later non-Hello frame keeps the identity the Hello gave.
         assert_eq!(
             st.mismatch.as_ref().unwrap().device.as_deref(),
-            Some("radio_push_button v0.1.0")
+            Some("radio_button v0.1.0")
         );
         feed_render(&mut st, &hello_frame());
         assert!(st.mismatch.is_none() && !st.warned_mismatch);

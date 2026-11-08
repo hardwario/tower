@@ -1,5 +1,5 @@
 //! HIL gateway group: the full gateway product path on two boards: Dongle =
-//! `radio_dongle_gateway`, Core = `radio_push_button`. Exercises cable provisioning
+//! `radio_dongle_gateway`, Core = `radio_button`. Exercises cable provisioning
 //! (typed mgmt frames on both consoles), the transparent uplink bridge (typed
 //! `Frame::Uplink` with a decodable `radio::NodeMsg`), the downlink queue with the
 //! ACK-pending delivery window (remote shell round-trip), and the RadioStat stream.
@@ -48,12 +48,12 @@ fn describe_full(console: &mut Console, req_id: u16) -> (DeviceRole, u32, u8, u8
 /// The whole product story, one flow: provision over the cable, bridge a simulated
 /// click, run a remote shell command through the downlink queue, see stats flow.
 #[test]
-#[ignore = "requires the HIL bench (Dongle=gateway + Core=push-button in RF range)"]
+#[ignore = "requires the HIL bench (Dongle=gateway + Core=radio_button in RF range)"]
 fn gateway_bridges_push_button_end_to_end() {
     let bench = bench_or_fail();
 
     build_and_flash_app(&bench, Role::Dongle, "radio_dongle_gateway").expect("flash gateway");
-    build_and_flash_app(&bench, Role::Core, "radio_push_button").expect("flash push-button");
+    build_and_flash_app(&bench, Role::Core, "radio_button").expect("flash radio_button");
 
     let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
     let mut node = Console::open(&bench.core.serial).expect("open node console");

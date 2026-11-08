@@ -7,7 +7,7 @@ integrators (Node-RED, Home Assistant, custom backends) who talk to the gateway 
 and never read its source. The `tower nodes` and `tower net` commands are clients of exactly
 this API.
 
-For the product (the push-button node, the Radio Dongle, pairing, the downlink queue) see
+For the product (the button node, the Radio Dongle, pairing, the downlink queue) see
 [`firmware/docs/gateway.md`](../firmware/docs/gateway.md); for running the bridge and its
 flags see the [CLI README](../cli/README.md) (*Gateway & MQTT bridge*); for the threat model
 see [`security-model.md`](security-model.md).
@@ -226,16 +226,16 @@ queued for it, and on every broker (re)connect. The same object is an element of
 |-------|------|---------|
 | `addr` | string | The node's radio address, `0x%08x` |
 | `name` | string | Friendly name, at most 16 bytes; `""` while `unnamed` |
-| `kind` | string | Device kind from the node's firmware name (`radio_push_button` is `push-button`); `""` until the node's first `NodeInfo` heartbeat since the bridge started |
+| `kind` | string | Device kind from the node's firmware name (`radio_button` is `button`); `""` until the node's first `NodeInfo` heartbeat since the bridge started |
 | `sleeping` | bool | The node sleeps between uplinks (downlinks wait for its next uplink) |
-| `unnamed` | bool | No name assigned yet; the bridge auto-names the node `<kind>:<n>` (e.g. `push-button:0`; the kind clipped so the name fits 16 bytes, e.g. `climate-monito:0`) on its first heartbeat |
+| `unnamed` | bool | No name assigned yet; the bridge auto-names the node `<kind>:<n>` (e.g. `button:0`; the kind clipped so the name fits 16 bytes, e.g. `greenhouse-mon:0` for a `radio_greenhouse_monitor`) on its first heartbeat |
 | `last_seen` | number or `null` | Seconds since the node's last uplink as the dongle reported it at the last registry refresh, or `0` after an uplink the bridge has seen since; not aged between refreshes, so for liveness use the `ts` of the node's events or a fresh `node_list`. `null` = not heard since the dongle booted |
 | `rssi` | number or `null` | RSSI of the last uplink, dBm; `null` = none yet |
 | `uplinks` | number | Uplinks since the dongle booted |
 | `queued` | number | Downlink items queued on the gateway for this node (at least the remote commands this bridge has pending) |
 
 ```json
-{"addr":"0x0000ab12","name":"kitchen","kind":"push-button","sleeping":true,"unnamed":false,"last_seen":3,"rssi":-67,"uplinks":12,"queued":1}
+{"addr":"0x0000ab12","name":"kitchen","kind":"button","sleeping":true,"unnamed":false,"last_seen":3,"rssi":-67,"uplinks":12,"queued":1}
 ```
 
 On an external broker, a retained `nodes/{addr}` left by an earlier bridge run is not cleared
@@ -487,7 +487,7 @@ was lost)` and the bridge lists the registry again by itself.
 {"id":"u-l","op":"node_list"}
 ```
 ```json
-{"id":"u-l","ok":true,"data":[{"addr":"0x0000ab12","kind":"push-button","last_seen":3,"name":"kitchen","queued":0,"rssi":-60,"sleeping":true,"unnamed":false,"uplinks":5}]}
+{"id":"u-l","ok":true,"data":[{"addr":"0x0000ab12","kind":"button","last_seen":3,"name":"kitchen","queued":0,"rssi":-60,"sleeping":true,"unnamed":false,"uplinks":5}]}
 ```
 
 #### `node_add`
@@ -799,7 +799,7 @@ checked by comparing a 6-digit short authentication string (SAS) shown at both e
    address the gateway still has registered, so `node_remove` it here first.
 4. On a join, `gateway/pairing` becomes `{"state":"idle","joined":"0x0000cd34","sas":"004321"}`
    and the RPC answers `{"joined":"0x0000cd34","sas":"004321"}`. The node then appears on
-   `nodes/{addr}` (`unnamed`), and the bridge names it `push-button:0` (or the next free index)
+   `nodes/{addr}` (`unnamed`), and the bridge names it `button:0` (or the next free index)
    when its first heartbeat arrives, a few seconds later. Rename it with `node_rename`.
 5. If no node joined, `gateway/pairing` returns to `{"state":"idle"}` and the RPC answers
    `{"joined":null}`. `pairing_cancel` ends the window early the same way.
