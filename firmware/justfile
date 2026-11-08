@@ -98,6 +98,11 @@ examples:
     @echo fhss_sweep
     @echo i2cscan
     @echo kv_wipe
+    @echo lcd_gallery
+    @echo lcd_hello
+    @echo lcd_input
+    @echo lcd_menu
+    @echo lcd_thermometer
     @echo led_on
     @echo lowpower
     @echo lse_probe
@@ -192,12 +197,13 @@ check-r1:
 # beacon-epoch acceptance, pairing confirm freshness, CCM nonce construction), `tower-radio` (the
 # EU/US/FHSS duty token-bucket math + the fixed FHSS hop permutation, i.e. the regulatory
 # arithmetic), `tower-gateway` (the gateway node-registry bucket codec + downlink-queue policy) and
-# `tower-shell` (the `addr` setting value parser + its xorshift). The explicit host --target undoes
+# `tower-shell` (the `addr` setting value parser + its xorshift) and `tower-hmi` (the HMI core:
+# framebuffer, drawing, fonts, menus, button gestures, swipe decoding). The explicit host --target undoes
 # this directory's thumbv6m default (see `host` above). `just test` at the repo root runs the
 # whole host workspace instead.
 # Run the host-side unit tests of the shared crates the firmware builds on.
 test *args:
-    cargo test --locked --manifest-path ../Cargo.toml --target {{host}} -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell {{args}}
+    cargo test --locked --manifest-path ../Cargo.toml --target {{host}} -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi {{args}}
 
 
 # flip-link puts the stack BELOW the statics on the 20 KB part, so each product bin must

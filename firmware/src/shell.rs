@@ -1101,6 +1101,78 @@ fn read_value(kv: Scoped, s: &Setting, out: &mut String<MAX_SETTING>) {
     }
 }
 
+/// A settings table as the [`Values`](tower_hmi::menu::Values) of an on-device menu
+/// ([`tower_hmi::menu`]): a menu item whose id is a setting's `key` edits that setting, stored in
+/// EEPROM exactly as `system settings set` stores it, so the console and the menu see one value.
+/// A `Bool` setting is a toggle (0 or 1), a `Uint` or `Int` a number, an `Enum` a choice (the
+/// index of its value; list the same strings in the menu item). `Str` and `Addr` settings read 0
+/// and ignore writes; a value out of the setting's range is refused (not stored).
+///
+/// ```ignore
+/// static SETS: &[Setting] = &[Setting { key: 0x10, name: "period", kind: Kind::Uint { min: 5, max: 600 }, default: "60" }];
+/// static MENU: Menu = Menu::new("Settings", &[Item::number("Period", 0x10, 5, 600, 5).unit(" s")]);
+/// let mut values = shell::SettingsValues::new(b.kv, SETS);
+/// ```
+#[derive(Clone, Copy)]
+pub struct SettingsValues {
+    kv: Scoped,
+    table: &'static [Setting],
+}
+
+impl SettingsValues {
+    /// The settings of `table` (an app's own, as passed to [`serve_ext`]) in the shell's
+    /// namespace of `kv`.
+    pub fn new(kv: Nv, table: &'static [Setting]) -> Self {
+        Self {
+            kv: kv.scope(NS_SHELL),
+            table,
+        }
+    }
+
+    fn find(&self, id: u16) -> Option<&'static Setting> {
+        self.table.iter().find(|s| s.key as u16 == id)
+    }
+}
+
+impl tower_hmi::menu::Values for SettingsValues {
+    fn get(&self, id: u16) -> i32 {
+        let Some(s) = self.find(id) else { return 0 };
+        let mut text = String::<MAX_SETTING>::new();
+        read_value(self.kv, s, &mut text);
+        match s.kind {
+            Kind::Uint { .. } => text.parse::<u32>().map_or(0, |v| v.min(i32::MAX as u32) as i32),
+            Kind::Int { .. } => text.parse().unwrap_or(0),
+            Kind::Bool => parse_bool(&text).unwrap_or(false) as i32,
+            Kind::Enum(choices) => choices.iter().position(|c| *c == text.as_str()).unwrap_or(0) as i32,
+            Kind::Str { .. } | Kind::Addr => 0,
+        }
+    }
+
+    fn set(&mut self, id: u16, value: i32) {
+        let Some(s) = self.find(id) else { return };
+        let mut text = String::<MAX_SETTING>::new();
+        match s.kind {
+            Kind::Uint { .. } | Kind::Int { .. } => {
+                let _ = write!(text, "{value}");
+            }
+            Kind::Bool => {
+                let _ = text.push_str(if value != 0 { "true" } else { "false" });
+            }
+            Kind::Enum(choices) => match usize::try_from(value).ok().and_then(|i| choices.get(i)) {
+                Some(c) => {
+                    let _ = text.push_str(c);
+                }
+                None => return,
+            },
+            Kind::Str { .. } | Kind::Addr => return,
+        }
+        let mut buf = [0u8; MAX_SETTING];
+        if let Ok(n) = encode_value(s.kind, &text, &mut buf) {
+            let _ = self.kv.set_bytes(s.key, &buf[..n]);
+        }
+    }
+}
+
 /// Write a human-readable constraint for `kind` (e.g. `uint 1..=3600`, `enum p2p|star`).
 fn write_constraint(ctx: &mut Ctx<'_>, kind: Kind) {
     match kind {

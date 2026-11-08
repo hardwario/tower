@@ -13,7 +13,8 @@ runs; radio send is a TODO). Build/flash with `just`, which takes the kind then 
 over the UART bootloader via the `tower` CLI (`../cli`). Standalone device control
 (logs/console/reset/erase/chip/devices) is the CLI's own job: call `tower` directly; there are
 no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`,
-`docs/storage.md`, `docs/gateway.md` (the push-button + gateway product).
+`docs/storage.md`, `docs/gateway.md` (the push-button + gateway product), `docs/hmi.md` (the LCD
+Module driver `tower::lcd` and the HMI framework: drawing, fonts, menus, input).
 
 ## Workspace and builds
 
@@ -40,7 +41,9 @@ no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`,
 - Host tests: the firmware itself is `no_std` and can't `cargo test`; its logic is tested
   through the shared crates it builds on. `just test` here (or `just fw test` from the repo
   root) runs those crates' host tests (`tower-protocol`, `tower-kv`, `tower-net`, `tower-radio`,
-  `tower-gateway`, `tower-shell`); `just test` at the repo root runs the whole host workspace.
+  `tower-gateway`, `tower-shell`, `tower-hmi`); `just test` at the repo root runs the whole host
+  workspace. A UI is checked without looking at the module: the `lcd::SHELL` commands' `lcd dump`
+  prints the frame, `tools/lcd_dump.py` renders it to a PNG, and `lcd press` drives the UI.
 
 ## Shared crates (`../crates/*`, path dependencies)
 
@@ -50,8 +53,10 @@ key-value codec behind `tower::storage::Kv`), `tower-net` (`../crates/net`, the 
 security decision kernels), `tower-radio` (`../crates/radio`, the radio timing / CCM /
 compliance arithmetic; not the SPIRIT1 driver, which is `tower::radio`), `tower-gateway`
 (`../crates/gateway`, the gateway app's registry / downlink-queue core; not the host-side
-`tower gateway` command) and `tower-shell` (`../crates/shell`, the shell's parser / PRNG /
-pagination / completion kernels; not `tower::shell` itself). There is nothing to pin: the
+`tower gateway` command), `tower-shell` (`../crates/shell`, the shell's parser / PRNG /
+pagination / completion kernels; not `tower::shell` itself) and `tower-hmi` (`../crates/hmi`, the
+HMI core: framebuffer, drawing, Spleen fonts, menus, button gestures; re-exported as `tower::hmi`,
+driven by `tower::lcd`). There is nothing to pin: the
 `tower` CLI and the HIL harness build the very same `crates/protocol` tree, so the wire format
 cannot drift between the ends at build time.
 

@@ -20,7 +20,8 @@ use embassy_stm32::gpio::{Flex, Level, Output, Pull, Speed};
 use embassy_stm32::i2c::{Config as I2cConfig, I2c, Master};
 use embassy_stm32::mode::{Async, Blocking};
 use embassy_stm32::peripherals::{
-    DMA1_CH3, IWDG, PA1, PA15, PB3, PB4, PB5, PB7, PB10, PB11, PH1, SPI1, TIM2,
+    DMA1_CH3, DMA1_CH6, DMA1_CH7, EXTI13, IWDG, PA1, PA15, PB3, PB4, PB5, PB7, PB10, PB11, PB12, PB13, PB14,
+    PB15, PC13, PH1, SPI1, SPI2, TIM2,
 };
 use embassy_stm32::rcc::{LsConfig, Sysclk};
 use embassy_stm32::time::Hertz;
@@ -33,7 +34,8 @@ use crate::storage::{Nv, Storage};
 use crate::tmp112::{self, Tmp112};
 
 // PA8 (button), PA12 (VBUS_SENSE, r2 board only) and PA7 (SPIRIT1 nIRQ) are EXTI lines 8/12/7,
-// all on EXTI4_15, no line collision (PB6 accel INT1 is line 6, also here).
+// all on EXTI4_15, no line collision (PB6 accel INT1 is line 6, PC13 header INT line 13, also
+// here).
 bind_interrupts!(struct Irqs {
     EXTI4_15 => InterruptHandler<interrupt::typelevel::EXTI4_15>;
 });
@@ -113,6 +115,59 @@ pub struct Board {
     /// `EXTI4_15` group); it wakes the driver on radio events. Pulled up so the
     /// idle (de-asserted) level is defined before the SPIRIT1 drives it.
     pub radio_irq: ExtiInput<'static, Async>,
+
+    // --- The TOWER header's bus lines for plug-in modules (the LCD Module). ---
+    /// The header SPI (SPI2 on P12..P15) and its DMA channels; see [`HeaderSpi`].
+    pub header_spi: HeaderSpi,
+    /// The header `INT` line (PC13), left unconfigured until a module driver claims it; see
+    /// [`HeaderInt`].
+    pub header_int: HeaderInt,
+}
+
+/// The TOWER header's SPI bus: SPI2 on header pins P14 (PB13, SCK), P13 (PB15, MOSI), P12
+/// (PB14, MISO) and P15 (PB12, the shared chip select), with SPI2's DMA channels (TX on DMA1_CH7,
+/// RX on DMA1_CH6: CH4 and CH5 carry the console). Pass to
+/// [`lcd::init`](crate::lcd::init), or build an `Spi` with [`HeaderSpiIrqs`] as the DMA
+/// interrupt binding.
+pub struct HeaderSpi {
+    pub spi: Peri<'static, SPI2>,
+    pub sck: Peri<'static, PB13>,
+    pub mosi: Peri<'static, PB15>,
+    pub miso: Peri<'static, PB14>,
+    pub cs: Peri<'static, PB12>,
+    pub tx_dma: Peri<'static, DMA1_CH7>,
+    pub rx_dma: Peri<'static, DMA1_CH6>,
+}
+
+/// The interrupt binding of the header SPI's DMA channels (DMA1_CH6/CH7 share the
+/// `DMA1_CHANNEL4_5_6_7` vector, which the r2 board's console also uses, so the console's binding
+/// covers them).
+#[cfg(not(feature = "core-module-r1"))]
+pub use crate::console::ConsoleIrqs as HeaderSpiIrqs;
+
+#[cfg(feature = "core-module-r1")]
+bind_interrupts!(
+    /// The interrupt binding of the header SPI's DMA channels (DMA1_CH6/CH7).
+    pub struct HeaderSpiIrqs {
+        DMA1_CHANNEL4_5_6_7 => embassy_stm32::dma::InterruptHandler<DMA1_CH6>,
+            embassy_stm32::dma::InterruptHandler<DMA1_CH7>;
+    }
+);
+
+/// The TOWER header's `INT` line (PC13, EXTI line 13): an active-low, open-drain interrupt that
+/// modules share (the LCD Module's APDS-9960 gesture sensor drives it). Not configured at boot,
+/// so an app that doesn't use it leaves the pin in its reset (analog, lowest power) state.
+pub struct HeaderInt {
+    pin: Peri<'static, PC13>,
+    exti: Peri<'static, EXTI13>,
+}
+
+impl HeaderInt {
+    /// The line as an EXTI input with the internal pull-up (the idle level of an open-drain
+    /// line), able to wake the MCU from STOP.
+    pub fn into_input(self) -> ExtiInput<'static, Async> {
+        ExtiInput::new(self.pin, self.exti, Pull::Up, Irqs)
+    }
 }
 
 /// Boot indicator timings: the common HARDWARIO TOWER power-on signature every
@@ -207,6 +262,11 @@ impl Board {
         // configures the part.
         let _ = i2c.blocking_write(ACCEL_ADDR, &[LIS2DH12_CTRL_REG1, 0x00]);
 
+        // An attached LCD Module keeps its state across an MCU reset (it is powered from the
+        // header): a gesture sensor left running draws hundreds of µA, a display select left
+        // asserted 330 µA. Park both, whatever app runs now (each step checks the chip first).
+        crate::lcd::park(&mut i2c);
+
         // ATSHA204A crypto → Sleep (the last raw bus op, since any I2C traffic can re-wake
         // it). From here on the app's bus is [`AtshaGuard`]-wrapped, so every subsequent
         // transaction re-sleeps it automatically; no app has to remember.
@@ -241,6 +301,20 @@ impl Board {
             radio_mosi: p.PB5,
             radio_miso: p.PB4,
             radio_irq: ExtiInput::new(p.PA7, p.EXTI7, Pull::Up, Irqs),
+
+            header_spi: HeaderSpi {
+                spi: p.SPI2,
+                sck: p.PB13,
+                mosi: p.PB15,
+                miso: p.PB14,
+                cs: p.PB12,
+                tx_dma: p.DMA1_CH7,
+                rx_dma: p.DMA1_CH6,
+            },
+            header_int: HeaderInt {
+                pin: p.PC13,
+                exti: p.EXTI13,
+            },
         }
     }
 }
@@ -701,7 +775,19 @@ pub fn atsha_sleep(i2c: &mut I2c<'static, Blocking, Master>) {
 static ATSHA_PRESENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
 /// ATSHA204A wake-to-command delay (datasheet t_WHI = 2.5 ms) plus margin.
-const ATSHA_WAKE_DELAY: Duration = Duration::from_millis(3);
+pub(crate) const ATSHA_WAKE_DELAY: Duration = Duration::from_millis(3);
+
+/// Whether the board has an ATSHA204A (as learned at boot by [`atsha_sleep`]).
+pub(crate) fn atsha_fitted() -> bool {
+    ATSHA_PRESENT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// One ATSHA204A Sleep attempt, no retry: whether it was ACKed. The shared bus
+/// ([`I2cBus::rest`](crate::i2c::I2cBus::rest)) waits out the wake delay asynchronously between
+/// two of these instead of the [`AtshaGuard`]'s busy-wait.
+pub(crate) fn atsha_sleep_once<B: I2cTrait>(bus: &mut B) -> bool {
+    bus.write(ATSHA_ADDR, &[0x01]).is_ok()
+}
 
 /// Send the ATSHA204A Sleep command, retrying **once after ~3 ms** if it is NACKed.
 ///
@@ -757,6 +843,11 @@ impl<T> AtshaGuard<T> {
     /// Unwrap and return the raw (unguarded) bus.
     pub fn into_inner(self) -> T {
         self.inner
+    }
+
+    /// The raw (unguarded) bus, borrowed: traffic through it does not re-sleep the ATSHA.
+    pub(crate) fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
     }
 }
 

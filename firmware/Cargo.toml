@@ -137,6 +137,12 @@ tower-gateway = { path = "../crates/gateway" }
 # (`just test`); the firmware `src/` is no_std and can't cargo test. no_std.
 tower-shell = { path = "../crates/shell" }
 
+# The hardware-free core of the HMI framework (framebuffer + dirty rows, drawing, the Spleen fonts,
+# 1-bit images, declarative menus, button gestures, swipe decoding), host-tested like the other
+# `crates/`; `src/lcd.rs` drives the TOWER LCD Module with it, and `tower::hmi` re-exports it. no_std,
+# no dependencies; the linker keeps only the font blocks an app uses.
+tower-hmi = { path = "../crates/hmi" }
+
 # Shared console wire protocol (framing + CRC + message schema): the same crates/protocol source
 # tree the `tower` CLI and the HIL harness build, so the two ends of the link cannot drift.
 tower-protocol = { path = "../crates/protocol" }

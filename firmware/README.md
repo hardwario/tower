@@ -11,8 +11,9 @@ confirmed delivery, replay protection, bulk transfer, OTA pairing); flashable
 programs live in [`examples/`](examples) and are built/flashed by name with
 [`just`](https://just.systems). Apps link to the full 192 KB flash at `0x0800_0000`.
 Each subsystem has a guide: [`docs/console.md`](docs/console.md),
-[`docs/radio.md`](docs/radio.md), [`docs/storage.md`](docs/storage.md), and
-[`docs/gateway.md`](docs/gateway.md) (the push-button + gateway product).
+[`docs/radio.md`](docs/radio.md), [`docs/storage.md`](docs/storage.md),
+[`docs/gateway.md`](docs/gateway.md) (the push-button + gateway product), and
+[`docs/hmi.md`](docs/hmi.md) (the LCD Module and the HMI framework).
 
 | | |
 |---|---|
@@ -28,6 +29,7 @@ Each subsystem has a guide: [`docs/console.md`](docs/console.md),
 | EEPROM | 6 KB byte-addressable data EEPROM @ `0x0808_0000` (no erase, ~100k+ cycles) |
 | USB sense | VBUS on PA12; gates STOP (stay awake while plugged in). Rev 1.3 board: no VBUS line, a pulse of the USB D+ pull-up finds the host |
 | Radio | SPIRIT1 (SPSGRF), SPI1 on PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 (EXTI); EU 868 / US 915 (runtime-switchable); see [`docs/radio.md`](docs/radio.md) |
+| Header bus | SPI2 on P14/P13/P12/P15 (PB13 SCK, PB15 MOSI, PB14 MISO, PB12 CS; DMA1_CH7/CH6), `INT` on PC13 (EXTI); used by the LCD Module, see [`docs/hmi.md`](docs/hmi.md) |
 
 ## Quick start
 
@@ -53,6 +55,9 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/button.rs` | Debounced button driver (click/hold) over any GPIO; `init_exti` (low-power, sleeps when idle) or `init_polled` (when the EXTI line is taken) |
 | `src/console.rs` | Framed host↔target console (`tower-protocol`): `log` backend, `print!`/`println!`, structured `event`s, and chunked shell responses over an interrupt-driven UART, paired with the `tower` host CLI; see [`docs/console.md`](docs/console.md) |
 | `src/shell.rs` | RouterOS-style shell with target-authoritative TAB completion and a declarative, EEPROM-backed settings framework (`Str`/`Uint`/`Int`/`Bool`/`Enum`/`Addr`); apps deep-merge their own commands + settings via `serve_ext`; see [`docs/console.md`](docs/console.md) |
+| `src/lcd.rs` | The TOWER LCD Module: Sharp memory LCD (dirty-row flushes over SPI2 + DMA, software VCOM), buttons (PA8-gated), RGB LED patterns, backlight, APDS-9960 swipes, menu runner, `lcd` shell commands; with the `tower-hmi` framework (`tower::hmi`), see [`docs/hmi.md`](docs/hmi.md) |
+| `src/i2c.rs` | The board's I2C2 bus as a `Copy` handle shared by several drivers, with an async ATSHA204A re-sleep for bursts |
+| `src/tca9534a.rs`, `src/apds9960.rs` | TCA9534A I/O expander and APDS-9960 gesture sensor drivers (HAL-independent) |
 | `src/led.rs` | Non-blocking LED blink dispatcher (background pattern + priority instant sequences) |
 | `src/lis2dh12.rs` | LIS2DH12 accelerometer (HAL-independent): 10 Hz/normal mode, `dice()` orientation (1-6), and a hardware tilt/movement interrupt with selectable sensitivity + report `min_interval` |
 | `src/power.rs` | Notes on the SDK's low-power (STOP) policy; the USB-presence gating itself lives in `console::manager` (see [`docs/console.md`](docs/console.md)) |

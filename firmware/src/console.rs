@@ -57,6 +57,8 @@ use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::mode::Async;
 #[cfg(not(feature = "core-module-r1"))]
 use embassy_stm32::peripherals::{DMA1_CH4, DMA1_CH5, PA9, PA10, USART1};
+#[cfg(not(feature = "core-module-r1"))]
+use embassy_stm32::peripherals::{DMA1_CH6, DMA1_CH7};
 use embassy_stm32::rcc::{StopMode, WakeGuard};
 #[cfg(not(feature = "core-module-r1"))]
 use embassy_stm32::usart::{
@@ -94,10 +96,13 @@ pub use usb::manager;
 // channel 4 and the RX ring on channel 5, both on the shared `DMA1_CHANNEL4_5_6_7` vector, so
 // BOTH channel handlers are bound to it. This is a DIFFERENT channel group from the WS2812 strip's
 // `DMA1_CH3` (`DMA1_CHANNEL2_3`), so the strip and console coexist on DMA (USART1_RX maps to CH3|CH5).
+// The same vector serves channels 6 and 7, the header SPI's (SPI2) RX and TX DMA, and a vector has
+// one binding per program, so their handlers are bound here too (`board::HeaderSpiIrqs`).
 #[cfg(not(feature = "core-module-r1"))]
 bind_interrupts!(pub struct ConsoleIrqs {
     USART1 => UsartInterruptHandler<USART1>;
-    DMA1_CHANNEL4_5_6_7 => DmaInterruptHandler<DMA1_CH4>, DmaInterruptHandler<DMA1_CH5>;
+    DMA1_CHANNEL4_5_6_7 => DmaInterruptHandler<DMA1_CH4>, DmaInterruptHandler<DMA1_CH5>,
+        DmaInterruptHandler<DMA1_CH6>, DmaInterruptHandler<DMA1_CH7>;
 });
 
 /// The transmit half of the console link, as [`writer_loop`] drives it: the USART of the r2

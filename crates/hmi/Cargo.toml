@@ -1,0 +1,13 @@
+[package]
+name = "tower-hmi"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+# The crate is MIT; the bundled Spleen glyphs (src/fonts/spleen/) are BSD-2-Clause (LICENSE-spleen).
+license = "MIT AND BSD-2-Clause"
+repository.workspace = true
+description = "no_std, hardware-free core of the HARDWARIO TOWER HMI framework: a 1-bit framebuffer with per-row dirty tracking, drawing primitives, text in the bundled Spleen bitmap fonts, compile-time 1-bit images, declarative menus, button gesture recognition (click, double click, hold, repeat, chords) and APDS-9960 swipe decoding. Not the LCD Module driver (that is the SDK's `tower::lcd`); split out like tower-kv / tower-shell so the logic is unit-tested on the host."
+
+# Pure logic only: no dependencies, no_std, host-testable with plain `cargo test`.
+[dependencies]

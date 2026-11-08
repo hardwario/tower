@@ -23,15 +23,23 @@
 //! - [`storage`]: EEPROM non-volatile storage: raw byte area + a key-value store (raw or postcard values).
 //! - [`ws2812`]: WS2812B/SK6812 strip driver (timer PWM + DMA).
 //! - [`strip`]: addressable-LED effects (rainbow, chase, …) with brightness+gamma.
+//! - [`lcd`]: the TOWER LCD Module (128 x 128 memory LCD, buttons, RGB LED, gesture sensor) with
+//!   the [`hmi`] framework: drawing, Spleen fonts, images, declarative menus, button gestures.
+//! - [`hmi`]: the hardware-free HMI core (`tower-hmi`, re-exported).
+//! - [`i2c`]: the board's I²C2 bus as a `Copy` handle shared by several drivers.
+//! - [`tca9534a`]: TCA9534A I/O expander driver; [`apds9960`]: APDS-9960 gesture sensor driver.
 
 #![no_std]
 
+pub mod apds9960;
 pub mod board;
 pub mod bootguard;
 pub mod button;
 pub mod clock;
 pub mod console;
 pub mod crashlog;
+pub mod i2c;
+pub mod lcd;
 pub mod led;
 pub mod lis2dh12;
 pub mod power;
@@ -41,11 +49,14 @@ pub mod stack;
 pub mod storage;
 pub mod strip;
 pub mod sysboot;
+pub mod tca9534a;
 pub mod tmp112;
 pub mod watchdog;
 pub mod ws2812;
 
 pub use embassy_executor::Spawner;
+/// The hardware-free HMI core (the `tower-hmi` crate): drawing, fonts, images, menus, input.
+pub use tower_hmi as hmi;
 
 /// Define an application entry point with the common boilerplate handled.
 ///
