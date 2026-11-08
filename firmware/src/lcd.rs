@@ -88,6 +88,7 @@ pub use auto_rotate::{AutoRotate, AutoRotation, autorotate};
 
 use crate::apds9960::{self, Apds9960, GestureConfig};
 use crate::board::{HeaderInt, HeaderSpi, HeaderSpiIrqs};
+use crate::clock::delay_us;
 use crate::i2c::{I2cBus, RawI2c};
 use crate::tca9534a::Tca9534a;
 
@@ -218,12 +219,6 @@ fn bump(counter: &AtomicU32, n: u32) {
     counter.store(counter.load(Ordering::Relaxed).wrapping_add(n), Ordering::Relaxed);
 }
 
-/// Busy-wait at least `us` microseconds (SYSCLK is HSI16, 16 MHz; see `board::init`): the
-/// display's chip select setup and hold times are a few µs, below the 30 µs timer tick.
-fn delay_us(us: u32) {
-    cortex_m::asm::delay(us * 16);
-}
-
 /// The panel's gate line address of frame row `y` (lines count from 1, sent LSB first).
 fn gate(y: usize) -> u8 {
     (y as u8 + 1).reverse_bits()
@@ -267,7 +262,7 @@ fn command(d: &mut Display, hw: &mut Option<Hw>, bus: I2cBus, mode: u8) {
     if let Some(Hw { spi, cs }) = hw.as_mut() {
         let _selected = Selected::new(bus, cs);
         let _ = spi.blocking_write(&[mode | vcom, 0]);
-        delay_us(10); // SCS high at least 22.55 µs in display mode
+        delay_us(25); // SCS high at least 22.55 µs in display mode
     }
     flip_vcom(d);
 }

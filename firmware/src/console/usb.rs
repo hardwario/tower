@@ -155,13 +155,15 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 const RESET_MIN_HOLD: Duration = Duration::from_millis(20);
 /// Settle after the lines leave the RESET state, before BOOT0 is sampled; see the module docs.
 const LINE_SETTLE: Duration = Duration::from_millis(30);
-/// Transceiver start-up before the probe's pull-up, in CPU cycles: t_STARTUP is 1 µs (RM0367,
-/// `USB_CNTR.PDWN`); 2 µs at the 16 MHz HSI16 system clock.
-const PROBE_STARTUP_CYCLES: u32 = 32;
-/// How long the probe's pull-up is on before D+ is read, in CPU cycles: ~1.5 µs at 16 MHz, six
-/// time constants of 1.5 kΩ against ~150 pF of line, and under the 2.5 µs a hub needs to see a
-/// connect.
-const PROBE_PULLUP_CYCLES: u32 = 24;
+/// Transceiver start-up before the probe's pull-up, in µs: t_STARTUP is 1 µs (RM0367,
+/// `USB_CNTR.PDWN`).
+const PROBE_STARTUP_US: u32 = 2;
+/// How long the probe's pull-up is on before D+ is read: the argument to `cortex_m::asm::delay`,
+/// whose 6-cycle loop (see [`clock::delay_us`](crate::clock::delay_us)) makes `delay(6)` 4
+/// iterations, 24 cycles, 1.5 µs at 16 MHz: six time constants of 1.5 kΩ against ~150 pF of line.
+/// With the register accesses around it the pull-up is on about 2 µs, under the 2.5 µs a hub needs
+/// to see a connect. (It was `delay(24)` until 2026-11-08, written for a 1-cycle loop: 4.9 µs.)
+const PROBE_PULLUP_DELAY: u32 = 6;
 /// After a host program opens the port, wait this long before the console's opening frames: an
 /// opening program may still be flushing its input (the `tower` CLI clears it 50 ms after setting
 /// its lines, `RUN_SETTLE`), which would discard the `Hello`.
@@ -535,7 +537,7 @@ impl LinkRx for CdcRx {
 }
 
 /// The host probe: `true` when a USB host is on the cable. The USB transceiver is powered up with
-/// every interrupt masked, its own D+ pull-up (1.5 kΩ) is switched on for [`PROBE_PULLUP_CYCLES`],
+/// every interrupt masked, its own D+ pull-up (1.5 kΩ) is switched on for [`PROBE_PULLUP_DELAY`],
 /// the line state is read back from `USB_FNR.RXDP` (the transceiver's single-ended D+ receiver),
 /// and everything is switched off again (see the module docs for the physics). The pull-up is on
 /// for under 2.5 µs, the shortest connect a hub registers (USB 2.0, 7.1.7.3, TDCNN), so a host
@@ -546,10 +548,10 @@ fn host_probe() -> bool {
     RCC.apb1enr().modify(|w| w.set_usben(true));
     // Transceiver powered, peripheral out of reset, no interrupt enabled.
     regs.cntr().write(|w| w.set_pdwn(false));
-    cortex_m::asm::delay(PROBE_STARTUP_CYCLES);
+    crate::clock::delay_us(PROBE_STARTUP_US);
     let high = critical_section::with(|_| {
         regs.bcdr().write(|w| w.set_dppu(true));
-        cortex_m::asm::delay(PROBE_PULLUP_CYCLES);
+        cortex_m::asm::delay(PROBE_PULLUP_DELAY);
         let fnr = regs.fnr().read();
         regs.bcdr().write(|w| w.set_dppu(false));
         fnr.rxdp()

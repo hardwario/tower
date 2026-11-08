@@ -65,3 +65,16 @@ fn days_since_2000(year: u64, month: u64, day: u64) -> u64 {
     year * 365 + leap_days_before + CUM[(month.clamp(1, 12) - 1) as usize] + u64::from(leap_this) + day.max(1)
         - 1
 }
+
+/// Busy-wait at least `us` microseconds, for the timings below embassy's 30 µs tick (chip-select
+/// setup and hold times, bit-banged interfaces). Interrupts only lengthen it.
+///
+/// SYSCLK is HSI16 (16 MHz, see `board::init`), and `cortex_m::asm::delay(n)` runs `1 + n / 2`
+/// iterations of a `subs` + taken `bne` loop. On the Core Module an iteration takes **6 cycles**,
+/// twice the Cortex-M0+ textbook figure, with the flash at zero wait states and the prefetch on
+/// (measured 2026-11-08 with SysTick: `delay(533)` = 1606 cycles, 100.4 µs), so `delay(n)` lasts
+/// 3n cycles. Code that passes `asm::delay` a cycle count gets three times that.
+#[inline(always)]
+pub fn delay_us(us: u32) {
+    cortex_m::asm::delay(us * 16 / 3);
+}

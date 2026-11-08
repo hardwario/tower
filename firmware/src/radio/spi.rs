@@ -28,11 +28,14 @@ use super::regs;
 /// CPU is idle/sleep-bound. (÷2 → 2 MHz and ÷8 → 8 MHz are the other exact steps.)
 const SPI_HZ: u32 = 4_000_000;
 
-/// CS setup busy-wait, in core cycles at 16 MHz sysclk. 48 cycles ≈ 3 µs, above
-/// the datasheet's 2 µs `t_su(CS)` minimum with margin.
-const CS_SETUP_CYCLES: u32 = 48;
-/// CS hold after the last clock before releasing CS (a little margin for `t_h`).
-const CS_HOLD_CYCLES: u32 = 32;
+/// CS setup busy-wait, CS low to the first SCLK edge, in µs: the datasheet's `t_su(CS)` minimum is
+/// 2 µs, so 3 µs keeps a 50 % reserve (the SPI start-up adds a little more). Until 2026-11-08 this
+/// was `asm::delay(48)`, written for a 1-cycle loop; the loop takes 6 cycles per iteration here (see
+/// [`clock::delay_us`](crate::clock::delay_us)), so it waited 9 µs.
+const CS_SETUP_US: u32 = 3;
+/// CS hold after the last clock before releasing CS, in µs: a little reserve for `t_h` (was
+/// `asm::delay(32)`, 6 µs).
+const CS_HOLD_US: u32 = 2;
 
 /// Largest single SPI transaction: header + address + the 96-byte FIFO.
 const MAX_XFER: usize = 2 + 96;
@@ -125,9 +128,9 @@ impl Spirit1Spi {
     /// datasheet setup/hold guard times.
     fn xfer(&mut self, rx: &mut [u8], tx: &[u8]) -> Result<(), SpiError> {
         self.cs.set_low();
-        cortex_m::asm::delay(CS_SETUP_CYCLES);
+        crate::clock::delay_us(CS_SETUP_US);
         let r = self.spi.blocking_transfer(rx, tx);
-        cortex_m::asm::delay(CS_HOLD_CYCLES);
+        crate::clock::delay_us(CS_HOLD_US);
         self.cs.set_high();
         r
     }
