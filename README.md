@@ -21,6 +21,7 @@ loaded over the wire (`tower flash`, or SWD); there is no over-the-air update pa
 | [`crates/radio`](crates/radio) | `tower-radio` | Radio timing / CCM / compliance logic the SDK builds on (duty cycle, time-on-air, FHSS hops); not the SPIRIT1 driver. |
 | [`crates/gateway`](crates/gateway) | `tower-gateway` | Decision core of the Radio Dongle gateway firmware (node registry, downlink queue); not the `tower gateway` command. |
 | [`crates/shell`](crates/shell) | `tower-shell` | Pure kernels behind the device shell (address parsing, pagination, TAB completion). |
+| [`crates/strip`](crates/strip) | `tower-strip` | The LED strip effects core: frame, effects, colours and palettes, the render pipeline (gamma, RGBW white, dithering, current limit); not the WS2812 driver (`no_std`, hardware-free). |
 | [`crates/flasher`](crates/flasher) | `tower-flasher` | The flasher, around the STM32 ROM bootloader: UART flash / erase / verify, chip info, readout protection, NRST/BOOT0 reset pulses; USB DFU for the Core Module r1.x. |
 | [`firmware/`](firmware) | `tower-sdk` (lib `tower`) | Embassy firmware SDK, `examples/` and the TOWER IoT Kit product `apps/`. Its own Cargo workspace for `thumbv6m-none-eabi`. |
 | [`cli/`](cli) | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip / protect, `tower gateway` (radio to MQTT), `tower nodes`, `tower net`. |
@@ -42,7 +43,7 @@ tower/
 ├── rust-toolchain.toml   the one toolchain (1.99.1 + rustfmt, clippy, llvm-tools, thumbv6m)
 ├── rustfmt.toml          the one house style (110 columns), applied everywhere
 ├── justfile              just check / test / fw / hil
-├── crates/               protocol, kv, net, radio, gateway, shell, flasher
+├── crates/               protocol, kv, net, radio, gateway, shell, hmi, strip, flasher
 ├── firmware/             tower-sdk: src/, examples/, apps/, docs/, tools/ (own workspace)
 ├── cli/                  tower-cli: the `tower` binary
 ├── hil/                  tower-hil: the bench harness

@@ -12,8 +12,9 @@ programs live in [`examples/`](examples) and are built/flashed by name with
 [`just`](https://just.systems). Apps link to the full 192 KB flash at `0x0800_0000`.
 Each subsystem has a guide: [`docs/console.md`](docs/console.md),
 [`docs/radio.md`](docs/radio.md), [`docs/storage.md`](docs/storage.md),
-[`docs/gateway.md`](docs/gateway.md) (the push-button + gateway product), and
-[`docs/hmi.md`](docs/hmi.md) (the LCD Module and the HMI framework).
+[`docs/gateway.md`](docs/gateway.md) (the push-button + gateway product),
+[`docs/hmi.md`](docs/hmi.md) (the LCD Module and the HMI framework), and
+[`docs/strip.md`](docs/strip.md) (the LED strip: driver, effects, the `led_strip` app).
 
 | | |
 |---|---|
@@ -25,7 +26,7 @@ Each subsystem has a guide: [`docs/console.md`](docs/console.md),
 | I2C | I2C2, PB10/PB11 (AF6), 100 kHz; TMP112 @ `0x49`, LIS2DH12 @ `0x19` |
 | Accelerometer | LIS2DH12, INT1 → PB6 (EXTI); orientation/dice + tilt |
 | Console | USART1, TX PA9 / RX PA10, 115200 8N1 (behind the FT231X USB-UART bridge); framed host↔target link (logs/events/shell), see [`docs/console.md`](docs/console.md). Rev 1.3 board (`core-module-r1`): a USB CDC-ACM port on PA11/PA12 instead |
-| RGB strip | WS2812B/SK6812 on PA1 (TIM2_CH2 PWM + DMA1_CH3) |
+| RGB strip | WS2812B/SK6812 on PA1 (TIM2_CH2 PWM + DMA1_CH3), see [`docs/strip.md`](docs/strip.md) |
 | EEPROM | 6 KB byte-addressable data EEPROM @ `0x0808_0000` (no erase, ~100k+ cycles) |
 | USB sense | VBUS on PA12; gates STOP (stay awake while plugged in). Rev 1.3 board: no VBUS line, a pulse of the USB D+ pull-up finds the host |
 | Radio | SPIRIT1 (SPSGRF), SPI1 on PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 (EXTI); EU 868 / US 915 (runtime-switchable); see [`docs/radio.md`](docs/radio.md) |
@@ -62,9 +63,9 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/lis2dh12.rs` | LIS2DH12 accelerometer (HAL-independent): 10 Hz/normal mode, `dice()` orientation (1-6), and a hardware tilt/movement interrupt with selectable sensitivity + report `min_interval` |
 | `src/power.rs` | Notes on the SDK's low-power (STOP) policy; the USB-presence gating itself lives in `console::manager` (see [`docs/console.md`](docs/console.md)) |
 | `src/storage.rs` | Non-volatile storage in the data EEPROM: a raw byte area (`read`/`write` at offset) and a key-value store (`Kv`); values are raw scalars or postcard structs, CRC-framed, updated in place |
-| `src/strip.rs` | LED-strip effects over `ws2812`: solid/compound/gradient + rainbow, chase, breathe, scanner, sparkle; brightness 0-100 % with gamma |
+| `src/strip.rs` | The LED strip: the `tower-strip` effects core (re-exported) on the `ws2812` driver; `Strip` = a frame of effects + the render settings (brightness, gamma, RGBW white, dithering, orientation, current limit), see [`docs/strip.md`](docs/strip.md) |
 | `src/tmp112.rs` | TMP112 driver, generic over `embedded_hal::i2c::I2c` (HAL-independent) |
-| `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1): TIM2 PWM + DMA, RGB & RGBW, arbitrary length |
+| `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1): TIM2 PWM + DMA from a one-byte-per-bit buffer (4.6 KB for 144 RGBW pixels), RGB & RGBW, arbitrary length, cancel-safe |
 | `src/radio/` | SPIRIT1 sub-GHz radio stack: chip driver (SPI/state machine/CSMA/sleep), RF config, hardware AES-128-CCM, frame codec, EU duty governor, and a secured network layer (`net`) with per-peer keys, confirmed delivery, replay protection, bulk transfer and OTA pairing; see [`docs/radio.md`](docs/radio.md) |
 | `src/board.rs` | `Board::take()` + `app!`, the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns the USB-gated `console::manager`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
 
@@ -161,7 +162,9 @@ Flashable programs come in two kinds:
   HW-verified radio products**; `radio_climate_monitor` is still a **starter skeleton** whose
   radio wiring is a TODO you fill in following the `net_*` examples. `lcd_games` is five
   small games on the LCD Module (buttons, swipes and tilt as controls; see
-  [`docs/hmi.md`](docs/hmi.md)). They're Cargo binaries:
+  [`docs/hmi.md`](docs/hmi.md)). `led_strip` is an LED strip controller: every effect, live
+  control over the shell (`strip effect fire`, `strip brightness 40`, ...), settings in EEPROM (see
+  [`docs/strip.md`](docs/strip.md)). They're Cargo binaries:
   list them with `just apps`, build with `just build app <name>`. Add one by dropping
   `apps/<name>.rs` and a matching `[[bin]]` in `Cargo.toml`.
 
@@ -171,7 +174,9 @@ Flashable programs come in two kinds:
 | `button` | The `button` block: log press/release/click/hold, flash the LED |
 | `thermometer` | `tmp112`: log the temperature every 2 s |
 | `accelerometer` | `lis2dh12`: report die face 1-6 as you turn the board; opt-in tilt alert |
-| `strip` | `ws2812` + `strip`: a scrolling rainbow on PA1 |
+| `strip` | `strip`: a tour of every effect on the 144-pixel RGBW TOWER LED strip (PA1), starting with a channel-order test, under a current limit |
+| `strip_thermometer` | `strip` + `tmp112`: the temperature as a gliding bar, blue to red |
+| `strip_tilt` | `strip` + `lis2dh12`: tilt the board for a spirit level or a rolling ball (click switches) |
 | `storage` | `storage`: a key-value store in EEPROM (a raw boot counter + a postcard settings struct), surviving reset |
 | `i2cscan` | Probe the I2C2 bus and log responding addresses (diagnostic) |
 | `lowpower` | Measure the SDK's STOP-mode idle floor: VBUS-gated STOP, parked forever; flash over SWD + measure VDD (probe detached) |

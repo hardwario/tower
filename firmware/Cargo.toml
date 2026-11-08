@@ -143,6 +143,12 @@ tower-shell = { path = "../crates/shell" }
 # no dependencies; the linker keeps only the font blocks an app uses.
 tower-hmi = { path = "../crates/hmi" }
 
+# The hardware-free core of the LED strip effects (frame + effects, colours and palettes, the
+# render pipeline: brightness, gamma, RGBW white, dithering, current limit), host-tested like the
+# other `crates/`; `src/strip.rs` drives a WS2812B / SK6812 strip with it over `src/ws2812.rs`, and
+# `tower::strip` re-exports it. no_std, no dependencies.
+tower-strip = { path = "../crates/strip" }
+
 # Shared console wire protocol (framing + CRC + message schema): the same crates/protocol source
 # tree the `tower` CLI and the HIL harness build, so the two ends of the link cannot drift.
 tower-protocol = { path = "../crates/protocol" }
@@ -205,6 +211,10 @@ path = "apps/radio_climate_monitor.rs"
 [[bin]]
 name = "lcd_games"
 path = "apps/lcd_games.rs"
+
+[[bin]]
+name = "led_strip"
+path = "apps/led_strip.rs"
 
 # Optimize for size; an L0 has only 192 KB of flash. Debug info is kept (it does
 # not end up in the flashed binary, only in the ELF) so a debugger stays useful.

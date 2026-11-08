@@ -136,6 +136,8 @@ examples:
     @echo shell_demo
     @echo storage
     @echo strip
+    @echo strip_thermometer
+    @echo strip_tilt
     @echo thermometer
     @echo watchdog
 
@@ -143,6 +145,7 @@ examples:
 # List the TOWER IoT Kit product firmwares (apps/*.rs); build/flash/run them as kind `app`.
 apps:
     @echo lcd_games
+    @echo led_strip
     @echo radio_climate_monitor
     @echo radio_dongle_gateway
     @echo radio_push_button
@@ -199,13 +202,14 @@ check-r1:
 # beacon-epoch acceptance, pairing confirm freshness, CCM nonce construction), `tower-radio` (the
 # EU/US/FHSS duty token-bucket math + the fixed FHSS hop permutation, i.e. the regulatory
 # arithmetic), `tower-gateway` (the gateway node-registry bucket codec + downlink-queue policy) and
-# `tower-shell` (the `addr` setting value parser + its xorshift) and `tower-hmi` (the HMI core:
-# framebuffer, drawing, fonts, menus, button gestures, swipe decoding). The explicit host --target undoes
+# `tower-shell` (the `addr` setting value parser + its xorshift), `tower-hmi` (the HMI core:
+# framebuffer, drawing, fonts, menus, button gestures, swipe decoding) and `tower-strip` (the LED
+# strip effects, colours, palettes and render pipeline). The explicit host --target undoes
 # this directory's thumbv6m default (see `host` above). `just test` at the repo root runs the
 # whole host workspace instead.
 # Run the host-side unit tests of the shared crates the firmware builds on.
 test *args:
-    cargo test --locked --manifest-path ../Cargo.toml --target {{host}} -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi {{args}}
+    cargo test --locked --manifest-path ../Cargo.toml --target {{host}} -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi -p tower-strip {{args}}
 
 
 # flip-link puts the stack BELOW the statics on the 20 KB part, so each product bin must
@@ -215,9 +219,9 @@ test *args:
 # Guard the RAM budget: fail if any product bin's statics leave too little stack.
 ram-budget:
     cargo build --locked --release --bins
-    python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor lcd_games
+    python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor lcd_games led_strip
     cargo build --locked --release --bins --features core-module-r1
-    python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor lcd_games
+    python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor lcd_games led_strip
 
 # rustfmt house style: the repo-root rustfmt.toml (110 cols) covers this workspace too.
 # Apply rustfmt to this workspace.

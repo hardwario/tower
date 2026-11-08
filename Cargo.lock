@@ -3883,6 +3883,10 @@ name = "tower-shell"
 version = "0.0.0"
 
 [[package]]
+name = "tower-strip"
+version = "0.0.0"
+
+[[package]]
 name = "tracing"
 version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"

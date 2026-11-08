@@ -9,13 +9,15 @@ programs come in two kinds: educational `examples/` (Cargo `--example`) and TOWE
 products: `radio_push_button` (sleeping sensor node) and `radio_dongle_gateway` (radio↔serial
 bridge + node coordinator); `radio_climate_monitor` is still a starter skeleton (non-radio logic
 runs; radio send is a TODO); `lcd_games` is five games on the LCD Module (one file per game in
-`apps/lcd_games/`, pulled in with `#[path]`, so `just lists` still sees one `apps/*.rs`). Build/flash with `just`, which takes the kind then the name
+`apps/lcd_games/`, pulled in with `#[path]`, so `just lists` still sees one `apps/*.rs`); `led_strip` is an
+LED strip controller (every effect, live `strip` shell commands, settings in EEPROM). Build/flash with `just`, which takes the kind then the name
 (`just flash example blinky`, `just build app radio_push_button`, `just run example <name>`)
 over the UART bootloader via the `tower` CLI (`../cli`). Standalone device control
 (logs/console/reset/erase/chip/devices) is the CLI's own job: call `tower` directly; there are
 no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`,
 `docs/storage.md`, `docs/gateway.md` (the push-button + gateway product), `docs/hmi.md` (the LCD
-Module driver `tower::lcd` and the HMI framework: drawing, fonts, menus, input).
+Module driver `tower::lcd` and the HMI framework: drawing, fonts, menus, input), `docs/strip.md` (the
+LED strip: driver, render pipeline, effects, the `led_strip` app).
 
 ## Workspace and builds
 
@@ -42,7 +44,7 @@ Module driver `tower::lcd` and the HMI framework: drawing, fonts, menus, input).
 - Host tests: the firmware itself is `no_std` and can't `cargo test`; its logic is tested
   through the shared crates it builds on. `just test` here (or `just fw test` from the repo
   root) runs those crates' host tests (`tower-protocol`, `tower-kv`, `tower-net`, `tower-radio`,
-  `tower-gateway`, `tower-shell`, `tower-hmi`); `just test` at the repo root runs the whole host
+  `tower-gateway`, `tower-shell`, `tower-hmi`, `tower-strip`); `just test` at the repo root runs the whole host
   workspace. A UI is checked without looking at the module: the `lcd::SHELL` commands' `lcd dump`
   prints the frame, `tools/lcd_dump.py` renders it to a PNG, and `lcd press` drives the UI.
 
@@ -55,9 +57,11 @@ security decision kernels), `tower-radio` (`../crates/radio`, the radio timing /
 compliance arithmetic; not the SPIRIT1 driver, which is `tower::radio`), `tower-gateway`
 (`../crates/gateway`, the gateway app's registry / downlink-queue core; not the host-side
 `tower gateway` command), `tower-shell` (`../crates/shell`, the shell's parser / PRNG /
-pagination / completion kernels; not `tower::shell` itself) and `tower-hmi` (`../crates/hmi`, the
+pagination / completion kernels; not `tower::shell` itself), `tower-hmi` (`../crates/hmi`, the
 HMI core: framebuffer, drawing, Spleen fonts, menus, button gestures; re-exported as `tower::hmi`,
-driven by `tower::lcd`). There is nothing to pin: the
+driven by `tower::lcd`) and `tower-strip` (`../crates/strip`, the LED strip core: frame and effects,
+colours and palettes, the render pipeline; re-exported as `tower::strip`, which adds the
+`tower::ws2812` driver). There is nothing to pin: the
 `tower` CLI and the HIL harness build the very same `crates/protocol` tree, so the wire format
 cannot drift between the ends at build time.
 

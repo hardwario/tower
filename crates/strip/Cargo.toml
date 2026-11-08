@@ -1,0 +1,12 @@
+[package]
+name = "tower-strip"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "no_std, hardware-free core of the HARDWARIO TOWER addressable LED strip effects: an RGB frame with composition and animated effects (rainbow, palettes, fire, twinkle, candle, plasma, scanner, bouncing balls, sunrise, clock, ...), colour helpers (constant-power hue, HSV, palettes), and the render pipeline from intent to wire levels (brightness, selectable gamma, RGBW white extraction, spatial dithering, a current limiter). Not the WS2812/SK6812 driver (that is the SDK's `tower::ws2812`, with `tower::strip` on top); split out like tower-hmi so the logic is unit-tested on the host."
+
+# Pure logic only: no dependencies, no_std, host-testable with plain `cargo test`.
+[dependencies]
