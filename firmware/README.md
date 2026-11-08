@@ -65,7 +65,7 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/storage.rs` | Non-volatile storage in the data EEPROM: a raw byte area (`read`/`write` at offset) and a key-value store (`Kv`); values are raw scalars or postcard structs, CRC-framed, updated in place |
 | `src/strip.rs` | The LED strip: the `tower-strip` effects core (re-exported) on the `ws2812` driver; `Strip` = a frame of effects + the render settings (brightness, gamma, RGBW white, dithering, orientation, current limit), see [`docs/strip.md`](docs/strip.md) |
 | `src/tmp112.rs` | TMP112 driver, generic over `embedded_hal::i2c::I2c` (HAL-independent) |
-| `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1): TIM2 PWM + DMA from a one-byte-per-bit buffer (4.6 KB for 144 RGBW pixels), RGB & RGBW, arbitrary length, cancel-safe |
+| `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1): TIM2 PWM fed by DMA from a 256 B ring the highest-priority interrupt refills just in time (a 144-pixel RGBW frame costs 576 B of levels), RGB & RGBW, arbitrary length, cancel-safe, EEPROM writes cut a frame cleanly |
 | `src/radio/` | SPIRIT1 sub-GHz radio stack: chip driver (SPI/state machine/CSMA/sleep), RF config, hardware AES-128-CCM, frame codec, EU duty governor, and a secured network layer (`net`) with per-peer keys, confirmed delivery, replay protection, bulk transfer and OTA pairing; see [`docs/radio.md`](docs/radio.md) |
 | `src/board.rs` | `Board::take()` + `app!`, the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns the USB-gated `console::manager`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
 

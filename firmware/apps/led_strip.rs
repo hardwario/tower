@@ -13,7 +13,8 @@
 //!
 //! Commands (`strip ...`):
 //!
-//! * `status`: the effect and every setting, the strip's estimated current and frame time;
+//! * `status`: the effect and every setting, the strip's estimated current, the frame time and
+//!   the driver's underrun count (late ring refills; should stay 0);
 //! * `effect <name>`, `next`, `on`, `off`;
 //! * `brightness <0-100>` (perceptual %), `color <name|rrggbb>` (for the one-colour effects),
 //!   `palette <lava|ocean|forest|party|heat|sunrise>` (for `palette` and `plasma`),
@@ -39,6 +40,7 @@ use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, Ordering::Relaxed};
 
 use embassy_futures::select::{Either, select};
+use embassy_stm32::bind_interrupts;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
@@ -49,6 +51,11 @@ use tower::strip::{
     parse_color,
 };
 use tower::{app, board, board::Board, button, ws2812};
+
+// The strip driver's refill interrupt (see `tower::ws2812::Refill`).
+bind_interrupts!(struct Irqs {
+    DMA1_CHANNEL2_3 => ws2812::Refill;
+});
 
 /// Pixels on the strip.
 const NUM: usize = 144;
@@ -199,11 +206,13 @@ fn cmd_status(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     let effect_us = EFFECT_US.load(Relaxed);
     let _ = writeln!(
         ctx,
-        "), frame {}.{} ms (effect {}.{} ms)",
+        "), frame {}.{} ms (effect {}.{} ms), underruns {}, cuts {}",
         frame_us / 1000,
         frame_us % 1000 / 100,
         effect_us / 1000,
-        effect_us % 1000 / 100
+        effect_us % 1000 / 100,
+        tower::ws2812::underruns(),
+        tower::ws2812::cuts()
     );
     let _ = write!(
         ctx,
@@ -469,6 +478,7 @@ async fn run(b: Board) {
         b.strip_tim,
         b.strip_data,
         b.strip_dma,
+        Irqs,
         KIND,
         BRIGHTNESS.load(Relaxed),
     );

@@ -143,6 +143,7 @@ impl<'d> Storage<'d> {
 
     /// Write `data` at `offset` (bounds-checked; the HAL handles unlock/relock).
     pub fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), Error> {
+        crate::ws2812::yield_to_nvm(); // programming stalls flash fetch (see `Eeprom` below)
         self.flash.eeprom_write_slice(offset, data).map_err(Error::Flash)
     }
 }
@@ -159,6 +160,11 @@ impl<'d> Storage<'d> {
 /// app's liveness check-ins are stale or the stall outlasts any legitimate EEPROM operation, so
 /// a genuine hang still resets. One register write per program; a no-op with no watchdog armed.
 ///
+/// **LED strip.** Programming stalls instruction fetch from flash, which would starve the WS2812
+/// driver's refill interrupt mid-frame; each write first cuts any frame in flight
+/// ([`ws2812::yield_to_nvm`](crate::ws2812::yield_to_nvm), a no-op without a strip), so the
+/// strip lags a frame instead of showing garbage and the write never waits for it.
+///
 /// **Whole words.** `eeprom_write_slice` programs a word-aligned middle as word programs and an
 /// unaligned head or tail as single-byte programs, each an erase plus a program of the whole word
 /// holding the byte. The codec only ever writes whole words at word-aligned offsets (its padded
@@ -170,6 +176,7 @@ impl Eeprom for Storage<'_> {
         self.flash.eeprom_read_slice(off, buf)
     }
     fn write(&mut self, off: u32, data: &[u8]) -> Result<(), Self::Error> {
+        crate::ws2812::yield_to_nvm();
         let r = self.flash.eeprom_write_slice(off, data);
         crate::watchdog::pet_during_stall();
         r
@@ -602,6 +609,12 @@ pub async fn maintenance(kv: Nv) {
                 while crate::console::host_rx_age_ticks() < HOST_QUIET.as_ticks() as u32 {
                     Timer::after(Duration::from_millis(250)).await;
                 }
+            }
+            // A slice stalls the CPU, ISRs included: let an LED strip frame finish first (at
+            // most ~6 ms) rather than cut it (`ws2812::yield_to_nvm`). No other task runs
+            // between this check and the slice, so no new frame can start in between.
+            while crate::ws2812::streaming() {
+                Timer::after(Duration::from_micros(500)).await;
             }
             kv.maintain(MAINT_BUDGET_WORDS)
         } {

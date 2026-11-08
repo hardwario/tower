@@ -25,6 +25,7 @@
 #![no_std]
 #![no_main]
 
+use embassy_stm32::bind_interrupts;
 use embassy_time::{Duration, Instant, Ticker};
 use log::info;
 use tower::strip::palette::{LAVA, PARTY};
@@ -33,6 +34,11 @@ use tower::strip::{
     WHITE, YELLOW,
 };
 use tower::{app, board, board::Board, ws2812};
+
+// The strip driver's refill interrupt (see `tower::ws2812::Refill`).
+bind_interrupts!(struct Irqs {
+    DMA1_CHANNEL2_3 => ws2812::Refill;
+});
 
 /// Pixels on the strip.
 const NUM: usize = 144;
@@ -73,6 +79,7 @@ async fn run(b: Board) {
         b.strip_tim,
         b.strip_data,
         b.strip_dma,
+        Irqs,
         KIND,
         BRIGHTNESS,
     );

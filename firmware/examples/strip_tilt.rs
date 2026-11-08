@@ -16,11 +16,17 @@
 #![no_main]
 
 use embassy_futures::select::{Either, select};
+use embassy_stm32::bind_interrupts;
 use embassy_time::{Duration, Instant, Ticker};
 use log::{error, info};
 use tower::lis2dh12::{self, Lis2dh12, Odr};
 use tower::strip::{GREEN, LedKind, ORANGE, RED, Rgb, Strip, YELLOW};
 use tower::{app, board::Board, button, ws2812};
+
+// The strip driver's refill interrupt (see `tower::ws2812::Refill`).
+bind_interrupts!(struct Irqs {
+    DMA1_CHANNEL2_3 => ws2812::Refill;
+});
 
 const NUM: usize = 144;
 const KIND: LedKind = LedKind::Rgbw;
@@ -52,6 +58,7 @@ async fn run(b: Board) {
         b.strip_tim,
         b.strip_data,
         b.strip_dma,
+        Irqs,
         KIND,
         BRIGHTNESS,
     );

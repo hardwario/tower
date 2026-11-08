@@ -11,7 +11,8 @@ the effects, colours and palettes, the render pipeline) is the `tower-strip` cra
 > strip), the first effects tour, the gamma curves and the dithering (on is visibly smoother near
 > black). Verified on the board: every effect of the tour and of the app runs within its frame
 > (times in `strip status`), the `strip` shell commands, settings surviving a reset, the TMP112
-> and LIS2DH12 reads. Still to be signed off by eye: the look of the new effects, the thermometer
+> and LIS2DH12 reads, and the streaming driver: zero underruns through every effect and 180
+> EEPROM writes (`strip save`) in a row. Still to be signed off by eye: the look of the new effects, the thermometer
 > bar and the tilt modes. The current figures are the model's estimates, not measurements.
 
 Samples: `strip` (a tour of every effect, under a current limit), `strip_thermometer` (the
@@ -22,13 +23,17 @@ app*).
 ## Quick start
 
 ```rust
+use embassy_stm32::bind_interrupts;
 use embassy_time::{Instant, Timer};
 use tower::strip::{LedKind, Strip};
 use tower::{app, board::Board, ws2812};
 
+// The driver's refill interrupt, bound in the app so apps without a strip link none of it.
+bind_interrupts!(struct Irqs { DMA1_CHANNEL2_3 => ws2812::Refill; });
+
 async fn run(b: Board) {
     let mut strip = Strip::<144, { ws2812::rgbw_buf_len(144) }>::new(
-        b.strip_tim, b.strip_data, b.strip_dma, LedKind::Rgbw, 40);
+        b.strip_tim, b.strip_data, b.strip_dma, Irqs, LedKind::Rgbw, 40);
     strip.set_power_limit(1500); // mA, the whole strip
     let start = Instant::now();
     loop {
@@ -52,9 +57,19 @@ event. A '0' is high for 0.375 µs and a '1' for 0.69 µs (6 and 11 ticks at the
 the middle of the windows the WS2812B and SK6812 datasheets share. After a frame the line stays
 low for 300 µs, the latch the newer WS2812B needs (the SK6812 needs 80 µs).
 
-- **RAM.** The compare buffer holds one byte per bit (the DMA reads bytes and writes 16-bit
-  words), so 144 RGBW pixels take 4.6 KB; `ws2812::rgbw_buf_len(n)` sizes it. The frame adds 3
-  bytes a pixel.
+- **Streaming.** One compare value per bit would be 32 bytes a pixel (4.6 KB for 144 RGBW
+  pixels), too much next to the radio stack. So `show` renders the frame into its wire *levels*
+  (4 bytes an RGBW pixel, 576 B for 144; `ws2812::rgbw_buf_len(n)` sizes it), and the driver
+  encodes them just in time into a 256 B ring of compare values that the DMA plays in circular
+  mode: two halves of 16 levels (160 µs each), each refilled by the DMA's half/complete interrupt
+  (highest priority, a plain handler, about 10 µs of work) while the other plays. The strip costs
+  about 1.3 KB in all (frame, levels, ring). `strip.underruns()` counts late refills (wrong
+  colours for the rest of a frame); it stays at 0 on the bench, effects and EEPROM stress alike.
+- **EEPROM writes.** Programming the data EEPROM stalls instruction fetch, so the refill
+  interrupt cannot run (measured: about one underrun per write before the fix). A foreground
+  write therefore cuts the frame in flight cleanly (the rest of the strip keeps the previous
+  frame's colours for one frame; `strip.cuts()` counts them) and never waits for the strip; the
+  KV store's background maintenance waits for a gap between frames instead and cuts none.
 - **Byte order.** G, R, B (and W) on the wire, the order of the WS2812B and the SK6812. A strip
   that shows the wrong colours in the tour's `channel test` (red, green, blue, white quarters)
   has another order.
@@ -66,9 +81,9 @@ low for 300 µs, the latch the newer WS2812B needs (the SK6812 needs 80 µs).
   several amperes, and even dark each LED draws about 1 mA. The Core Module's 3.3 V data line is
   usually read correctly by 5 V strips; a level shifter (the Power Module has one) makes it
   certain.
-- **Timing.** A 144-pixel RGBW frame takes about 6 ms on the wire and 5 to 7 ms to render in
-  total on the M0+ (gamma, dithering, encoding); the effects add 0.1 to 3 ms. Every effect fits a
-  20 ms (50 fps) frame.
+- **Timing.** A 144-pixel RGBW frame takes about 6 ms on the wire; with the render (gamma,
+  dithering, white extraction) a `show` is 11 to 12 ms, and the effects add 0.1 to 3 ms. Every
+  effect fits a 20 ms (50 fps) frame.
 
 ## The render pipeline
 
@@ -148,15 +163,15 @@ off and on. Everything else is the `strip` shell menu (`tower shell`, the consol
 | `strip sunrise <minutes>` | Start a sunrise of that length |
 | `strip save` | Keep the settings in EEPROM; they load at boot |
 
-Its stack peaks at 2.8 KB (measured); the RAM budget gives it its own 6 KB floor
-(`tools/check_ram_budget.py`), since the strip's 4.6 KB buffer leaves 7.8 KB of stack.
+Its statics are 9.0 KB, so 11.5 KB of stack is left (measured peak 2.8 KB), well over the RAM
+budget's 8 KB floor. `strip status` also shows the driver's underrun and cut counts.
 
 ## Not (yet) here
 
-- **A radio-controlled strip.** A strip node in the radio network (effects set over MQTT through
-  the gateway) needs the radio stack's RAM (about 4 KB of statics and a measured 6.8 KB stack
-  peak) next to the strip's 4.6 KB buffer, which does not fit the 20 KB part. It needs a streaming
-  encoder first: a small circular DMA buffer refilled from the frame on the half-transfer
-  interrupt, instead of the whole frame encoded up front.
+- **A radio-controlled strip** (planned). With the streaming driver the strip costs about 1.3 KB,
+  so a strip node with the radio stack (pairing, keys in EEPROM, the remote shell) fits the 20 KB
+  part with the standard 8 KB stack floor (estimated statics about 11.3 KB). It is to be a
+  *listening* node, always receiving, so commands (and later relay control) take effect at once
+  rather than on the node's next uplink; the network layer does not have that mode yet.
 - **Temporal dithering**, which would also vary the pattern over time: at about 70 to 80 fps it
   could shimmer near black, so only the spatial pattern is used.

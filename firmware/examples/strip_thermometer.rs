@@ -16,11 +16,17 @@
 
 use core::sync::atomic::{AtomicI32, Ordering::Relaxed};
 
+use embassy_stm32::bind_interrupts;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use log::{info, warn};
 use tower::board::Tmp112Sensor;
 use tower::strip::{BLUE, LedKind, RED, Rgb, Strip};
 use tower::{app, board::Board, tmp112, ws2812};
+
+// The strip driver's refill interrupt (see `tower::ws2812::Refill`).
+bind_interrupts!(struct Irqs {
+    DMA1_CHANNEL2_3 => ws2812::Refill;
+});
 
 const NUM: usize = 144;
 const KIND: LedKind = LedKind::Rgbw;
@@ -74,6 +80,7 @@ async fn run(b: Board) {
         b.strip_tim,
         b.strip_data,
         b.strip_dma,
+        Irqs,
         KIND,
         BRIGHTNESS,
     );

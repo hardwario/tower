@@ -16,12 +16,6 @@ An 8 KB floor keeps ~1 KB over the measured/estimated peaks. If a bin legitimate
 more statics, raise STACK_FLOOR *consciously* and re-measure the high-water mark on hardware
 (see docs/gateway.md "RAM budget"); do not just nudge the number to make CI green.
 
-A bin without the radio stack can carry its own floor in BIN_FLOORS, set from ITS measured
-high-water mark with the same margin discipline:
-  * led_strip  2.8 KB peak (`system stack print` after effects, every shell command and
-    repeated `strip save` EEPROM writes, 2026-11-08); floor 6 KB, over 2x the peak, leaves room
-    for a KV compaction. Its statics are the strip's 4.6 KB wire buffer.
-
 Usage: check_ram_budget.py <bin-name> [<bin-name> ...]
        (ELFs are read from target/thumbv6m-none-eabi/release/<bin-name>)
 """
@@ -33,8 +27,6 @@ from pathlib import Path
 RAM_BASE = 0x2000_0000
 RAM_SIZE = 20 * 1024
 STACK_FLOOR = 8 * 1024  # bytes; every bin must leave at least this much stack
-# Measured per-bin floors for bins without the radio stack (see the docstring).
-BIN_FLOORS = {"led_strip": 6 * 1024}
 TARGET_DIR = Path("target/thumbv6m-none-eabi/release")
 
 
@@ -69,15 +61,9 @@ def main(bins) -> None:
         top = stack_top(elf.read_bytes())
         stack = top - RAM_BASE
         statics = RAM_SIZE - stack
-        floor = BIN_FLOORS.get(name, STACK_FLOOR)
-        ok = stack >= floor
+        ok = stack >= STACK_FLOOR
         failed |= not ok
-        if not ok:
-            note = f"FAIL (< {floor} floor)"
-        elif floor != STACK_FLOOR:
-            note = f"OK (own floor {floor})"
-        else:
-            note = "OK"
+        note = "OK" if ok else f"FAIL (< {STACK_FLOOR} floor)"
         print(f"  {name:<26} {statics:>8} {stack:>8}   {note}")
     if failed:
         print(

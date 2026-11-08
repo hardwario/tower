@@ -8,8 +8,10 @@
 //! documented in [`tower_strip::render`]).
 //!
 //! ```ignore
+//! bind_interrupts!(struct Irqs { DMA1_CHANNEL2_3 => ws2812::Refill; });
+//!
 //! let mut strip = Strip::<144, { ws2812::rgbw_buf_len(144) }>::new(
-//!     b.strip_tim, b.strip_data, b.strip_dma, LedKind::Rgbw, 50);
+//!     b.strip_tim, b.strip_data, b.strip_dma, Irqs, LedKind::Rgbw, 50);
 //! strip.render.power_limit_ma = 1500; // stay within the supply
 //! let start = Instant::now();
 //! loop {
@@ -35,7 +37,9 @@ use embassy_stm32::peripherals::{DMA1_CH3, PA1, TIM2};
 
 pub use tower_strip::*;
 
-use crate::ws2812::{Ws2812, rgbw_buf_len};
+use embassy_stm32::interrupt::typelevel::{Binding, DMA1_CHANNEL2_3};
+
+use crate::ws2812::{Refill, Ws2812, rgbw_buf_len};
 
 /// A WS2812B / SK6812 strip: a [`Frame`] to draw on, the [`Render`] settings and the driver.
 ///
@@ -57,19 +61,21 @@ impl<'d, const NUM: usize, const BUF: usize> Strip<'d, NUM, BUF> {
     /// (or silently overflow) on hardware.
     const _BUF_FITS: () = assert!(BUF >= rgbw_buf_len(NUM), "Strip: BUF must be rgbw_buf_len(NUM)");
 
-    /// A strip on PA1 (TIM2_CH2 + DMA1_CH3), all pixels off. `brightness` is 0 to 100 %; the
-    /// other render settings start at their defaults (gamma 2.0, dithering on, not reversed, no
-    /// current limit).
+    /// A strip on PA1 (TIM2_CH2 + DMA1_CH3), all pixels off. `irq` is the app's binding of
+    /// `DMA1_CHANNEL2_3` to [`ws2812::Refill`](crate::ws2812::Refill). `brightness` is 0 to
+    /// 100 %; the other render settings start at their defaults (gamma 2.0, dithering on, not
+    /// reversed, no current limit).
     pub fn new(
         tim: Peri<'d, TIM2>,
         data: Peri<'d, PA1>,
         dma: Peri<'d, DMA1_CH3>,
+        irq: impl Binding<DMA1_CHANNEL2_3, Refill> + 'd,
         kind: LedKind,
         brightness: u8,
     ) -> Self {
         let () = Self::_BUF_FITS; // force the compile-time BUF check for this (NUM, BUF)
         Self {
-            ws: Ws2812::new(tim, data, dma),
+            ws: Ws2812::new(tim, data, dma, irq),
             frame: Frame::new(),
             render: Render::new(kind, brightness),
             current_ma: 0,
@@ -107,6 +113,17 @@ impl<'d, const NUM: usize, const BUF: usize> Strip<'d, NUM, BUF> {
     /// The estimated current of the last frame [`show`](Self::show) sent, after the limit, in mA.
     pub fn current_ma(&self) -> u32 {
         self.current_ma
+    }
+
+    /// Late ring refills since boot (see [`ws2812`](crate::ws2812), "Underruns"); a frame with
+    /// one shows wrong colours from that point. Should stay at 0.
+    pub fn underruns(&self) -> u32 {
+        crate::ws2812::underruns()
+    }
+
+    /// Frames cut short for an EEPROM write since boot (see [`ws2812`](crate::ws2812)).
+    pub fn cuts(&self) -> u32 {
+        crate::ws2812::cuts()
     }
 
     /// Render the frame over the wire. Encodes straight from the frame: no second pixel array.
