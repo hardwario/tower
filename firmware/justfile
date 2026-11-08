@@ -119,6 +119,8 @@ examples:
     @echo net_persist
     @echo net_secure_ping
     @echo net_star
+    @echo pir
+    @echo pir_signal
     @echo radio_afa
     @echo radio_band
     @echo radio_beacon

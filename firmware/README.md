@@ -4,7 +4,7 @@ An [Embassy](https://embassy.dev) firmware SDK for the **HARDWARIO TOWER Core
 Module** (STM32L083CZ), the `firmware/` directory of the
 [hardwario/tower](https://github.com/hardwario/tower) monorepo. The package is `tower-sdk`; its
 library is the crate `tower` (`use tower::...`). The crate is a **library** of reusable blocks (LED,
-button, TMP112 thermometer, LIS2DH12 accelerometer, addressable-LED strip, a
+button, TMP112 thermometer, LIS2DH12 accelerometer, addressable-LED strip, PIR motion detector, a
 framed host↔target **console** (logs/events/shell), EEPROM storage, USB-gated low
 power) plus a **SPIRIT1 sub-GHz radio stack** (secured AES-128-CCM network layer:
 confirmed delivery, replay protection, bulk transfer, OTA pairing); flashable
@@ -13,8 +13,9 @@ programs live in [`examples/`](examples) and are built/flashed by name with
 Each subsystem has a guide: [`docs/console.md`](docs/console.md),
 [`docs/radio.md`](docs/radio.md), [`docs/storage.md`](docs/storage.md),
 [`docs/gateway.md`](docs/gateway.md) (the push-button + gateway product),
-[`docs/hmi.md`](docs/hmi.md) (the LCD Module and the HMI framework), and
-[`docs/strip.md`](docs/strip.md) (the LED strip: driver, effects, the `led_strip` app).
+[`docs/hmi.md`](docs/hmi.md) (the LCD Module and the HMI framework),
+[`docs/strip.md`](docs/strip.md) (the LED strip: driver, effects, the `led_strip` app), and
+[`docs/pir.md`](docs/pir.md) (the PIR Module: the DigiPyro detector, its timing, tuning).
 
 | | |
 |---|---|
@@ -30,6 +31,7 @@ Each subsystem has a guide: [`docs/console.md`](docs/console.md),
 | EEPROM | 6 KB byte-addressable data EEPROM @ `0x0808_0000` (no erase, ~100k+ cycles) |
 | USB sense | VBUS on PA12; gates STOP (stay awake while plugged in). Rev 1.3 board: no VBUS line, a pulse of the USB D+ pull-up finds the host |
 | Radio | SPIRIT1 (SPSGRF), SPI1 on PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 (EXTI); EU 868 / US 915 (runtime-switchable); see [`docs/radio.md`](docs/radio.md) |
+| PIR Module | Excelitas PYQ 1648 DigiPyro: SERIN on P8 (PB0), DIRECT LINK on P9 (PB2, EXTI line 2); see [`docs/pir.md`](docs/pir.md) |
 | Header bus | SPI2 on P14/P13/P12/P15 (PB13 SCK, PB15 MOSI, PB14 MISO, PB12 CS; DMA1_CH7/CH6), `INT` on PC13 (EXTI); used by the LCD Module, see [`docs/hmi.md`](docs/hmi.md) |
 
 ## Quick start
@@ -61,6 +63,7 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/tca9534a.rs`, `src/apds9960.rs` | TCA9534A I/O expander and APDS-9960 gesture sensor drivers (HAL-independent) |
 | `src/led.rs` | Non-blocking LED blink dispatcher (background pattern + priority instant sequences) |
 | `src/lis2dh12.rs` | LIS2DH12 accelerometer (HAL-independent): 10 Hz/normal mode, `dice()` orientation (1-6), and a hardware tilt/movement interrupt with selectable sensitivity + report `min_interval` |
+| `src/pir.rs` | The TOWER PIR Module (Excelitas DigiPyro PYQ 1648 / 1548): writes the detection criteria over SERIN and reads them back over DIRECT LINK (bit-banged within the detector's timing), motion events that wake the MCU from STOP, or the raw band-pass / low-pass / temperature signal; see [`docs/pir.md`](docs/pir.md) |
 | `src/power.rs` | Notes on the SDK's low-power (STOP) policy; the USB-presence gating itself lives in `console::manager` (see [`docs/console.md`](docs/console.md)) |
 | `src/storage.rs` | Non-volatile storage in the data EEPROM: a raw byte area (`read`/`write` at offset) and a key-value store (`Kv`); values are raw scalars or postcard structs, CRC-framed, updated in place |
 | `src/strip.rs` | The LED strip: the `tower-strip` effects core (re-exported) on the `ws2812` driver; `Strip` = a frame of effects + the render settings (brightness, gamma, RGBW white, dithering, orientation, current limit), see [`docs/strip.md`](docs/strip.md) |
@@ -177,6 +180,8 @@ Flashable programs come in two kinds:
 | `strip` | `strip`: a tour of every effect on the 144-pixel RGBW TOWER LED strip (PA1), starting with a channel-order test, under a current limit |
 | `strip_thermometer` | `strip` + `tmp112`: the temperature as a gliding bar, blue to red |
 | `strip_tilt` | `strip` + `lis2dh12`: tilt the board for a spirit level or a rolling ball (click switches) |
+| `pir` | `pir`: motion events from the PIR Module, logged and flashed on the LED; a click steps the sensitivity |
+| `pir_signal` | `pir`: the detector's raw signal (band-pass peaks every 0.5 s, or low pass, temperature) for choosing a threshold |
 | `storage` | `storage`: a key-value store in EEPROM (a raw boot counter + a postcard settings struct), surviving reset |
 | `i2cscan` | Probe the I2C2 bus and log responding addresses (diagnostic) |
 | `lowpower` | Measure the SDK's STOP-mode idle floor: VBUS-gated STOP, parked forever; flash over SWD + measure VDD (probe detached) |

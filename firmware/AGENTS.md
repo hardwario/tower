@@ -17,7 +17,8 @@ over the UART bootloader via the `tower` CLI (`../cli`). Standalone device contr
 no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`,
 `docs/storage.md`, `docs/gateway.md` (the push-button + gateway product), `docs/hmi.md` (the LCD
 Module driver `tower::lcd` and the HMI framework: drawing, fonts, menus, input), `docs/strip.md` (the
-LED strip: driver, render pipeline, effects, the `led_strip` app).
+LED strip: driver, render pipeline, effects, the `led_strip` app), `docs/pir.md` (the PIR Module
+driver `tower::pir`: the DigiPyro's two serial interfaces, their timing, tuning).
 
 ## Workspace and builds
 

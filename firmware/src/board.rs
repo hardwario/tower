@@ -20,8 +20,8 @@ use embassy_stm32::gpio::{Flex, Level, Output, Pull, Speed};
 use embassy_stm32::i2c::{Config as I2cConfig, I2c, Master};
 use embassy_stm32::mode::{Async, Blocking};
 use embassy_stm32::peripherals::{
-    DMA1_CH3, DMA1_CH6, DMA1_CH7, EXTI13, IWDG, PA1, PA15, PB3, PB4, PB5, PB7, PB10, PB11, PB12, PB13, PB14,
-    PB15, PC13, PH1, SPI1, SPI2, TIM2,
+    DMA1_CH3, DMA1_CH6, DMA1_CH7, EXTI2, EXTI13, IWDG, PA1, PA15, PB0, PB2, PB3, PB4, PB5, PB7, PB10, PB11,
+    PB12, PB13, PB14, PB15, PC13, PH1, SPI1, SPI2, TIM2,
 };
 use embassy_stm32::rcc::{LsConfig, Sysclk};
 use embassy_stm32::time::Hertz;
@@ -35,8 +35,9 @@ use crate::tmp112::{self, Tmp112};
 
 // PA8 (button), PA12 (VBUS_SENSE, r2 board only) and PA7 (SPIRIT1 nIRQ) are EXTI lines 8/12/7,
 // all on EXTI4_15, no line collision (PB6 accel INT1 is line 6, PC13 header INT line 13, also
-// here).
-bind_interrupts!(struct Irqs {
+// here). PB2 (header P9, the PIR Module's DIRECT LINK) is line 2, on EXTI2_3.
+bind_interrupts!(pub(crate) struct Irqs {
+    EXTI2_3 => InterruptHandler<interrupt::typelevel::EXTI2_3>;
     EXTI4_15 => InterruptHandler<interrupt::typelevel::EXTI4_15>;
 });
 // The USART1 interrupt (console UART) is bound in `console` (`ConsoleIrqs`), which owns
@@ -122,6 +123,8 @@ pub struct Board {
     /// The header `INT` line (PC13), left unconfigured until a module driver claims it; see
     /// [`HeaderInt`].
     pub header_int: HeaderInt,
+    /// The PIR Module's lines (header P8 and P9); see [`PirPins`].
+    pub pir: PirPins,
 }
 
 /// The TOWER header's SPI bus: SPI2 on header pins P14 (PB13, SCK), P13 (PB15, MOSI), P12
@@ -168,6 +171,16 @@ impl HeaderInt {
     pub fn into_input(self) -> ExtiInput<'static, Async> {
         ExtiInput::new(self.pin, self.exti, Pull::Up, Irqs)
     }
+}
+
+/// The PIR Module's lines on the TOWER header: P8 (PB0) to the detector's SERIN input, P9 (PB2) to
+/// its DIRECT LINK output, and EXTI line 2 for DIRECT LINK's motion interrupt. Pass to
+/// [`pir::Pir::new`](crate::pir::Pir::new). Not configured at boot: an app that doesn't use them
+/// leaves both pins in their reset (analog) state.
+pub struct PirPins {
+    pub serin: Peri<'static, PB0>,
+    pub dl: Peri<'static, PB2>,
+    pub exti: Peri<'static, EXTI2>,
 }
 
 /// Boot indicator timings: the common HARDWARIO TOWER power-on signature every
@@ -314,6 +327,11 @@ impl Board {
             header_int: HeaderInt {
                 pin: p.PC13,
                 exti: p.EXTI13,
+            },
+            pir: PirPins {
+                serin: p.PB0,
+                dl: p.PB2,
+                exti: p.EXTI2,
             },
         }
     }

@@ -20,6 +20,8 @@
 //! - [`radio`]: SPIRIT1 sub-GHz radio stack (driver + AES-CCM + network layer).
 //! - [`tmp112`]: TMP112 temperature sensor driver (HAL-independent).
 //! - [`lis2dh12`]: LIS2DH12 accelerometer: orientation/dice + tilt interrupt.
+//! - [`pir`]: the TOWER PIR Module (Excelitas DigiPyro): motion events that wake the MCU from STOP,
+//!   or the raw pyroelectric signal.
 //! - [`storage`]: EEPROM non-volatile storage: raw byte area + a key-value store (raw or postcard values).
 //! - [`ws2812`]: WS2812B/SK6812 strip driver (timer PWM + DMA).
 //! - [`strip`]: addressable-LED effects (rainbow, chase, …) with brightness+gamma.
@@ -42,6 +44,7 @@ pub mod i2c;
 pub mod lcd;
 pub mod led;
 pub mod lis2dh12;
+pub mod pir;
 pub mod power;
 pub mod radio;
 pub mod shell;
