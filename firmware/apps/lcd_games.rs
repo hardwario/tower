@@ -143,8 +143,8 @@ static GAMES: [Game; 5] = [
             ],
             &[
                 (Icon::Tilt, "lean: move"),
-                (Icon::Note, "tip back: rotate"),
-                (Icon::Note, "tip fwd: faster"),
+                (Icon::Note, "tilt away: rotate"),
+                (Icon::Note, "tilt to you: faster"),
             ],
         ],
     },

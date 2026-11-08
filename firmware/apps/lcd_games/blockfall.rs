@@ -143,7 +143,7 @@ pub async fn play(ctx: &mut Ctx) -> End {
     let (mut score, mut rows) = (0u32, 0u32);
     let mut fall_at = Instant::now();
     let mut pad = Pad::default();
-    let mut tilt = TiltInput::default();
+    let mut tilt = TiltInput::new();
     loop {
         if pad.quit() {
             return End::Quit;
@@ -267,10 +267,19 @@ pub async fn play(ctx: &mut Ctx) -> End {
 
 /// Tilt as Blockfall moves: leaning sideways slides the piece a column at a time, faster the
 /// further the board leans; tilting it away rotates the piece once (tilt back to rotate again);
-/// tilting it towards the player makes it fall faster. Milli-g, from where it was held at the start.
-#[derive(Default)]
+/// tilting it towards the player makes it fall faster. Milli-g (the sine of the angle), from where
+/// the board was held at the start.
+///
+/// Calm on purpose: the lean is smoothed, a move takes a clear lean (about 20 degrees, 25 for a
+/// rotation), a sustained lean repeats like a held key (one step, a pause, then steady steps), and
+/// each threshold lets go only well below where it engaged, so a lean right at the edge doesn't
+/// flicker. A first cut that moved from 10 degrees on and repeated every 220 ms was too sensitive.
 struct TiltInput {
-    next_slide: Option<Instant>,
+    /// The lean, smoothed over about 150 ms (a hand's tremor, the jolt of a button press).
+    smooth: Option<(i32, i32)>,
+    /// Sliding this way (-1 or 1), 0 when not.
+    sliding: i32,
+    next_slide: Instant,
     /// A rotation is taken: the board must come back before the next.
     rotated: bool,
     /// Falling faster.
@@ -278,31 +287,69 @@ struct TiltInput {
 }
 
 impl TiltInput {
-    /// About 10 degrees to start sliding, 25 to slide fast.
-    const SLIDE: i32 = 170;
-    const SLIDE_FAST: i32 = 420;
-    /// About 14 degrees away to rotate, back under 7 to arm the next one.
-    const ROTATE: i32 = -250;
-    const REARM: i32 = -120;
-    /// About 14 degrees towards the player to fall faster.
-    const FAST: i32 = 250;
+    /// About 20 degrees to start sliding, back under 13 to stop, 35 to slide fast.
+    const SLIDE: i32 = 340;
+    const SLIDE_END: i32 = 220;
+    const SLIDE_FAST: i32 = 570;
+    /// A sustained lean: a step, this long a pause, then a step every `REPEAT` (`REPEAT_FAST`
+    /// leaning far), milliseconds.
+    const FIRST_REPEAT: u64 = 450;
+    const REPEAT: u64 = 250;
+    const REPEAT_FAST: u64 = 120;
+    /// About 25 degrees away to rotate, back under 12 to arm the next one.
+    const ROTATE: i32 = -420;
+    const REARM: i32 = -200;
+    /// About 25 degrees towards the player to fall faster, back under 17 to stop.
+    const FAST: i32 = 420;
+    const FAST_END: i32 = 300;
+
+    const fn new() -> Self {
+        Self {
+            smooth: None,
+            sliding: 0,
+            next_slide: Instant::from_ticks(0),
+            rotated: false,
+            fast: false,
+        }
+    }
 
     fn read(&mut self, lx: i32, ly: i32, moves: &mut heapless::Vec<Move, 2>) {
+        // Each reading (every 50 ms) counts a third.
+        let (x, y) = match self.smooth {
+            None => (lx, ly),
+            Some((x, y)) => (x + (lx - x) / 3, y + (ly - y) / 3),
+        };
+        self.smooth = Some((x, y));
         let now = Instant::now();
-        if lx.abs() < Self::SLIDE {
-            self.next_slide = None;
-        } else if self.next_slide.is_none_or(|t| now >= t) {
-            let _ = moves.push(Move::Side(lx.signum()));
-            let gap = if lx.abs() >= Self::SLIDE_FAST { 90 } else { 220 };
-            self.next_slide = Some(now + Duration::from_millis(gap));
+        let dir = if x.abs() >= Self::SLIDE {
+            x.signum()
+        } else if self.sliding != 0 && x * self.sliding >= Self::SLIDE_END {
+            self.sliding
+        } else {
+            0
+        };
+        if dir == 0 {
+            self.sliding = 0;
+        } else if dir != self.sliding {
+            let _ = moves.push(Move::Side(dir));
+            self.sliding = dir;
+            self.next_slide = now + Duration::from_millis(Self::FIRST_REPEAT);
+        } else if now >= self.next_slide {
+            let _ = moves.push(Move::Side(dir));
+            let gap = if x.abs() >= Self::SLIDE_FAST {
+                Self::REPEAT_FAST
+            } else {
+                Self::REPEAT
+            };
+            self.next_slide = now + Duration::from_millis(gap);
         }
-        if ly <= Self::ROTATE && !self.rotated {
+        if y <= Self::ROTATE && !self.rotated {
             let _ = moves.push(Move::Rotate);
             self.rotated = true;
-        } else if ly > Self::REARM {
+        } else if y > Self::REARM {
             self.rotated = false;
         }
-        self.fast = ly >= Self::FAST;
+        self.fast = y >= if self.fast { Self::FAST_END } else { Self::FAST };
     }
 }
 
