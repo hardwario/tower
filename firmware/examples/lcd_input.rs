@@ -89,6 +89,7 @@ fn feedback(lcd: lcd::Lcd, event: Event) {
         Event::Button(Button::Both, _) => Rgb::BLUE,
         Event::Button(Button::Core, _) => Rgb::WHITE,
         Event::Gesture(_) => Rgb::CYAN,
+        Event::Rotated(_) => return,
     };
     match event {
         Event::Button(_, Kind::Hold) => lcd.led().blink(color, 80, 80, 3),
@@ -111,6 +112,9 @@ async fn draw(lcd: lcd::Lcd, last: Option<Event>, history: &Deque<Event, 4>, ges
             Some(Event::Button(b, k)) => {
                 c.text_fmt(64, 24, format_args!("{b}"), &BIG);
                 c.text_fmt(64, 48, format_args!("{k}"), &BIG);
+            }
+            Some(Event::Rotated(_)) => {
+                c.text(64, 36, "rotated", &BIG);
             }
             Some(Event::Gesture(g)) => {
                 let arrow = match g {

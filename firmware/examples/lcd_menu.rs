@@ -11,7 +11,8 @@
 //! [`Setting`](shell::Setting)s, edited through [`shell::SettingsValues`], so a change made on the
 //! device shows in `tower exec "system settings print"` and a `system settings set led=blue` made
 //! over the console shows on the device. The `Live` wrapper applies each change at once
-//! (backlight, rotation, swipes, LED).
+//! (backlight, auto-rotation, rotation, swipes, LED). With `Auto-rotate` on (the default), the
+//! screen follows the board's orientation with an animated turn.
 //!
 //!   just flash example lcd_menu
 
@@ -36,6 +37,7 @@ const PERIOD: u8 = 0x12;
 const ALARM: u8 = 0x13;
 const SWIPES: u8 = 0x14;
 const ROTATION: u8 = 0x15;
+const AUTOROTATE: u8 = 0x16;
 
 /// A choice item and an enum setting must list their options in the same order: the menu value
 /// is the index.
@@ -103,6 +105,7 @@ static DISPLAY_MENU: Menu = Menu::new(
     "Display",
     &[
         Item::toggle("Backlight", BACKLIGHT as u16),
+        Item::toggle("Auto-rotate", AUTOROTATE as u16),
         Item::choice("Rotation", ROTATION as u16, &["0°", "90°", "180°", "270°"]),
         Item::toggle("Swipes", SWIPES as u16),
         Item::back("Back"),
@@ -142,6 +145,7 @@ static CMDS: &[shell::Entry] = &[shell::Entry::menu("lcd", lcd::SHELL)];
 struct Live {
     stored: shell::SettingsValues,
     lcd: lcd::Lcd,
+    autorotation: lcd::AutoRotation,
 }
 
 impl Live {
@@ -149,6 +153,7 @@ impl Live {
         let v = self.stored.get(id);
         match id as u8 {
             BACKLIGHT => self.lcd.set_backlight(v != 0),
+            AUTOROTATE => self.autorotation.set_enabled(v != 0),
             SWIPES => self.lcd.set_gestures(v != 0),
             ROTATION => self.lcd.set_rotation(match v {
                 1 => Rotation::R90,
@@ -184,9 +189,16 @@ async fn run(b: Board) {
             return;
         }
     };
+    // Auto-rotation starts off; the `autorotate` setting (applied below) turns it on.
+    let autorotate = lcd::AutoRotate {
+        enabled: false,
+        ..lcd::AutoRotate::default()
+    };
+    let autorotation = lcd::autorotate(b.spawner, lcd, b.accel_int, autorotate);
     let mut values = Live {
         stored: shell::SettingsValues::new(b.kv, SETS),
         lcd,
+        autorotation,
     };
     for s in SETS {
         values.apply(s.key as u16);

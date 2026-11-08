@@ -14,6 +14,8 @@
 //! * [`input`]: button gestures (click, double click, hold, repeat, chords) from sampled button
 //!   states.
 //! * [`gesture`]: swipe direction from an APDS-9960 style gesture engine's samples.
+//! * [`turn`]: turning the screen: rotation animation steps, and which way up from an
+//!   accelerometer.
 //!
 //! It is not a display driver: the firmware SDK's `tower::lcd` drives the TOWER LCD Module with
 //! it. Split out of the `no_std` firmware (which can't `cargo test`) so the logic is unit-tested
@@ -33,6 +35,7 @@ pub mod gesture;
 pub mod image;
 pub mod input;
 pub mod menu;
+pub mod turn;
 
 pub use canvas::{Align, Canvas, Color, Rotation, TextStyle};
 pub use font::Font;

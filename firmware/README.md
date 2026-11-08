@@ -159,7 +159,9 @@ Flashable programs come in two kinds:
   (a sleeping sensor node: button events, thermometer, accelerometer) and
   `radio_dongle_gateway` (a radio↔serial bridge + node coordinator) are **complete,
   HW-verified radio products**; `radio_climate_monitor` is still a **starter skeleton** whose
-  radio wiring is a TODO you fill in following the `net_*` examples. They're Cargo binaries:
+  radio wiring is a TODO you fill in following the `net_*` examples. `lcd_games` is five
+  small games on the LCD Module (buttons, swipes and tilt as controls; see
+  [`docs/hmi.md`](docs/hmi.md)). They're Cargo binaries:
   list them with `just apps`, build with `just build app <name>`. Add one by dropping
   `apps/<name>.rs` and a matching `[[bin]]` in `Cargo.toml`.
 

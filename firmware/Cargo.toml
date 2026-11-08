@@ -202,6 +202,10 @@ path = "apps/radio_push_button.rs"
 name = "radio_climate_monitor"
 path = "apps/radio_climate_monitor.rs"
 
+[[bin]]
+name = "lcd_games"
+path = "apps/lcd_games.rs"
+
 # Optimize for size; an L0 has only 192 KB of flash. Debug info is kept (it does
 # not end up in the flashed binary, only in the ELF) so a debugger stays useful.
 [profile.release]

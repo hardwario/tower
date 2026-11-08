@@ -57,8 +57,9 @@ def main():
         text = open(a.input).read()
     else:
         cmd = ["tower"] + (["-d", a.device] if a.device else []) + ["exec", "lcd dump"]
-        # The dump is refused while a flush holds the frame (a few ms at a time): retry.
-        for _ in range(5):
+        # The dump is refused while a flush holds the frame (a few ms at a time, but most of the
+        # time in an animated game): retry.
+        for _ in range(30):
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode == 0:
                 break

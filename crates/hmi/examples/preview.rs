@@ -2,7 +2,8 @@
 //!
 //!     cargo run -p tower-hmi --example preview -- <out-dir>
 //!
-//! Writes `fonts.png`, `shapes.png`, `menu.png` and `menu-edit.png`: the 128 x 128 frame, each
+//! Writes `fonts.png`, `shapes.png`, `menu*.png` and `turn-0.png` to `turn-4.png` (the steps of a
+//! rotation animation): the 128 x 128 frame, each
 //! pixel scaled up 4 times, ink dark on a pale grey (roughly the memory LCD's look).
 
 use std::io::Write;
@@ -10,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use tower_hmi::fonts::{self, SPLEEN_5X8, SPLEEN_6X12, SPLEEN_8X16, SPLEEN_12X24, SPLEEN_32X64_NUMERIC};
 use tower_hmi::menu::{Item, Menu, MenuState, MenuStyle, Nav, Table};
-use tower_hmi::{Align, Color, Frame, Image, Rect, TextStyle, image};
+use tower_hmi::{Align, Color, Frame, Image, Rect, TextStyle, image, turn};
 
 type F = Frame<16, 128>;
 
@@ -124,6 +125,15 @@ fn main() {
     let mut f = F::new();
     m.render(&mut f.canvas(), &values, &MenuStyle::new(&SPLEEN_6X12));
     save(&f, &out.join("menu-small.png"));
+    // A quarter turn as the driver animates it: the menu screen snapshot, eased and shrunk.
+    let mut snapshot = F::new();
+    m.render(&mut snapshot.canvas(), &values, &MenuStyle::new(&SPLEEN_6X12));
+    for (i, t) in [0, 1, 2, 3, 4].iter().enumerate() {
+        let a = turn::QUARTER * turn::ease(t * turn::ONE / 4) / turn::ONE;
+        let mut f = F::new();
+        f.draw_turned(snapshot.bytes(), a, turn::fit(a));
+        save(&f, &out.join(format!("turn-{i}.png")));
+    }
     println!("wrote screens to {}", out.display());
 }
 

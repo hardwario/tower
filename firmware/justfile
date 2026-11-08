@@ -102,6 +102,7 @@ examples:
     @echo lcd_hello
     @echo lcd_input
     @echo lcd_menu
+    @echo lcd_swipe
     @echo lcd_thermometer
     @echo led_on
     @echo lowpower
@@ -141,6 +142,7 @@ examples:
 # Hand-maintained, same deal as `examples`: add an `@echo <name>` line for a new apps/<name>.rs.
 # List the TOWER IoT Kit product firmwares (apps/*.rs); build/flash/run them as kind `app`.
 apps:
+    @echo lcd_games
     @echo radio_climate_monitor
     @echo radio_dongle_gateway
     @echo radio_push_button
@@ -213,9 +215,9 @@ test *args:
 # Guard the RAM budget: fail if any product bin's statics leave too little stack.
 ram-budget:
     cargo build --locked --release --bins
-    python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor
+    python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor lcd_games
     cargo build --locked --release --bins --features core-module-r1
-    python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor
+    python3 tools/check_ram_budget.py radio_push_button radio_dongle_gateway radio_climate_monitor lcd_games
 
 # rustfmt house style: the repo-root rustfmt.toml (110 cols) covers this workspace too.
 # Apply rustfmt to this workspace.

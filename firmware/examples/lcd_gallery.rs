@@ -2,8 +2,11 @@
 //!
 //! Four pages: the bundled Spleen fonts, drawing primitives, 1-bit images (built from ASCII art
 //! at compile time with `image!`), and text: alignment, Central European letters from a font
-//! composed of Spleen blocks, symbols. Left and right click page back and forth; a right hold
-//! turns the screen by 90 degrees.
+//! composed of Spleen blocks, symbols. Left and right click page back and forth.
+//!
+//! The screen follows the board: turn it and the picture turns with an animation
+//! ([`lcd::autorotate`], the Core Module's accelerometer). A right hold turns it by 90 degrees by
+//! hand, and `tower exec "lcd rotate 180"` from the console.
 //!
 //!   just flash example lcd_gallery
 
@@ -94,6 +97,8 @@ async fn run(b: Board) {
             return;
         }
     };
+    // Keep the picture upright as the board turns, animated.
+    lcd::autorotate(b.spawner, lcd, b.accel_int, lcd::AutoRotate::default());
     let mut page = 0;
     loop {
         lcd.draw(|c| {
@@ -120,8 +125,8 @@ async fn run(b: Board) {
                     Rotation::R180 => Rotation::R270,
                     Rotation::R270 => Rotation::R0,
                 };
-                lcd.set_rotation(next);
-                info!(target: "gallery", "rotation {next:?}");
+                info!(target: "gallery", "turning to {}°", next as u16 * 90);
+                lcd.rotate_animated(next, lcd::Animation::default()).await;
             }
             _ => {}
         }

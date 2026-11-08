@@ -16,8 +16,9 @@
 //! interacting, and power it down after.
 //!
 //! The register values follow the SparkFun APDS-9960 library's gesture defaults, except a
-//! longer proximity wait (SparkFun: 2.78 ms) and no LED boost (SparkFun: 300 %, a current spike a
-//! coin cell or two AAA cells take badly).
+//! longer proximity wait (SparkFun: 2.78 ms), no LED boost (SparkFun: 300 %, a current spike a
+//! coin cell or two AAA cells take badly) and half the gesture gain (saturation, measured on the
+//! LCD Module).
 
 use embedded_hal::i2c::I2c;
 use tower_hmi::gesture::Sample;
@@ -119,7 +120,9 @@ impl<I2C: I2c> Apds9960<I2C> {
         self.write(GPENTH, cfg.enter)?;
         self.write(GEXTH, cfg.exit)?;
         self.write(GCONF1, 0x40)?; // interrupt at 4 datasets, exit after the first one below
-        self.write(GCONF2, 0x41)?; // gesture gain 4x, LED 100 mA, 2.8 ms between datasets
+        // Gesture gain 2x (SparkFun: 4x, which saturates all four channels at 255 for most of a
+        // swipe on the LCD Module), LED 100 mA, 2.8 ms between datasets.
+        self.write(GCONF2, 0x21)?;
         for reg in [GOFFSET_U, GOFFSET_D, GOFFSET_L, GOFFSET_R] {
             self.write(reg, 0)?;
         }

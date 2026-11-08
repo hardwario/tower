@@ -53,6 +53,8 @@
 //! * **Expander writes are skipped when nothing changes**; I²C bursts re-sleep the ATSHA204A once,
 //!   with an async wait ([`I2cBus::rest`]).
 //! * **The gesture sensor is off unless asked for** ([`Lcd::set_gestures`]): on, it draws ~0.3 mA.
+//! * **Auto-rotation** ([`autorotate`]) leaves orientation tracking to the accelerometer, which
+//!   wakes the MCU only when the device turns.
 //!
 //! RAM: about 2.9 KB (the 2 KB frame, 512 B of row signatures, a DMA chunk buffer, the tasks).
 
@@ -70,6 +72,7 @@ use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use tower_hmi::frame::{Frame, row_signature};
 use tower_hmi::gesture::{Decoder, Sample};
@@ -79,6 +82,9 @@ use tower_hmi::{Canvas, Rotation};
 
 pub use tower_hmi::gesture::Gesture;
 pub use tower_hmi::input::Kind;
+
+pub mod auto_rotate;
+pub use auto_rotate::{AutoRotate, AutoRotation, autorotate};
 
 use crate::apds9960::{self, Apds9960, GestureConfig};
 use crate::board::{HeaderInt, HeaderSpi, HeaderSpiIrqs};
@@ -198,6 +204,9 @@ async fn lock() -> (Guard<Display>, Guard<Option<Hw>>) {
 }
 /// When the panel's VCOM last flipped.
 static LAST_VCOM: BlockingMutex<CriticalSectionRawMutex, Cell<Instant>> =
+    BlockingMutex::new(Cell::new(Instant::from_ticks(0)));
+/// Drawing waits until then: a shell `lcd dump` in progress (see `cmd_dump`).
+static DUMP_HOLD: BlockingMutex<CriticalSectionRawMutex, Cell<Instant>> =
     BlockingMutex::new(Cell::new(Instant::from_ticks(0)));
 static FLUSHES: AtomicU32 = AtomicU32::new(0);
 static ROWS_SENT: AtomicU32 = AtomicU32::new(0);
@@ -428,6 +437,10 @@ impl Button {
 pub enum Event {
     Button(Button, Kind),
     Gesture(Gesture),
+    /// The screen turned ([`Lcd::rotate`], [`Lcd::rotate_animated`], [`autorotate`]): the picture
+    /// turned with it and drawing continues in the new rotation. Nothing needs redrawing, but a
+    /// UI whose layout depends on the rotation redraws now.
+    Rotated(Rotation),
 }
 
 impl core::fmt::Display for Event {
@@ -435,6 +448,27 @@ impl core::fmt::Display for Event {
         match self {
             Event::Button(b, k) => write!(f, "{b} {k}"),
             Event::Gesture(g) => write!(f, "swipe {g}"),
+            Event::Rotated(r) => write!(f, "rotated to {}°", *r as u16 * 90),
+        }
+    }
+}
+
+/// How [`Lcd::rotate_animated`] animates a turn.
+#[derive(Clone, Copy, Debug)]
+pub struct Animation {
+    /// How long a quarter turn takes (a half turn 1.5 times as long). The panel's own response
+    /// (10 to 40 ms) makes much faster pointless.
+    pub duration: Duration,
+    /// Shrink the picture as it turns, so its corners stay on the screen (back to full size at
+    /// the end).
+    pub shrink: bool,
+}
+
+impl Default for Animation {
+    fn default() -> Self {
+        Self {
+            duration: Duration::from_millis(400),
+            shrink: true,
         }
     }
 }
@@ -471,6 +505,9 @@ pub enum Error {
 }
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+/// The picture an animated turn turns ([`Lcd::rotate_animated`]): referenced only from there, so
+/// the linker keeps these 2 KB only in apps that animate.
+static SNAPSHOT: Mutex<ThreadModeRawMutex, [u8; STRIDE * ROWS]> = Mutex::new([0; STRIDE * ROWS]);
 /// The rotation canvases use (a [`Rotation`] as `u8`), applied to the frame by the next update.
 static ROTATION: AtomicU8 = AtomicU8::new(Rotation::R0 as u8);
 
@@ -493,6 +530,7 @@ enum Cmd {
 enum Ctrl {
     Gestures(bool),
     Simulate(u8, u32),
+    Buttons(tower_hmi::input::Config),
 }
 
 static CMDS: Channel<CriticalSectionRawMutex, Cmd, 8> = Channel::new();
@@ -595,6 +633,11 @@ impl Lcd {
 
     /// Draw with `f` without sending anything yet (several updates, one [`flush`](Self::flush)).
     pub async fn update<R>(&self, f: impl FnOnce(&mut Canvas<'_>) -> R) -> R {
+        // A shell `lcd dump` pages the frame out over several requests: hold drawing meanwhile, so
+        // they all see one frame.
+        while Instant::now() < DUMP_HOLD.lock(|c| c.get()) {
+            Timer::after_millis(20).await;
+        }
         let mut d = DISPLAY.lock().await;
         let r = ROTATION.load(Ordering::Relaxed);
         if r != d.frame.rotation() as u8 {
@@ -624,9 +667,78 @@ impl Lcd {
 
     /// Change the rotation from the next [`draw`](Self::draw) or [`update`](Self::update) on
     /// (fire-and-forget, so a menu's [`Values::set`] can call it). What is already drawn stays
-    /// where it is: redraw the whole screen after this.
+    /// where it is: redraw the whole screen after this. [`rotate`](Self::rotate) turns the
+    /// picture along.
     pub fn set_rotation(&self, rotation: Rotation) {
         ROTATION.store(rotation as u8, Ordering::Relaxed);
+    }
+
+    /// Turn the screen to `rotation` at once, the picture on it included (in place, exact, no extra
+    /// RAM), and send it; drawing continues in the new rotation. Emits [`Event::Rotated`].
+    pub async fn rotate(&self, rotation: Rotation) {
+        let turned = {
+            let (mut d, mut hw) = lock().await;
+            let q = tower_hmi::turn::quarters(d.frame.rotation(), rotation);
+            if q != 0 {
+                d.frame.turn_quarters(q);
+                d.frame.set_rotation(rotation);
+                flush(&mut d, &mut hw, self.bus, false).await;
+            }
+            ROTATION.store(rotation as u8, Ordering::Relaxed);
+            q != 0
+        };
+        self.after_turn(turned, rotation).await;
+    }
+
+    /// [`rotate`](Self::rotate), animated: the picture turns on the screen, eased in and out, in
+    /// as many steps as `animation.duration` allows (a step is a full-screen redraw and flush,
+    /// about 45 ms), and ends exactly on the new rotation. Holds the display meanwhile. Needs a 2 KB
+    /// snapshot of the picture (a `static`, linked only into an app that animates).
+    pub async fn rotate_animated(&self, rotation: Rotation, animation: Animation) {
+        use tower_hmi::turn::{self, ONE, QUARTER};
+        let turned = {
+            let (mut d, mut hw) = lock().await;
+            let q = turn::quarters(d.frame.rotation(), rotation);
+            if q != 0 {
+                let mut snapshot = SNAPSHOT.lock().await;
+                snapshot.copy_from_slice(d.frame.bytes());
+                let total = animation.duration * if q == 2 { 3 } else { 2 } / 2;
+                let start = Instant::now();
+                let mut steps = 0u32;
+                loop {
+                    let t = (start.elapsed().as_millis() * ONE as u64 / total.as_millis().max(1)) as i32;
+                    if t >= ONE {
+                        break;
+                    }
+                    let a = q * QUARTER * turn::ease(t) / ONE;
+                    let scale = if animation.shrink { turn::fit(a) } else { ONE };
+                    d.frame.draw_turned(&snapshot[..], a, scale);
+                    flush(&mut d, &mut hw, self.bus, false).await;
+                    steps += 1;
+                }
+                // The last step is the exact quarter turn: what drawing in `rotation` gives.
+                d.frame.draw_turned(&snapshot[..], q * QUARTER, ONE);
+                d.frame.set_rotation(rotation);
+                flush(&mut d, &mut hw, self.bus, false).await;
+                log::debug!(
+                    target: "lcd",
+                    "turned {}° in {} ms, {} steps",
+                    q * 90,
+                    start.elapsed().as_millis(),
+                    steps + 1
+                );
+            }
+            ROTATION.store(rotation as u8, Ordering::Relaxed);
+            q != 0
+        };
+        self.after_turn(turned, rotation).await;
+    }
+
+    async fn after_turn(&self, turned: bool, rotation: Rotation) {
+        self.bus.rest().await;
+        if turned {
+            let _ = EVENTS.try_send(Event::Rotated(rotation));
+        }
     }
 
     pub fn rotation(&self) -> Rotation {
@@ -661,6 +773,12 @@ impl Lcd {
     /// Show the panel's memory (`true`), or white with the memory kept (`false`; fire-and-forget).
     pub fn set_display(&self, on: bool) {
         let _ = CMDS.try_send(Cmd::DisplayOn(on));
+    }
+
+    /// Change the button timing (fire-and-forget; applied once no button is down): a game turning
+    /// on auto-repeat, say, which a menu would rather not have.
+    pub fn set_buttons(&self, config: tower_hmi::input::Config) {
+        let _ = CTRL.try_send(Ctrl::Buttons(config));
     }
 
     /// Turn the gesture sensor on or off (~0.3 mA when on; fire-and-forget).
@@ -1043,85 +1161,173 @@ struct InputCfg {
 /// While a button is held past its Hold (nothing else can happen until a release), sample this
 /// often instead of every scan interval, besides waking on the all-released edge of PA8.
 const HELD_POLL: Duration = Duration::from_millis(250);
-/// The longest a single swipe is read for.
+/// The longest a single swipe is read for (a hand resting over the sensor keeps it in gesture
+/// mode: the reading then starts over).
 const GESTURE_MAX: Duration = Duration::from_secs(3);
+/// How often the gesture FIFO is read while a swipe is in progress (it holds 32 datasets, about
+/// 90 ms of them).
+const GESTURE_POLL: Duration = Duration::from_millis(30);
+/// Swipes are ignored this long after a button was down: a hand reaching for a button passes
+/// over the gesture sensor too.
+const SWIPE_QUIET: Duration = Duration::from_millis(400);
 
-/// Buttons (sampled while PA8 is high) and swipes (read when PC13 falls).
+/// A swipe being read.
+struct Swipe {
+    start: Instant,
+    next_read: Instant,
+    /// A button was down meanwhile: what the sensor saw was the hand at the buttons.
+    buttons: bool,
+}
+
+/// One activation of the gesture sensor as the driver read it, decoded or not
+/// ([`swipe_trace`]): a tuning and test aid.
+#[derive(Clone, Copy, Debug)]
+pub struct SwipeTrace {
+    /// How long the sensor stayed in gesture mode, milliseconds.
+    pub ms: u32,
+    /// What the decoder made of the datasets read: how many, the brightest, the lags it decides
+    /// on.
+    pub trace: tower_hmi::gesture::Trace,
+    /// The swipe decoded (before [`Config::gesture_map`]), if any.
+    pub gesture: Option<Gesture>,
+    /// Decoded but dropped: a button was in use.
+    pub ignored: bool,
+}
+
+static SWIPE_TRACE: Signal<CriticalSectionRawMutex, SwipeTrace> = Signal::new();
+
+/// The next activation of the gesture sensor, every one, decoded or not (the latest if several
+/// came since the last call). A tuning aid; an app reacts to [`Event::Gesture`].
+pub async fn swipe_trace() -> SwipeTrace {
+    SWIPE_TRACE.wait().await
+}
+
+/// Buttons (sampled while PA8 is high) and swipes (read while the gesture sensor reports one),
+/// interleaved in one loop so neither waits for the other: a swipe takes a FIFO read every 30 ms,
+/// the buttons keep their sampling meanwhile.
 #[embassy_executor::task]
 async fn input(bus: I2cBus, mut button: ExtiInput<'static, Async>, int: HeaderInt, cfg: InputCfg) {
     let mut int = int.into_input();
     let mut rec = Recognizer::new(cfg.buttons);
     let mut gestures = cfg.gestures;
     let mut decoder = Decoder::new();
+    let mut swipe: Option<Swipe> = None;
     let mut sim: Option<(u8, Instant)> = None;
     let mut traffic = false;
+    let mut quiet_until = Instant::from_ticks(0);
+    // New button timing waits until no button is down: a recognizer replaced mid-press would take
+    // the buttons still held for a fresh press, and their release for a click (a game quit by
+    // holding both buttons would click its way straight back in from the menu).
+    let mut new_timing: Option<tower_hmi::input::Config> = None;
     loop {
-        let deadline = rec.next_deadline().map(Instant::from_millis);
-        let mut swipe = false;
-        if sim.is_some() || (rec.needs_polling() && !rec.waiting_for_release()) {
-            let mut at = Instant::now() + cfg.scan;
-            if let Some(d) = deadline {
-                at = at.min(d);
-            }
-            if let Some((_, end)) = sim {
-                at = at.min(end);
-            }
-            Timer::at(at).await;
-        } else {
-            let held = rec.waiting_for_release();
-            let edge = async {
-                if held {
-                    let _ = with_timeout(HELD_POLL, button.wait_for_low()).await;
-                } else {
-                    button.wait_for_high().await;
-                }
-            };
-            let irq = async {
-                if gestures {
-                    int.wait_for_low().await
-                } else {
-                    core::future::pending().await
-                }
-            };
-            let timer = async {
-                match deadline {
-                    Some(d) => Timer::at(d).await,
-                    None => core::future::pending().await,
-                }
-            };
-            match select4(edge, irq, CTRL.receive(), timer).await {
-                Either4::Second(()) => swipe = true,
-                Either4::Third(Ctrl::Gestures(on)) => {
-                    gestures = on;
-                    bus.raw(|b| {
-                        let mut s = Apds9960::new(b);
-                        if on {
-                            s.start_gestures(&cfg.gesture)
-                        } else {
-                            s.power_down()
-                        }
-                    })
-                    .ok();
-                    bus.rest().await;
-                }
-                Either4::Third(Ctrl::Simulate(mask, ms)) => {
-                    sim = Some((mask, Instant::now() + Duration::from_millis(ms as u64)));
-                }
-                _ => {}
-            }
+        // When to look again without an edge: the recognizer's next deadline, the scan interval
+        // while a button is down, the end of a simulated press, the next FIFO read of a swipe.
+        let polling = sim.is_some() || (rec.needs_polling() && !rec.waiting_for_release());
+        let mut at = rec.next_deadline().map(Instant::from_millis);
+        let mut sooner = |t: Instant| at = Some(at.map_or(t, |a| a.min(t)));
+        if polling {
+            sooner(Instant::now() + cfg.scan);
         }
-
-        if swipe {
-            if let Some(g) = read_swipe(bus, &mut decoder).await {
-                let _ = EVENTS.try_send(Event::Gesture((cfg.map)(g)));
-            } else if int.is_low() {
-                // The line stays asserted with nothing decoded: don't spin on it.
-                Timer::after_millis(100).await;
+        if let Some((_, end)) = sim {
+            sooner(end);
+        }
+        if let Some(s) = &swipe {
+            sooner(s.next_read);
+        }
+        let held = rec.waiting_for_release();
+        let edge = async {
+            if polling {
+                core::future::pending::<()>().await
+            } else if held {
+                let _ = with_timeout(HELD_POLL, button.wait_for_low()).await;
+            } else {
+                button.wait_for_high().await
             }
-            continue;
+        };
+        let irq = async {
+            if gestures && swipe.is_none() {
+                int.wait_for_low().await
+            } else {
+                core::future::pending().await
+            }
+        };
+        let timer = async {
+            match at {
+                Some(t) => Timer::at(t).await,
+                None => core::future::pending().await,
+            }
+        };
+        match select4(edge, irq, CTRL.receive(), timer).await {
+            Either4::Second(()) => {
+                decoder.reset();
+                let now = Instant::now();
+                swipe = Some(Swipe {
+                    start: now,
+                    next_read: now,
+                    buttons: false,
+                });
+            }
+            Either4::Third(Ctrl::Gestures(on)) => {
+                gestures = on;
+                swipe = None;
+                bus.raw(|b| {
+                    let mut s = Apds9960::new(b);
+                    if on {
+                        s.start_gestures(&cfg.gesture)
+                    } else {
+                        s.power_down()
+                    }
+                })
+                .ok();
+                traffic = true;
+            }
+            Either4::Third(Ctrl::Buttons(c)) => new_timing = Some(c),
+            Either4::Third(Ctrl::Simulate(mask, ms)) => {
+                sim = Some((mask, Instant::now() + Duration::from_millis(ms as u64)));
+            }
+            _ => {}
         }
 
         let now = Instant::now();
+        // The swipe: read what the FIFO holds; decide once the sensor leaves gesture mode.
+        if let Some(s) = &mut swipe
+            && now >= s.next_read
+        {
+            traffic = true;
+            let active = bus.raw(|b| {
+                let mut a = Apds9960::new(b);
+                let mut samples = [Sample::default(); 32];
+                let n = a.read_fifo(&mut samples).unwrap_or(0);
+                for x in &samples[..n] {
+                    decoder.push(*x);
+                }
+                a.gesture_active().unwrap_or(false)
+            });
+            if active && now.saturating_duration_since(s.start) < GESTURE_MAX {
+                s.next_read = now + GESTURE_POLL;
+            } else {
+                bus.raw(|b| Apds9960::new(b).clear_fifo()).ok();
+                let trace = decoder.trace();
+                let g = decoder.finish();
+                let ignored = g.is_some() && (s.buttons || now < quiet_until);
+                SWIPE_TRACE.signal(SwipeTrace {
+                    ms: now.saturating_duration_since(s.start).as_millis() as u32,
+                    trace,
+                    gesture: g,
+                    ignored,
+                });
+                if let Some(g) = g {
+                    if ignored {
+                        log::debug!(target: "lcd", "swipe {g} ignored (a hand at the buttons)");
+                    } else {
+                        let _ = EVENTS.try_send(Event::Gesture((cfg.map)(g)));
+                    }
+                }
+                swipe = None;
+            }
+        }
+
+        // The buttons, sampled on every pass.
         if sim.is_some_and(|(_, end)| now >= end) {
             sim = None;
         }
@@ -1133,40 +1339,27 @@ async fn input(bus: I2cBus, mut button: ExtiInput<'static, Async>, int: HeaderIn
                 | (if pins & P_BUTTON_RIGHT != 0 { M_RIGHT } else { 0 });
             mask |= if module != 0 { module } else { M_CORE };
         }
+        if mask != 0 {
+            quiet_until = now + SWIPE_QUIET;
+            if let Some(s) = &mut swipe {
+                s.buttons = true;
+            }
+        }
         rec.update(now.as_millis(), mask, &mut |e: ButtonEvent| {
             if let Some(b) = Button::from_mask(e.buttons) {
                 let _ = EVENTS.try_send(Event::Button(b, e.kind));
             }
         });
-        if traffic && !rec.needs_polling() {
+        if !rec.needs_polling()
+            && let Some(c) = new_timing.take()
+        {
+            rec = Recognizer::new(c);
+        }
+        if traffic && !rec.needs_polling() && swipe.is_none() {
             traffic = false;
             bus.rest().await;
         }
     }
-}
-
-/// Read one swipe: the FIFO while the engine stays in gesture mode, then the decision.
-async fn read_swipe(bus: I2cBus, decoder: &mut Decoder) -> Option<Gesture> {
-    decoder.reset();
-    let start = Instant::now();
-    loop {
-        let active = bus.raw(|b| {
-            let mut s = Apds9960::new(b);
-            let mut samples = [Sample::default(); 32];
-            let n = s.read_fifo(&mut samples).unwrap_or(0);
-            for x in &samples[..n] {
-                decoder.push(*x);
-            }
-            s.gesture_active().unwrap_or(false)
-        });
-        if !active || start.elapsed() > GESTURE_MAX {
-            break;
-        }
-        Timer::after_millis(30).await;
-    }
-    bus.raw(|b| Apds9960::new(b).clear_fifo()).ok();
-    bus.rest().await;
-    decoder.finish()
 }
 
 // ---- test hooks and the `lcd` shell subtree ----------------------------------------------------
@@ -1202,11 +1395,15 @@ pub fn stats() -> Stats {
 /// * `lcd press <left|right|both|core> [ms]`: a press held `ms` (default 100), recognized like a
 ///   real one (console only: over the radio it would let anyone drive the UI);
 /// * `lcd swipe <up|down|left|right>`: a decoded swipe (console only);
+/// * `lcd rotate <0|90|180|270>`: turn the screen as auto-rotation would, animated (console only;
+///   needs [`autorotate`] running);
 /// * `lcd stats`: flushes, rows sent, VCOM-only toggles;
 /// * `lcd dump`: the frame, one row per line in hex (128 lines of 32 digits, a set bit ink);
-///   `tools/lcd_dump.py` renders it to a PNG.
+///   `tools/lcd_dump.py` renders it to a PNG. Drawing pauses while it is paged out (about a
+///   second), so an animated screen dumps whole.
 pub static SHELL: &[crate::shell::Entry] = &[
     crate::shell::Entry::cmd_console_only("press", crate::shell::Args::None, cmd_press),
+    crate::shell::Entry::cmd_console_only("rotate", crate::shell::Args::None, cmd_rotate),
     crate::shell::Entry::cmd_console_only("swipe", crate::shell::Args::None, cmd_swipe),
     crate::shell::Entry::cmd("stats", crate::shell::Args::None, cmd_stats),
     crate::shell::Entry::cmd("dump", crate::shell::Args::None, cmd_dump),
@@ -1261,6 +1458,27 @@ fn cmd_swipe(ctx: &mut crate::shell::Ctx<'_>, args: &[&str]) -> crate::shell::Ou
     crate::shell::Outcome::ok()
 }
 
+fn cmd_rotate(ctx: &mut crate::shell::Ctx<'_>, args: &[&str]) -> crate::shell::Outcome {
+    use core::fmt::Write as _;
+    let r = match args.first().copied() {
+        Some("0") => Rotation::R0,
+        Some("90") => Rotation::R90,
+        Some("180") => Rotation::R180,
+        Some("270") => Rotation::R270,
+        _ => {
+            let _ = write!(ctx, "usage: lcd rotate <0|90|180|270>");
+            return crate::shell::Outcome::code(crate::shell::R_BAD_ARG);
+        }
+    };
+    if auto_rotate::request_turn(r) {
+        let _ = write!(ctx, "turning to {}°", r as u16 * 90);
+        crate::shell::Outcome::ok()
+    } else {
+        let _ = write!(ctx, "auto-rotation is not running");
+        crate::shell::Outcome::code(crate::shell::R_BAD_ARG)
+    }
+}
+
 fn cmd_stats(ctx: &mut crate::shell::Ctx<'_>, _args: &[&str]) -> crate::shell::Outcome {
     use core::fmt::Write as _;
     let s = stats();
@@ -1274,6 +1492,10 @@ fn cmd_stats(ctx: &mut crate::shell::Ctx<'_>, _args: &[&str]) -> crate::shell::O
 
 fn cmd_dump(ctx: &mut crate::shell::Ctx<'_>, _args: &[&str]) -> crate::shell::Outcome {
     use core::fmt::Write as _;
+    // Hold drawing for a moment: the host pages the dump out over several requests, each a run
+    // of this handler, and they should all see the same frame (an animated screen redraws every
+    // few tens of ms). Each run extends the hold; drawing resumes a second after the last.
+    DUMP_HOLD.lock(|c| c.set(Instant::now() + Duration::from_millis(1000)));
     // A shell handler is synchronous: it takes the frame only if no flush holds it right now.
     let Ok(d) = DISPLAY.try_lock() else {
         let _ = write!(ctx, "busy, try again");

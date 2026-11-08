@@ -18,6 +18,9 @@
 //!     sleep and be woken by an EXTI edge; [`tilt_triggered`](Lis2dh12::tilt_triggered)
 //!     reads and clears the latched source. Sensitivity is selectable via
 //!     [`Sensitivity`].
+//!   * **Orientation interrupt**: [`enable_orientation`](Lis2dh12::enable_orientation) raises
+//!     INT1 when the device turns between portrait and landscape (the LCD Module's
+//!     auto-rotation, [`lcd::autorotate`](crate::lcd::autorotate)).
 //!
 //! ```ignore
 //! let mut accel = Lis2dh12::new(i2c, lis2dh12::ADDR_DEFAULT);
@@ -68,6 +71,16 @@ const CTRL3_I1_IA1: u8 = 0b0100_0000; // route interrupt-activity 1 to INT1 pin
 const CTRL5_LIR_INT1: u8 = 0b0000_1000; // latch INT1 until INT1_SRC is read
 const INT1_CFG_HIGH_OR: u8 = 0b0010_1010; // OR of X/Y/Z "high" events (movement)
 const INT1_SRC_IA: u8 = 0b0100_0000; // interrupt-active flag in INT1_SRC
+
+// Orientation (4D) interrupt wiring.
+const CTRL1_10HZ_LP_XYZ: u8 = 0b0010_1111; // ODR = 10 Hz, LPen (8-bit low-power mode), X/Y/Z on
+const CTRL5_D4D_INT1: u8 = 0b0000_0100; // 4D: the 6D generator ignores Z
+const INT1_CFG_6D_MOVE_XY: u8 = 0b0100_1111; // AOI = 0, 6D = 1: movement between X/Y zones
+/// Orientation zone threshold, 1 LSB = 16 mg at ±2 g: an axis past 0.5 g (and the other below it)
+/// is a zone, so the portrait / landscape boundary has a hysteresis band of 30 to 60 degrees.
+const ORIENT_THS: u8 = 32;
+/// Samples (at 10 Hz) a new zone must hold before it is reported.
+const ORIENT_DURATION: u8 = 2;
 
 /// Sensitivity of the [tilt](Lis2dh12::enable_tilt) (movement) interrupt: the
 /// motion threshold, where 1 LSB = 16 mg at ±2 g. Lower threshold = more sensitive.
@@ -121,6 +134,16 @@ impl Default for TiltConfig {
     fn default() -> Self {
         Self::new(Sensitivity::Medium)
     }
+}
+
+/// Output data rate in normal mode (`CTRL_REG1.ODR`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Odr {
+    Hz1 = 1,
+    Hz10 = 2,
+    Hz25 = 3,
+    Hz50 = 4,
+    Hz100 = 5,
 }
 
 /// A 3-axis acceleration sample, in **milli-g** (1000 = 1 g).
@@ -198,6 +221,13 @@ impl<I2C: I2c> Lis2dh12<I2C> {
         self.write_reg(CTRL_REG1, CTRL1_10HZ_XYZ)
     }
 
+    /// [`init`](Self::init) at another output data rate: faster for a tilt control read every
+    /// frame (50 Hz: a fresh sample each 20 ms, about 10 µA), slower to save power.
+    pub fn init_rate(&mut self, odr: Odr) -> Result<(), I2C::Error> {
+        self.write_reg(CTRL_REG4, CTRL4_BDU_2G_NORMAL)?;
+        self.write_reg(CTRL_REG1, ((odr as u8) << 4) | 0b0111)
+    }
+
     /// Read one acceleration sample (milli-g) from the output registers.
     pub fn read(&mut self) -> Result<Accel, I2C::Error> {
         let mut b = [0u8; 6];
@@ -257,6 +287,39 @@ impl<I2C: I2c> Lis2dh12<I2C> {
         }
         self.last_tilt = Some(now);
         Ok(true)
+    }
+
+    /// Enable **orientation** (portrait / landscape) detection on INT1, the low-power way to follow
+    /// which way up the device is held: the chip's 4D movement recognition (its 6D position
+    /// generator with Z ignored, no high-pass filter: it watches gravity) raises INT1 when the
+    /// device turns into another of the four X/Y zones and stays there 200 ms, latched until
+    /// [`orientation_changed`](Self::orientation_changed). Lying flat is no zone, so it reports
+    /// nothing. Runs the chip in low-power mode at 10 Hz (8-bit samples, a few µA); [`read`](Self::read)
+    /// still returns milli-g. Replaces the tilt interrupt (they share INT1's generator).
+    pub fn enable_orientation(&mut self) -> Result<(), I2C::Error> {
+        self.write_reg(CTRL_REG4, CTRL4_BDU_2G_NORMAL)?;
+        self.write_reg(CTRL_REG1, CTRL1_10HZ_LP_XYZ)?;
+        self.write_reg(CTRL_REG2, 0)?; // no high-pass on INT1: the zones are gravity's
+        self.write_reg(CTRL_REG3, CTRL3_I1_IA1)?;
+        self.write_reg(CTRL_REG5, CTRL5_LIR_INT1 | CTRL5_D4D_INT1)?;
+        self.write_reg(INT1_THS, ORIENT_THS)?;
+        self.write_reg(INT1_DURATION, ORIENT_DURATION)?;
+        self.write_reg(INT1_CFG, INT1_CFG_6D_MOVE_XY)?; // enable, last per the datasheet
+        let _ = self.read_reg(INT1_SRC)?; // clear any startup latch
+        Ok(())
+    }
+
+    /// Read and clear the latched orientation interrupt: whether the device turned into another
+    /// zone since the last call (reading re-arms INT1).
+    pub fn orientation_changed(&mut self) -> Result<bool, I2C::Error> {
+        Ok(self.read_reg(INT1_SRC)? & INT1_SRC_IA != 0)
+    }
+
+    /// Power the chip down (interrupts off, no sampling: about 0.5 µA).
+    pub fn power_down(&mut self) -> Result<(), I2C::Error> {
+        self.write_reg(INT1_CFG, 0)?;
+        self.write_reg(CTRL_REG3, 0)?;
+        self.write_reg(CTRL_REG1, 0)
     }
 
     /// Consume the driver and hand the I²C bus back to the caller.

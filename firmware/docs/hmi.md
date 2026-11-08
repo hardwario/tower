@@ -8,13 +8,17 @@ crate (`crates/hmi`, re-exported as `tower::hmi`), host-tested like the other sh
 
 > **Status: implemented and hardware-verified** on an LCD Module rev 2.4 with a Core Module r2:
 > the display (drawing, partial updates, rotation), both module buttons and the Core Module
-> button, swipes in all four directions, the menu with settings in EEPROM. Chords (both buttons)
-> are verified through injected presses only. The power figures below are estimates from the
+> button, swipes in all four directions, the menu with settings in EEPROM, auto-rotation from the
+> accelerometer with an animated turn (all four orientations), the five games. Chords (both
+> buttons) are verified through injected presses only. The power figures below are estimates from the
 > datasheets and the code path; they have not been measured on the PPK2 bench yet.
 
-Samples: `lcd_hello` (first light), `lcd_gallery` (the drawing API), `lcd_input` (every input
-event, LED feedback, swipes on demand), `lcd_menu` (a settings menu over EEPROM settings),
-`lcd_thermometer` (a battery-friendly big-digit readout). `just flash example lcd_hello`.
+Samples: `lcd_hello` (first light), `lcd_gallery` (the drawing API, auto-rotation), `lcd_input`
+(every input event, LED feedback, swipes on demand), `lcd_menu` (a settings menu over EEPROM
+settings), `lcd_thermometer` (a battery-friendly big-digit readout), `lcd_swipe` (the gesture
+sensor's every activation, a test and tuning aid). `just flash example
+lcd_hello`. And an app, `lcd_games`: five games, each playable with the buttons, swipes or tilt
+(see *The games app*).
 
 ## Quick start
 
@@ -121,18 +125,53 @@ every row.
   `\n` starts a new line. Both return the area covered. Build styles as `const`s.
 * **Images**: `c.image(x, y, &IMAGE, Color::Black, None)`; the last argument paints the image's
   paper pixels too (`Some(Color::White)`) or leaves them (`None`). `image!` builds an `Image` from
-  ASCII art at compile time (`#` ink, `.` paper); `Image::new(w, h, &BYTES)` takes the "horizontal,
-  1 bit per pixel, MSB first" output of the usual converters (image2cpp, LCD Assistant).
+  ASCII art at compile time (`#` ink, `.` paper); `crates/hmi/tools/image.py` converts a PNG
+  (scaled, trimmed, thresholded, with a preview PNG to check the result) into a Rust file defining
+  one; `Image::new(w, h, &BYTES)` also takes the "horizontal, 1 bit per pixel, MSB first" output of
+  the usual converters (image2cpp, LCD Assistant).
 * **Clipping**: `c.set_clip(rect)`, `c.with_clip(rect, |c| ...)`; everything is clipped to it.
-* **Rotation**: `Config::rotation` or `lcd.set_rotation(...)` (applied from the next draw; redraw
-  the screen after it). `R0` reads with the buttons below the display. Unrotated fills, text and
-  images take byte-wide fast paths; a rotated screen draws pixel by pixel (correct, slower).
+* **Rotation**: `Config::rotation`, or at run time (see *Rotation and auto-rotation*). `R0` reads
+  with the buttons below the display. Unrotated fills, text and images take byte-wide fast paths;
+  a rotated screen draws pixel by pixel (correct, slower).
 
 **Draw immediately, the driver sends the difference.** A canvas marks a row dirty only when a byte
 in it actually changes, and the driver keeps a signature (FNV-1a) of each row the panel shows, so
 clearing and redrawing a whole screen sends only the rows that came out different: the menu sample
 averaged 38 rows per redraw, a changed clock digit is about 20 rows. There is no need to track
 what changed in the application.
+
+## Rotation and auto-rotation
+
+Three ways to change the rotation at run time:
+
+* `lcd.set_rotation(r)`: from the next draw on; what is on the screen stays as it was (redraw it).
+  Fire-and-forget, so a menu's `Values::set` can call it.
+* `lcd.rotate(r).await`: the picture turns with the screen, exactly and in place (no extra RAM),
+  and is sent; drawing continues in the new rotation.
+* `lcd.rotate_animated(r, lcd::Animation::default()).await`: the same, animated: the picture turns
+  on the screen, eased in and out and shrunk to fit while it turns, and lands exactly on the new
+  rotation (a quarter turn in about 0.5 s: 9 steps of a full-screen redraw and flush). It keeps a
+  2 KB snapshot of the picture, a `static` linked only into apps that animate.
+
+Both `rotate` calls emit `Event::Rotated(r)`. Nothing needs redrawing (the turned picture is what
+drawing in the new rotation gives: `tower-hmi` tests this for every pair of rotations), but a UI
+whose layout depends on the rotation redraws then.
+
+**Auto-rotation** keeps the picture upright as the board turns, with the Core Module's LIS2DH12:
+
+```rust
+lcd::autorotate(b.spawner, lcd, b.accel_int, lcd::AutoRotate::default()); // animated
+```
+
+The accelerometer runs its own 4D orientation detection in low-power mode at 10 Hz (a few µA) and
+raises INT1 (PB6) only when the board turns into another portrait / landscape zone, so the MCU
+wakes once per turn, not to poll. The task then reads the gravity vector and picks the rotation
+with hysteresis (`tower_hmi::turn::orientation`: the new direction must dominate by about 56
+degrees; lying flat keeps the current rotation). `AutoRotate::mounting` maps the accelerometer's
+axes onto the panel's (verified: the panel's x is the accelerometer's -x), `animation: None` turns
+at once, `enabled: false` starts it off; the returned `AutoRotation` handle switches it on and
+off (off powers the accelerometer down). The accelerometer is the task's: don't use its tilt
+interrupt alongside. `lcd rotate <0|90|180|270>` turns the screen from the console while it runs.
 
 ## Fonts
 
@@ -193,13 +232,29 @@ period while a button is down. After a Hold without Repeat the driver samples ev
 wakes on PA8's falling edge, so a button held down (or stuck) for hours costs no 100 Hz wake-ups.
 
 `lcd.simulate(Button::Left, 100)` (or `lcd::simulate`) injects a press that goes through the same
-recognition as a real one.
+recognition as a real one. `lcd.set_buttons(config)` changes the timing at run time (a game that
+wants auto-repeat, which a menu would rather not have).
 
 ### Swipes
 
 The APDS-9960 recognizes `Gesture::Up`, `Down`, `Left` and `Right` over the module, in the
 module's frame with `Rotation::R0` (verified on hardware: a hand moving from the bottom edge to the
-top edge is `Up`). `Config::gesture_map` remaps them for another mounting.
+top edge is `Up`). `Config::gesture_map` remaps them for another mounting. A hand reaching for a
+button passes over the sensor too, so a swipe read while a button is down, or within 0.4 s of
+one, is dropped. Swipes and buttons are read in one interleaved loop (a FIFO read every 30 ms
+while a swipe lasts), so a hand resting over the sensor never holds up the buttons.
+
+**How a swipe is decided** (`tower_hmi::gesture`): by timing, not by levels. The decoder takes
+the time-weighted center of each photodiode's signal over the gesture; the axis whose two centers
+lie further apart (relative to the gesture's length, at least 4 %) gives the direction. Comparing
+levels (the SparkFun method: the balance between opposite channels at the first and the last
+sample) failed on the LCD Module: close to the sensor all four channels saturate, and the IR LED
+sits off-center, so right swipes read much weaker than left ones and often went undecided.
+Activations of fewer than 6 samples or with a brightest reading under 80 are dropped: those are
+the hand passing the edge of the range on its way back to start the next swipe. The gesture gain
+is 2x (SparkFun's 4x saturated almost every swipe). On a labeled run of 20 swipes (5 each way) all
+20 were decoded right and the one stray flicker was rejected. `lcd_swipe` shows every activation
+with these numbers (`lcd::swipe_trace()`), for tuning on other hardware.
 
 **The sensor is off by default**: with its gesture engine on it never sleeps (about 40 µA in its
 wait state, plus the IR LED pulses of each proximity check: roughly 0.3 mA in all at the default
@@ -279,6 +334,7 @@ driver still does, and what it costs (estimates; the PPK2 measurement is still t
 | Button press | on each press | PA8 wakes the MCU; the expander is read every 10 ms while a button is down |
 | Gesture sensor | only when on | ~0.3 mA (see *Swipes*) |
 | RGB LED, backlight | only when on | 0.3 to 1.3 mA per lit color; the backlight depends on what is fitted |
+| Auto-rotation | only when started | the accelerometer's few µA; one wake-up per turn of the board |
 
 * **VCOM period.** The panel needs its polarity inverted periodically, or a DC bias builds up across
   the liquid crystal (image retention, slow degradation). Sharp characterizes the LS013B7DH03's
@@ -328,9 +384,43 @@ chunk, the two tasks) and roughly 23 KB of flash for the driver, the canvas, the
 shell hooks, plus the fonts used (table above). `lcd_hello` is 130 KB of flash with three font
 sizes, against 81 KB for a bare SDK example.
 
+## The games app
+
+`apps/lcd_games.rs` (`just flash app lcd_games`) is five small games picked from a menu. After
+picking a game, the player picks how to play it: **buttons**, **swipes** (the gesture sensor) or
+**tilt** (the Core Module's accelerometer). Only that input is live for the round, so nothing else
+moves the game by surprise, and the sensor it needs is powered only then. A card then explains
+that control. Every game ends with both buttons held for 2 seconds, whatever the control (long
+enough not to happen while steering or rotating a piece). Best scores are kept in EEPROM per game
+and control (local keys `0x50 + 3 * game + control`), shown as a table under *High scores*.
+
+| Game | Buttons | Swipes | Tilt |
+|---|---|---|---|
+| Asteroid Run: dodge falling rocks | hold to steer | left / right: a lane over (five lanes) | the rocket sits where the board leans |
+| Snake: eat, grow, don't bite | press to turn left / right | sets the direction | heads the way the board leans most |
+| Blockfall: pieces of two to five cells, full rows clear | click moves, hold L rotates, hold R drops | left / right move, up rotates, down drops | lean slides (faster further), tilt away rotates, tilt towards you falls faster |
+| Bounce: paddle, ball, bricks | hold to move | left / right: the paddle glides; up / down stops it | the paddle sits where the board leans |
+| Marble Maze: roll into the hole | press to turn the game's gravity a quarter | points the game's gravity | real gravity rolls the marble |
+
+Tilt is level wherever the board was held when the round started (four readings averaged after
+the splash), since a player holds it tipped towards them, not flat. With buttons or swipes, Marble
+Maze has a gravity of its own, shown as an arrow at the top of the screen. The chooser starts on
+the control last used for that game.
+
+The app opens on the HARDWARIO TOWER logo for 3 seconds, and each game for 1 second with its name
+under it: the approved stacked lockup from the HARDWARIO artwork repository, rendered from its SVG
+and converted by `crates/hmi/tools/image.py` (124 x 35 pixels, 560 bytes; the source and its
+checksum are in the generated `apps/lcd_games/logo.rs`). Each game is a file in
+`apps/lcd_games/`, an `async fn play(ctx) -> End` with its own frame loop: draw the whole scene
+every frame (25 to 33 frames a second) and let the driver send the rows that changed. It reads
+`ctx.control` and handles that control's input only; `ctx.drain` hands it the events (tracking the
+quit gesture), `ctx.lean()` the board's lean.
+
 ## Not done yet
 
 * PPK2 measurement of the idle floor with the module attached, the VCOM toggle and a flush.
 * Physical two-button chords (verified with injected presses).
+* The games' tilt control in play: verified with the board at rest (calibration, no drift) and
+  through the code path; the thresholds (lean angles) await a play-test.
 * The I2C bus stays at 100 kHz: at 400 kHz expander bursts would be shorter and might not wake the
   ATSHA204A at all, but that changes the bus for every device on it and needs the bench.
