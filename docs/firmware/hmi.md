@@ -13,6 +13,11 @@ crate (`crates/hmi`, re-exported as `tower::hmi`), host-tested like the other sh
 > buttons) are verified through injected presses only. The power figures below are estimates from the
 > datasheets and the code path; they have not been measured on the PPK2 bench yet.
 
+Two modes. **Frame mode** (`lcd::init`, everything below unless said otherwise) keeps the picture
+in a 2 KB frame and sends the rows that changed. **Page mode** (`lcd::init_paged`, see *Page mode*)
+keeps no frame: a renderer draws the whole screen band by band as it is sent, for a radio node
+that has no 2.6 KB to spare (`radio_thermostat`'s screen).
+
 Samples: `lcd_hello` (first light), `lcd_gallery` (the drawing API, auto-rotation), `lcd_input`
 (every input event, LED feedback, swipes on demand), `lcd_menu` (a settings menu over EEPROM
 settings), `lcd_thermometer` (a battery-friendly big-digit readout), `lcd_swipe` (the gesture
@@ -139,6 +144,46 @@ in it actually changes, and the driver keeps a signature (FNV-1a) of each row th
 clearing and redrawing a whole screen sends only the rows that came out different: the menu sample
 averaged 38 rows per redraw, a changed clock digit is about 20 rows. There is no need to track
 what changed in the application.
+
+## Page mode
+
+A radio node can't spare frame mode's 2.6 KB (the frame and the row signatures) next to its radio
+stack and its 8 KB stack floor (`docs/firmware/taf.md`, *RAM*). Page mode keeps no frame:
+
+```rust
+fn render(c: &mut Canvas<'_>) {
+    let v = VIEW.lock(|v| v.get()); // the app's state, in a static
+    c.clear(Color::White);
+    c.text_fmt(64, 40, format_args!("{}", v.value), &BIG.align(Align::Center));
+}
+
+let lcd = lcd::init_paged(b.spawner, res, bus, lcd::Config::default(), render).await?;
+VIEW.lock(|v| v.set(new_state));
+lcd.show().await; // renders, sends the bands that changed
+```
+
+* **The renderer** (`lcd::Renderer`, a plain `fn(&mut Canvas)`) draws the whole screen from the
+  app's state every time. `show()` runs it once per band of 8 rows, into a canvas over that band
+  (`Canvas::window` in `tower-hmi`: the band's rows sit in the driver's 146-byte transfer buffer,
+  between the line headers) with drawing clipped to the band; every drawing call works as on a
+  frame (a host test checks that the bands equal a frame's rows, in every rotation). It must not
+  block, and it draws the same screen until the app changes its state; the state lives in a
+  `static` the app changes between shows, never across an `.await`.
+* **What is sent**: a band whose signature (FNV-1a over its 128 bytes) differs from the one the
+  panel shows; the driver keeps 16 signatures instead of 128.
+* **The cost** is the drawing: the whole screen sixteen times per show, each glyph or fill outside
+  the band skipped early (a glyph row outside the clip costs nothing). Text and fills take a few
+  milliseconds per show on the L0; a screen redrawn once a minute or on a button press doesn't
+  notice.
+* **Lean on purpose**: the buttons only (no swipes: the gesture sensor stays powered down and its
+  decoding out of the image; `Config::gestures` is ignored), no rotation animation, and the
+  periodic refresh rides on the next `show()` (an app showing a clock shows every minute). Input,
+  the RGB LED, the backlight and `set_rotation` are the same as in frame mode (`Lcd<Paged>` and
+  `Lcd` share them).
+* **`lcd dump`** runs the renderer band by band. The dump is paged out over several shell
+  requests, so a screen that changes meanwhile comes out torn: dump a settled screen.
+* `lcd::probe(bus)` says whether a module is attached before the app hands over its resources (the
+  Core button among them), for an app that runs with or without one.
 
 ## Rotation and auto-rotation
 
@@ -371,7 +416,7 @@ lcd::SHELL)]; app!(run, commands: CMDS);`):
 * `lcd press <left|right|both|core> [ms]`: a press recognized like a real one (console only);
 * `lcd swipe <up|down|left|right>`: a decoded swipe (console only);
 * `lcd stats`: flushes, rows sent, VCOM-only toggles;
-* `lcd dump`: the frame as hex, one row per line.
+* `lcd dump`: the frame as hex, one row per line (in page mode, the renderer's screen).
 
 `python3 tools/lcd_dump.py screen.png` renders `lcd dump` to a PNG: what the firmware drew, without
 looking at the module. Together with `lcd press` it drives and checks a UI from the console (how
@@ -379,10 +424,16 @@ the samples were verified).
 
 ## Budget
 
-The driver costs about 2.9 KB of RAM (the 2 KB frame, 512 B of row signatures, a 146-byte DMA
+Frame mode costs about 2.9 KB of RAM (the 2 KB frame, 512 B of row signatures, a 146-byte DMA
 chunk, the two tasks) and roughly 23 KB of flash for the driver, the canvas, the recognizer and the
 shell hooks, plus the fonts used (table above). `lcd_hello` is 130 KB of flash with three font
 sizes, against 81 KB for a bare SDK example.
+
+Page mode costs about 1.5 KB of RAM (the transfer buffer, 64 B of band signatures, the two smaller
+tasks, the queues) and, in `radio_thermostat`, about 13 KB of flash for the driver and the canvas,
+plus the app's screen and fonts. Fonts are the lever there: `radio_thermostat` draws its big
+digits from the 16x32 numeric font at twice the size (1.2 KiB) instead of the 32x64 one (4.8 KiB),
+and its 8x16 font is ASCII only, with the degree sign drawn as a ring.
 
 ## The games app
 
@@ -418,7 +469,8 @@ quit gesture), `ctx.lean()` the board's lean.
 
 ## Not done yet
 
-* PPK2 measurement of the idle floor with the module attached, the VCOM toggle and a flush.
+* PPK2 measurement of the idle floor with the module attached, the VCOM toggle and a flush (and a
+  page-mode show, whose drawing runs sixteen times).
 * Physical two-button chords (verified with injected presses).
 * The games' tilt control in play: verified with the board at rest (calibration, no drift) and
   through the code path; the thresholds (lean angles) await a play-test.

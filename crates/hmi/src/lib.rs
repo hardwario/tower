@@ -37,7 +37,7 @@ pub mod input;
 pub mod menu;
 pub mod turn;
 
-pub use canvas::{Align, Canvas, Color, Rotation, TextStyle};
+pub use canvas::{Align, Canvas, Color, Rotation, TextStyle, Window};
 pub use font::Font;
 pub use frame::Frame;
 pub use geom::{Point, Rect};

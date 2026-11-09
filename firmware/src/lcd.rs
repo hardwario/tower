@@ -62,7 +62,7 @@ use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either, Either4, select, select4};
+use embassy_futures::select::{Either, Either3, Either4, select, select3, select4};
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::mode::Async;
@@ -170,38 +170,42 @@ struct Hw {
     cs: Output<'static>,
 }
 
-/// The frame and what the panel holds. All zero bytes initially, so the static is in `.bss`; the
-/// hardware handles live apart in [`HW`] (an `Option` of them is not all zeros when `None`, which
-/// would move these 2.8 KB into `.data`, a flash copy initialized at every boot).
-struct Display {
-    frame: LcdFrame,
-    /// Signature of what each panel row shows ([`row_signature`] of the frame row sent).
-    sent: [u32; ROWS],
+/// What both modes share: the VCOM bit and the transfer buffer (a mode byte, eight lines, the
+/// trailing dummy byte). All zero bytes initially, so the static is in `.bss`; the hardware
+/// handles live apart in [`HW`] (an `Option` of them is not all zeros when `None`, which would
+/// move the buffer into `.data`, a flash copy initialized at every boot).
+struct Panel {
     vcom: bool,
     buf: [u8; 1 + CHUNK_LINES * LINE + 1],
 }
 
-impl Display {
-    const fn new() -> Self {
-        Self {
-            frame: Frame::new(),
-            sent: [0; ROWS],
-            vcom: false,
-            buf: [0; 1 + CHUNK_LINES * LINE + 1],
-        }
-    }
+/// Frame mode ([`init`]): the frame, and the signature of what each panel row shows
+/// ([`row_signature`] of the frame row sent). Referenced only from the frame-mode code, so the
+/// linker leaves these 2.6 KB out of a page-mode app.
+struct FrameState {
+    frame: LcdFrame,
+    sent: [u32; ROWS],
 }
 
 type Guard<T> = embassy_sync::mutex::MutexGuard<'static, ThreadModeRawMutex, T>;
 
-static DISPLAY: Mutex<ThreadModeRawMutex, Display> = Mutex::new(Display::new());
-/// The SPI and the chip select; always locked after [`DISPLAY`] (see [`lock`]).
+static PANEL: Mutex<ThreadModeRawMutex, Panel> = Mutex::new(Panel {
+    vcom: false,
+    buf: [0; 1 + CHUNK_LINES * LINE + 1],
+});
+/// The SPI and the chip select; always locked after [`PANEL`] (see [`lock`]).
 static HW: Mutex<ThreadModeRawMutex, Option<Hw>> = Mutex::new(None);
+/// Frame mode's state; always locked before [`PANEL`].
+static FRAME: Mutex<ThreadModeRawMutex, FrameState> = Mutex::new(FrameState {
+    frame: Frame::new(),
+    sent: [0; ROWS],
+});
 
-/// Lock the display state and its hardware, in that order (the only order either is taken in).
-async fn lock() -> (Guard<Display>, Guard<Option<Hw>>) {
-    let d = DISPLAY.lock().await;
-    (d, HW.lock().await)
+/// Lock the panel and its hardware, in that order (the only order either is taken in; frame mode
+/// takes [`FRAME`] before both).
+async fn lock() -> (Guard<Panel>, Guard<Option<Hw>>) {
+    let p = PANEL.lock().await;
+    (p, HW.lock().await)
 }
 /// When the panel's VCOM last flipped.
 static LAST_VCOM: BlockingMutex<CriticalSectionRawMutex, Cell<Instant>> =
@@ -250,37 +254,46 @@ impl Drop for Selected<'_> {
     }
 }
 
-fn flip_vcom(d: &mut Display) {
-    d.vcom = !d.vcom;
+fn flip_vcom(p: &mut Panel) {
+    p.vcom = !p.vcom;
     LAST_VCOM.lock(|c| c.set(Instant::now()));
+}
+
+/// The mode byte of a transfer: `mode` with the current VCOM bit.
+fn mode_byte(p: &Panel, mode: u8) -> u8 {
+    mode | if p.vcom { M_VCOM } else { 0 }
 }
 
 /// A command without data (display mode, all clear): the mode byte and 13 or more dummy clocks.
 /// Raw I²C traffic: the caller follows with [`I2cBus::rest`], after releasing the display.
-fn command(d: &mut Display, hw: &mut Option<Hw>, bus: I2cBus, mode: u8) {
-    let vcom = if d.vcom { M_VCOM } else { 0 };
+fn command(p: &mut Panel, hw: &mut Option<Hw>, bus: I2cBus, mode: u8) {
     if let Some(Hw { spi, cs }) = hw.as_mut() {
         let _selected = Selected::new(bus, cs);
-        let _ = spi.blocking_write(&[mode | vcom, 0]);
+        let _ = spi.blocking_write(&[mode_byte(p, mode), 0]);
         delay_us(25); // SCS high at least 22.55 µs in display mode
     }
-    flip_vcom(d);
+    flip_vcom(p);
 }
 
-/// Send the frame rows that differ from what the panel shows (all of them with `force`). Raw I²C
-/// traffic: the caller follows with [`I2cBus::rest`], after releasing the display (the ATSHA's
-/// wake delay need not hold up a shell `lcd dump` or another drawer).
+/// Put line `y`'s header and trailer around its pixels at `line` (`LINE` bytes: the gate address,
+/// the pixels, the dummy byte), the pixels turned from ink-is-set to the panel's set-is-white.
+fn frame_line(line: &mut [u8], y: usize) {
+    line[0] = gate(y);
+    for b in &mut line[1..1 + STRIDE] {
+        *b = !*b;
+    }
+    line[LINE - 1] = 0;
+}
+
+/// Frame mode: send the frame rows that differ from what the panel shows (all of them with
+/// `force`). Raw I²C traffic: the caller follows with [`I2cBus::rest`], after releasing the
+/// display (the ATSHA's wake delay need not hold up a shell `lcd dump` or another drawer).
 ///
 /// Cancellation-safe: the rows' signatures and dirty marks are updated only once the transfer
 /// has completed, so a flush dropped halfway leaves those rows to the next one.
-async fn flush(d: &mut Display, hw: &mut Option<Hw>, bus: I2cBus, force: bool) {
+async fn flush(f: &mut FrameState, p: &mut Panel, hw: &mut Option<Hw>, bus: I2cBus, force: bool) {
     let Some(Hw { spi, cs }) = hw.as_mut() else { return };
-    let Display {
-        frame,
-        sent,
-        vcom,
-        buf,
-    } = d;
+    let FrameState { frame, sent } = f;
     let mut send = [0u32; ROWS / 32];
     let mut count = 0;
     for y in 0..ROWS {
@@ -292,19 +305,16 @@ async fn flush(d: &mut Display, hw: &mut Option<Hw>, bus: I2cBus, force: bool) {
     let rows = || (0..ROWS).filter(move |y| send[y / 32] & (1 << (y % 32)) != 0);
     if count > 0 {
         let selected = Selected::new(bus, cs);
-        buf[0] = M_UPDATE | if *vcom { M_VCOM } else { 0 };
+        p.buf[0] = mode_byte(p, M_UPDATE);
+        let buf = &mut p.buf;
         let mut n = 1;
         for y in rows() {
             if n + LINE > buf.len() - 1 {
                 let _ = spi.write(&buf[..n]).await;
                 n = 0;
             }
-            buf[n] = gate(y);
-            // The frame keeps ink as a set bit; the panel takes a set bit as white.
-            for (dst, src) in buf[n + 1..n + 1 + STRIDE].iter_mut().zip(frame.row(y)) {
-                *dst = !src;
-            }
-            buf[n + LINE - 1] = 0;
+            buf[n + 1..n + 1 + STRIDE].copy_from_slice(frame.row(y));
+            frame_line(&mut buf[n..n + LINE], y);
             n += LINE;
         }
         buf[n] = 0; // with the last line's dummy byte, the 16 clocks of the transfer period
@@ -319,8 +329,104 @@ async fn flush(d: &mut Display, hw: &mut Option<Hw>, bus: I2cBus, force: bool) {
     }
     frame.clear_all_dirty();
     if count > 0 {
-        flip_vcom(d);
+        flip_vcom(p);
     }
+}
+
+// ---- page mode ---------------------------------------------------------------------------------
+
+/// Bands of [`CHUNK_LINES`] rows: what page mode renders, compares and sends at a time.
+const BANDS: usize = ROWS / CHUNK_LINES;
+
+/// Page mode's renderer ([`init_paged`]).
+static RENDER: BlockingMutex<ThreadModeRawMutex, Cell<Option<Renderer>>> =
+    BlockingMutex::new(Cell::new(None));
+/// The signature of what each band of the panel shows ([`render_band`]).
+static BAND_SENT: BlockingMutex<ThreadModeRawMutex, [Cell<u32>; BANDS]> =
+    BlockingMutex::new([const { Cell::new(0) }; BANDS]);
+
+/// FNV-1a, continued over `bytes` (a band's signature runs over its rows' pixels).
+fn fnv(mut h: u32, bytes: &[u8]) -> u32 {
+    for &b in bytes {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// Render band `band` with `render` into `lines` ([`CHUNK_LINES`] lines `stride` bytes apart, the
+/// pixels of each at `1..1 + STRIDE`, as in the transfer buffer), ink as a set bit; returns its
+/// signature. The rest of each line is left alone.
+fn render_band(render: Renderer, lines: &mut [u8], stride: usize, band: usize, rotation: Rotation) -> u32 {
+    for l in 0..CHUNK_LINES {
+        lines[l * stride + 1..l * stride + 1 + STRIDE].fill(0);
+    }
+    let window = tower_hmi::Window {
+        width: SIZE,
+        height: SIZE,
+        y0: (band * CHUNK_LINES) as i32,
+        rows: CHUNK_LINES as i32,
+    };
+    let mut dirty = [0u32; 1];
+    render(&mut Canvas::window(
+        &mut lines[1..],
+        &mut dirty,
+        stride,
+        window,
+        rotation,
+    ));
+    (0..CHUNK_LINES).fold(0x811C_9DC5, |h, l| {
+        fnv(h, &lines[l * stride + 1..l * stride + 1 + STRIDE])
+    })
+}
+
+/// Page mode: render the screen band by band and send the bands whose signature changed (all of
+/// them with `force`). Raw I²C traffic: the caller follows with [`I2cBus::rest`].
+///
+/// A band's signature is recorded once its lines are out, so a show dropped halfway leaves the
+/// band it was sending to the next one.
+async fn show_bands(p: &mut Panel, hw: &mut Option<Hw>, bus: I2cBus, force: bool) {
+    let Some(Hw { spi, cs }) = hw.as_mut() else { return };
+    let Some(render) = RENDER.lock(|r| r.get()) else {
+        return;
+    };
+    let rotation = rotation_from(ROTATION.load(Ordering::Relaxed));
+    let lines = 1..1 + CHUNK_LINES * LINE;
+    // The first band to send, rendered into the buffer: none, nothing to do.
+    let next = |buf: &mut [u8], from: usize| {
+        (from..BANDS).find_map(|band| {
+            let sig = render_band(render, &mut buf[lines.clone()], LINE, band, rotation);
+            (force || BAND_SENT.lock(|s| s[band].get()) != sig).then_some((band, sig))
+        })
+    };
+    let Some((mut band, mut sig)) = next(&mut p.buf, 0) else {
+        return;
+    };
+    let selected = Selected::new(bus, cs);
+    // The first band sent goes with the mode byte.
+    p.buf[0] = mode_byte(p, M_UPDATE);
+    let mut from = 0;
+    let mut bands = 0;
+    loop {
+        for l in 0..CHUNK_LINES {
+            let at = 1 + l * LINE;
+            frame_line(&mut p.buf[at..at + LINE], band * CHUNK_LINES + l);
+        }
+        let _ = spi.write(&p.buf[from..lines.end]).await;
+        BAND_SENT.lock(|s| s[band].set(sig));
+        bands += 1;
+        from = 1;
+        match next(&mut p.buf, band + 1) {
+            Some(n) => (band, sig) = n,
+            None => break,
+        }
+    }
+    // With the last line's dummy byte, the 16 clocks of the transfer period.
+    let _ = spi.blocking_write(&[0u8]);
+    drop(selected);
+    flip_vcom(p);
+    bump(&FLUSHES, 1);
+    bump(&ROWS_SENT, (bands * CHUNK_LINES) as u32);
 }
 
 // ---- configuration, events, handle -------------------------------------------------------------
@@ -531,9 +637,105 @@ enum Ctrl {
 static CMDS: Channel<CriticalSectionRawMutex, Cmd, 8> = Channel::new();
 static CTRL: Channel<CriticalSectionRawMutex, Ctrl, 4> = Channel::new();
 
-/// Start the driver: set up the expander, clear the panel and turn it on, and spawn its two tasks
-/// (VCOM and LED timing; input). The screen starts white with the backlight and LED off.
+/// Whether an LCD Module is attached (its expander answers): for an app that runs with or
+/// without one, before it hands [`init`] the resources.
+pub async fn probe(bus: I2cBus) -> bool {
+    let found = bus.raw(|b| Tca9534a::new(b, EXP_ADDR).read_config().is_ok());
+    bus.rest().await;
+    found
+}
+
+/// Start the driver in frame mode: set up the expander, clear the panel and turn it on, and spawn
+/// its two tasks (VCOM and LED timing; input). The screen starts white with the backlight and LED
+/// off. The frame costs 2.6 KB of RAM; [`init_paged`] draws without one.
 pub async fn init(spawner: Spawner, res: Resources, bus: I2cBus, cfg: Config) -> Result<Lcd, Error> {
+    let spi = start(res.spi, bus, &cfg).await?;
+    spawner.spawn(
+        input(
+            bus,
+            res.button,
+            res.int,
+            InputCfg {
+                buttons: cfg.buttons,
+                scan: cfg.scan_interval,
+                gestures: cfg.gestures,
+                gesture: cfg.gesture,
+                map: cfg.gesture_map,
+            },
+        )
+        .unwrap(),
+    );
+    {
+        let mut f = FRAME.lock().await;
+        let (mut p, mut hw) = lock().await;
+        *hw = Some(spi);
+        f.frame.set_rotation(cfg.rotation);
+        f.sent = [row_signature(&[0; STRIDE]); ROWS];
+        power_on(&mut p, &mut hw, bus);
+    }
+    DUMPER.lock(|d| d.set(Some(dump_frame)));
+    set_out(bus, P_DISP_ON, P_DISP_ON);
+    bus.raw(|b| {
+        let mut s = Apds9960::new(b);
+        if cfg.gestures {
+            s.start_gestures(&cfg.gesture)
+        } else {
+            s.power_down()
+        }
+    })
+    .ok();
+    bus.rest().await;
+    spawner.spawn(service(bus, cfg.vcom_period, cfg.refresh_period).unwrap());
+    Ok(Lcd::new(bus))
+}
+
+/// What draws a page-mode screen ([`init_paged`]): the whole screen, every time, from the app's
+/// state (a `static` the app updates before [`Lcd::show`]). It runs once per band of rows, with
+/// drawing clipped to the band; it must not block, and it draws the same screen each time until
+/// the app changes its state.
+pub type Renderer = fn(&mut Canvas<'_>);
+
+/// Start the driver in **page mode**: no frame in RAM. The screen is whatever `render` draws;
+/// [`Lcd::show`] runs it once per band of 8 rows into the driver's 146 B transfer buffer and sends
+/// the bands that changed (a signature per band). That saves 2.5 KB of RAM over [`init`] (the
+/// frame and the row signatures) at the cost of drawing the whole screen per band: about the
+/// time a frame-mode full redraw takes, sixteen times over (milliseconds per band for text and
+/// fills). A radio node's screen fits this way.
+///
+/// Lean on purpose, for a node short of RAM and flash: the buttons only (no swipes; the gesture
+/// sensor stays powered down and its decoding out of the image, [`Config::gestures`] is
+/// ignored), and the periodic refresh rides on the app's next [`show`](Lcd::<Paged>::show) (an
+/// app showing a clock shows every minute anyway). `lcd dump` runs `render`. Otherwise as
+/// [`init`]; `res.int` is not used.
+pub async fn init_paged(
+    spawner: Spawner,
+    res: Resources,
+    bus: I2cBus,
+    cfg: Config,
+    render: Renderer,
+) -> Result<Lcd<Paged>, Error> {
+    let spi = start(res.spi, bus, &cfg).await?;
+    spawner.spawn(input_keys(bus, res.button, cfg.buttons, cfg.scan_interval).unwrap());
+    {
+        let (mut p, mut hw) = lock().await;
+        *hw = Some(spi);
+        let blank = (0..CHUNK_LINES).fold(0x811C_9DC5, |h, _| fnv(h, &[0; STRIDE]));
+        BAND_SENT.lock(|s| s.iter().for_each(|b| b.set(blank)));
+        power_on(&mut p, &mut hw, bus);
+    }
+    RENDER.lock(|r| r.set(Some(render)));
+    DUMPER.lock(|d| d.set(Some(dump_paged)));
+    set_out(bus, P_DISP_ON, P_DISP_ON);
+    bus.raw(|b| Apds9960::new(b).power_down()).ok();
+    bus.rest().await;
+    spawner.spawn(service_paged(bus, cfg.vcom_period, cfg.refresh_period).unwrap());
+    Ok(Lcd::new(bus))
+}
+
+/// The common start of both modes: the expander (or [`Error::NotFound`]), the SPI. The panel's
+/// power-on sequence follows: clear the pixel memory ([`power_on`]), then `DISP` high (30 µs
+/// later at least; the expander write alone takes longer).
+async fn start(spi: HeaderSpi, bus: I2cBus, cfg: &Config) -> Result<Hw, Error> {
     // Thread mode only (no atomic swap on the M0+), so a load and a store suffice.
     if INITIALIZED.load(Ordering::Relaxed) {
         return Err(Error::AlreadyInitialized);
@@ -561,7 +763,7 @@ pub async fn init(spawner: Spawner, res: Resources, bus: I2cBus, cfg: Config) ->
         cs,
         tx_dma,
         ..
-    } = res.spi;
+    } = spi;
     let spi = Spi::new_txonly(spi2, sck, mosi, tx_dma, HeaderSpiIrqs, sc);
     // SCK idles low on embassy's pull-down while the SPI is disabled between transfers; MOSI
     // would float (an input buffer leaking in STOP), so give it a pull-down too.
@@ -569,52 +771,62 @@ pub async fn init(spawner: Spawner, res: Resources, bus: I2cBus, cfg: Config) ->
         .pupdr()
         .modify(|w| w.set_pupdr(15, embassy_stm32::pac::gpio::vals::Pupdr::PULL_DOWN));
     let cs = Output::new(cs, Level::High, Speed::Low);
-
-    {
-        // Power-on sequence: clear the pixel memory, then DISP high (30 µs later at least; the
-        // expander write alone takes longer).
-        let (mut d, mut hw) = lock().await;
-        *hw = Some(Hw { spi, cs });
-        d.frame.set_rotation(cfg.rotation);
-        ROTATION.store(cfg.rotation as u8, Ordering::Relaxed);
-        d.sent = [row_signature(&[0; STRIDE]); ROWS];
-        command(&mut d, &mut hw, bus, M_CLEAR);
-    }
-    set_out(bus, P_DISP_ON, P_DISP_ON);
-    bus.raw(|b| {
-        let mut s = Apds9960::new(b);
-        if cfg.gestures {
-            s.start_gestures(&cfg.gesture)
-        } else {
-            s.power_down()
-        }
-    })
-    .ok();
-    bus.rest().await;
-
-    spawner.spawn(service(bus, cfg.vcom_period, cfg.refresh_period).unwrap());
-    spawner.spawn(
-        input(
-            bus,
-            res.button,
-            res.int,
-            InputCfg {
-                buttons: cfg.buttons,
-                scan: cfg.scan_interval,
-                gestures: cfg.gestures,
-                gesture: cfg.gesture,
-                map: cfg.gesture_map,
-            },
-        )
-        .unwrap(),
-    );
-    Ok(Lcd { bus })
+    ROTATION.store(cfg.rotation as u8, Ordering::Relaxed);
+    Ok(Hw { spi, cs })
 }
 
-/// The handle to the started driver: cheap, `Copy`, usable from any task.
+/// The panel's power-on sequence, first half: clear the pixel memory.
+fn power_on(p: &mut Panel, hw: &mut Option<Hw>, bus: I2cBus) {
+    command(p, hw, bus, M_CLEAR);
+}
+
+/// [`Lcd`]'s mode: [`Framed`] ([`init`]) or [`Paged`] ([`init_paged`]).
+pub trait Mode: Clone + Copy {}
+
+/// Frame mode: draw into a frame kept in RAM ([`Lcd::draw`]).
 #[derive(Clone, Copy)]
-pub struct Lcd {
+pub struct Framed;
+
+/// Page mode: a renderer draws the screen band by band ([`Lcd::show`]).
+#[derive(Clone, Copy)]
+pub struct Paged;
+
+impl Mode for Framed {}
+impl Mode for Paged {}
+
+/// The handle to the started driver: cheap, `Copy`, usable from any task. Its mode says how the
+/// screen is drawn: [`Lcd`] (frame mode, [`init`]) draws with [`draw`](Self::draw), `Lcd<Paged>`
+/// ([`init_paged`]) with [`show`](Lcd::<Paged>::show); input, the LED and the rest are the same.
+#[derive(Clone, Copy)]
+pub struct Lcd<M: Mode = Framed> {
     bus: I2cBus,
+    mode: core::marker::PhantomData<M>,
+}
+
+impl Lcd<Paged> {
+    /// Draw the screen with the renderer and send the bands that changed (every band once the
+    /// periodic refresh is due).
+    pub async fn show(&self) {
+        let force = REFRESH_DUE.load(Ordering::Relaxed);
+        self.send(force).await;
+    }
+
+    /// Draw the screen and rewrite every band of the panel.
+    pub async fn refresh(&self) {
+        self.send(true).await;
+    }
+
+    #[inline(never)]
+    async fn send(&self, force: bool) {
+        {
+            let (mut p, mut hw) = lock().await;
+            show_bands(&mut p, &mut hw, self.bus, force).await;
+            if force {
+                REFRESH_DUE.store(false, Ordering::Relaxed);
+            }
+        }
+        self.bus.rest().await;
+    }
 }
 
 impl Lcd {
@@ -633,20 +845,21 @@ impl Lcd {
         while Instant::now() < DUMP_HOLD.lock(|c| c.get()) {
             Timer::after_millis(20).await;
         }
-        let mut d = DISPLAY.lock().await;
+        let mut state = FRAME.lock().await;
         let r = ROTATION.load(Ordering::Relaxed);
-        if r != d.frame.rotation() as u8 {
-            d.frame.set_rotation(rotation_from(r));
+        if r != state.frame.rotation() as u8 {
+            state.frame.set_rotation(rotation_from(r));
         }
-        f(&mut d.frame.canvas())
+        f(&mut state.frame.canvas())
     }
 
     /// Send what changed since the last flush.
     #[inline(never)]
     pub async fn flush(&self) {
         {
-            let (mut d, mut hw) = lock().await;
-            flush(&mut d, &mut hw, self.bus, false).await;
+            let mut f = FRAME.lock().await;
+            let (mut p, mut hw) = lock().await;
+            flush(&mut f, &mut p, &mut hw, self.bus, false).await;
         }
         self.bus.rest().await;
     }
@@ -654,30 +867,24 @@ impl Lcd {
     /// Rewrite every row of the panel.
     pub async fn refresh(&self) {
         {
-            let (mut d, mut hw) = lock().await;
-            flush(&mut d, &mut hw, self.bus, true).await;
+            let mut f = FRAME.lock().await;
+            let (mut p, mut hw) = lock().await;
+            flush(&mut f, &mut p, &mut hw, self.bus, true).await;
         }
         self.bus.rest().await;
-    }
-
-    /// Change the rotation from the next [`draw`](Self::draw) or [`update`](Self::update) on
-    /// (fire-and-forget, so a menu's [`Values::set`] can call it). What is already drawn stays
-    /// where it is: redraw the whole screen after this. [`rotate`](Self::rotate) turns the
-    /// picture along.
-    pub fn set_rotation(&self, rotation: Rotation) {
-        ROTATION.store(rotation as u8, Ordering::Relaxed);
     }
 
     /// Turn the screen to `rotation` at once, the picture on it included (in place, exact, no extra
     /// RAM), and send it; drawing continues in the new rotation. Emits [`Event::Rotated`].
     pub async fn rotate(&self, rotation: Rotation) {
         let turned = {
-            let (mut d, mut hw) = lock().await;
-            let q = tower_hmi::turn::quarters(d.frame.rotation(), rotation);
+            let mut f = FRAME.lock().await;
+            let (mut p, mut hw) = lock().await;
+            let q = tower_hmi::turn::quarters(f.frame.rotation(), rotation);
             if q != 0 {
-                d.frame.turn_quarters(q);
-                d.frame.set_rotation(rotation);
-                flush(&mut d, &mut hw, self.bus, false).await;
+                f.frame.turn_quarters(q);
+                f.frame.set_rotation(rotation);
+                flush(&mut f, &mut p, &mut hw, self.bus, false).await;
             }
             ROTATION.store(rotation as u8, Ordering::Relaxed);
             q != 0
@@ -692,11 +899,12 @@ impl Lcd {
     pub async fn rotate_animated(&self, rotation: Rotation, animation: Animation) {
         use tower_hmi::turn::{self, ONE, QUARTER};
         let turned = {
-            let (mut d, mut hw) = lock().await;
-            let q = turn::quarters(d.frame.rotation(), rotation);
+            let mut f = FRAME.lock().await;
+            let (mut p, mut hw) = lock().await;
+            let q = turn::quarters(f.frame.rotation(), rotation);
             if q != 0 {
                 let mut snapshot = SNAPSHOT.lock().await;
-                snapshot.copy_from_slice(d.frame.bytes());
+                snapshot.copy_from_slice(f.frame.bytes());
                 let total = animation.duration * if q == 2 { 3 } else { 2 } / 2;
                 let start = Instant::now();
                 let mut steps = 0u32;
@@ -707,14 +915,14 @@ impl Lcd {
                     }
                     let a = q * QUARTER * turn::ease(t) / ONE;
                     let scale = if animation.shrink { turn::fit(a) } else { ONE };
-                    d.frame.draw_turned(&snapshot[..], a, scale);
-                    flush(&mut d, &mut hw, self.bus, false).await;
+                    f.frame.draw_turned(&snapshot[..], a, scale);
+                    flush(&mut f, &mut p, &mut hw, self.bus, false).await;
                     steps += 1;
                 }
                 // The last step is the exact quarter turn: what drawing in `rotation` gives.
-                d.frame.draw_turned(&snapshot[..], q * QUARTER, ONE);
-                d.frame.set_rotation(rotation);
-                flush(&mut d, &mut hw, self.bus, false).await;
+                f.frame.draw_turned(&snapshot[..], q * QUARTER, ONE);
+                f.frame.set_rotation(rotation);
+                flush(&mut f, &mut p, &mut hw, self.bus, false).await;
                 log::debug!(
                     target: "lcd",
                     "turned {}° in {} ms, {} steps",
@@ -734,6 +942,23 @@ impl Lcd {
         if turned {
             let _ = EVENTS.try_send(Event::Rotated(rotation));
         }
+    }
+}
+
+impl<M: Mode> Lcd<M> {
+    fn new(bus: I2cBus) -> Self {
+        Self {
+            bus,
+            mode: core::marker::PhantomData,
+        }
+    }
+
+    /// Change the rotation from the next drawing on ([`draw`](Lcd::draw), [`update`](Lcd::update),
+    /// [`show`](Lcd::<Paged>::show); fire-and-forget, so a menu's [`Values::set`] can call it). In
+    /// frame mode what is already drawn stays where it is: redraw the whole screen after this
+    /// ([`rotate`](Lcd::rotate) turns the picture along).
+    pub fn set_rotation(&self, rotation: Rotation) {
+        ROTATION.store(rotation as u8, Ordering::Relaxed);
     }
 
     pub fn rotation(&self) -> Rotation {
@@ -776,11 +1001,6 @@ impl Lcd {
         let _ = CTRL.try_send(Ctrl::Buttons(config));
     }
 
-    /// Turn the gesture sensor on or off (~0.3 mA when on; fire-and-forget).
-    pub fn set_gestures(&self, on: bool) {
-        let _ = CTRL.try_send(Ctrl::Gestures(on));
-    }
-
     /// Inject a press of `button` held for `ms` milliseconds: it goes through the same
     /// recognition as a real one (a test hook, a shell command).
     pub fn simulate(&self, button: Button, ms: u32) {
@@ -789,6 +1009,14 @@ impl Lcd {
 
     pub fn stats(&self) -> Stats {
         stats()
+    }
+}
+
+impl Lcd {
+    /// Turn the gesture sensor on or off (~0.3 mA when on; fire-and-forget). Frame mode only: page
+    /// mode has no swipes.
+    pub fn set_gestures(&self, on: bool) {
+        let _ = CTRL.try_send(Ctrl::Gestures(on));
     }
 
     /// Run `state` as a full-screen menu until an action, a back out of the root, or `timeout`
@@ -1091,9 +1319,45 @@ impl LedMachine {
 
 // ---- tasks -------------------------------------------------------------------------------------
 
-/// VCOM inversion, the periodic full rewrite, the LED's timing and the expander commands.
+/// Page mode's periodic refresh is due: the next [`Lcd::show`] rewrites every band.
+static REFRESH_DUE: AtomicBool = AtomicBool::new(false);
+
+/// How a mode rewrites the whole panel (the periodic refresh).
+trait Rewrite {
+    async fn rewrite(bus: I2cBus);
+}
+
+impl Rewrite for Framed {
+    async fn rewrite(bus: I2cBus) {
+        let mut f = FRAME.lock().await;
+        let (mut p, mut hw) = lock().await;
+        flush(&mut f, &mut p, &mut hw, bus, true).await;
+    }
+}
+
+impl Rewrite for Paged {
+    /// Left to the app's next show: the driver has no picture of its own to send, and running the
+    /// renderer from here would keep a second copy of the band loop's state in this task.
+    async fn rewrite(_bus: I2cBus) {
+        REFRESH_DUE.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The service task of frame mode.
 #[embassy_executor::task]
 async fn service(bus: I2cBus, vcom_period: Duration, refresh: Option<Duration>) {
+    serve::<Framed>(bus, vcom_period, refresh).await
+}
+
+/// The service task of page mode.
+#[embassy_executor::task]
+async fn service_paged(bus: I2cBus, vcom_period: Duration, refresh: Option<Duration>) {
+    serve::<Paged>(bus, vcom_period, refresh).await
+}
+
+/// VCOM inversion, the periodic full rewrite, the LED's timing and the expander commands. Generic
+/// over the mode only for the rewrite, so the other mode's state stays out of the image.
+async fn serve<M: Rewrite>(bus: I2cBus, vcom_period: Duration, refresh: Option<Duration>) {
     let mut led = LedMachine::new();
     let mut last_refresh = Instant::now();
     loop {
@@ -1129,13 +1393,12 @@ async fn service(bus: I2cBus, vcom_period: Duration, refresh: Option<Duration>) 
                 }
                 if refresh_at.is_some_and(|t| t <= now) {
                     last_refresh = now;
-                    let (mut d, mut hw) = lock().await;
-                    flush(&mut d, &mut hw, bus, true).await;
+                    M::rewrite(bus).await;
                 } else if vcom_at <= now {
-                    let (mut d, mut hw) = lock().await;
+                    let (mut p, mut hw) = lock().await;
                     // A flush may have inverted it meanwhile.
                     if LAST_VCOM.lock(|c| c.get()) + vcom_period <= Instant::now() {
-                        command(&mut d, &mut hw, bus, 0);
+                        command(&mut p, &mut hw, bus, 0);
                         bump(&VCOM_TOGGLES, 1);
                     }
                 }
@@ -1197,48 +1460,122 @@ pub async fn swipe_trace() -> SwipeTrace {
     SWIPE_TRACE.wait().await
 }
 
-/// Buttons (sampled while PA8 is high) and swipes (read while the gesture sensor reports one),
-/// interleaved in one loop so neither waits for the other: a swipe takes a FIFO read every 30 ms,
-/// the buttons keep their sampling meanwhile.
-#[embassy_executor::task]
-async fn input(bus: I2cBus, mut button: ExtiInput<'static, Async>, int: HeaderInt, cfg: InputCfg) {
-    let mut int = int.into_input();
-    let mut rec = Recognizer::new(cfg.buttons);
-    let mut gestures = cfg.gestures;
-    let mut decoder = Decoder::new();
-    let mut swipe: Option<Swipe> = None;
-    let mut sim: Option<(u8, Instant)> = None;
-    let mut traffic = false;
-    let mut quiet_until = Instant::from_ticks(0);
+/// The buttons' side of the input: the recognizer, an injected press, new timing waiting for the
+/// buttons to come up. Shared by both input tasks.
+struct Keys {
+    rec: Recognizer,
+    scan: Duration,
+    sim: Option<(u8, Instant)>,
     // New button timing waits until no button is down: a recognizer replaced mid-press would take
     // the buttons still held for a fresh press, and their release for a click (a game quit by
     // holding both buttons would click its way straight back in from the menu).
-    let mut new_timing: Option<tower_hmi::input::Config> = None;
-    loop {
-        // When to look again without an edge: the recognizer's next deadline, the scan interval
-        // while a button is down, the end of a simulated press, the next FIFO read of a swipe.
-        let polling = sim.is_some() || (rec.needs_polling() && !rec.waiting_for_release());
-        let mut at = rec.next_deadline().map(Instant::from_millis);
-        let mut sooner = |t: Instant| at = Some(at.map_or(t, |a| a.min(t)));
-        if polling {
-            sooner(Instant::now() + cfg.scan);
+    new_timing: Option<tower_hmi::input::Config>,
+}
+
+impl Keys {
+    fn new(buttons: tower_hmi::input::Config, scan: Duration) -> Self {
+        Self {
+            rec: Recognizer::new(buttons),
+            scan,
+            sim: None,
+            new_timing: None,
         }
-        if let Some((_, end)) = sim {
+    }
+
+    /// Sampling on a timer: a button down (before its Hold), or an injected press.
+    fn polling(&self) -> bool {
+        self.sim.is_some() || (self.rec.needs_polling() && !self.rec.waiting_for_release())
+    }
+
+    /// When to look again without an edge: the recognizer's next deadline, the scan interval
+    /// while a button is down, the end of an injected press.
+    fn next_at(&self) -> Option<Instant> {
+        let mut at = self.rec.next_deadline().map(Instant::from_millis);
+        let mut sooner = |t: Instant| at = Some(at.map_or(t, |a| a.min(t)));
+        if self.polling() {
+            sooner(Instant::now() + self.scan);
+        }
+        if let Some((_, end)) = self.sim {
             sooner(end);
         }
-        if let Some(s) = &swipe {
-            sooner(s.next_read);
+        at
+    }
+
+    /// The PA8 edge worth waiting for: none while polling, the release (or a slow poll) while a
+    /// button is held past its Hold, else a press.
+    async fn edge(&self, button: &mut ExtiInput<'static, Async>) {
+        if self.polling() {
+            core::future::pending::<()>().await
+        } else if self.rec.waiting_for_release() {
+            let _ = with_timeout(HELD_POLL, button.wait_for_low()).await;
+        } else {
+            button.wait_for_high().await
         }
-        let held = rec.waiting_for_release();
-        let edge = async {
-            if polling {
-                core::future::pending::<()>().await
-            } else if held {
-                let _ = with_timeout(HELD_POLL, button.wait_for_low()).await;
-            } else {
-                button.wait_for_high().await
+    }
+
+    fn control(&mut self, c: Ctrl) {
+        match c {
+            Ctrl::Buttons(c) => self.new_timing = Some(c),
+            Ctrl::Simulate(mask, ms) => {
+                self.sim = Some((mask, Instant::now() + Duration::from_millis(ms as u64)));
             }
-        };
+            Ctrl::Gestures(_) => {}
+        }
+    }
+
+    /// Sample the buttons (the expander, while PA8 is high) and run the recognizer; the buttons
+    /// down, and whether the bus was used.
+    fn sample(&mut self, now: Instant, bus: I2cBus, button: &ExtiInput<'static, Async>) -> (u8, bool) {
+        if self.sim.is_some_and(|(_, end)| now >= end) {
+            self.sim = None;
+        }
+        let mut mask = self.sim.map_or(0, |(m, _)| m);
+        let traffic = button.is_high();
+        if traffic {
+            let pins = bus.raw(|b| Tca9534a::new(b, EXP_ADDR).read_input()).unwrap_or(0);
+            let module = (if pins & P_BUTTON_LEFT != 0 { M_LEFT } else { 0 })
+                | (if pins & P_BUTTON_RIGHT != 0 { M_RIGHT } else { 0 });
+            mask |= if module != 0 { module } else { M_CORE };
+        }
+        self.rec.update(now.as_millis(), mask, &mut |e: ButtonEvent| {
+            if let Some(b) = Button::from_mask(e.buttons) {
+                let _ = EVENTS.try_send(Event::Button(b, e.kind));
+            }
+        });
+        if !self.rec.needs_polling()
+            && let Some(c) = self.new_timing.take()
+        {
+            self.rec = Recognizer::new(c);
+        }
+        (mask, traffic)
+    }
+}
+
+/// Wait until `at` (forever when `None`).
+async fn until(at: Option<Instant>) {
+    match at {
+        Some(t) => Timer::at(t).await,
+        None => core::future::pending().await,
+    }
+}
+
+/// Frame mode's input: buttons (sampled while PA8 is high) and swipes (read while the gesture
+/// sensor reports one), interleaved in one loop so neither waits for the other: a swipe takes a
+/// FIFO read every 30 ms, the buttons keep their sampling meanwhile.
+#[embassy_executor::task]
+async fn input(bus: I2cBus, mut button: ExtiInput<'static, Async>, int: HeaderInt, cfg: InputCfg) {
+    let mut int = int.into_input();
+    let mut keys = Keys::new(cfg.buttons, cfg.scan);
+    let mut gestures = cfg.gestures;
+    let mut decoder = Decoder::new();
+    let mut swipe: Option<Swipe> = None;
+    let mut traffic = false;
+    let mut quiet_until = Instant::from_ticks(0);
+    loop {
+        let mut at = keys.next_at();
+        if let Some(s) = &swipe {
+            at = Some(at.map_or(s.next_read, |a| a.min(s.next_read)));
+        }
         let irq = async {
             if gestures && swipe.is_none() {
                 int.wait_for_low().await
@@ -1246,13 +1583,7 @@ async fn input(bus: I2cBus, mut button: ExtiInput<'static, Async>, int: HeaderIn
                 core::future::pending().await
             }
         };
-        let timer = async {
-            match at {
-                Some(t) => Timer::at(t).await,
-                None => core::future::pending().await,
-            }
-        };
-        match select4(edge, irq, CTRL.receive(), timer).await {
+        match select4(keys.edge(&mut button), irq, CTRL.receive(), until(at)).await {
             Either4::Second(()) => {
                 decoder.reset();
                 let now = Instant::now();
@@ -1276,10 +1607,7 @@ async fn input(bus: I2cBus, mut button: ExtiInput<'static, Async>, int: HeaderIn
                 .ok();
                 traffic = true;
             }
-            Either4::Third(Ctrl::Buttons(c)) => new_timing = Some(c),
-            Either4::Third(Ctrl::Simulate(mask, ms)) => {
-                sim = Some((mask, Instant::now() + Duration::from_millis(ms as u64)));
-            }
+            Either4::Third(c) => keys.control(c),
             _ => {}
         }
 
@@ -1323,34 +1651,40 @@ async fn input(bus: I2cBus, mut button: ExtiInput<'static, Async>, int: HeaderIn
         }
 
         // The buttons, sampled on every pass.
-        if sim.is_some_and(|(_, end)| now >= end) {
-            sim = None;
-        }
-        let mut mask = sim.map_or(0, |(m, _)| m);
-        if button.is_high() {
-            traffic = true;
-            let pins = bus.raw(|b| Tca9534a::new(b, EXP_ADDR).read_input()).unwrap_or(0);
-            let module = (if pins & P_BUTTON_LEFT != 0 { M_LEFT } else { 0 })
-                | (if pins & P_BUTTON_RIGHT != 0 { M_RIGHT } else { 0 });
-            mask |= if module != 0 { module } else { M_CORE };
-        }
+        let (mask, used) = keys.sample(now, bus, &button);
+        traffic |= used;
         if mask != 0 {
             quiet_until = now + SWIPE_QUIET;
             if let Some(s) = &mut swipe {
                 s.buttons = true;
             }
         }
-        rec.update(now.as_millis(), mask, &mut |e: ButtonEvent| {
-            if let Some(b) = Button::from_mask(e.buttons) {
-                let _ = EVENTS.try_send(Event::Button(b, e.kind));
-            }
-        });
-        if !rec.needs_polling()
-            && let Some(c) = new_timing.take()
-        {
-            rec = Recognizer::new(c);
+        if traffic && !keys.rec.needs_polling() && swipe.is_none() {
+            traffic = false;
+            bus.rest().await;
         }
-        if traffic && !rec.needs_polling() && swipe.is_none() {
+    }
+}
+
+/// Page mode's input: the buttons only (no swipes: their decoding is kept out of the image, and
+/// the sensor stays powered down).
+#[embassy_executor::task]
+async fn input_keys(
+    bus: I2cBus,
+    mut button: ExtiInput<'static, Async>,
+    buttons: tower_hmi::input::Config,
+    scan: Duration,
+) {
+    let mut keys = Keys::new(buttons, scan);
+    let mut traffic = false;
+    loop {
+        if let Either3::Second(c) =
+            select3(keys.edge(&mut button), CTRL.receive(), until(keys.next_at())).await
+        {
+            keys.control(c);
+        }
+        traffic |= keys.sample(Instant::now(), bus, &button).1;
+        if traffic && !keys.rec.needs_polling() {
             traffic = false;
             bus.rest().await;
         }
@@ -1485,22 +1819,64 @@ fn cmd_stats(ctx: &mut crate::shell::Ctx<'_>, _args: &[&str]) -> crate::shell::O
     crate::shell::Outcome::ok()
 }
 
+/// How `lcd dump` reads the screen in the running mode (set by [`init`] or [`init_paged`]).
+static DUMPER: BlockingMutex<ThreadModeRawMutex, Cell<Option<Dumper>>> = BlockingMutex::new(Cell::new(None));
+type Dumper = fn(&mut crate::shell::Ctx<'_>) -> crate::shell::Outcome;
+
 fn cmd_dump(ctx: &mut crate::shell::Ctx<'_>, _args: &[&str]) -> crate::shell::Outcome {
+    use core::fmt::Write as _;
+    match DUMPER.lock(|d| d.get()) {
+        Some(dump) => dump(ctx),
+        None => {
+            let _ = write!(ctx, "the display is not running");
+            crate::shell::Outcome::code(crate::shell::R_BAD_ARG)
+        }
+    }
+}
+
+/// One row of the dump: its bytes in hex.
+fn dump_row(ctx: &mut crate::shell::Ctx<'_>, row: &[u8]) {
+    use core::fmt::Write as _;
+    for b in row {
+        let _ = write!(ctx, "{b:02x}");
+    }
+    let _ = ctx.write_str("\n");
+}
+
+/// Frame mode's `lcd dump`: the frame.
+fn dump_frame(ctx: &mut crate::shell::Ctx<'_>) -> crate::shell::Outcome {
     use core::fmt::Write as _;
     // Hold drawing for a moment: the host pages the dump out over several requests, each a run
     // of this handler, and they should all see the same frame (an animated screen redraws every
     // few tens of ms). Each run extends the hold; drawing resumes a second after the last.
     DUMP_HOLD.lock(|c| c.set(Instant::now() + Duration::from_millis(1000)));
     // A shell handler is synchronous: it takes the frame only if no flush holds it right now.
-    let Ok(d) = DISPLAY.try_lock() else {
+    let Ok(f) = FRAME.try_lock() else {
         let _ = write!(ctx, "busy, try again");
         return crate::shell::Outcome::code(crate::shell::R_BAD_ARG);
     };
     for y in 0..ROWS {
-        for b in d.frame.row(y) {
-            let _ = write!(ctx, "{b:02x}");
+        dump_row(ctx, f.frame.row(y));
+    }
+    crate::shell::Outcome::ok()
+}
+
+/// Page mode's `lcd dump`: the renderer's screen, band by band into a buffer of its own (what
+/// [`Lcd::show`] would send; the app's state may change between the requests a dump is paged out
+/// over).
+fn dump_paged(ctx: &mut crate::shell::Ctx<'_>) -> crate::shell::Outcome {
+    let Some(render) = RENDER.lock(|r| r.get()) else {
+        return crate::shell::Outcome::code(crate::shell::R_BAD_ARG);
+    };
+    let rotation = rotation_from(ROTATION.load(Ordering::Relaxed));
+    // Rows `1 + STRIDE` apart with the pixels at `1..`, the layout `render_band` takes.
+    let mut lines = [0u8; CHUNK_LINES * (1 + STRIDE)];
+    for band in 0..BANDS {
+        render_band(render, &mut lines, 1 + STRIDE, band, rotation);
+        for l in 0..CHUNK_LINES {
+            let at = l * (1 + STRIDE) + 1;
+            dump_row(ctx, &lines[at..at + STRIDE]);
         }
-        let _ = ctx.write_str("\n");
     }
     crate::shell::Outcome::ok()
 }

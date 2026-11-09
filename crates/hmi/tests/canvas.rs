@@ -298,3 +298,118 @@ fn every_bundled_font_is_consistent() {
     }
     assert!(fonts::spleen_8x16::LATIN_EXT_A.len() == 128 && fonts::spleen_8x16::SYMBOLS.len() > 50);
 }
+
+/// A screen with every kind of drawing: tall glyphs across band edges, aligned and opaque text,
+/// fills, outlines, lines, an image, an inverted bar, a clipped region, a menu.
+fn scene(c: &mut tower_hmi::Canvas<'_>) {
+    use tower_hmi::menu::{Item, Menu, MenuState, MenuStyle, Table};
+    static MENU: Menu = Menu::new(
+        "Menu",
+        &[
+            Item::choice("Mode", 1, &["auto", "manual", "off"]),
+            Item::number("Setpoint", 2, 50, 300, 5).decimals(1),
+            Item::action("Pair", 3),
+        ],
+    );
+    const LOGO: Image = image!("#..#.", ".##..", "#..#.");
+    c.clear(Color::White);
+    c.text(
+        64,
+        3,
+        "21.5",
+        &TextStyle::new(&fonts::SPLEEN_32X64_NUMERIC).align(Align::Center),
+    );
+    c.text(
+        127,
+        70,
+        "°C",
+        &TextStyle::new(&SPLEEN_12X24).align(Align::Right).opaque(),
+    );
+    c.fill_round_rect(Rect::new(2, 96, 60, 30), 6, Color::Black);
+    c.text(
+        32,
+        103,
+        "auto",
+        &TextStyle::new(&SPLEEN_8X16).inverted().align(Align::Center),
+    );
+    c.circle(96, 110, 13, Color::Black);
+    c.line(70, 127, 127, 90, Color::Invert);
+    c.image(5, 70, &LOGO, Color::Black, Some(Color::White));
+    c.with_clip(Rect::new(0, 60, 40, 9), |c| {
+        c.text(0, 55, "clipped", &TextStyle::new(&SPLEEN_8X16));
+    });
+    c.invert_rect(Rect::new(0, 88, 128, 5));
+    // A menu over the lower part, as a full-screen menu would draw.
+    let mut menu = MenuState::new(&MENU);
+    let style = MenuStyle::new(&SPLEEN_5X8);
+    menu.render_in(
+        c,
+        Rect::new(64, 0, 64, 60),
+        &Table::new([(1, 1), (2, 215)]),
+        &style,
+    );
+}
+
+#[test]
+fn bands_draw_what_the_frame_holds() {
+    use tower_hmi::Window;
+    // What the LCD driver does in page mode: each band of 8 rows rendered between the line
+    // headers of its transfer buffer (a gate byte, 16 pixel bytes, a dummy byte per line).
+    const LINE: usize = 18;
+    for rot in [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270] {
+        let mut f = F::new();
+        f.set_rotation(rot);
+        scene(&mut f.canvas());
+        for band in 0..16 {
+            let mut buf = [0xA5u8; 1 + 8 * LINE + 1];
+            for line in 0..8 {
+                buf[1 + line * LINE + 1..1 + line * LINE + 17].fill(0);
+            }
+            let mut dirty = [0u32; 1];
+            let window = Window {
+                width: 128,
+                height: 128,
+                y0: band * 8,
+                rows: 8,
+            };
+            let mut c = tower_hmi::Canvas::window(&mut buf[2..], &mut dirty, LINE, window, rot);
+            scene(&mut c);
+            for line in 0..8 {
+                let y = band as usize * 8 + line;
+                let at = 1 + line * LINE;
+                assert_eq!(&buf[at + 1..at + 17], f.row(y), "{rot:?} row {y}");
+                // The line headers and the dummy bytes are left alone.
+                assert_eq!((buf[at], buf[at + 17]), (0xA5, 0xA5), "{rot:?} row {y}");
+            }
+            assert_eq!(buf[0], 0xA5);
+        }
+    }
+}
+
+#[test]
+fn window_clips_to_its_rows() {
+    use tower_hmi::Window;
+    let mut buf = [0u8; 2 * 16];
+    let mut dirty = [0u32; 1];
+    let window = Window {
+        width: 128,
+        height: 128,
+        y0: 10,
+        rows: 2,
+    };
+    let mut c = tower_hmi::Canvas::window(&mut buf, &mut dirty, 16, window, Rotation::R0);
+    assert_eq!(c.area(), Rect::new(0, 10, 128, 2));
+    assert_eq!(c.bounds(), Rect::new(0, 0, 128, 128));
+    c.fill_rect(Rect::new(0, 0, 128, 128), Color::Black);
+    assert!(c.get_pixel(5, 11) && !c.get_pixel(5, 12) && !c.get_pixel(5, 9));
+    c.set_clip(Rect::new(0, 0, 64, 128));
+    assert_eq!(c.clip(), Rect::new(0, 10, 64, 2));
+    c.reset_clip();
+    assert_eq!(c.clip(), c.area());
+    assert_eq!(dirty[0], 0b11);
+    assert!(buf.iter().all(|b| *b == 0xFF));
+    // Turned a quarter, the same physical rows are two logical columns.
+    let mut dirty = [0u32; 1];
+    let c = tower_hmi::Canvas::window(&mut buf, &mut dirty, 16, window, Rotation::R90);
+    assert_eq!(c.area(), Rect::new(10, 0, 2, 128));
+}

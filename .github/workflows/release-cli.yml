@@ -275,16 +275,23 @@ jobs:
         shell: bash
         working-directory: firmware
         run: |
-          apps=(radio_button radio_climate radio_motion radio_control radio_thermostat radio_gateway)
+          # Each app at its profile, as `just fw build` does: `z_apps` (firmware/justfile) at
+          # opt-level "z" (profile release-z), the rest at "s" (TASKS.md, D14).
+          apps=(radio_button radio_climate radio_motion radio_control radio_gateway)
+          z_apps=(radio_thermostat)
           examples=(blinky)
           args=()
           for a in "${apps[@]}"; do args+=(--bin "$a"); done
           for e in "${examples[@]}"; do args+=(--example "$e"); done
           cargo build --locked --release "${args[@]}"
+          z_args=()
+          for a in "${z_apps[@]}"; do z_args+=(--bin "$a"); done
+          cargo build --locked --profile release-z "${z_args[@]}"
           objcopy="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objcopy"
           staging="tower-firmware-${GITHUB_REF_NAME}"
           mkdir "../$staging"
           for a in "${apps[@]}"; do "$objcopy" -O binary "target/thumbv6m-none-eabi/release/$a" "../$staging/$a.bin"; done
+          for a in "${z_apps[@]}"; do "$objcopy" -O binary "target/thumbv6m-none-eabi/release-z/$a" "../$staging/$a.bin"; done
           for e in "${examples[@]}"; do "$objcopy" -O binary "target/thumbv6m-none-eabi/release/examples/$e" "../$staging/$e.bin"; done
           cp ../LICENSE "../$staging/"
           cat > "../$staging/README.md" <<EOF

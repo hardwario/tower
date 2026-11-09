@@ -239,5 +239,15 @@ lto = true
 debug = 2
 codegen-units = 1
 
+# `radio_thermostat` alone is built at "z" (this profile, picked per app by the justfile's
+# `z_apps`): about 15 KB less, which is what lets it carry its LCD screen next to the radio
+# (TASKS.md, D14). Not every app: under fat LTO the whole image takes the "z" pipeline (a
+# per-package override can't keep a crate at "s"), which slows the LED strip's effects up to 2.2
+# times and lets its DMA refill run late (bench, D14 and T18). A cargo command for the thermostat
+# outside `just` needs `--profile release-z`: at `--release` it overflows the flash.
+[profile.release-z]
+inherits = "release"
+opt-level = "z"
+
 [profile.dev]
 opt-level = "s"

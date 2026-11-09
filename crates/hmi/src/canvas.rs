@@ -111,13 +111,28 @@ impl TextStyle {
 /// Lines whose width [`Canvas::text_fmt`] measures for alignment; later lines are left-aligned.
 const MAX_ALIGNED_LINES: usize = 8;
 
-/// A drawing surface over a 1-bit frame buffer (see the [module docs](self)).
+/// The part of a panel a [`Canvas::window`] draws into: physical rows `y0..y0 + rows` of a
+/// `width` x `height` panel (`width` a multiple of 8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    pub width: i32,
+    pub height: i32,
+    pub y0: i32,
+    pub rows: i32,
+}
+
+/// A drawing surface over a 1-bit frame buffer (see the [module docs](self)), or over a window of
+/// its rows ([`Canvas::window`]).
 pub struct Canvas<'a> {
     buf: &'a mut [u8],
     dirty: &'a mut [u32],
     stride: usize,
     pw: i32,
     ph: i32,
+    /// The first physical row `buf` holds (0 unless a window).
+    y0: i32,
+    /// What `buf` holds, in logical coordinates: the clip never leaves it.
+    area: Rect,
     rot: Rotation,
     clip: Rect,
 }
@@ -127,18 +142,67 @@ impl<'a> Canvas<'a> {
     /// ink) and `dirty` (one bit per row, at least `ceil(height / 32)` words). A
     /// [`Frame`](crate::frame::Frame) makes this for you.
     pub fn new(buf: &'a mut [u8], dirty: &'a mut [u32], stride: usize, height: usize, rot: Rotation) -> Self {
-        assert!(buf.len() >= stride * height && dirty.len() * 32 >= height);
-        let (pw, ph) = ((stride * 8) as i32, height as i32);
+        let (width, height) = ((stride * 8) as i32, height as i32);
+        let window = Window {
+            width,
+            height,
+            y0: 0,
+            rows: height,
+        };
+        Self::window(buf, dirty, stride, window, rot)
+    }
+
+    /// A canvas over a window of a panel's rows, for drawing a screen in bands instead of keeping a
+    /// frame (page mode): `buf` holds physical rows `window.y0..window.y0 + window.rows`, `stride`
+    /// bytes apart, each row's pixels its first `window.width / 8` bytes (so a driver can render
+    /// straight into its transfer buffer, between the line headers); `dirty` has one bit per row
+    /// of the window. Coordinates are the whole screen's and drawing is clipped to the window:
+    /// draw the whole screen into each band in turn and each gets its part, the same pixels a
+    /// frame would hold there.
+    pub fn window(
+        buf: &'a mut [u8],
+        dirty: &'a mut [u32],
+        stride: usize,
+        window: Window,
+        rot: Rotation,
+    ) -> Self {
+        let Window {
+            width,
+            height,
+            y0,
+            rows,
+        } = window;
+        assert!(
+            width > 0 && width % 8 == 0 && stride * 8 >= width as usize,
+            "Canvas: the width is whole bytes within the stride"
+        );
+        assert!(
+            y0 >= 0 && rows >= 0 && y0 + rows <= height,
+            "Canvas: the window lies within the panel"
+        );
+        let used = if rows == 0 {
+            0
+        } else {
+            (rows as usize - 1) * stride + width as usize / 8
+        };
+        assert!(buf.len() >= used && dirty.len() * 32 >= rows as usize);
         let mut c = Self {
             buf,
             dirty,
             stride,
-            pw,
-            ph,
+            pw: width,
+            ph: height,
+            y0,
+            area: Rect::default(),
             rot,
             clip: Rect::default(),
         };
-        c.clip = c.bounds();
+        if rows > 0 {
+            let (ax, ay) = c.to_logical(0, y0);
+            let (bx, by) = c.to_logical(width - 1, y0 + rows - 1);
+            c.area = Rect::from_corners(crate::geom::Point::new(ax, ay), crate::geom::Point::new(bx, by));
+        }
+        c.clip = c.area;
         c
     }
 
@@ -157,6 +221,12 @@ impl<'a> Canvas<'a> {
         Rect::new(0, 0, self.width(), self.height())
     }
 
+    /// The part of the screen this canvas holds: [`bounds`](Self::bounds), or a window's rows
+    /// (a renderer may skip what lies outside).
+    pub fn area(&self) -> Rect {
+        self.area
+    }
+
     pub fn rotation(&self) -> Rotation {
         self.rot
     }
@@ -165,13 +235,14 @@ impl<'a> Canvas<'a> {
         self.clip
     }
 
-    /// Restrict drawing to `r` (within the screen) until [`reset_clip`](Self::reset_clip).
+    /// Restrict drawing to `r` (within the screen, or the window) until
+    /// [`reset_clip`](Self::reset_clip).
     pub fn set_clip(&mut self, r: Rect) {
-        self.clip = r.intersect(&self.bounds());
+        self.clip = r.intersect(&self.area);
     }
 
     pub fn reset_clip(&mut self) {
-        self.clip = self.bounds();
+        self.clip = self.area;
     }
 
     /// Run `f` with drawing restricted to `r` (also within the current clip), then restore.
@@ -191,23 +262,19 @@ impl<'a> Canvas<'a> {
     pub fn pixel(&mut self, x: i32, y: i32, color: Color) {
         if self.clip.contains(crate::geom::Point::new(x, y)) {
             let (px, py) = self.to_phys(x, y);
-            if self.paint(
-                py as usize * self.stride + (px >> 3) as usize,
-                0x80 >> (px & 7),
-                color,
-            ) {
+            if self.paint(self.index(px, py), 0x80 >> (px & 7), color) {
                 self.mark(py);
             }
         }
     }
 
-    /// Whether the pixel at `(x, y)` is ink (`false` outside the screen).
+    /// Whether the pixel at `(x, y)` is ink (`false` outside the screen, or the window).
     pub fn get_pixel(&self, x: i32, y: i32) -> bool {
-        if !self.bounds().contains(crate::geom::Point::new(x, y)) {
+        if !self.area.contains(crate::geom::Point::new(x, y)) {
             return false;
         }
         let (px, py) = self.to_phys(x, y);
-        self.buf[py as usize * self.stride + (px >> 3) as usize] & (0x80 >> (px & 7)) != 0
+        self.buf[self.index(px, py)] & (0x80 >> (px & 7)) != 0
     }
 
     /// `w` pixels from `(x, y)` to the right.
@@ -319,14 +386,12 @@ impl<'a> Canvas<'a> {
     /// Draw `img` with its top left corner at `(x, y)`: ink pixels in `color`, the others in
     /// `background` (or left untouched with `None`).
     pub fn image(&mut self, x: i32, y: i32, img: &Image, color: Color, background: Option<Color>) {
-        let area = Rect::new(x, y, img.width as i32, img.height as i32);
         for row in 0..img.height as i32 {
             self.blit_row(
                 x,
                 y + row,
                 img.row(row as usize),
                 img.width as i32,
-                &area,
                 color,
                 background,
             );
@@ -383,6 +448,21 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// The inverse of [`to_phys`](Self::to_phys).
+    fn to_logical(&self, px: i32, py: i32) -> (i32, i32) {
+        match self.rot {
+            Rotation::R0 => (px, py),
+            Rotation::R90 => (py, self.pw - 1 - px),
+            Rotation::R180 => (self.pw - 1 - px, self.ph - 1 - py),
+            Rotation::R270 => (self.ph - 1 - py, px),
+        }
+    }
+
+    /// The byte of `buf` holding physical pixel `(px, py)` (a pixel within the area).
+    fn index(&self, px: i32, py: i32) -> usize {
+        (py - self.y0) as usize * self.stride + (px >> 3) as usize
+    }
+
     /// A non-empty logical rectangle (inside the screen) in physical coordinates.
     fn rect_to_phys(&self, r: Rect) -> Rect {
         let (ax, ay) = self.to_phys(r.x, r.y);
@@ -391,7 +471,8 @@ impl<'a> Canvas<'a> {
     }
 
     fn mark(&mut self, py: i32) {
-        self.dirty[py as usize / 32] |= 1 << (py as usize % 32);
+        let r = (py - self.y0) as usize;
+        self.dirty[r / 32] |= 1 << (r % 32);
     }
 
     /// Apply `color` to the `mask` bits of byte `i`; whether the byte changed.
@@ -412,7 +493,7 @@ impl<'a> Canvas<'a> {
         let m0 = 0xFFu8 >> (p.x & 7);
         let m1 = 0xFFu8 << (7 - ((p.right() - 1) & 7));
         for py in p.y..p.bottom() {
-            let row = py as usize * self.stride;
+            let row = self.index(0, py);
             let mut changed = false;
             if b0 == b1 {
                 changed |= self.paint(row + b0, m0 & m1, color);
@@ -429,23 +510,18 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Draw `n` pixels of packed `bits` (MSB first) at logical `(x, y)`. `area` is the whole
-    /// bitmap being drawn: when it lies inside the clip on an unrotated frame, the row is shifted
-    /// in a byte at a time; otherwise it goes pixel by pixel.
-    #[allow(clippy::too_many_arguments)]
-    fn blit_row(
-        &mut self,
-        x: i32,
-        y: i32,
-        bits: &[u8],
-        n: i32,
-        area: &Rect,
-        color: Color,
-        background: Option<Color>,
-    ) {
-        if self.rot == Rotation::R0 && area.intersect(&self.clip) == *area {
+    /// Draw `n` pixels of packed `bits` (MSB first) at logical `(x, y)`. A row outside the clip
+    /// costs nothing (a band of a page-mode screen skips the rest of a tall glyph); on an
+    /// unrotated frame, a row wholly inside the clip is shifted in a byte at a time; anything else
+    /// goes pixel by pixel.
+    fn blit_row(&mut self, x: i32, y: i32, bits: &[u8], n: i32, color: Color, background: Option<Color>) {
+        let clip = self.clip;
+        if y < clip.y || y >= clip.bottom() || x >= clip.right() || x + n <= clip.x {
+            return;
+        }
+        if self.rot == Rotation::R0 && x >= clip.x && x + n <= clip.right() {
             let shift = (x & 7) as u32;
-            let row = y as usize * self.stride;
+            let row = self.index(0, y);
             let mut changed = false;
             for (i, &b) in bits.iter().enumerate().take((n as usize).div_ceil(8)) {
                 let byte = (x >> 3) as usize + i;
@@ -494,15 +570,7 @@ impl<'a> Canvas<'a> {
                 let stride = f.stride();
                 for row in 0..h {
                     let r = row as usize * stride;
-                    self.blit_row(
-                        x,
-                        y + row,
-                        &bits[r..r + stride],
-                        w,
-                        &cell,
-                        style.color,
-                        style.background,
-                    );
+                    self.blit_row(x, y + row, &bits[r..r + stride], w, style.color, style.background);
                 }
             }
             None => {

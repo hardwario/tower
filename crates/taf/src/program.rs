@@ -2,18 +2,16 @@
 //! setpoint from then on.
 //!
 //! The setpoint at any moment is that of the last switch point at or before it, looking back over
-//! earlier days (and round the week) when today has none yet. The whole program is one postcard
-//! record of at most `7 * (1 + POINTS * 6)` bytes, well inside the node's 256-byte EEPROM value.
+//! earlier days (and round the week) when today has none yet. The whole program is one record of
+//! at most [`WEEK_BYTES`] bytes ([`Week::encode`]), well inside the node's 256-byte EEPROM value.
 
 use core::fmt;
-
-use serde::{Deserialize, Serialize};
 
 /// Switch points per day.
 pub const POINTS: usize = 6;
 
 /// One switch point.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Point {
     /// Minute of the day, 0..=1439.
     pub minute: u16,
@@ -22,7 +20,7 @@ pub struct Point {
 }
 
 /// One day's switch points, in time order.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Day {
     len: u8,
     points: [Option<Point>; POINTS],
@@ -189,10 +187,17 @@ pub fn parse_setpoint(text: &str) -> Option<i16> {
 pub const DAY_NAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 /// A week of switch points.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Week {
     pub days: [Day; 7],
 }
+
+/// The most bytes [`Week::encode`] writes: per day a count, then four bytes per switch point.
+pub const WEEK_BYTES: usize = 7 * (1 + POINTS * 4);
+const _: () = assert!(
+    WEEK_BYTES <= 256,
+    "a week is one EEPROM value (256 bytes at most)"
+);
 
 impl Default for Week {
     /// Workdays 06:00 21.0, 08:00 18.0, 16:00 21.0, 22:00 18.0; the weekend 08:00 21.0, 22:30 18.0.
@@ -206,6 +211,52 @@ impl Default for Week {
 }
 
 impl Week {
+    /// The program as bytes for storage: per day its count of switch points, then each point's
+    /// minute (`u16`) and setpoint (`i16`), little-endian. Made by hand: postcard's code for these
+    /// arrays of options cost the node about 3.5 KB of flash.
+    pub fn encode<'a>(&self, out: &'a mut [u8; WEEK_BYTES]) -> &'a [u8] {
+        let mut n = 0;
+        for day in &self.days {
+            out[n] = day.len;
+            n += 1;
+            for p in day.points() {
+                out[n..n + 2].copy_from_slice(&p.minute.to_le_bytes());
+                out[n + 2..n + 4].copy_from_slice(&p.deci.to_le_bytes());
+                n += 4;
+            }
+        }
+        &out[..n]
+    }
+
+    /// The program [`encode`](Self::encode) wrote; `None` when `bytes` are not one (a count, a
+    /// time or a setpoint out of range, switch points out of order, bytes missing or left over).
+    pub fn decode(bytes: &[u8]) -> Option<Week> {
+        let mut week = Week {
+            days: [Day::new(); 7],
+        };
+        let mut rest = bytes;
+        for day in &mut week.days {
+            let (&len, tail) = rest.split_first()?;
+            rest = tail;
+            if usize::from(len) > POINTS {
+                return None;
+            }
+            for i in 0..usize::from(len) {
+                let (p, tail) = rest.split_at_checked(4)?;
+                rest = tail;
+                let minute = u16::from_le_bytes([p[0], p[1]]);
+                let deci = i16::from_le_bytes([p[2], p[3]]);
+                let after_last = day.points().last().is_none_or(|last| last.minute < minute);
+                if minute >= 1440 || !(MIN_DECI..=MAX_DECI).contains(&deci) || !after_last {
+                    return None;
+                }
+                day.points[i] = Some(Point { minute, deci });
+                day.len += 1;
+            }
+        }
+        rest.is_empty().then_some(week)
+    }
+
     /// The setpoint at `minute` of `weekday` (0 = Monday): the last switch point at or before it,
     /// this day or earlier ones; `None` for a program without any switch point.
     pub fn setpoint(&self, weekday: u8, minute: u16) -> Option<i16> {

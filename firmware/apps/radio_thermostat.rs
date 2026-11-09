@@ -12,10 +12,16 @@
 //! removes one, which is what fits a remote shell line (`tower nodes shell <node> "thermostat
 //! point workdays 06:00 21"`).
 //!
-//! Headless for now: the room temperature is the taf runtime's reading of the Core Module's
-//! TMP112, settings and state go over MQTT. The LCD Module's screen does not fit next to the radio yet: its driver
-//! keeps a 2.6 KB frame in RAM that this node lacks (`docs/firmware/taf.md`, "RAM"), so the screen waits
-//! for a frame-less (page mode) LCD driver.
+//! The room temperature is the taf runtime's reading of the Core Module's TMP112. With an **LCD
+//! Module** attached (Core Module r2) the thermostat has a screen: the room temperature, the
+//! setpoint, the mode, the day and time, a flame while it heats. The left and right buttons step the
+//! setpoint by 0.5 °C (applied 3 s after the last press: one save, one report); holding either
+//! button opens the menu (the mode, pairing, the node's address, the factory reset). The LCD driver
+//! runs in page mode (`tower::lcd::init_paged`): a frame would not fit next to the radio
+//! (`docs/firmware/taf.md`, "RAM"). The module's buttons share the Core button's line, so the
+//! driver takes the Core button too: the power-up gesture is the menu's pairing and reset then.
+//! Without the module, and always on the Core Module r1 (no room for the screen in its RAM), the
+//! thermostat runs headless: settings and state go over MQTT.
 //!
 //!   just run app radio_thermostat
 
@@ -34,12 +40,20 @@ use tower::storage::{NS_APP, Nv};
 use tower::{app, board::Board, taf};
 use tower_protocol::props::{self, thermostat};
 use tower_taf::program::{
-    DAY_NAMES, Day, MAX_DECI, MIN_DECI, Week, minutes_until, parse_minute, parse_setpoint,
+    DAY_NAMES, Day, MAX_DECI, MIN_DECI, WEEK_BYTES, Week, minutes_until, parse_minute, parse_setpoint,
 };
 use tower_taf::thermostat::{Demand, Mode, Override};
 
 const KIND: props::Kind = thermostat::KIND;
 static SETTINGS: [shell::Setting; taf::settings_len(&KIND)] = taf::settings(&KIND);
+#[cfg(not(feature = "core-module-r1"))]
+static COMMANDS: &[Entry] = &[
+    taf::NODE_COMMANDS,
+    taf::BUTTON_COMMANDS,
+    Entry::menu("thermostat", THERMOSTAT_COMMANDS),
+    Entry::menu("lcd", tower::lcd::SHELL),
+];
+#[cfg(feature = "core-module-r1")]
 static COMMANDS: &[Entry] = &[
     taf::NODE_COMMANDS,
     taf::BUTTON_COMMANDS,
@@ -103,6 +117,14 @@ impl State {
         }
     }
 
+    /// A new mode: what a hand-set setpoint held is dropped.
+    fn set_mode(&mut self, mode: Mode, kv: Nv) {
+        self.mode = mode;
+        self.over.clear();
+        info!(target: "thermostat", "mode {}", thermostat::MODES[mode as usize]);
+        self.save(kv);
+    }
+
     /// Recompute the demand and report the state.
     fn update(&mut self) {
         let setpoint = self.setpoint();
@@ -130,9 +152,11 @@ impl State {
     }
 }
 
-/// The thermostat: regulation on the runtime's temperature samples, the reports.
+/// The thermostat: regulation on the runtime's temperature samples, the reports, and the screen
+/// when there is one (one task: the screen draws from the regulator's state).
 #[embassy_executor::task]
-async fn regulator(kv: Nv) {
+async fn regulator(kv: Nv, ui: Option<screen::Ui>) {
+    let mut ui = ui;
     let saved = kv.scope(NS_APP).get::<Saved>(KEY_STATE).ok().flatten();
     let mut s = State {
         temperature: taf::temperature(),
@@ -146,18 +170,30 @@ async fn regulator(kv: Nv) {
     };
     loop {
         s.update();
-        // Wake at the runtime's next temperature sample (every `report-period`), or at the next
-        // minute (a switch point).
-        let minute = match taf::local_time() {
+        if let Some(ui) = &mut ui {
+            ui.show(&mut s).await;
+        }
+        // Wake at the runtime's next temperature sample (every `report-period`), at the next
+        // minute (a switch point, the clock on the screen), or when the screen has something due.
+        let mut wake = match taf::local_time() {
             Some(t) => Instant::now() + Duration::from_secs(60 - u64::from(t.second)),
             None => Instant::now() + Duration::from_secs(60),
         };
+        if let Some(t) = ui.as_ref().and_then(screen::Ui::deadline) {
+            wake = wake.min(t);
+        }
+        let input = async {
+            match &ui {
+                Some(ui) => ui.next_event().await,
+                None => core::future::pending().await,
+            }
+        };
         match select4(
             taf::next_set(),
-            select(taf::temperature_sampled(), Timer::at(minute)),
-            PROGRAM_CHANGED.wait(),
+            select(taf::temperature_sampled(), Timer::at(wake)),
             // The wall clock arrived (or moved): the program's setpoint is looked up again.
-            taf::clock_synced(),
+            select(PROGRAM_CHANGED.wait(), taf::clock_synced()),
+            input,
         )
         .await
         {
@@ -168,31 +204,39 @@ async fn regulator(kv: Nv) {
                 }
                 thermostat::MODE => {
                     if let Some(m) = Mode::from_index(value) {
-                        s.mode = m;
-                        s.over.clear();
-                        info!(target: "thermostat", "mode {}", thermostat::MODES[m as usize]);
-                        s.save(kv);
+                        s.set_mode(m, kv);
                     }
                 }
                 _ => {} // hysteresis and the common settings: read when used
             },
             Either4::Second(Either::First(centi)) => s.temperature = Some(centi),
-            Either4::Second(Either::Second(())) | Either4::Fourth(()) => {}
-            Either4::Third(()) => {
+            Either4::Second(Either::Second(())) => {
+                if let Some(ui) = &mut ui {
+                    ui.on_timer(&mut s, kv);
+                }
+            }
+            Either4::Third(Either::First(())) => {
                 s.week = load_week(kv);
                 s.over.clear();
                 info!(target: "thermostat", "weekly program changed");
+            }
+            Either4::Third(Either::Second(())) => {}
+            Either4::Fourth(ev) => {
+                if let Some(ui) = &mut ui {
+                    ui.on_event(ev, &mut s, kv).await;
+                }
             }
         }
     }
 }
 
+/// The stored weekly program (`Week::encode`'s bytes), else the default one.
 fn load_week(kv: Nv) -> Week {
-    kv.scope(NS_APP)
-        .get::<Week>(KEY_PROGRAM)
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+    let mut buf = [0u8; WEEK_BYTES];
+    match kv.scope(NS_APP).get_bytes(KEY_PROGRAM, &mut buf) {
+        Ok(Some(n)) => buf.get(..n).and_then(Week::decode).unwrap_or_default(),
+        _ => Week::default(),
+    }
 }
 
 // ---- the `thermostat` shell commands ----------------------------------------------------------
@@ -215,7 +259,12 @@ fn store_week(ctx: &mut Ctx<'_>, week: &Week) -> Result<(), Outcome> {
     if load_week(kv) == *week {
         return Ok(());
     }
-    if kv.scope(NS_APP).set(KEY_PROGRAM, week).is_err() {
+    let mut buf = [0u8; WEEK_BYTES];
+    if kv
+        .scope(NS_APP)
+        .set_bytes(KEY_PROGRAM, week.encode(&mut buf))
+        .is_err()
+    {
         let _ = write!(ctx, "not saved");
         return Err(Outcome::code(shell::R_STORAGE));
     }
@@ -314,9 +363,53 @@ static THERMOSTAT_COMMANDS: &[Entry] = &[
     Entry::cmd("point", Args::None, cmd_point),
 ];
 
+#[cfg(not(feature = "core-module-r1"))]
 async fn run(b: Board) {
-    b.spawner.spawn(regulator(b.kv).unwrap());
+    // The LCD Module's buttons share the Core button's line: with the module, its driver takes the
+    // button and the runtime goes without (pairing and the reset are in the menu then).
+    let mut base = tower::taf_base!(b, no_button);
+    let ui = if tower::lcd::probe(base.i2c).await {
+        let res = tower::lcd::Resources::new(b.header_spi, b.button, b.header_int);
+        screen::Ui::start(b.spawner, res, base.i2c).await
+    } else {
+        info!(target: "thermostat", "no LCD Module: headless");
+        base.button = Some(b.button);
+        None
+    };
+    b.spawner.spawn(regulator(b.kv, ui).unwrap());
+    taf::run(base, &KIND, &SETTINGS).await
+}
+
+#[cfg(feature = "core-module-r1")]
+async fn run(b: Board) {
+    b.spawner.spawn(regulator(b.kv, None).unwrap());
     taf::run(tower::taf_base!(b), &KIND, &SETTINGS).await
+}
+
+/// The screen, on the LCD Module (Core Module r2).
+#[cfg(not(feature = "core-module-r1"))]
+#[path = "radio_thermostat/screen.rs"]
+mod screen;
+
+/// The Core Module r1 has no room for the screen (RAM; `docs/firmware/taf.md`, "RAM"): headless.
+#[cfg(feature = "core-module-r1")]
+mod screen {
+    use super::{Nv, State};
+    use tower::lcd::Event;
+
+    pub enum Ui {}
+
+    impl Ui {
+        pub async fn show(&mut self, _: &mut State) {}
+        pub fn deadline(&self) -> Option<embassy_time::Instant> {
+            None
+        }
+        pub async fn next_event(&self) -> Event {
+            match *self {}
+        }
+        pub fn on_timer(&mut self, _: &mut State, _: Nv) {}
+        pub async fn on_event(&mut self, _: Event, _: &mut State, _: Nv) {}
+    }
 }
 
 app!(run, commands: COMMANDS, settings: &SETTINGS);

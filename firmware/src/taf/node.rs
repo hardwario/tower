@@ -522,12 +522,7 @@ impl Node {
             }
             Some(4) => {
                 warn!(target: "node", "factory reset (button released after 20 s), rebooting");
-                if self.kv.wipe().is_err() {
-                    log::error!(target: "storage", "wipe failed (the store is whole or empty)");
-                }
-                // The store is frozen now: reboot, as the shell's `system eeprom wipe` does.
-                console::flush().await;
-                cortex_m::peripheral::SCB::sys_reset();
+                super::factory_reset().await;
             }
             _ => self.restore_cue(),
         }

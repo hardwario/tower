@@ -88,6 +88,12 @@ impl Override {
         self.active = None;
     }
 
+    /// The local second the override ends, if one is set (expired or not: [`at`](Self::at)
+    /// clears an expired one).
+    pub fn until(&self) -> Option<i64> {
+        self.active.map(|(_, until)| until)
+    }
+
     /// The override's setpoint at local second `now`, if it still holds (an expired one clears).
     pub fn at(&mut self, now: i64) -> Option<i16> {
         match self.active {

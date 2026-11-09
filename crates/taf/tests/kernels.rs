@@ -1,7 +1,9 @@
 //! The taf kernels: report policy, wall clock, weekly program, thermostat demand.
 
 use tower_taf::clock::{Local, WallClock};
-use tower_taf::program::{Day, POINTS, ParseError, Week, minutes_until, parse_minute, parse_setpoint};
+use tower_taf::program::{
+    Day, POINTS, ParseError, WEEK_BYTES, Week, minutes_until, parse_minute, parse_setpoint,
+};
 use tower_taf::report::Reporter;
 use tower_taf::thermostat::{Demand, Mode, Override};
 
@@ -186,14 +188,58 @@ fn week_fits_one_eeprom_record_and_roundtrips() {
     let mut full = Week::default();
     let day = Day::parse("01:00 30 02:00 30 03:00 30 04:00 30 05:00 30 23:59 30").unwrap();
     full.days = [day; 7];
-    let mut buf = [0u8; 256];
-    let bytes = postcard::to_slice(&full, &mut buf).expect("a full week fits 256 bytes");
-    assert!(bytes.len() <= 256);
-    let back: Week = postcard::from_bytes(bytes).unwrap();
-    assert_eq!(back, full);
-    let mut buf = [0u8; 256];
-    let bytes = postcard::to_slice(&Week::default(), &mut buf).unwrap();
-    assert_eq!(postcard::from_bytes::<Week>(bytes).unwrap(), Week::default());
+    let mut buf = [0u8; WEEK_BYTES];
+    let bytes = full.encode(&mut buf);
+    assert_eq!(bytes.len(), WEEK_BYTES);
+    assert_eq!(Week::decode(bytes), Some(full));
+    for week in [
+        Week::default(),
+        Week {
+            days: [Day::new(); 7],
+        },
+    ] {
+        let mut buf = [0u8; WEEK_BYTES];
+        assert_eq!(Week::decode(week.encode(&mut buf)), Some(week));
+    }
+    // An empty week is a count per day; a day's point is minute then setpoint, little-endian.
+    let mut one = Week {
+        days: [Day::new(); 7],
+    };
+    one.days[2] = Day::parse("06:30 21.5").unwrap();
+    let mut buf = [0u8; WEEK_BYTES];
+    assert_eq!(one.encode(&mut buf), [0, 0, 1, 134, 1, 215, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn week_decode_refuses_what_encode_never_writes() {
+    let mut buf = [0u8; WEEK_BYTES];
+    let good = Week::default().encode(&mut buf).to_vec();
+    assert!(Week::decode(&good).is_some());
+    // Bytes missing or left over.
+    assert_eq!(Week::decode(&good[..good.len() - 1]), None);
+    assert_eq!(Week::decode(&[good.as_slice(), &[0]].concat()), None);
+    assert_eq!(Week::decode(&[]), None);
+    // A count past POINTS.
+    assert_eq!(Week::decode(&[7, 0, 0, 0, 0, 0, 0]), None);
+    let point = |minute: u16, deci: i16| {
+        let mut b = minute.to_le_bytes().to_vec();
+        b.extend(deci.to_le_bytes());
+        b
+    };
+    let week = |day: Vec<u8>| [day, vec![0; 6]].concat();
+    assert!(Week::decode(&week([vec![1], point(1439, 300)].concat())).is_some());
+    // A time past the day, a setpoint out of range, points out of order or repeated.
+    assert_eq!(Week::decode(&week([vec![1], point(1440, 210)].concat())), None);
+    assert_eq!(Week::decode(&week([vec![1], point(60, 49)].concat())), None);
+    assert_eq!(Week::decode(&week([vec![1], point(60, 301)].concat())), None);
+    assert_eq!(
+        Week::decode(&week([vec![2], point(60, 210), point(30, 180)].concat())),
+        None
+    );
+    assert_eq!(
+        Week::decode(&week([vec![2], point(60, 210), point(60, 180)].concat())),
+        None
+    );
 }
 
 #[test]
@@ -215,9 +261,12 @@ fn demand_has_hysteresis() {
 fn override_expires() {
     let mut o = Override::new();
     assert_eq!(o.at(0), None);
+    assert_eq!(o.until(), None);
     o.set(225, 100);
+    assert_eq!(o.until(), Some(100));
     assert_eq!(o.at(99), Some(225));
     assert_eq!(o.at(100), None);
+    assert_eq!(o.until(), None, "cleared when found expired");
     assert_eq!(o.at(50), None, "an expired override is gone");
     o.set(200, 10);
     o.clear();

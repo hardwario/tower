@@ -51,27 +51,17 @@ at any time.
 
 ## Tasks
 
-### T2. LCD thermostat: a page-mode LCD driver, then the thermostat's screen
+### T22. The LCD thermostat: what the bench left open
 
-Status: open (D1: later)
+Status: open
 
-**Why.** `radio_thermostat` runs headless: the LCD driver keeps a 2 KB frame, 512 B of row
-signatures and its tasks resident (about 4.3 KB), which on a radio node leaves 5.9 KB of stack
-against the thermostat's measured 6.2 KB peak.
-
-**What it takes.** A page-mode path: the app draws the screen once per band of 8 rows into a
-128 B buffer that is sent and reused (about 2.6 KB saved). It touches `tower-hmi` (a band canvas)
-and `tower::lcd` (a frame-less path the linker keeps apart from the frame). Then the screen: big
-temperature, setpoint, clock, demand; buttons adjust the setpoint, a hold opens a menu. Needs an
-r2 with the LCD Module: the r1 build has 4.5 KiB of flash left headless.
-
-**Mind the accelerometer.** The LCD's auto-rotate owns the LIS2DH12 (its 4D orientation
-interrupt on INT1), and since T17 the taf runtime does too (tilt events): a thermostat with a
-screen keeps one of them (a wall unit needs no auto-rotate) or hands the chip over.
-
-**Done when.** The thermostat with its screen passes `just fw ci` (RAM budget, 8 KB floor) with a
-measured stack peak under it, the UI checks out with `lcd dump`, and the radio side works as
-today.
+- **The pairing SAS on the screen.** With the LCD Module the thermostat pairs from its menu, but
+  the SAS to compare shows only on the USB console (`net: pairing: SAS n`) and on the host. A
+  hook from the runtime (the SAS, pairing done or failed) would let the screen show it.
+- **PPK2**: the idle floor with the module attached, a VCOM toggle, a page-mode show (its drawing
+  runs sixteen times per show; estimated a few ms of CPU at 16 MHz).
+- **The `button simulate` command** stays mounted on the thermostat with the module, where it does
+  nothing (the LCD driver owns the button; `lcd press core` is the equivalent).
 
 ### T3. Listening node on US 915
 
@@ -386,10 +376,28 @@ generation still targets the same modules.
   (`radio_control`'s click and hold) (T20). 2026-11-09.
 - **D8. The replay check of the 2026-10-17 batch.** Add a reboot command to the bridge (T21),
   then run the check (T9). 2026-11-09.
+- **D14. Flash for the LCD thermostat.** First answer: the `tower-sdk` package at `opt-level =
+  "z"`, provided the LED strip passed on the bench. It did not: effects up to 2.2 times slower,
+  1 to 3 underruns per sweep of the 18 effects (none at "s"), and keeping `tower-strip` at "s"
+  doesn't help under fat LTO. Final answer: "z" for `radio_thermostat` only (cargo profile
+  `release-z`, the justfile's `z_apps`), every other app at "s" as before (T2). The options
+  passed over were "z" for every app despite the strip, and parking the screen. 2026-11-09.
 
 ## Done
 
 (Newest first; one line each.)
+
+- **T2. LCD thermostat**: `tower-hmi` canvas windows (bands; a host test checks bands against a
+  frame in every rotation), `tower::lcd` page mode (`init_paged`, `Lcd<Paged>::show`, buttons
+  only, band signatures, the frame linked only in frame mode, `lcd::probe`), the thermostat's
+  screen (temperature, setpoint by the buttons, mode, clock, flame, a menu with mode, pairing,
+  info, factory reset) in the regulator task, `taf::factory_reset` / `addr` / `gateway`,
+  `Week::encode` / `decode` (no serde, 2.2 KB), `Override::until`; the thermostat built at
+  `opt-level = "z"` (D14; `release-z`, the justfile's `z_apps`), r2 only (the r1 stays headless).
+  Bench (LCD Module on the PIR board r2, now `radio_thermostat` "r2"): every page by `lcd dump`,
+  setpoint by the buttons on MQTT, a mode set from MQTT on the screen, a remote `thermostat point`
+  stored and read back, OTA pairing from the menu (SAS on both ends), stack peak 7.1 KB of 8.3 KB,
+  4.5 KB of flash free; the strip at "s" unchanged (timings as before, 0 underruns). 2026-11-09.
 
 - **T21. A reboot command for the gateway** (D8): the `reboot` RPC, the bridge pulses the
   dongle's reset line through the port it holds (no firmware or wire change, works on a wedged

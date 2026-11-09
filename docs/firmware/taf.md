@@ -24,7 +24,7 @@ The MQTT side of the same properties (topics, payloads, the kinds' tables) is
 | `radio_climate` | `climate` | sleeping | Core Module | The common sensors only for now (the Climate Module's are still to come) |
 | `radio_motion` | `motion` | sleeping | Core Module r2 + PIR Module | Motion events with a holdoff, PIR sensitivity |
 | `radio_control` | `control` | listening | Core Module r2 + Power Module + LED strip | The relay (P0) and the strip (every `led_strip` effect) |
-| `radio_thermostat` | `thermostat` | sleeping | Core Module | Setpoint, mode, weekly program, heating demand (headless for now, see *RAM*) |
+| `radio_thermostat` | `thermostat` | sleeping | Core Module (r2: + LCD Module) | Setpoint, mode, weekly program, heating demand; a screen with the LCD Module (r2), headless without it and on the r1 (see *RAM*) |
 
 Every one of them also has the common sensors (*Sensors* in the contract below). `radio_control` does not fit a
 Core Module r1's flash (its USB console's code): the r1 build is a stub that says so. The others
@@ -61,6 +61,10 @@ What every taf app does, so a user meets the same device whatever it measures:
   comes on it starts the ROM bootloader. Unpaired, the node shows its LED cue for 180 s after
   boot. Cable provisioning over USB (`tower nodes add --port`) and `node pair` (USB console) work
   for every app.
+- **An app whose LCD Module takes the Core button** (`radio_thermostat` with the module: the
+  module's buttons share the Core button's line, so its driver reads all three): the Core button's
+  gestures are the screen's input, not `button` events, and the power-up gesture is the menu's
+  *Pair* and *Reset* (`taf::request_pairing`, `taf::factory_reset`).
 - **USB console**: logs, the shell and the management channel, always. Every app has
   `node status`, `node pair` (console only) and, when it has the Core button, `button simulate
   <ms>` (console only: a press of that length, for tests without hands).
@@ -139,6 +143,8 @@ What every taf app does, so a user meets the same device whatever it measures:
 | `taf::local_time()` | Local wall-clock time (`weekday`, `minute`, ...) once the host synced it |
 | `taf::clock_synced().await` | Wakes when the clock is synced (a scheduler looks again) |
 | `taf::request_pairing()`, `taf::paired()` | Start OTA pairing from an app gesture; whether paired |
+| `taf::factory_reset().await` | The power-up gesture's factory reset (wipe, reboot), for an app that gave the Core button away |
+| `taf::addr()`, `taf::gateway()` | This node's radio address; the gateway it is paired with |
 | `taf::temperature()` | The Core Module's temperature (centi °C) as the runtime last read it; `None` before the first read |
 | `taf::temperature_sampled().await` | Wakes with each new temperature sample (one waiter: the app) |
 | `taf::NODE_COMMANDS`, `taf::BUTTON_COMMANDS` | The standard shell commands, for the app's `COMMANDS` |
@@ -161,8 +167,9 @@ A taf node runs in the Core Module's 20 KB: about 10 KB of statics for a sleepin
 runtime's future with the radio state is about 2.6 KB of it, the console about 3 KB, the shell
 1 KB), leaving 10 KB of stack, above the 8 KB floor of `tools/check_ram_budget.py`. Measured
 stack peaks (`system stack print`, 2026-11-09, after pairing, remote shell, sets and EEPROM
-writes): 4.7 KB `radio_motion`, 5.2 KB `radio_control`, 6.2 KB `radio_thermostat` (6.1 KB on the
-r1). So the floor is real margin, not slack. What keeps an app small:
+writes): 4.7 KB `radio_motion`, 5.2 KB `radio_control`, 6.2 KB `radio_thermostat` headless (6.1 KB
+on the r1), 7.1 KB `radio_thermostat` with its screen (r2, opt-level "z", OTA pairing from the
+menu, 2026-11-09). So the floor is real margin, not slack. What keeps an app small:
 
 - **A task argument is stored twice** in its future (the argument and the local it moves into):
   build big things (a strip, a driver) inside the task.
@@ -175,19 +182,31 @@ r1). So the floor is real margin, not slack. What keeps an app small:
   without a waiting future. The runtime's sensor task is 200 B.
 
 **Flash is the other limit.** The runtime is in every app, so code added to it lands in all of
-them; the largest are `radio_control` on the r2 (6.3 KB of its 192 KB free, 2026-11-09) and
-`radio_thermostat` on the r1 (5.6 KB). `just fw ci` prints every bin's free flash and warns
-under 2 KB (`tools/check_ram_budget.py`). Two lessons from winning it back:
+them; the tightest are `radio_thermostat` on the r2 (4.5 KB of its 192 KB free at opt-level "z",
+with the screen, 2026-11-09) and `radio_control` on the r2 (5.6 KB). `just fw ci` prints every
+bin's free flash and warns under 2 KB (`tools/check_ram_budget.py`). Lessons from winning it back:
 
 - **No checked `str` slices** (`&s[a..b]`, `split_at`, a `str` pattern's reverse search) in
   firmware code: each can panic, and the panic's message Debug-formats a `char`, which links
   about 4.5 KB of Unicode tables into every app. Use `s.get(a..b)`, `split_at_checked`,
   `split_once`, `rfind` with a `char`. Removing the last such site freed 5.7 KB.
-- **Not `opt-level = "z"`**: it frees about 12 KB but slows the LED strip's rendering by up to
-  three times and lets its DMA refill run late (an underrun on the bench).
+- **`opt-level = "z"` per app, never for a strip app.** It frees about 15 KB, but it slows the LED
+  strip's effects up to 2.2 times and lets the strip's DMA refill run late (underruns on the
+  bench, T18 and D14). Under fat LTO the whole image takes the final crate's pipeline, so a
+  crate can't be kept at "s" by a per-package override (measured: the effects stay slow, and the
+  dependencies alone at "z" make the image bigger). So the apps short of flash that drive no
+  strip are built with the `release-z` profile, the rest at "s": the justfile's `z_apps`
+  (`radio_thermostat`) and `s_apps`, picked by `just fw build`, the budget check and the release
+  bundle.
+- **No serde for a fixed record**: postcard's code for the thermostat's weekly program (arrays of
+  options) cost 2.2 KB; `Week::encode` / `decode` by hand cost a few hundred bytes.
 
-**The LCD Module does not fit next to the radio yet.** Its driver keeps the 2 KB frame, 512 B of
-row signatures and its tasks resident (about 4.3 KB), which leaves a radio node 5.9 KB of stack,
-below the measured 6.2 KB peak. `radio_thermostat` therefore runs headless for now. The way out
-is a frame-less (page mode) LCD driver: the app draws the screen once per band of rows into a
-small buffer that is sent and reused, which costs CPU time, not RAM.
+**The LCD Module next to the radio: page mode.** The LCD driver's frame mode keeps a 2 KB frame,
+512 B of row signatures and its tasks resident (about 4 KB), more than a radio node has above the
+8 KB stack floor. `radio_thermostat` uses page mode instead (`lcd::init_paged`,
+`docs/firmware/hmi.md`, *Page mode*): no frame, the screen drawn band by band as it is sent, about
+1.5 KB of statics. Its UI lives in the regulator task (one task, the state in one place) and draws
+from a `static` the task updates. On the r2 that leaves 8.3 KB of stack; the measured peak with
+the screen is 7.3 KB (OTA pairing from the menu; 6.6 KB after a remote shell command with an
+EEPROM write). The r1 has 0.9 KB above the floor, too little even for page mode: its build stays
+headless.

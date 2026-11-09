@@ -18,11 +18,12 @@ more statics, raise STACK_FLOOR *consciously* and re-measure the high-water mark
 
 It also reports each bin's free flash and warns (without failing) when an image comes within
 `FLASH_WARN` of the 192 KB: code added to the SDK or the taf runtime lands in every app, and the
-largest ones (radio_control on the r2, radio_thermostat on the r1) are the first to overflow
-(TASKS.md, T18; docs/firmware/taf.md, "RAM").
+largest ones (radio_thermostat on the r2 even at opt-level "z", with its LCD screen; radio_control
+on the r2) are the first to overflow (TASKS.md, T18 and D14; docs/firmware/taf.md, "RAM").
 
-Usage: check_ram_budget.py <bin-name> [<bin-name> ...]
-       (ELFs are read from target/thumbv6m-none-eabi/release/<bin-name>)
+Usage: check_ram_budget.py <bin-name>[@<profile>] [...]
+       (ELFs are read from target/thumbv6m-none-eabi/<profile>/<bin-name>, profile `release`
+       unless named: `radio_thermostat@release-z`, the apps the justfile builds at "z")
 """
 
 import struct
@@ -35,7 +36,7 @@ STACK_FLOOR = 8 * 1024  # bytes; every bin must leave at least this much stack
 FLASH_BASE = 0x0800_0000
 FLASH_SIZE = 192 * 1024
 FLASH_WARN = 2 * 1024  # bytes; warn when an image leaves less flash than this
-TARGET_DIR = Path("target/thumbv6m-none-eabi/release")
+TARGET_DIR = Path("target/thumbv6m-none-eabi")
 
 
 def stack_top(elf: bytes) -> int:
@@ -78,10 +79,11 @@ def main(bins) -> None:
     print(f"RAM budget: {RAM_SIZE // 1024} KB SRAM, stack floor {STACK_FLOOR // 1024} KB (flip-link layout)\n")
     print(f"  {'bin':<26} {'statics':>8} {'stack':>8} {'flash free':>10}   verdict")
     failed = False
-    for name in bins:
-        elf = TARGET_DIR / name
+    for arg in bins:
+        name, _, profile = arg.partition("@")
+        elf = TARGET_DIR / (profile or "release") / name
         if not elf.exists():
-            raise SystemExit(f"{elf} not found; build first (cargo build --release --bins)")
+            raise SystemExit(f"{elf} not found; build first (just ram-budget)")
         data = elf.read_bytes()
         top = stack_top(data)
         stack = top - RAM_BASE

@@ -377,6 +377,33 @@ pub fn paired() -> bool {
     GATEWAY.load(Ordering::Relaxed) != 0
 }
 
+/// The gateway this node is paired with.
+pub fn gateway() -> Option<u32> {
+    match GATEWAY.load(Ordering::Relaxed) {
+        0 => None,
+        gw => Some(gw),
+    }
+}
+
+/// This node's radio address (0 until [`run`] has started).
+pub fn addr() -> u32 {
+    ADDR.load(Ordering::Relaxed)
+}
+
+/// The factory reset: wipe the store (pairing, settings, the app's state) and reboot. The
+/// power-up gesture's, for an app that gave the Core button away (a menu item, confirmed first).
+pub async fn factory_reset() -> ! {
+    let kv = critical_section::with(|cs| SHARED.borrow_ref(cs).kv);
+    if let Some(kv) = kv
+        && kv.wipe().is_err()
+    {
+        log::error!(target: "storage", "wipe failed (the store is whole or empty)");
+    }
+    // The store is frozen now: reboot, as the shell's `system eeprom wipe` does.
+    crate::console::flush().await;
+    cortex_m::peripheral::SCB::sys_reset()
+}
+
 // ---- the common shell commands ------------------------------------------------------------
 
 /// `node status`: the node's address, kind and class, its gateway, its wall-clock time.
