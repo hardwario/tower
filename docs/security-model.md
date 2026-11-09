@@ -343,8 +343,9 @@ registered address by design (an authenticated host action: the re-provision pat
     so anyone allowed to publish `nodes/{addr}/set/...` or a remote shell line can drain that
     budget and delay every node's downlinks (and the gateway's ACKs) until it refills. The MQTT
     access policy (4.4) is the control; the queue's per-node cap (2 items) bounds what one burst
-    holds. A listening node absent from the air costs one attempt per `LISTEN_RETRY` (2 s) until
-    the item's TTL ends.
+    holds. A listening node absent from the air is tried again after 2 s, the pause doubling per
+    miss up to 64 s (`tower_gateway::listen`), until the item's TTL ends; meanwhile the other
+    listening nodes' commands go ahead.
 
 ## 6. Questions for the reviewer
 

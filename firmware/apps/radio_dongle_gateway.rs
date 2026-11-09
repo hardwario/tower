@@ -51,6 +51,7 @@ use tower::radio::net::{
 };
 use tower::storage::{NS_APP, NS_SHELL, Nv, Scoped};
 use tower::{app, board::Board, console, shell, watchdog};
+use tower_gateway::listen::ListenBackoff;
 use tower_gateway::queue::{PushError, Queue};
 use tower_gateway::registry::{self, BucketIo, IoError, NodeRecord, RegistryError};
 use tower_protocol::mgmt::{self, DeviceInfo, DeviceRole, MgmtOp, NodeEntry, NodeKey, Paired, QueueId};
@@ -196,9 +197,6 @@ const DOWNLINK_TURNAROUND: Duration = Duration::from_millis(20);
 /// single-owner loop out of `recv` while a mid-response node is uplinking its next
 /// shell chunk.
 const DOWNLINK_REPS: u8 = 2;
-/// The pause after a listening node did not take its downlink, before the next attempt (the queue's
-/// TTL ends the attempts).
-const LISTEN_RETRY: Duration = Duration::from_secs(2);
 /// US 915: how long the gateway stays on the pairing carrier after a commit, so the new node's
 /// commit uplinks (confirmed NodeInfo, retried for up to ~15 s) are ACKed before it hops again.
 const COMMIT_GRACE: Duration = Duration::from_secs(15);
@@ -545,7 +543,7 @@ async fn run(b: Board) {
     let mut last_hop_stat = Instant::now();
 
     let mut queue = Queue::new();
-    let mut listen_retry_at = Instant::MIN;
+    let mut listen_backoff = ListenBackoff::new();
     let mut stats = Stats::new();
     let mut pairing: Option<PairingSession> = None;
     let mut last_stat = Instant::now();
@@ -647,6 +645,7 @@ async fn run(b: Board) {
             // the same fixed carrier at the same low power) still need their ACK here.
             if let Some(rx) = net.recv(RECV_SLICE).await {
                 on_uplink(&rx, &mut net, &mut stats, &mut queue, now_ms).await;
+                listen_backoff.clear(rx.src);
             }
         } else if hopping {
             if parked {
@@ -663,23 +662,32 @@ async fn run(b: Board) {
                 && let Some(rx) = slot.received
             {
                 on_uplink(&rx, &mut net, &mut stats, &mut queue, now_ms).await;
+                listen_backoff.clear(rx.src);
             }
         } else if let Some(rx) = net.recv(RECV_SLICE).await {
             // 3. One authenticated uplink.
             on_uplink(&rx, &mut net, &mut stats, &mut queue, now_ms).await;
+            listen_backoff.clear(rx.src);
         }
         // 3b. A listening node (taf, its registry flag says not sleeping) keeps its receiver on:
         //     its queued downlink goes out now, not after its next uplink. EU 868 only (a listening
-        //     node does not follow the US 915 hop schedule yet). After a failed attempt the node
-        //     is given `LISTEN_RETRY` before the next, so an absent one cannot hold the radio.
-        if pairing.is_none() && !hopping && !queue.is_empty() && Instant::now() >= listen_retry_at {
+        //     node does not follow the US 915 hop schedule yet). A node that did not take its
+        //     downlink waits before the next attempt, longer per miss, and the next listening node
+        //     that is due goes first (`tower_gateway::listen`): an absent node can neither hold up
+        //     the others' commands nor keep the radio out of receive.
+        if pairing.is_none() && !hopping && !queue.is_empty() {
+            listen_backoff.retain(|addr| queue.count_for(addr) > 0);
+            let now = Instant::now().as_millis();
             let target = queue.iter().map(|i| i.node_addr).find(|&addr| {
-                registry::find(&buckets, addr).is_some_and(|r| r.flags & mgmt::NODE_FLAG_SLEEPING == 0)
+                listen_backoff.due(addr, now)
+                    && registry::find(&buckets, addr).is_some_and(|r| r.flags & mgmt::NODE_FLAG_SLEEPING == 0)
             });
-            if let Some(node) = target
-                && !deliver(&mut net, &mut queue, node, now_ms).await
-            {
-                listen_retry_at = Instant::now() + LISTEN_RETRY;
+            if let Some(node) = target {
+                if deliver(&mut net, &mut queue, node, now_ms).await {
+                    listen_backoff.clear(node);
+                } else {
+                    listen_backoff.missed(node, Instant::now().as_millis());
+                }
             }
         }
 
