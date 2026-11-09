@@ -319,14 +319,21 @@ or the add answers `MGMT_STORAGE`.
 
 ### Downlink queue (`tower_gateway::queue`, RAM-only)
 
-Opaque host-built `NodeCmd` envelopes awaiting a sleeping node's next uplink. Global pool
+Opaque host-built `NodeCmd` envelopes awaiting delivery: after a sleeping node's next uplink, or
+at once to a listening node. Global pool
 `QUEUE_CAP = 4`, per-node FIFO `PER_NODE_CAP = 2`, `MAX_ITEM = 74` B. Stable monotonic `u16` ids
 (from 1; `0` reserved = "not a queue item" in `RadioStat::Tx`). TTL expiry drops stale items and
 reports `TX_EXPIRED`. **The queue is RAM-only:** a gateway reboot drops it, made visible by the
 `Hello` `session_id` bump; the host fails every pending command ("gateway rebooted; command
 lost") and the client sends it again. Delivery: each confirmed uplink's ACK carries a
 *pending* flag; when set, the node opens a short RX window and the gateway delivers one item per
-uplink cycle.
+uplink cycle. A **listening** node (its registry flag `NODE_FLAG_SLEEPING` clear; the host sets
+the flag from the node's `NodeInfo.sleeping`) keeps its receiver on, so it is not waited for: the
+main loop sends its first queued item at once (EU 868 only, see docs/radio.md, "Node classes").
+A listening node that does not ACK is tried again after a pause of its own, 2 s doubling per miss
+up to 64 s and cleared by any uplink from it or a delivery (`tower_gateway::listen`), while the
+next listening node that is due goes first: an absent node neither holds up the others'
+commands nor keeps the radio out of receive. The TTL still ends the attempts.
 
 ### Settings
 
@@ -444,7 +451,8 @@ The radio-bridge path (`net.send`) is exercised by `gateway_bridges_push_button_
 
 ## Remote shell over the radio
 
-The full round-trip, node asleep between events:
+The full round-trip for a sleeping node (asleep between events; a listening node skips the wait,
+see below):
 
 1. Host encodes `NodeCmd::Shell{epoch, cmd_id, line}` (random per-process `epoch` for
    at-least-once de-dup) and `QueuePush`es it to the gateway.
@@ -460,6 +468,10 @@ The full round-trip, node asleep between events:
    gateway would send it again after each of the node's uplinks, every chunk of the reply
    included, out of receive for ~0.5 s each time (the node does not listen mid-reply).
 
+A **listening** node (`radio_control`) gets the line at once: step 2 does not wait for an
+uplink, and the reply is back within about one radio round trip (bench: queued to answered in
+0.77 s, a property `set` reported in 0.67 s; `hil/tests/listening.rs` holds both to 2.5 s).
+
 No tab completion over the air; completion is a per-transport feature the radio transport
 doesn't offer.
 
@@ -469,8 +481,8 @@ must be physical; it erases the pairing key) and `system settings set` of an add
 (re-addressing a live node over the air orphans it). `system reboot` still works remotely. Anyone
 who can reach the gateway's MQTT broker can queue remote shell lines, so this is the backstop
 that keeps a broker-level intruder from unpairing the fleet (see the access policy in the
-[CLI README](../../cli/README.md)). App commands opt in with `Entry::cmd_console_only`; see
-[console.md](console.md).
+[CLI README](../../cli/README.md)). App commands opt in with `Entry::cmd_console_only` (for
+example `radio_control`'s `strip limit` and `strip save`); see [console.md](console.md).
 
 ---
 

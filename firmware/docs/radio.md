@@ -195,6 +195,19 @@ handful of downlinks per boot and a lazy lane would never be written at all (a r
 every uplink, and its host drops a replayed uplink by counter instead (docs/gateway.md). CCM
 verify happens *before* the replay comparison, so a forged frame can't poison the state.
 
+**Node classes: when a downlink can arrive.** The network layer does not decide when a node
+listens; the app does, and taf names two classes (docs/taf.md). A **sleeping** node (battery)
+turns its receiver on only after its own confirmed uplinks: when the gateway's ACK carries
+`PENDING`, the node stays in receive for a short window and takes the queued downlink there
+(docs/gateway.md). A **listening** node (mains powered) keeps the SPIRIT1 in receive between its
+own sends, in `recv` slices of 50 ms that are awaited to their end and never cancelled from
+outside, so the gateway can send it a confirmed downlink at any time and has its ACK at once.
+Both classes use the same frames, CCM, replay lanes and counter invariants (the class changes
+when a downlink may arrive, not how it is protected), and both persist the gateway's lane on
+every accepted downlink (`set_lane_persist_period(1)`, above). EU 868 only: on US 915 a
+listening node would have to follow the hop schedule continuously, which it does not yet, so a
+listening kind refuses that band.
+
 Every TX path (DATA, ACK, FHSS beacon, bulk announce/session/request, JOIN frames) takes its
 counter from **one allocator** (`TxCounter::alloc` in `tower-net`, driven by
 `Net::alloc_counter`) that hands the value out *already consumed*, **before** the transfer
