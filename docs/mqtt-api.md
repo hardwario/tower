@@ -361,7 +361,9 @@ number may be written in hex, `0xff8000`). The bridge checks it against the node
 property exists, is settable, the value is in range) and queues it on the gateway; a refused set
 is logged by the bridge and goes no further. There is no response topic: the node's report on
 `state/{prop}` confirms it (also when the value did not change), when the node takes it (see
-*Classes*).
+*Classes*). Until the bridge knows the node's kind, it cannot check a set and refuses it: after a
+bridge start that lasts until the node's next `NodeInfo` (which the bridge asks for), up to one
+`heartbeat` for a sleeping node. Send the set again once the node's `state` topics appear.
 
 ```sh
 mosquitto_pub -h 127.0.0.1 -q 1 -t tower/nodes/0x0000ab12/set/setpoint -m 21.5
