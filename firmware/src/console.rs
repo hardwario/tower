@@ -231,8 +231,8 @@ impl Encoded {
         }
     }
 
-    /// For the async producers, which move the message into their wait: `None` (counted as a
-    /// drop) if it encodes past one frame.
+    /// For the async producers, which keep it in their future while they wait for room: `None`
+    /// (counted as a drop) if it encodes past one frame.
     fn new<T: Serialize>(msg_type: MsgType, payload: &T) -> Option<Self> {
         let mut e = Self::empty(msg_type);
         e.encode(payload).then_some(e)
@@ -416,12 +416,15 @@ fn try_enqueue<T: Serialize>(msg_type: MsgType, payload: &T) {
 /// If the link goes down *during* a backpressured wait, [`set_console_up`] wakes the waiters and
 /// they drop instead of waiting on (and [`manager`]'s unplugged poll still empties the ring,
 /// counting drops), so the stall is bounded, never indefinite.
-async fn enqueue(e: Option<Encoded>) {
+///
+/// By reference: the caller's future already holds the message, and one moved in here would be a
+/// second payload-sized copy in it (a future keeps an argument and the local it moves into).
+async fn enqueue(e: Option<&Encoded>) {
     let Some(e) = e else {
         return;
     };
     if !CONSOLE_UP.load(Ordering::Relaxed) {
-        if !push(&e) {
+        if !push(e) {
             bump_dropped();
         }
         return;
@@ -429,7 +432,7 @@ async fn enqueue(e: Option<Encoded>) {
     let dropped = poll_fn(|cx| {
         critical_section::with(|cs| {
             let mut q = TX.borrow_ref_mut(cs);
-            if q.push(&e) {
+            if q.push(e) {
                 Poll::Ready(false)
             } else if !CONSOLE_UP.load(Ordering::Relaxed) {
                 Poll::Ready(true) // the writer went away while we waited: drop-newest
@@ -929,7 +932,7 @@ pub async fn event(name: &str, fields: &[(&str, &str)]) {
             },
         )
     };
-    enqueue(e).await;
+    enqueue(e.as_ref()).await;
 }
 
 /// [`event`] without the wait: queued now, or dropped (and counted, like a log line) when the
@@ -965,13 +968,14 @@ pub(crate) async fn shell_response_frame(cmd_id: u16, result: u8, chunk: u16, la
             text: clip_str(text, SHELL_CHUNK),
         },
     );
-    enqueue(e).await;
+    enqueue(e.as_ref()).await;
 }
 
-/// Send a completion result. Async: never dropped. Used by the shell engine.
-pub async fn shell_completions(c: ShellCompletions<'static>) {
+/// Send a completion result. Async: never dropped. Used by the shell engine. Encoded before the
+/// future exists, so the future holds the encoded payload alone, not the completions as well.
+pub fn shell_completions(c: ShellCompletions<'static>) -> impl Future<Output = ()> {
     let e = Encoded::new(MsgType::ShellCompletions, &c);
-    enqueue(e).await;
+    async move { enqueue(e.as_ref()).await }
 }
 
 /// Forward one decrypted, authenticated radio uplink to the host, verbatim: the
@@ -990,7 +994,7 @@ pub async fn uplink(src: u32, counter: u32, rssi: i16, lqi: u8, data: &[u8]) {
             data: &data[..data.len().min(UPLINK_MAX)],
         },
     );
-    enqueue(e).await;
+    enqueue(e.as_ref()).await;
 }
 
 /// Send one management-response chunk (exactly one wire frame). Chunking is the
@@ -1009,14 +1013,14 @@ pub async fn mgmt_chunk(req_id: u16, result: u8, chunk: u16, last: bool, data: &
             data: &data[..data.len().min(MGMT_CHUNK)],
         },
     );
-    enqueue(e).await;
+    enqueue(e.as_ref()).await;
 }
 
 /// Send one radio-diagnostics sample ([`RadioStat`]) for the host's running channel
 /// graph. Async: backpressured while USB is present.
 pub async fn radio_stat(stat: RadioStat) {
     let e = Encoded::new(MsgType::RadioStat, &stat);
-    enqueue(e).await;
+    enqueue(e.as_ref()).await;
 }
 
 /// Record the firmware name and emit the boot banner log. Called by the [`app!`](crate::app)
