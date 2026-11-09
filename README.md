@@ -22,6 +22,7 @@ loaded over the wire (`tower flash`, or SWD); there is no over-the-air update pa
 | [`crates/gateway`](crates/gateway) | `tower-gateway` | Decision core of the Radio Dongle gateway firmware (node registry, downlink queue); not the `tower gateway` command. |
 | [`crates/shell`](crates/shell) | `tower-shell` | Pure kernels behind the device shell (address parsing, pagination, TAB completion). |
 | [`crates/strip`](crates/strip) | `tower-strip` | The LED strip effects core: frame, effects, colours and palettes, the render pipeline (gamma, RGBW white, dithering, current limit); not the WS2812 driver (`no_std`, hardware-free). |
+| [`crates/taf`](crates/taf) | `tower-taf` | The TOWER Application Framework's kernels: report policy, wall clock, weekly program, thermostat demand (`no_std`, hardware-free); the runtime is `tower::taf` ([`firmware/docs/taf.md`](firmware/docs/taf.md)). |
 | [`crates/flasher`](crates/flasher) | `tower-flasher` | The flasher, around the STM32 ROM bootloader: UART flash / erase / verify, chip info, readout protection, NRST/BOOT0 reset pulses; USB DFU for the Core Module r1.x. |
 | [`firmware/`](firmware) | `tower-sdk` (lib `tower`) | Embassy firmware SDK, `examples/` and the TOWER IoT Kit product `apps/`. Its own Cargo workspace for `thumbv6m-none-eabi`. |
 | [`cli/`](cli) | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip / protect, `tower gateway` (radio to MQTT), `tower nodes`, `tower net`. |

@@ -14,8 +14,9 @@ Each subsystem has a guide: [`docs/console.md`](docs/console.md),
 [`docs/radio.md`](docs/radio.md), [`docs/storage.md`](docs/storage.md),
 [`docs/gateway.md`](docs/gateway.md) (the push-button + gateway product),
 [`docs/hmi.md`](docs/hmi.md) (the LCD Module and the HMI framework),
-[`docs/strip.md`](docs/strip.md) (the LED strip: driver, effects, the `led_strip` app), and
-[`docs/pir.md`](docs/pir.md) (the PIR Module: the DigiPyro detector, its timing, tuning).
+[`docs/strip.md`](docs/strip.md) (the LED strip: driver, effects, the `led_strip` app),
+[`docs/pir.md`](docs/pir.md) (the PIR Module: the DigiPyro detector, its timing, tuning), and
+[`docs/taf.md`](docs/taf.md) (taf, the application framework the radio apps are built on).
 
 | | |
 |---|---|
@@ -64,6 +65,9 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/led.rs` | Non-blocking LED blink dispatcher (background pattern + priority instant sequences) |
 | `src/lis2dh12.rs` | LIS2DH12 accelerometer (HAL-independent): 10 Hz/normal mode, `dice()` orientation (1-6), and a hardware tilt/movement interrupt with selectable sensitivity + report `min_interval` |
 | `src/pir.rs` | The TOWER PIR Module (Excelitas DigiPyro PYQ 1648 / 1548): writes the detection criteria over SERIN and reads them back over DIRECT LINK (bit-banged within the detector's timing), motion events that wake the MCU from STOP, or the raw band-pass / low-pass / temperature signal; see [`docs/pir.md`](docs/pir.md) |
+| `src/taf/` | **taf**, the TOWER Application Framework's runtime: radio, pairing, settings from the property tables, reports and heartbeat, downlinks (sets, time, remote shell), the two node classes; see [`docs/taf.md`](docs/taf.md) |
+| `src/power_module.rs` | The Power Module's relay (P0) |
+| `src/strip_player.rs` | The LED strip player shared by `led_strip` and `radio_control`: the effects, their settings, the `strip` shell commands |
 | `src/power.rs` | Notes on the SDK's low-power (STOP) policy; the USB-presence gating itself lives in `console::manager` (see [`docs/console.md`](docs/console.md)) |
 | `src/storage.rs` | Non-volatile storage in the data EEPROM: a raw byte area (`read`/`write` at offset) and a key-value store (`Kv`); values are raw scalars or postcard structs, CRC-framed, updated in place |
 | `src/strip.rs` | The LED strip: the `tower-strip` effects core (re-exported) on the `ws2812` driver; `Strip` = a frame of effects + the render settings (brightness, gamma, RGBW white, dithering, orientation, current limit), see [`docs/strip.md`](docs/strip.md) |
@@ -159,11 +163,13 @@ Flashable programs come in two kinds:
   (`just build example <name>`); also add an `@echo <name>` line to the `examples` recipe in the
   [`justfile`](justfile) so `just examples` lists it (that list is hand-maintained to keep the
   recipe OS-independent; `just lists`, run by CI, fails if it drifts from `examples/*.rs`).
-- **Applications**: TOWER IoT Kit **products** in [`apps/`](apps). `radio_button`
-  (a sleeping sensor node: button events, thermometer, accelerometer) and
-  `radio_dongle_gateway` (a radio↔serial bridge + node coordinator) are **complete,
-  HW-verified radio products**; `radio_climate` is still a **starter skeleton** whose
-  radio wiring is a TODO you fill in following the `net_*` examples. `lcd_games` is five
+- **Applications**: TOWER IoT Kit **products** in [`apps/`](apps). The radio nodes are
+  built on **taf**, the TOWER Application Framework ([`docs/taf.md`](docs/taf.md)), and behave
+  alike (pairing, settings, reports, MQTT properties): `radio_button` (button gestures, tilt),
+  `radio_climate` (temperature), `radio_motion` (PIR Module), `radio_control` (Power Module
+  relay and LED strip, a listening node) and `radio_thermostat` (setpoint, weekly program,
+  heating demand). `radio_dongle_gateway` is the radio↔serial bridge and node coordinator
+  they talk to. `lcd_games` is five
   small games on the LCD Module (buttons, swipes and tilt as controls; see
   [`docs/hmi.md`](docs/hmi.md)). `led_strip` is an LED strip controller: every effect, live
   control over the shell (`strip effect fire`, `strip brightness 40`, ...), settings in EEPROM (see

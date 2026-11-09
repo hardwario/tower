@@ -92,13 +92,19 @@ deliberate `NodeRevealKey`.
 
 ### Radio application schema (`radio::NodeMsg` / `NodeCmd`)
 
-Node → host (`NodeMsg`): `Info(NodeInfo{firmware_name, firmware_version, session_id, sleeping})` ·
-`Button{kind, count}` · `Temperature{millic}` · `Accel{kind, face}` ·
-`Shell(NodeShellChunk{cmd_id, result, chunk, last, text})`. `ButtonKind` = Press/Release/Click/
-Hold; `AccelKind` = Motion/Orientation. Per-kind button `count` is RAM-only; a reset means the
+The application messages are generic: an app declares **properties** (`props.rs`, the kinds'
+tables; `docs/taf.md`) and the framework carries their values.
+
+Node → host (`NodeMsg`): `Info(NodeInfo{firmware_name, firmware_version, session_id, sleeping,
+wants_time})` · `Report(Vec<(id, value)>)` (up to `MAX_REPORT` property values) · `Event{id,
+value, count}` · `Shell(NodeShellChunk{cmd_id, result, chunk, last, text})`. Every value is an
+`i32` that the property's type interprets. An event's `count` is RAM-only; a reset means the
 node rebooted (watch `NodeInfo::session_id`).
 
-Host → node (`NodeCmd`): `Shell{epoch, cmd_id, line}`, queued as a downlink; the node runs it in
+Host → node (`NodeCmd`): `Set{id, value}` (a control or a setting), `Time{unix, utc_offset_min}`
+(the wall clock, answering `wants_time`), `Describe` (send an `Info` and a full report: a host
+that started after the node's last heartbeat does not know its kind yet) and `Shell{epoch,
+cmd_id, line}`, each queued as a downlink. The node runs a `Shell` line in
 the standard shell dispatcher and answers with `NodeMsg::Shell` chunks (≤ `RADIO_SHELL_CHUNK` =
 56 B) correlated by `cmd_id`. `epoch` is a random per-host-process tag: the queue is at-least-once,
 so the node de-duplicates re-deliveries on `(epoch, cmd_id)`: the random epoch stops a restarted
@@ -117,25 +123,25 @@ with the text `(reply lost on the air: ran once, not run again)`, never an empty
 
 ## The push-button node (`radio_button`)
 
-A sleeping node. Every enabled button event sends a secured `NodeMsg::Button` with that kind's
-running count; temperature is measured on a period and sent on-change or at latest every
-heartbeat; the accelerometer's tilt interrupt wakes the node for `NodeMsg::Accel` events. All
-of it is remote-shell reconfigurable (`system settings set …`).
+A sleeping taf node (`docs/taf.md`, kind `button`). Every enabled button gesture is a `button`
+event with its running count; the temperature is measured every `report-period` and sent on a
+change of `report-delta` or at the latest with the heartbeat; the accelerometer's tilt interrupt
+wakes the node for `tilt` events. Every setting is remote-settable (MQTT `set/<name>`, or
+`system settings set ...` over the remote shell).
 
 ### Settings
 
 | setting | kind | default | range / values | effect |
 |---|---|---|---|---|
-| `therm-period` | uint s | `60` | 5..86400 | temperature measure/send cadence |
-| `therm-delta` | uint c°C | `50` | 0..10000 | send when |ΔT| ≥ this; `0` = every period |
+| `report-period` | uint s | `60` | 5..86400 | temperature measure cadence |
+| `report-delta` | fixed °C | `0.50` | 0..10.00 | send when |ΔT| ≥ this; `0` = every period |
+| `led` | bool | `on` | on/off | event feedback on the LED |
 | `accel` | enum | `medium` | off/low/medium/high | tilt sensitivity (**boot-applied**) |
 | `heartbeat` | uint s | `900` | 60..86400 | max interval between uplinks (`NodeInfo`) |
 | `press` | bool | `off` | on/off | master enable: Press events |
 | `release` | bool | `off` | on/off | master enable: Release events |
 | `click` | bool | `on` | on/off | master enable: Click events |
 | `hold` | bool | `on` | on/off | master enable: Hold events |
-| `debounce-press` | uint ms | `30` | 1..1000 | press-recognition debounce (**boot-applied**) |
-| `debounce-release` | uint ms | `30` | 1..1000 | release debounce (**boot-applied**) |
 | `click-timeout` | uint ms | `500` | 50..5000 | max press length still counted a click (**boot-applied**) |
 | `hold-time` | uint ms | `1000` | 100..10000 | press length that becomes a hold (**boot-applied**) |
 | `band` | enum | `eu868` | eu868 / us915 | the band an **unpaired** node pairs on (**boot-applied**); a paired node runs the band of its pairing |
@@ -148,8 +154,8 @@ reported over radio and not shown on the LED. The default is the coherent **gest
 four is redundant and their LED shapes blend on a tap). Enable `press`/`release` for raw-edge
 reporting.
 
-**Timing is recognition, not indication.** `debounce-*`, `click-timeout`, and `hold-time`
-define what the physical input *means*; the LED feedback is a separate fixed indicator (below).
+**Timing is recognition, not indication.** `click-timeout` and `hold-time` (and a fixed 30 ms
+debounce) define what the physical input *means*; the LED feedback is a separate fixed indicator (below).
 
 ### LED behaviour
 
@@ -190,7 +196,7 @@ on that slot's channel, and the downlink window is the rest of that slot.
 
 ### Radio duty and backoff
 
-The temperature is measured every `therm-period` and sent when it changed or the heartbeat is
+The temperature is measured every `report-period` and sent when it changed or the heartbeat is
 due. While uplinks go undelivered (the gateway switched off, out of range, the node removed),
 the period doubles per consecutive miss up to `heartbeat`, so an orphaned node no longer spends
 a confirmed uplink with every retransmission and ACK window on every period, forever. A delivery,

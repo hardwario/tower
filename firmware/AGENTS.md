@@ -5,10 +5,16 @@ Cortex-M0+), the `firmware/` directory of the hardwario/tower monorepo (read the
 `AGENTS.md` first). The package is `tower-sdk`; its library keeps the crate name `tower`
 (`[lib] name = "tower"`), so code writes `use tower::...`. The crate is a library; runnable
 programs come in two kinds: educational `examples/` (Cargo `--example`) and TOWER IoT Kit
-**products** in `apps/` (Cargo `[[bin]]`, `--bin`). Two apps are complete, HW-verified radio
-products: `radio_button` (sleeping sensor node) and `radio_dongle_gateway` (radio↔serial
-bridge + node coordinator); `radio_climate` is still a starter skeleton (non-radio logic
-runs; radio send is a TODO); `lcd_games` is five games on the LCD Module (one file per game in
+**products** in `apps/` (Cargo `[[bin]]`, `--bin`). The radio node products are built on
+**taf**, the TOWER Application Framework (`src/taf/`, the property tables in
+`../crates/protocol/src/props.rs`, the kernels in `../crates/taf`; guide `docs/taf.md`, which
+also holds the app contract every one of them keeps): `radio_button` (button gestures, tilt),
+`radio_climate` (temperature; the Climate Module's sensors are still to come), `radio_motion`
+(PIR Module), `radio_control` (listening node: the Power Module relay and the LED strip; r2 only)
+and `radio_thermostat` (setpoint, mode, weekly program, heating demand; headless until the LCD
+fits, see `docs/taf.md` "RAM"). `radio_dongle_gateway` is the radio↔serial bridge + node
+coordinator. A new radio app goes on taf: declare its kind, write its task, nothing else.
+`lcd_games` is five games on the LCD Module (one file per game in
 `apps/lcd_games/`, pulled in with `#[path]`, so `just lists` still sees one `apps/*.rs`); `led_strip` is an
 LED strip controller (every effect, live `strip` shell commands, settings in EEPROM). Build/flash with `just`, which takes the kind then the name
 (`just flash example blinky`, `just build app radio_button`, `just run example <name>`)
@@ -18,7 +24,8 @@ no `just` wrappers for it. Subsystem guides: `docs/radio.md`, `docs/console.md`,
 `docs/storage.md`, `docs/gateway.md` (the push-button + gateway product), `docs/hmi.md` (the LCD
 Module driver `tower::lcd` and the HMI framework: drawing, fonts, menus, input), `docs/strip.md` (the
 LED strip: driver, render pipeline, effects, the `led_strip` app), `docs/pir.md` (the PIR Module
-driver `tower::pir`: the DigiPyro's two serial interfaces, their timing, tuning).
+driver `tower::pir`: the DigiPyro's two serial interfaces, their timing, tuning), `docs/taf.md`
+(the application framework and its apps).
 
 ## Workspace and builds
 
