@@ -154,7 +154,9 @@ impl<'d> Storage<'d> {
 /// program the flag stays set, and every later program reads it and fails too, until a reset.
 /// Bench 2026-11-09: a `radio_control` node lost every EEPROM write after one failure (settings,
 /// the strip state, the replay lane) until it rebooted. The flags are write-1-to-clear, so
-/// writing back what was read clears the ones set.
+/// writing back what was read clears the ones set. Fixed upstream after 0.6.0
+/// (embassy-rs/embassy#7307: the L0 `eeprom_write` clears them before and after every program);
+/// drop the clearing here with the first release that carries it.
 fn program(
     flash: &mut Flash<'_, Blocking>,
     off: u32,

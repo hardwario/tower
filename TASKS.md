@@ -21,20 +21,16 @@ Task status: `open`, `in progress`, `waiting (Dn)` (blocked on a decision), `don
 
 ## Decisions
 
-### D6. Report the embassy-stm32 EEPROM error-flag bug upstream?
-
-embassy-stm32 0.6 on the L0 checks `FLASH_SR` after each EEPROM program but clears the error flags
-only on success, and `unlock` never clears them: one failed program makes every later EEPROM write
-fail until reset. On the bench it silently stopped settings, strip state and replay lanes from
-saving after 18 minutes. Our storage works around it (8a24fe5). Options: an issue, an issue with
-a fix (clear the error flags before programming), or nothing.
-
 ### D7. The next CLI release: when, and after a dry run?
 
 `main` carries taf, the five node apps, `radio_gateway` and a firmware bundle that now ships every
 node app; `cli/Cargo.toml` is still 1.1.0. AGENTS.md asks for a dry run of `release-cli.yml` before
 tagging (the bundle step changed). Decide the version and when to tag; the dry run can go first
 at any time.
+
+2026-11-09: the dry run passed on 0ec5ca8 (T25), so the workflow is ready. Proposed:
+`cli-v1.2.0`; the version and the tag stay the maintainer's call. A commit that touches the
+build or its dependencies after 0ec5ca8 (T26 does) needs the dry run again.
 
 ## Tasks
 
@@ -345,6 +341,44 @@ README notices pointing to hardwario/tower; then archive (not delete) the old re
 existing links and releases keep working. Keep `twr-hardware` and `twr-enclosures` if the new
 generation still targets the same modules.
 
+### T26. Every component at its latest production version
+
+Status: open (asked for 2026-11-09)
+
+**Why.** What the repository pins should be the newest stable release of each thing. Dependabot
+proposes the weekly minor and patch bumps of the three lockfiles and the Actions, but a major
+needs its callers changed, a toolchain bump needs the workflow lines, and some pins it does not
+see at all. One of them is known to matter: the first embassy-stm32 after 0.6.0 carries the
+unified flash driver (T24), with API changes and our EEPROM workaround to drop.
+
+**Rule.** Released, stable versions only: no pre-releases, no git revisions. A version that
+cannot be taken (it breaks the bench, it needs a newer MSRV than the pin) is listed here with the
+reason, not skipped silently.
+
+- [ ] The inventory: every pin, its version, the newest stable one, how far apart. Known from
+      `cargo audit` (2026-11-09, warnings only): `clipboard-win` 5.4.1 in the root lockfile is
+      yanked, `bare-metal` 0.2.5 in the firmware's is unmaintained (RUSTSEC-2026-0110)
+- [ ] The Rust toolchain: `rust-toolchain.toml` and `RUST_TOOLCHAIN` in the three workflows
+      together (`audit` fails while they differ), `rust-version` in `[workspace.package]` and
+      the firmware's own
+- [ ] The host workspace: `[workspace.dependencies]`, the members' own dependencies, the root
+      `Cargo.lock`, majors included; the vendored OpenSSL comes with `openssl-src`
+- [ ] The firmware workspace: the embassy crates and the rest, `firmware/Cargo.lock`; with a new
+      embassy-stm32, the flash API (`Flash::new_blocking` takes a `Config`, the `Error` variants)
+      and the clearing in `storage.rs` goes (T24); look again at T11 (the `PWR_CR` write)
+- [ ] The fuzz harness: `fuzz/Cargo.toml`, `fuzz/Cargo.lock`, `CARGO_FUZZ_VERSION`
+- [ ] CI: every GitHub Action (full SHA, its `# vX.Y.Z` comment), the cross images of the
+      release build, the tools the workflows install by version (flip-link, cargo-fuzz and the
+      ones `taiki-e/install-action` fetches)
+- [ ] The Python side: what `hil/ppk2d.py` and the tools under `firmware/tools` and `tools`
+      import
+- [ ] `just check` green; the bench for what the firmware bumps can reach (the HIL groups, the
+      strip's timing, a STOP floor when a PPK2 is there); the release dry run again
+- [ ] The docs and comments that name a version (`embassy-stm32 0.6` in several) follow
+
+**Done when.** Every pin is at its newest stable release or listed here with the reason it is
+not, the gates and the bench pass, and the release dry run is green on that commit.
+
 ## Decided
 
 
@@ -376,9 +410,28 @@ generation still targets the same modules.
   `release-z`, the justfile's `z_apps`), every other app at "s" as before (T2). The options
   passed over were "z" for every app despite the strip, and parking the screen. 2026-11-09.
 
+- **D6. Report the embassy-stm32 EEPROM error-flag bug upstream.** Check first that upstream
+  still has it; if so, an issue with the fix (T24). 2026-11-09.
+
 ## Done
 
 (Newest first; one line each.)
+
+- **T25. Dry run of the CLI release** (D7): `release-cli.yml` run by hand on `main` (0ec5ca8,
+  run 42694611103): the checks, the six CLI builds and the firmware build green, the tag gate
+  and the publish job skipped, nothing published. The firmware zip holds the gateway, the five
+  node apps (`radio_thermostat` 192224 B, from `release-z`) and `blinky`, with the README and
+  the LICENSE. 2026-11-09.
+
+- **T24. The embassy-stm32 EEPROM error-flag bug, upstream** (D6): no issue filed, upstream has
+  fixed it. 0.6.0 (the newest release, what the firmware builds on) has the bug as described: its
+  `eeprom_write_*` return on the error before `clear_all_err`, and `unlock` clears nothing.
+  embassy's `main` (fd1ad3d) does not: the unified flash driver (embassy-rs/embassy#7307, merged
+  2026-10-20, commit 290c65b) writes the EEPROM through `flash/v3.rs` `eeprom_write`, which
+  clears the error flags before every program and again after it, whatever its result. Not in a
+  release yet; storage.rs and docs/firmware/storage.md say to drop our clearing with the first
+  one that carries it (the API changes there too: `Flash::new_blocking` takes a `Config`, the
+  `Error` variants are renamed). 2026-11-09.
 
 - **T23. The bridge knows node kinds across its own restart** (D5 (a)): a stable `id` per kind
   in `props.rs` (`0` = unknown; pinned by test, not in the radio tag: no node sends one),

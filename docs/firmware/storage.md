@@ -71,6 +71,9 @@ rules an app should follow so the EEPROM lasts the product's life.
   `radio_control` node with its strip running lost every write for the rest of its uptime). The
   storage clears the flags before each program, and retries a failed program once after logging
   it (`storage: EEPROM program at 0x... failed: ... (SR 0x...)`, the flags tell the cause).
+  Upstream fixed it after 0.6.0 (embassy-rs/embassy#7307, the unified flash driver: its L0
+  `eeprom_write` clears the flags before and after every program); the clearing here can go
+  with the first release that carries it, the logged retry stays.
 
 ## How it wears: it wear-levels
 
