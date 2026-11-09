@@ -15,7 +15,7 @@ it passes. The per-test catalogue of the firmware stays in
 | Fuzzing of the pure kernels (frames, radio envelopes, KV store, radio and shell kernels) | `fuzz/`, `just fuzz` | CI, weekly (nightly toolchain) |
 | Firmware gates: MCU build, RAM budget, clippy over the role variants, rustdoc | `just fw ci` | CI, every push |
 | Supply chain: `cargo audit` on every lockfile, pinned actions | `.github/workflows` | CI |
-| HIL bench: smoke, KATs, two-board radio and network, gateway end to end, stack high-water | `just hil bench` | by hand |
+| HIL bench: smoke, KATs, two-board radio and network, gateway end to end, stack high-water, a listening node's downlinks, OTA pairing and a sleeping node's `set` | `just hil bench` | by hand |
 | HIL power group (PPK2 + J-Link) | `just hil bench-power` | by hand |
 | Manual product checks and the remaining examples | `docs/firmware/test-plan.md`, `tools/hwtest` | by hand |
 

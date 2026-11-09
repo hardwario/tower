@@ -3,7 +3,7 @@
 Hardware-in-the-loop (HIL) test harness for the [HARDWARIO TOWER firmware
 SDK](../../firmware) (`hil/` in the [hardwario/tower](https://github.com/hardwario/tower)
 monorepo). It drives a real bench (a **TOWER Core Module** with SEGGER J-Link SWD + Nordic
-PPK2, and a **TOWER Radio Dongle** on USB) and asserts smoke, radio, extended, and power
+PPK2, and a **TOWER Radio Dongle** on USB) and asserts smoke, radio, extended, gateway and power
 behaviour against the firmware's **framed console decoded natively** with
 [`tower-protocol`](../../crates/protocol): tests match on typed `Log`/`Event` frames and on
 sequence gaps, not `strings | grep`.
@@ -32,7 +32,8 @@ just check        # no hardware: compiles EVERY bench group incl. the feature-ga
 cargo test        # no hardware: runs only host unit tests; compiles the #[ignore]d smoke/radio/
                   # extended/gateway groups, but NOT power (that needs `--features power`);
                   # from the repo root: cargo test -p tower-hil
-just bench        # bench: smoke + radio + extended + gateway groups (Dongle + Core over UART bootloader)
+just bench        # bench: smoke + radio + extended + gateway, listening and sleeping groups
+                  # (Dongle + Core over UART bootloader)
 just bench-power  # bench: STOP-floor current measurement (J-Link + PPK2, no USB power; see below)
 just bench-full   # bench: everything, on the fully-cabled bench
 ```
@@ -58,6 +59,19 @@ attached during power runs.
 
 `--test-threads=1` (baked into the `just` recipes) is load-bearing: the serial ports are
 exclusive, so bench tests must not run concurrently.
+
+The three groups on the product firmware (the Dongle with `radio_gateway`, the Core with a taf
+node app; no bridge, the tests speak the management channel on both consoles):
+
+| Group | Node | What it holds |
+|-------|------|---------------|
+| `tests/gateway.rs` | `radio_button` | Cable provisioning, a click bridged as a typed uplink, a remote shell line through the downlink queue, the stats stream; the gateway's stack peak with a full registry |
+| `tests/listening.rs` | `radio_control` | A listening node takes a `set` and a remote shell line at once: queued to answered within 2.5 s |
+| `tests/sleeping.rs` | `radio_button` | OTA pairing without hands (`PairingOpen` on the gateway, `JoinOpen` on the node: one SAS on both ends, the node registered as a sleeping one, its `Info` under the new key); a `set` queued while the node sleeps waits for the node's own next uplink, goes out in its window and is confirmed by the settings report, within the node's longest silence (`heartbeat` 60 s + `report-period` 5 s for the run, put back afterwards) |
+
+One group alone: `cargo test --test sleeping -- --ignored --test-threads=1 --nocapture` in `hil/`.
+The Dongle of a bench that also serves a bridge is flashed and its registry entry of the Core
+replaced by these groups: stop the bridge first, and name the node again afterwards.
 
 ## The wire format (one source tree)
 

@@ -611,13 +611,26 @@ impl Console {
         op: &MgmtOp<'_>,
         timeout: Duration,
     ) -> Result<(u8, Vec<u8>), String> {
+        self.mgmt_send(req_id, op)?;
+        self.mgmt_reply(req_id, timeout)
+    }
+
+    /// Send a management request without waiting for its reply: for an op that answers late
+    /// (`PairingOpen` resolves when a node joined or the window ended) while the test drives the
+    /// other board. Take the reply with [`mgmt_reply`](Self::mgmt_reply).
+    pub fn mgmt_send(&mut self, req_id: u16, op: &MgmtOp<'_>) -> Result<(), String> {
         self.send_frame(
             MsgType::MgmtRequest,
             &MgmtRequest {
                 req_id,
                 op: op.clone(),
             },
-        )?;
+        )
+    }
+
+    /// The reply to an earlier [`mgmt_send`](Self::mgmt_send): as
+    /// [`mgmt_roundtrip`](Self::mgmt_roundtrip) reads it.
+    pub fn mgmt_reply(&mut self, req_id: u16, timeout: Duration) -> Result<(u8, Vec<u8>), String> {
         let mut data = Vec::new();
         let mut deadline = Instant::now() + timeout;
         while Instant::now() < deadline {

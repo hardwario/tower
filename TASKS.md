@@ -105,17 +105,6 @@ of the kit.
 **Done when.** `radio_control` drives the Relay Module, its relay state reported and settable over
 MQTT like the Power Module's.
 
-### T7. HIL: OTA pairing of a taf node and a sleeping-node `set`
-
-Status: open
-
-**Why.** The HIL bench covers the listening node (`hil/tests/listening.rs`) and the gateway with
-cable provisioning; taf's OTA pairing and a `set` delivered on a sleeping node's next wake are
-checked by hand only.
-
-**Done when.** A HIL test pairs a taf node over the air and confirms a `set` on a sleeping node
-within one report period.
-
 ### T8. Root cause of the first failed EEPROM program
 
 Status: open (waiting for the bench to catch one)
@@ -382,6 +371,22 @@ reason, not skipped silently.
 **Done when.** Every pin is at its newest stable release or listed here with the reason it is
 not, the gates and the bench pass, and the release dry run is green on that commit.
 
+### T27. A bool setting prints `on` while unset and `true` once stored
+
+Status: open
+
+**Why.** The shell prints a stored bool as `true` / `false` (`firmware/src/shell.rs`) and an
+unset one as its default's text, which the taf property tables write as `on` / `off`
+(`crates/protocol/src/props.rs`): `led = on [bool, default on]` becomes `led = true [bool,
+default on]` after any `set`, also one to the same value. The node's log and MQTT say `on` /
+`off`. Found by `hil/tests/sleeping.rs` (T7), which accepts both.
+
+**What it takes.** One spelling: the shell prints a bool as `on` / `off` (it accepts all of
+`true`, `on`, `1` already), TAB completion offers the same, the SDK's own defaults (`"true"` /
+`"false"` in examples and docs) follow; then the test's `"false" | "off"` becomes `"off"`.
+
+**Done when.** `system settings get` shows the same text for a bool before and after a `set`.
+
 ## Decided
 
 
@@ -419,6 +424,20 @@ not, the gates and the bench pass, and the release dry run is green on that comm
 ## Done
 
 (Newest first; one line each.)
+
+- **T7. HIL: OTA pairing of a taf node and a sleeping-node `set`**: the group
+  `hil/tests/sleeping.rs` (the Dongle with `radio_gateway`, the Core with `radio_button`, no
+  bridge) and `Console::mgmt_send` / `mgmt_reply` for a request that answers late. It pairs over
+  the air without hands (`PairingOpen` on the gateway, `JoinOpen` on the node, the gesture's
+  pairing with its commit round): both ends name each other with one SAS, the node is registered
+  sleeping and unnamed, its `Info` arrives under the new key. Then a `set` (`led` off) queued
+  while the node sleeps: held on the gateway, not sent before the node's own next uplink,
+  delivered in its window and confirmed by the settings report. The bound is not one
+  `report-period` (a sample goes up only when its value moved) but the node's longest silence:
+  a value is sent again once its last send is a `heartbeat` old, looked at every
+  `report-period`; the test runs the node at 60 s + 5 s and allows 75 s. Bench: paired in 4.4 s,
+  the set delivered 48.5 s after it was queued and confirmed at 49.6 s, twice; the bench restored
+  (docs/firmware/results/2026-11-09.md). Found on the way: T27. 2026-11-09.
 
 - **T25. Dry run of the CLI release** (D7): `release-cli.yml` run by hand on `main` (0ec5ca8,
   run 42694611103): the checks, the six CLI builds and the firmware build green, the tag gate

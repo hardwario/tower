@@ -3,7 +3,7 @@
 //! downlink at once instead of holding it for the node's next uplink (docs/firmware/taf.md, "Classes"):
 //! here a property `Set` and a remote shell line each complete, end to end (queued on the gateway,
 //! delivered, run, answered over the radio), within [`LISTEN_BUDGET`], with nothing waking the node.
-//! The sleeping path is `gateway.rs`.
+//! The sleeping path is `gateway.rs` (a click wakes the node) and `sleeping.rs` (its own uplink).
 //!
 //! The Core board needs no Power Module and no strip: the relay (P0) and strip (P1) pins drive
 //! nothing on a bare board, and the test reads the relay back from the node's own report.
