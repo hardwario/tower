@@ -143,9 +143,25 @@ impl<'d> Storage<'d> {
 
     /// Write `data` at `offset` (bounds-checked; the HAL handles unlock/relock).
     pub fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), Error> {
-        crate::ws2812::yield_to_nvm(); // programming stalls flash fetch (see `Eeprom` below)
-        self.flash.eeprom_write_slice(offset, data).map_err(Error::Flash)
+        Eeprom::write(self, offset, data).map_err(Error::Flash)
     }
+}
+
+/// One EEPROM program of `data` at `off`, with the flash error flags cleared first.
+///
+/// embassy-stm32 (0.6) checks the L0 `FLASH_SR` error flags after each program but clears them
+/// only when the program succeeded, and its unlock does not clear them either: after one failed
+/// program the flag stays set, and every later program reads it and fails too, until a reset.
+/// Bench 2026-11-09: a `radio_control` node lost every EEPROM write after one failure (settings,
+/// the strip state, the replay lane) until it rebooted. The flags are write-1-to-clear, so
+/// writing back what was read clears the ones set.
+fn program(
+    flash: &mut Flash<'_, Blocking>,
+    off: u32,
+    data: &[u8],
+) -> Result<(), embassy_stm32::flash::Error> {
+    embassy_stm32::pac::FLASH.sr().modify(|_| {});
+    flash.eeprom_write_slice(off, data)
 }
 
 /// The [`Kv`] codec ([`tower_kv`]) drives the EEPROM through this trait. The raw flash error is
@@ -177,7 +193,14 @@ impl Eeprom for Storage<'_> {
     }
     fn write(&mut self, off: u32, data: &[u8]) -> Result<(), Self::Error> {
         crate::ws2812::yield_to_nvm();
-        let r = self.flash.eeprom_write_slice(off, data);
+        let mut r = program(&mut self.flash, off, data);
+        if let Err(e) = r {
+            // Logged with the raw flags, for the cause; then once more (a word program is
+            // idempotent, so the words of `data` already written are written again unchanged).
+            let sr = embassy_stm32::pac::FLASH.sr().read().0;
+            log::warn!(target: "storage", "EEPROM program at {off:#x} failed: {e:?} (SR {sr:#x}), retrying");
+            r = program(&mut self.flash, off, data);
+        }
         crate::watchdog::pet_during_stall();
         r
     }
