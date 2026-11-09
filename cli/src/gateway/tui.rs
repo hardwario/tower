@@ -1831,7 +1831,8 @@ fn render_modal(f: &mut Frame, app: &App, body: Rect) {
                         Span::raw(" left"),
                     ]));
                     lines.push(Line::from(""));
-                    lines.push(Line::from("hold the node's button ≥ 1 s to join;"));
+                    lines.push(Line::from("power the node up, hold its button 10 s,"));
+                    lines.push(Line::from("release when the LED goes off;"));
                     lines.push(Line::from("the window closes itself on the first join"));
                 }
                 _ if !seen_open => {

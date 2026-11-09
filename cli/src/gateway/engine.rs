@@ -3056,7 +3056,7 @@ mod tests {
         let mut e = engine();
         with_kind(&mut e, 0xAB12, "radio_button");
         let ev = NodeMsg::Event {
-            id: props::button::BUTTON,
+            id: props::common::BUTTON,
             value: 2,
             count: 7,
         };
@@ -3720,7 +3720,7 @@ mod tests {
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let n = radio::encode_node_msg(
             &NodeMsg::Event {
-                id: props::button::BUTTON,
+                id: props::common::BUTTON,
                 value: 2,
                 count: 1,
             },
@@ -4240,7 +4240,7 @@ mod tests {
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let n = radio::encode_node_msg(
             &NodeMsg::Event {
-                id: props::button::BUTTON,
+                id: props::common::BUTTON,
                 value: 2,
                 count: 1,
             },

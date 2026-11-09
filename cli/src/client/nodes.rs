@@ -278,7 +278,9 @@ fn sas_hint(addr: &str) -> String {
 fn add_ota(s: &mut Session, window: u16, name: Option<&str>) -> Result<u8> {
     // Printed before the gateway answers (it answers only when the window ends, or at once with
     // a refusal such as a full registry), so it must not claim the window is open.
-    eprintln!("[tower] opening a pairing window ({window}s): hold the node's button to join…");
+    eprintln!(
+        "[tower] opening a pairing window ({window}s): power the node up, hold its button 10 s, release when the LED goes off…"
+    );
     eprintln!(
         "[tower] to check the pairing's SAS, watch the node's console meanwhile (USB attached: \
          `tower -d <node port> logs`)"

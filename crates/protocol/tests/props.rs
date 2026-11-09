@@ -68,7 +68,7 @@ fn kinds_resolve_by_name_and_firmware() {
     assert_eq!(kind_of_firmware("button"), None);
     let b = kind("button").unwrap();
     assert_eq!(b.prop(common::TEMPERATURE).unwrap().name, "temperature");
-    assert_eq!(b.prop_named("click").unwrap().id, button::CLICK);
+    assert_eq!(b.prop_named("click").unwrap().id, common::CLICK);
     assert_eq!(kind("control").unwrap().class, Class::Listening);
 }
 

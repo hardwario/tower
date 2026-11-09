@@ -126,6 +126,9 @@ fn gateway_bridges_push_button_end_to_end() {
         })
         .expect("node console read");
     assert!(ready.is_some(), "node app up and paired after provisioning");
+    // A press within 3 s of the runtime's start is the power-up gesture's (pairing, factory reset;
+    // docs/firmware/taf.md), not a click: let that window close first.
+    std::thread::sleep(Duration::from_millis(3500));
 
     // --- uplink bridge: a simulated click must surface as a typed Uplink on the gateway ---
     node.send_shell(10, "button simulate 100").expect("sim click");
@@ -133,7 +136,7 @@ fn gateway_bridges_push_button_end_to_end() {
         .wait_for(Duration::from_secs(10), |f| {
             matches!(f, Frame::Uplink { src, data, .. }
                 if *src == node_addr
-                && matches!(radio::decode_node_msg(data), Ok(NodeMsg::Event { id: props::button::BUTTON, value: 2, count: 1 })))
+                && matches!(radio::decode_node_msg(data), Ok(NodeMsg::Event { id: props::common::BUTTON, value: 2, count: 1 })))
         })
         .expect("gateway console read");
     assert!(uplink.is_some(), "gateway forwarded the click (count=1) verbatim");

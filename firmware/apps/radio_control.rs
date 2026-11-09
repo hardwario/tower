@@ -8,9 +8,10 @@
 //! power-up (off, on, or its last state). The `strip ...` shell commands work as in `led_strip`,
 //! locally and over the radio's remote shell, and what they change is reported too. Changes are
 //! kept in EEPROM 10 s after the last one, so a power cut restores the strip (and the relay, with
-//! `relay-boot last`). The button: a click switches the relay, a hold the strip. The strip's clock
-//! effect shows the wall-clock time the gateway host syncs. The temperature and the
-//! accelerometer's `tilt` events are the taf runtime's, as in every taf app.
+//! `relay-boot last`). The button: a click switches the relay, a hold the strip (on top of the
+//! `button` events every taf app reports). The strip's clock effect shows the wall-clock time the
+//! gateway host syncs. The temperature and the accelerometer's `tilt` events are the taf
+//! runtime's, as in every taf app.
 //!
 //! Hardware: Core Module + Power Module (relay on P0) + the 144-pixel RGBW strip on PA1. The
 //! Power Module is mains powered, which is what a listening node needs.

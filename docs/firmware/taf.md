@@ -20,7 +20,7 @@ The MQTT side of the same properties (topics, payloads, the kinds' tables) is
 
 | App | Kind | Class | Hardware | What it does |
 |-----|------|-------|----------|--------------|
-| `radio_button` | `button` | sleeping | Core Module | Button gestures (press, release, click, hold, each switchable) |
+| `radio_button` | `button` | sleeping | Core Module | The common properties only: the Core button's gestures, the temperature, tilt |
 | `radio_climate` | `climate` | sleeping | Core Module | The common sensors only for now (the Climate Module's are still to come) |
 | `radio_motion` | `motion` | sleeping | Core Module r2 + PIR Module | Motion events with a holdoff, PIR sensitivity |
 | `radio_control` | `control` | listening | Core Module r2 + Power Module + LED strip | The relay (P0) and the strip (every `led_strip` effect) |
@@ -39,10 +39,24 @@ What every taf app does, so a user meets the same device whatever it measures:
 - **Reports**: the app reports values; the runtime sends what is news (any change, or for the
   temperature a change of `report-delta`), batched into one uplink, and everything again every
   `heartbeat` (with an `Info`), settings included.
-- **Unpaired**: the LED cue for 180 s after boot; holding the Core button for `hold-time` opens
-  over-the-air pairing (the gateway's window open: `tower nodes add --ota`), the SAS logged on
-  both ends. A 12 s hold re-pairs a paired node. Cable provisioning over USB (`tower nodes add
-  --port`) works for every app.
+- **The Core button**: every gesture (press, release, click, hold) is a `button` event when its
+  setting is on (`press` and `release` off, `click` and `hold` on by default; `hold-time` and
+  `click-timeout` tune the recognition), answered on the LED when `led` is on (a pulse, a double
+  blink for a click, a long flash for a hold). An app that acts on the button itself
+  (`radio_control`) gets every gesture too (`taf::next_button()`).
+- **Pairing and factory reset, the power-up gesture**: the LED flashes once when the
+  runtime is up, and a press within 3 s of it, held, runs the gesture: at 5 s the LED blinks
+  (released now: nothing), at 10 s it goes off (released within 5 s: over-the-air pairing), at
+  15 s it blinks fast (released now: nothing), at 20 s it goes off (released within 5 s: factory
+  reset), past 25 s the button counts as stuck and is ignored until released. Its own press,
+  hold and release are not events. Pairing works with the gateway whose window is open (`tower
+  nodes add --ota`), the SAS logged on both ends; a paired node keeps its pairing unless the new
+  one commits, and a gateway refuses a node it still has registered (`tower nodes remove` it
+  first). The factory reset erases every key and setting (`system eeprom wipe`) and reboots. The
+  gesture cannot start *during* power-up: the button is the BOOT button, and held while the power
+  comes on it starts the ROM bootloader. Unpaired, the node shows its LED cue for 180 s after
+  boot. Cable provisioning over USB (`tower nodes add --port`) and `node pair` (USB console) work
+  for every app.
 - **USB console**: logs, the shell and the management channel, always. Every app has
   `node status`, `node pair` (console only) and, when it has the Core button, `button simulate
   <ms>` (console only: a press of that length, for tests without hands).
@@ -54,7 +68,7 @@ What every taf app does, so a user meets the same device whatever it measures:
   TMP112's bus and the accelerometer's interrupt line, and an app that works with the temperature
   reads the runtime's (`taf::temperature()`).
 - **Settings**: the common ones (`heartbeat`, `report-period`, `report-delta`, `led`, `band`,
-  `hold-time`, `accel`) plus the kind's, in `system settings` like any SDK setting, derived from the
+  `hold-time`, `accel`, `press`, `release`, `click`, `hold`, `click-timeout`) plus the kind's, in `system settings` like any SDK setting, derived from the
   property table (no hand-written setting list, no key collisions). A setting other than `band`
   can be set over the radio too; `band` is console only (a wrong band cuts the link).
 - **Downlinks**: `Set` (a control or a setting; a setting is stored before the app hears of it),
@@ -156,11 +170,17 @@ r1). So the floor is real margin, not slack. What keeps an app small:
 - **Fewer tasks**: a task's future is resident for good. `console::event_now` sends an event
   without a waiting future. The runtime's sensor task is 200 B.
 
-**Flash is as tight as RAM for two builds** (2026-11-09, after the sensors moved into the
-runtime): `radio_control` on the r2 has 924 B of its 192 KB left, `radio_thermostat` on the r1
-268 B. The runtime is in every app, so code added to it
-lands in both; check `just fw build app <name>` (and with `TOWER_FEATURES=core-module-r1`)
-before and after (TASKS.md, T18).
+**Flash is the other limit.** The runtime is in every app, so code added to it lands in all of
+them; the largest are `radio_control` on the r2 (6.3 KB of its 192 KB free, 2026-11-09) and
+`radio_thermostat` on the r1 (5.6 KB). `just fw ci` prints every bin's free flash and warns
+under 2 KB (`tools/check_ram_budget.py`). Two lessons from winning it back:
+
+- **No checked `str` slices** (`&s[a..b]`, `split_at`, a `str` pattern's reverse search) in
+  firmware code: each can panic, and the panic's message Debug-formats a `char`, which links
+  about 4.5 KB of Unicode tables into every app. Use `s.get(a..b)`, `split_at_checked`,
+  `split_once`, `rfind` with a `char`. Removing the last such site freed 5.7 KB.
+- **Not `opt-level = "z"`**: it frees about 12 KB but slows the LED strip's rendering by up to
+  three times and lets its DMA refill run late (an underrun on the bench).
 
 **The LCD Module does not fit next to the radio yet.** Its driver keeps the 2 KB frame, 512 B of
 row signatures and its tasks resident (about 4.3 KB), which leaves a radio node 5.9 KB of stack,

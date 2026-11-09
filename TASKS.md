@@ -75,22 +75,6 @@ backoff for a gateway that is gone.
 **Done when.** A node whose boot `Info` is lost is known to the bridge (and a thermostat synced)
 within about a minute, and a node without a gateway still backs off as today.
 
-### T18. Flash headroom of `radio_control` (r2) and `radio_thermostat` (r1)
-
-Status: open
-
-**Why.** Since the common sensors moved into the taf runtime (T17), `radio_control` has 924 B of
-the r2's 192 KB flash left and `radio_thermostat` 268 B on the r1. Code added to the runtime lands
-in every app, so the next runtime feature overflows one of them.
-
-**What it takes.** Find what to win back across the SDK, measured per symbol (`llvm-nm -S
---size-sort` on the ELF): the largest futures (`Node::run_pairing` 6.9 KB, `Node::on_downlink`
-6 KB, the shell's and the console's tasks 6 KB each), log strings and their formatting,
-`opt-level = "z"` for cold code (never for the strip's refill interrupt or the radio's timing).
-
-**Done when.** Both builds have at least 4 KB free, and `just fw ci` warns when an app's image
-comes within 2 KB of its flash.
-
 ### T2. LCD thermostat: a page-mode LCD driver, then the thermostat's screen
 
 Status: open (D1: later)
@@ -398,11 +382,26 @@ generation still targets the same modules.
 - **D11. The layout of `docs/`.** (a) By component, mirroring the code: `docs/firmware/`,
   `docs/cli/`, `docs/hil/`, `docs/protocol.md`, `docs/flasher.md`, `docs/fuzzing.md`, an index
   (T16). 2026-11-09.
+- **D12. The power-up gesture and the BOOT button.** (a) The sequence starts right after
+  power-up: the LED blinks once, the button pressed within 3 s and held runs the stages (T20).
+  2026-11-09.
+- **D13. A node's own button actions.** (a) Kept on top of the reported `button` events
+  (`radio_control`'s click and hold) (T20). 2026-11-09.
 
 ## Done
 
 (Newest first; one line each.)
 
+- **T20. The Core button the same in every node app; pairing and factory reset at power-up**
+  (D12 (a), D13 (a)): the gestures common and reported by the runtime, the power-up gesture
+  (press within 3 s of the boot flash: 10 s pairs, 20 s resets, 25 s stuck), the old gestures
+  gone. Bench: a click from every node; on the motion board 7 s (nothing), 27 s (stuck at 25 s),
+  12 s (pairing), 22 s (factory reset, then paired again with the gesture: SAS 215391 on both
+  ends); the stage timer bug it found fixed. 2026-11-09.
+- **T18. Flash headroom**: 5.7 KB back in every app (no checked `str` slices: their panic linked
+  the Unicode tables), `opt-level = "z"` measured and rejected (strip underruns), free flash and a
+  2 KB warning in `just fw ci`: `radio_control` (r2) 6.3 KB, `radio_thermostat` (r1) 5.6 KB.
+  2026-11-09.
 - **T17. Thermometer and accelerometer in the taf runtime, for every node app**: `tilt` and
   `accel` common, the runtime's sensor task, `accel` applied at once. Bench (motion, control, r1
   thermostat): armed at boot, temperature on MQTT, an `accel` set re-armed in 70 ms, a tilt of

@@ -297,11 +297,13 @@ it prints the node and the handshake's 6-digit short authentication string,
 with `tower -d <node port> logs` while the node is on USB and pairing): equal values rule out a
 man in the middle (a 1 in 10⁶ chance for an attacker); different values mean one sat in between,
 so remove the node and pair again. The node keeps the new key only once the gateway acknowledges
-its first uplink under it, so a lost handshake frame leaves it unpaired (another hold retries)
-rather than half-paired. A paired node whose gateway forgot it (removed, wiped, replaced), or one
-moving to another gateway, re-pairs with a **12 s hold**: remove it on its gateway first
-(`tower nodes remove <node>`; OTA pairing never re-keys a registered address), open a window, then
-hold. Its old pairing stays in force unless the new one commits. The RPC waits the window plus
+its first uplink under it, so a lost handshake frame leaves it unpaired (another gesture
+retries) rather than half-paired. A node joins with its **power-up gesture**: power it up, press
+the button within 3 s of the LED's flash, hold it until the LED goes off at 10 s and release it
+within 5 s (docs/firmware/taf.md). A paired node whose gateway forgot it (removed, wiped,
+replaced), or one moving to another gateway, pairs again the same way: remove it on its gateway
+first (`tower nodes remove <node>`; OTA pairing never re-keys a registered address), open a
+window, then run the gesture. Its old pairing stays in force unless the new one commits. The RPC waits the window plus
 15 s; a join the gateway reports even later is logged as such and published, not dropped.
 
 **Moving a node key to another gateway** (a replacement dongle, or this one after a factory

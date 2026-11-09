@@ -282,17 +282,18 @@ Every kind has the **common** properties:
 | `report-delta` | number °C, 0..10, 2 decimals | setting | `0.5` | The temperature change that is news |
 | `led` | bool | setting | `true` | Event feedback on the board LED |
 | `band` | `eu868`, `us915` | local setting | `eu868` | The radio band |
-| `hold-time` | number ms, 100..10000 | setting | `1000` | How long a button press is a hold (pairing gesture) |
+| `hold-time` | number ms, 100..10000 | setting | `1000` | How long a press of the Core button is a hold |
 | `tilt` | number 0..6 | event | | The board moved: the die face up after it settled (`0`: still moving); at most one a 10 s |
 | `accel` | `off`, `low`, `medium`, `high` | setting | `medium` | The tilt threshold (`off` powers the accelerometer down); takes effect at once |
+| `button` | `press`, `release`, `click`, `hold` | event | | A gesture of the Core button (each kind only when its setting below is on) |
+| `press`, `release`, `click`, `hold` | bool | setting | `false`, `false`, `true`, `true` | Which gestures are reported |
+| `click-timeout` | number ms, 50..5000 | setting | `500` | The longest press that is a click |
 
 and its own:
 
 | Kind (firmware) | Class | Property | Type | Access | Default | Meaning |
 |-----------------|-------|----------|------|--------|---------|---------|
-| `button` (`radio_button`) | sleeping | `button` | `press`, `release`, `click`, `hold` | event | | A button gesture (each kind only when its setting below is on) |
-| | | `press`, `release`, `click`, `hold` | bool | setting | `false`, `false`, `true`, `true` | Which gestures are reported |
-| | | `click-timeout` | number ms, 50..5000 | setting | `500` | The longest press that is a click |
+| `button` (`radio_button`) | sleeping | (the common ones) | | | | |
 | `climate` (`radio_climate`) | sleeping | (the common ones) | | | | |
 | `motion` (`radio_motion`) | sleeping | `motion` | number 1..65535 | event | | Motion: `1` when it starts; at the end of a `holdoff` that saw more, their number |
 | | | `sensitivity` | `low`, `medium`, `high`, `very-high` | setting | `high` | The PIR detection threshold |
@@ -876,10 +877,11 @@ checked by comparing a 6-digit short authentication string (SAS) shown at both e
 2. Send `node_add_ota` with the window you need (default 60 s, at most 600 s) and wait up to the
    window plus 20 s for the response. `gateway/pairing` turns to `{"state":"open","remaining":N}`
    and counts down every second.
-3. Put the node in join mode: on an unpaired push button, hold the button for at least its
-   `hold-time` setting (1 s by default). A node that is paired already (moving to this gateway,
-   or one whose gateway forgot it) re-pairs with a 12 s hold; OTA pairing never re-keys an
-   address the gateway still has registered, so `node_remove` it here first.
+3. Put the node in join mode with the power-up gesture (docs/firmware/taf.md): power it up,
+   press the Core button within 3 s of the LED's flash and hold it; release it within 5 s of the
+   LED going off at 10 s. The same for a node that is paired already (moving to this gateway, or
+   one whose gateway forgot it); OTA pairing never re-keys an address the gateway still has
+   registered, so `node_remove` it here first.
 4. On a join, `gateway/pairing` becomes `{"state":"idle","joined":"0x0000cd34","sas":"004321"}`
    and the RPC answers `{"joined":"0x0000cd34","sas":"004321"}`. The node then appears on
    `nodes/{addr}` (`unnamed`), and the bridge names it `button:0` (or the next free index)

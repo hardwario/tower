@@ -68,9 +68,18 @@ const CHUNK_REPS: u8 = 5;
 /// Reps of an event or report uplink (the gesture events of the button app used 5; 3 is enough
 /// for the rest, and costs less airtime).
 const UPLINK_REPS: u8 = 3;
-/// The re-pair gesture: the Core button held this long while paired. Past the longest
-/// configurable `hold-time` (10 s), so no hold setting turns an ordinary hold into it.
-const REPAIR_HOLD: Duration = Duration::from_secs(12);
+/// The power-up gesture (docs/firmware/taf.md): the LED flashes once when the runtime is up, and
+/// a press within `GESTURE_START` of it starts the gesture, whose stages are `GESTURE_STAGE` long:
+/// held 5 s the LED blinks (released: nothing), at 10 s it goes off (released within 5 s: OTA
+/// pairing), at 15 s it blinks fast (released: nothing), at 20 s it goes off (released within 5 s:
+/// factory reset), at 25 s the button counts as stuck. It cannot start *during* power-up: the
+/// button is the BOOT button, and BOOT0 high at reset starts the ROM bootloader instead.
+const GESTURE_START: Duration = Duration::from_secs(3);
+const GESTURE_STAGE: Duration = Duration::from_secs(5);
+const BOOT_FLASH_MS: u32 = 200;
+/// The gesture's first blink (pairing next) and its second (factory reset next).
+static GESTURE_PAIR: led::Pattern = &[led::Step::on(250), led::Step::off(250)];
+static GESTURE_RESET: led::Pattern = &[led::Step::on(50), led::Step::off(50)];
 /// Unacknowledged uplinks in a row after which the node hints that its gateway may have forgotten
 /// it (once per streak).
 const UNACKED_HINT: u8 = 8;
@@ -105,7 +114,19 @@ struct Node {
     misses: u8,
     next_heartbeat: Instant,
     cue_until: Option<Instant>,
-    pressed_at: Option<Instant>,
+    /// The power-up gesture: a press may start it until then.
+    gesture_open: Instant,
+    /// The press that started the power-up gesture, while it is held, and the stage whose LED
+    /// it shows (the next one is due a stage after that: computing it from the elapsed time
+    /// alone would move it past every wake that should act on it).
+    gesture: Option<(Instant, u8)>,
+    /// Held through the whole gesture: stuck, ignored until it is released.
+    stuck: bool,
+    /// A short gesture press ended: the button driver's `Click` right after its `Release` is the
+    /// gesture's too, not an event.
+    gesture_click: bool,
+    /// The gestures since boot (press, release, click, hold), for the log.
+    presses: [u32; 4],
     resync_after: Instant,
     /// Running counts of the app's events since boot, by id.
     counts: heapless::Vec<(u8, u32), 8>,
@@ -156,10 +177,7 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
         .spawn(super::sensors::task(base.accel_int, base.i2c).unwrap());
     let btn = base.button.map(|pin| {
         let hold = super::param(props::common::HOLD_TIME).clamp(100, 10_000) as u64;
-        // An app with a `click-timeout` setting (the button) tunes the click recognition too.
-        let click = kind
-            .prop_named("click-timeout")
-            .map_or(500, |p| super::param(p.id).clamp(50, 5000)) as u64;
+        let click = super::param(props::common::CLICK_TIMEOUT).clamp(50, 5000) as u64;
         let config = button::Config {
             hold_time: Duration::from_millis(hold),
             click_timeout: Duration::from_millis(click),
@@ -271,7 +289,11 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
         misses: 0,
         next_heartbeat: Instant::now(),
         cue_until: None,
-        pressed_at: None,
+        gesture_open: Instant::MIN,
+        gesture: None,
+        stuck: false,
+        gesture_click: false,
+        presses: [0; 4],
         resync_after: Instant::MIN,
         counts: heapless::Vec::new(),
         describe_due: false,
@@ -283,9 +305,16 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
     match node.provision {
         Some(p) => info!(target: "node", "0x{:08x} paired with gateway 0x{:08x}", addr, p.gw_addr),
         None => {
-            info!(target: "node", "0x{:08x} not paired: hold the button 1 s (or `node pair`) to pair", addr);
+            info!(target: "node", "0x{:08x} not paired: power up, hold the button 10 s (or `node pair`)", addr);
             node.show_unpaired();
         }
+    }
+    // The runtime is up: one flash, and the power-up gesture may start (a press already held when
+    // the runtime came up starts it too).
+    node.led.flash(BOOT_FLASH_MS);
+    node.gesture_open = Instant::now() + GESTURE_START;
+    if node.btn.is_some_and(|b| b.is_pressed()) {
+        node.start_gesture();
     }
     node
 }
@@ -311,10 +340,7 @@ impl Node {
     /// The sleeping node's loop: the button, the timers, the app's reports and events, the cable.
     async fn sleep_loop(&mut self) -> ! {
         loop {
-            let repair_due = self
-                .pressed_at
-                .filter(|_| self.provision.is_some())
-                .map(|t| t + REPAIR_HOLD);
+            let gesture_due = self.gesture_due();
             let resync_due = self
                 .net
                 .fhss_since_beacon()
@@ -325,7 +351,7 @@ impl Node {
                 });
             let due = self
                 .next_heartbeat
-                .min(repair_due.unwrap_or(Instant::MAX))
+                .min(gesture_due.unwrap_or(Instant::MAX))
                 .min(self.cue_until.unwrap_or(Instant::MAX))
                 .min(resync_due.unwrap_or(Instant::MAX));
             let btn = self.btn;
@@ -341,7 +367,7 @@ impl Node {
                     if resync_due.is_some_and(|t| Instant::now() >= t) && !fhss_resync(&mut self.net).await {
                         self.resync_after = Instant::now() + Duration::from_secs(60);
                     }
-                    self.on_timer(repair_due).await;
+                    self.on_timer().await;
                 }
                 Either4::Third(()) => self.on_wake().await,
                 Either4::Fourth(frame) => {
@@ -372,16 +398,12 @@ impl Node {
             // first and the app's first values ride in its full report. A `Report` ahead of the
             // `Info` would make a host that does not know the kind yet ask for a `Describe`, and
             // then answer two `Info`s (two time syncs, two full reports).
-            let repair_due = self
-                .pressed_at
-                .filter(|_| self.provision.is_some())
-                .map(|t| t + REPAIR_HOLD);
             let now = Instant::now();
             if now >= self.next_heartbeat
-                || repair_due.is_some_and(|t| now >= t)
+                || self.gesture_due().is_some_and(|t| now >= t)
                 || self.cue_until.is_some_and(|t| now >= t)
             {
-                self.on_timer(repair_due).await;
+                self.on_timer().await;
             }
             if WAKE.signaled() {
                 WAKE.reset();
@@ -396,39 +418,124 @@ impl Node {
     }
 
     async fn on_button(&mut self, ev: button::Event) {
-        match ev {
-            button::Event::Press => self.pressed_at = Some(Instant::now()),
-            button::Event::Release => self.pressed_at = None,
-            _ => {}
+        if self.stuck {
+            // Held through the whole gesture: nothing until it is released.
+            self.stuck = ev != button::Event::Release;
+            return;
+        }
+        if core::mem::take(&mut self.gesture_click) && ev == button::Event::Click {
+            return;
+        }
+        if self.gesture.is_some() {
+            // The gesture's own press, hold and release are not events.
+            if ev == button::Event::Release {
+                self.end_gesture().await;
+            }
+            return;
+        }
+        if ev == button::Event::Press && Instant::now() < self.gesture_open {
+            self.start_gesture();
+            return;
         }
         if self.provision.is_none() {
-            // Someone is at the node: show the unpaired cue again; a hold pairs.
+            // Someone is at the node: show the unpaired cue again.
             self.show_unpaired();
-            if ev == button::Event::Hold {
-                self.pressed_at = None;
-                self.pair_due = Some((PAIRING_WINDOW, None));
-                return;
-            }
         } else if self.misses > 0 {
             // Someone is at the node: end the backoff.
             self.misses = 0;
         }
+        super::button_event(ev, &mut self.presses);
         let _ = super::BUTTON.try_send(ev);
     }
 
-    async fn on_timer(&mut self, repair_due: Option<Instant>) {
-        if repair_due.is_some() && !self.btn.is_some_and(|b| b.is_pressed()) {
+    // ---- the power-up gesture -------------------------------------------------------------------
+
+    fn start_gesture(&mut self) {
+        self.gesture = Some((Instant::now(), 0));
+        self.cue_until = None;
+        self.led.set_background(None);
+    }
+
+    /// The gesture's stage: whole `GESTURE_STAGE`s held so far.
+    fn gesture_stage(&self) -> Option<u64> {
+        self.gesture
+            .map(|(t, _)| t.elapsed().as_millis() / GESTURE_STAGE.as_millis())
+    }
+
+    /// When the held gesture's next stage is due (after the one its LED shows).
+    fn gesture_due(&self) -> Option<Instant> {
+        let (t, shown) = self.gesture?;
+        Some(t + GESTURE_STAGE * (u32::from(shown) + 1))
+    }
+
+    /// The held gesture entered a stage: its LED, or the stuck verdict.
+    fn gesture_tick(&mut self) {
+        let (Some((t, _)), Some(stage)) = (self.gesture, self.gesture_stage()) else {
+            return;
+        };
+        if !self.btn.is_some_and(|b| b.is_pressed()) {
             // Released, but the Release was lost to a full queue: no gesture.
-            self.pressed_at = None;
-        } else if repair_due.is_some_and(|due| Instant::now() >= due) {
-            self.pressed_at = None;
-            info!(target: "node", "re-pairing (button held {} s)", REPAIR_HOLD.as_secs());
-            self.pair_due = Some((PAIRING_WINDOW, None));
+            self.gesture = None;
+            self.restore_cue();
+            return;
         }
+        match stage {
+            0 => {}
+            1 => self.led.set_background(Some(GESTURE_PAIR)),
+            3 => self.led.set_background(Some(GESTURE_RESET)),
+            2 | 4 => self.led.set_background(None),
+            _ => {
+                warn!(target: "button", "held over 25 s: stuck, ignored until released");
+                self.gesture = None;
+                self.stuck = true;
+                self.restore_cue();
+                return;
+            }
+        }
+        self.gesture = Some((t, stage as u8));
+    }
+
+    /// The gesture's button came up: pairing after 10 to 15 s, the factory reset after 20 to 25 s,
+    /// nothing otherwise.
+    async fn end_gesture(&mut self) {
+        let stage = self.gesture_stage();
+        self.gesture = None;
+        self.gesture_click = true;
+        self.led.set_background(None);
+        match stage {
+            Some(2) => {
+                info!(target: "node", "pairing (button released after 10 s)");
+                self.pair_due = Some((PAIRING_WINDOW, None));
+            }
+            Some(4) => {
+                warn!(target: "node", "factory reset (button released after 20 s), rebooting");
+                if self.kv.wipe().is_err() {
+                    log::error!(target: "storage", "wipe failed (the store is whole or empty)");
+                }
+                // The store is frozen now: reboot, as the shell's `system eeprom wipe` does.
+                console::flush().await;
+                cortex_m::peripheral::SCB::sys_reset();
+            }
+            _ => self.restore_cue(),
+        }
+    }
+
+    /// Back from the gesture: the unpaired cue again when unpaired.
+    fn restore_cue(&mut self) {
+        if self.provision.is_none() {
+            self.show_unpaired();
+        }
+    }
+
+    async fn on_timer(&mut self) {
         let now = Instant::now();
         if self.cue_until.is_some_and(|t| now >= t) {
             self.cue_until = None;
             self.led.set_background(None);
+        }
+        // After the cue, so the gesture's LED wins.
+        if self.gesture_due().is_some_and(|t| now >= t) {
+            self.gesture_tick();
         }
         if now >= self.next_heartbeat {
             // The period, doubled per undelivered uplink in a row, capped at a day.
@@ -638,10 +745,9 @@ impl Node {
             if streak == UNACKED_HINT && !matches!(result, SendResult::DutyLimited) {
                 warn!(
                     target: "node",
-                    "gateway 0x{:08x}: {} uplinks unacknowledged; if it forgot this node, re-pair (hold {} s)",
+                    "gateway 0x{:08x}: {} uplinks unacknowledged; if it forgot this node, pair it again",
                     gw,
-                    streak,
-                    REPAIR_HOLD.as_secs()
+                    streak
                 );
             }
         }

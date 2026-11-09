@@ -141,12 +141,20 @@ pub mod common {
     pub const HOLD_TIME: u8 = 6;
     pub const TILT: u8 = 7;
     pub const ACCEL: u8 = 8;
+    pub const BUTTON: u8 = 9;
+    pub const PRESS: u8 = 10;
+    pub const RELEASE: u8 = 11;
+    pub const CLICK: u8 = 12;
+    pub const HOLD: u8 = 13;
+    pub const CLICK_TIMEOUT: u8 = 14;
 }
 
 /// The radio bands, by [`common::BAND`] index.
 pub const BANDS: &[&str] = &["eu868", "us915"];
 /// [`common::ACCEL`] (tilt sensitivity) values; `off` powers the accelerometer down.
 pub const SENSITIVITY: &[&str] = &["off", "low", "medium", "high"];
+/// [`common::BUTTON`] event values: the Core button's gestures, in this order.
+pub const BUTTON_EVENTS: &[&str] = &["press", "release", "click", "hold"];
 
 /// The properties every standard app has.
 pub const COMMON: &[Prop] = &[
@@ -208,46 +216,38 @@ pub const COMMON: &[Prop] = &[
         access: Access::Param,
         default: "medium",
     },
+    // The Core button: each gesture is reported when its setting is on (press and release off,
+    // click and hold on: the gesture scheme).
+    Prop {
+        id: common::BUTTON,
+        name: "button",
+        ty: Type::Enum(BUTTON_EVENTS),
+        access: Access::Event,
+        default: "",
+    },
+    bool_prop(common::PRESS, "press", Access::Param, "off"),
+    bool_prop(common::RELEASE, "release", Access::Param, "off"),
+    bool_prop(common::CLICK, "click", Access::Param, "on"),
+    bool_prop(common::HOLD, "hold", Access::Param, "on"),
+    Prop {
+        id: common::CLICK_TIMEOUT,
+        name: "click-timeout",
+        ty: number(50, 5000, 0, "ms"),
+        access: Access::Param,
+        default: "500",
+    },
 ];
 
-/// `radio_button`: a battery push button.
+/// `radio_button`: a battery push button: the common properties only (the Core button's gestures,
+/// the temperature, tilt).
 pub mod button {
     use super::*;
-
-    pub const BUTTON: u8 = APP_BASE;
-    pub const PRESS: u8 = APP_BASE + 1;
-    pub const RELEASE: u8 = APP_BASE + 2;
-    pub const CLICK: u8 = APP_BASE + 3;
-    pub const HOLD: u8 = APP_BASE + 4;
-    pub const CLICK_TIMEOUT: u8 = APP_BASE + 5;
-
-    /// [`BUTTON`] event values.
-    pub const EVENTS: &[&str] = &["press", "release", "click", "hold"];
 
     pub const KIND: Kind = Kind {
         name: "button",
         class: Class::Sleeping,
         time: false,
-        props: &[
-            Prop {
-                id: BUTTON,
-                name: "button",
-                ty: Type::Enum(EVENTS),
-                access: Access::Event,
-                default: "",
-            },
-            bool_prop(PRESS, "press", Access::Param, "off"),
-            bool_prop(RELEASE, "release", Access::Param, "off"),
-            bool_prop(CLICK, "click", Access::Param, "on"),
-            bool_prop(HOLD, "hold", Access::Param, "on"),
-            Prop {
-                id: CLICK_TIMEOUT,
-                name: "click-timeout",
-                ty: number(50, 5000, 0, "ms"),
-                access: Access::Param,
-                default: "500",
-            },
-        ],
+        props: &[],
     };
 }
 

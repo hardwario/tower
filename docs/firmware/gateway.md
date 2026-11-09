@@ -210,22 +210,23 @@ source register cannot be read (an I²C error) or when it stays high through 10 
 row that found nothing to report (a stuck line; real motion yields an event at least every 5),
 instead of re-reading it in a loop (which once starved the executor until the watchdog reset
 the node, a boot loop). A button held past `hold-time`, or
-stuck, waits for the release edge instead of polling every 5 ms (the re-pair gesture's 12 s
-clock runs in the main loop, from the Press, so it does not need the polling).
+stuck, waits for the release edge instead of polling every 5 ms (the power-up gesture's clock
+runs in the main loop, from the Press, so it does not need the polling).
 
 ### `button simulate <ms>`
 
 Injects a synthetic press of `<ms>` (1..15000) through the **real** recognition machine
 (debounce → click/hold classification) and on into reporting, the console "finger" for testing
 without a physical press. A `100` ms press is a click (> debounce, < click-timeout); a `1500` ms
-press is a hold; on a paired node a `13000` ms press is the re-pair gesture. Used by the HIL
-gateway test. **Console only:** over the radio it would let anyone who can publish a remote shell
-command inject clicks into the event stream, or start the re-pair gesture on every node.
+press is a hold; within 3 s of the runtime's boot flash a press is the power-up gesture's
+(`12000` pairs, `22000` factory-resets, up to 30000). Used by the HIL gateway test. **Console
+only:** over the radio it would let anyone who can publish a remote shell command inject clicks
+into the event stream, or pair or factory-reset nodes after a reboot.
 
 ### Pairing (node side)
 
-- **OTA**: hold the button for at least `hold-time` (1 s by default) while unprovisioned: the
-  node pairs (X25519 key agreement with a commitment round, docs/firmware/radio.md "OTA pairing") with any
+- **OTA**: the power-up gesture (docs/firmware/taf.md: press within 3 s of the boot flash, hold
+  until the LED goes off at 10 s, release within 5 s): the node pairs (X25519 key agreement with a commitment round, docs/firmware/radio.md "OTA pairing") with any
   gateway that has a window open.
   It logs `net: pairing: SAS 123456` at the end of the handshake; the same SAS on the gateway's
   side (its console, and `tower nodes add --ota`, which prints it) is the man-in-the-middle check
@@ -237,20 +238,19 @@ command inject clicks into the event stream, or start the re-pair gesture on eve
   to 6 attempts 2 s apart, ~15 s in all) and only on an ACK persists `(gw_addr, key, band,
   channel)` in `NS_APP` and logs `node: paired with gateway 0x…, SAS 123456 (uid …)`. No ACK (a
   lost JOIN_CONFIRM, a full or failing gateway registry): it logs `node: pairing: gateway 0x… did
-  not confirm (no ACK), key discarded` and stays unpaired, so another hold retries
+  not confirm (no ACK), key discarded` and stays unpaired, so another gesture retries
   (the gateway's window stays open after a lost confirm). Before this round a lost confirm left a
   node that believed it was paired while the gateway dropped all its uplinks, recoverable only
   over USB. The one asymmetry left is the reverse and needs every acknowledgement of the round to
   be lost: the gateway registered the node (it is in `tower nodes list`, never seen) while the
   node gave the key up; the gateway refuses that address's JOIN_REQ, so remove it there first.
-- **Re-pair** (recovery): hold the button ≥ 12 s while paired (longer than any `hold-time`, so a
-  normal Hold never becomes one): the node runs the same OTA pairing (fast blink). The current
-  pairing stays in force, in RAM and in EEPROM, unless the new one commits, so an accidental long
-  press changes nothing. It is the way back for a node whose gateway forgot it (a removed node, a
+- **Re-pair** (recovery): the same power-up gesture on a paired node runs the same OTA pairing
+  (fast blink). The current pairing stays in force, in RAM and in EEPROM, unless the new one
+  commits, so a gesture that finds no window changes nothing. It is the way back for a node whose gateway forgot it (a removed node, a
   wiped or replaced gateway) and the way to move a node to another gateway. OTA pairing never
   re-keys an address a gateway still has registered (see the gateway side), so: **remove the node
-  on its gateway (`tower nodes remove <node>`), open a window (`tower nodes add --ota`), then hold
-  the button 12 s.** A paired node whose uplinks go unacknowledged 8 times in a row logs a hint
+  on its gateway (`tower nodes remove <node>`), open a window (`tower nodes add --ota`), then run
+  the power-up gesture.** A paired node whose uplinks go unacknowledged 8 times in a row logs a hint
   saying so (`node: gateway 0x…: 8 uplinks unacknowledged; …`); it keeps sending, since
   the usual cause is range or a gateway that is off.
 - **Cable**: on USB the node serves the management channel: `Describe` (role probe), `Provision`
@@ -363,7 +363,7 @@ commands nor keeps the radio out of receive. The TTL still ends the attempts.
   the gateway's own) gets no answer, and the gateway logs `net: pairing: join request from 0x…
   refused: already registered, remove it to re-pair` (at most once per 10 s, with a count). The key agreement is unauthenticated until the SAS is
   compared, so answering would let anyone re-key a registered node by joining *as* it. **To
-  re-pair a known node (e.g. after a factory reset, or with its 12 s re-pair hold), `NodeRemove`
+  re-pair a known node (e.g. after a factory reset, or with its power-up gesture), `NodeRemove`
   it first**, then open the window. The registry commit is insert-only as a backstop
   (`registry::add_new`; an existing address answers `BAD_ARG`).
 - **The window closes on the first commit**, and the very next loop turn serves receive slices

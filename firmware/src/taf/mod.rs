@@ -14,8 +14,8 @@
 //! - [`param`]`(id)`: a setting's current value (from EEPROM, the shell's `system settings`).
 //!
 //! The runtime ([`run`], which never returns) owns the radio and gives every app the same
-//! behaviour: OTA pairing (Core button held while unpaired; a 12 s hold re-pairs), cable
-//! provisioning over USB, the unpaired LED cue, the heartbeat `Info` + full report, the remote
+//! behaviour: the Core button's gestures as `button` events, OTA pairing and the factory reset by
+//! the power-up gesture (a hold started within 3 s of the boot flash), cable provisioning over USB, the unpaired LED cue, the heartbeat `Info` + full report, the remote
 //! shell, settings over the radio, wall-clock time from the host ([`local_time`]), the watchdog,
 //! and the Core Module's sensors: the temperature (read it with [`temperature`]) and the
 //! accelerometer's `tilt` events.
@@ -302,7 +302,8 @@ pub async fn next_set() -> (u8, i32) {
     set
 }
 
-/// The next Core button event the runtime passed on (not those spent on pairing).
+/// The next Core button gesture, for an app that acts on the button itself (the runtime has
+/// reported it already, per its setting; the power-up gesture's own press never comes here).
 pub async fn next_button() -> button::Event {
     BUTTON.receive().await
 }
@@ -423,12 +424,14 @@ fn cmd_pair(ctx: &mut shell::Ctx<'_>, _args: &[&str]) -> shell::Outcome {
     shell::Outcome::ok()
 }
 
-/// The longest press `button simulate` injects (past the 12 s re-pair gesture).
-const SIM_MAX_MS: u32 = 15_000;
+/// The longest press `button simulate` injects: past the power-up gesture's 25 s, so every
+/// outcome (pairing, factory reset, a stuck button) can be tested from the console.
+const SIM_MAX_MS: u32 = 30_000;
 
 /// `button simulate <ms>`: a synthetic press of `<ms>` through the real recognition (debounce,
-/// click, hold): the console "finger" for tests and the HIL bench. Console only: over the radio
-/// it would inject events integrations act on, or start the re-pair gesture fleet-wide.
+/// click, hold): the console "finger" for tests and the HIL bench. Within 3 s of the runtime's
+/// boot flash it is the power-up gesture's press. Console only: over the radio it would inject
+/// events integrations act on, or pair or factory-reset nodes fleet-wide after a reboot.
 fn cmd_simulate(ctx: &mut shell::Ctx<'_>, args: &[&str]) -> shell::Outcome {
     match args.first().and_then(|s| s.parse::<u32>().ok()) {
         Some(ms) if (1..=SIM_MAX_MS).contains(&ms) => {
@@ -547,6 +550,44 @@ fn forget_sent() {
             s.sent.reset();
         }
     });
+}
+
+// ---- the Core button --------------------------------------------------------------------------
+
+/// The LED's answers to reported gestures (fixed shapes: the LED is an indicator, not a setting).
+/// A click is a double blink, so it reads apart from the press before it on the one LED.
+const LED_PULSE_MS: u32 = 250;
+const LED_CLICK_MS: u32 = 100;
+const LED_HOLD_MS: u32 = 1000;
+
+/// A Core button gesture in everyday use (not the power-up gesture): logged, answered on the LED
+/// and reported as a `button` event when its setting (`press`, `release`, `click`, `hold`) is on;
+/// a gesture whose setting is off is ignored entirely. `counts` are the per-gesture counts since
+/// boot, for the log.
+fn button_event(ev: button::Event, counts: &mut [u32; 4]) {
+    use props::common;
+    let (index, setting) = match ev {
+        button::Event::Press => (0, common::PRESS),
+        button::Event::Release => (1, common::RELEASE),
+        button::Event::Click => (2, common::CLICK),
+        button::Event::Hold => (3, common::HOLD),
+    };
+    counts[index] = counts[index].wrapping_add(1);
+    if param(setting) == 0 {
+        return;
+    }
+    let note = if paired() { "" } else { " (not paired)" };
+    log::info!(target: "button", "{} #{}{}", props::BUTTON_EVENTS[index], counts[index], note);
+    if led_on()
+        && let Some(led) = led()
+    {
+        match ev {
+            button::Event::Click => led.pulse(LED_CLICK_MS, LED_CLICK_MS, 2),
+            button::Event::Hold => led.flash(LED_HOLD_MS),
+            _ => led.flash(LED_PULSE_MS),
+        }
+    }
+    event(common::BUTTON, index as i32);
 }
 
 // ---- common sensors ---------------------------------------------------------------------------

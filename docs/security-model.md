@@ -285,11 +285,13 @@ registered address by design (an authenticated host action: the re-provision pat
    gateway's SAS reaches the operator through the tooling (`tower nodes add --ota` prints it);
    the node has no display, so its SAS is only visible on its USB console (`tower -d <port>
    logs` running while it pairs). Prefer cable provisioning or keyed join where possible, and
-   keep windows short. The node's re-pair gesture (a 12 s hold while paired) opens no extra door:
-   it only starts a join, which a gateway answers only inside an operator-opened window and never
-   for an address it still has registered. Only a hand on the node can make it: the push button's
-   `button simulate` (which can hold the button 15 s) is console-only, refused over the radio, so
-   a broker-level intruder can neither start the gesture fleet-wide nor inject clicks.
+   keep windows short. The power-up gesture (a hold of the Core button started within 3 s of
+   boot, docs/firmware/taf.md) opens no extra door: its pairing only starts a join, which a
+   gateway answers only inside an operator-opened window and never for an address it still has
+   registered; its factory reset erases the node's own keys and settings, which needs the same
+   hand on the node. Only a hand on the node can make it (a power cycle, then the button), or the
+   USB console: `button simulate` (up to 30 s) is console-only, refused over the radio, so a
+   broker-level intruder can neither run the gesture fleet-wide nor inject clicks.
 2. **No forward secrecy for data.** Link keys are static per node; whoever obtains a key (e.g. a
    board without RDP) can decrypt recorded past traffic of that node and impersonate it until it
    is re-keyed.
