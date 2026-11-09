@@ -66,8 +66,8 @@ impl Day {
         let mut words = text.split_ascii_whitespace();
         while let Some(time) = words.next() {
             let deci = words.next().ok_or(ParseError::Count)?;
-            let minute = parse_time(time).ok_or(ParseError::Time)?;
-            let deci = parse_deci(deci).ok_or(ParseError::Setpoint)?;
+            let minute = parse_minute(time).ok_or(ParseError::Time)?;
+            let deci = parse_setpoint(deci).ok_or(ParseError::Setpoint)?;
             if day.len as usize == POINTS {
                 return Err(ParseError::Count);
             }
@@ -78,6 +78,44 @@ impl Day {
             day.len += 1;
         }
         Ok(day)
+    }
+
+    /// Set the switch point at `minute` to `deci`, adding it in time order, or remove it (`None`;
+    /// removing one that is not there changes nothing). `Err(Count)` when adding to a full day.
+    /// One point at a time is what a remote shell line can carry (the radio's 56-byte line holds
+    /// a day of two or three points at most).
+    pub fn set_point(&mut self, minute: u16, deci: Option<i16>) -> Result<(), ParseError> {
+        let mut points: [Option<Point>; POINTS] = [None; POINTS];
+        let mut len = 0;
+        let mut placed = deci.is_none();
+        for p in self.points() {
+            if p.minute == minute {
+                continue; // replaced or removed
+            }
+            if !placed && p.minute > minute {
+                if len == POINTS {
+                    return Err(ParseError::Count);
+                }
+                points[len] = deci.map(|deci| Point { minute, deci });
+                len += 1;
+                placed = true;
+            }
+            if len == POINTS {
+                return Err(ParseError::Count);
+            }
+            points[len] = Some(p);
+            len += 1;
+        }
+        if !placed {
+            if len == POINTS {
+                return Err(ParseError::Count);
+            }
+            points[len] = deci.map(|deci| Point { minute, deci });
+            len += 1;
+        }
+        self.points = points;
+        self.len = len as u8;
+        Ok(())
     }
 
     /// The setpoint of the last switch point at or before `minute`.
@@ -119,7 +157,8 @@ impl fmt::Display for Day {
     }
 }
 
-fn parse_time(text: &str) -> Option<u16> {
+/// A `hh:mm` time of day as minutes since midnight (`6:00` too).
+pub fn parse_minute(text: &str) -> Option<u16> {
     let (h, m) = text.split_once(':')?;
     if h.is_empty() || h.len() > 2 || m.len() != 2 {
         return None;
@@ -129,7 +168,9 @@ fn parse_time(text: &str) -> Option<u16> {
     (h < 24 && m < 60).then_some(h * 60 + m)
 }
 
-fn parse_deci(text: &str) -> Option<i16> {
+/// A setpoint in °C with at most one decimal (`21`, `18.5`) as tenths, within
+/// [`MIN_DECI`]..=[`MAX_DECI`].
+pub fn parse_setpoint(text: &str) -> Option<i16> {
     let (int, frac) = match text.split_once('.') {
         Some((i, f)) => (i, f),
         None => (text, "0"),

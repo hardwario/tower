@@ -1,7 +1,7 @@
 //! The taf kernels: report policy, wall clock, weekly program, thermostat demand.
 
 use tower_taf::clock::{Local, WallClock};
-use tower_taf::program::{Day, ParseError, Week, minutes_until};
+use tower_taf::program::{Day, POINTS, ParseError, Week, minutes_until, parse_minute, parse_setpoint};
 use tower_taf::report::Reporter;
 use tower_taf::thermostat::{Demand, Mode, Override};
 
@@ -79,6 +79,47 @@ fn day_parses_prints_and_rejects() {
     assert_eq!(Day::parse("08:00 21 08:00 18"), Err(ParseError::Order));
     let seven = "01:00 20 02:00 20 03:00 20 04:00 20 05:00 20 06:00 20 07:00 20";
     assert_eq!(Day::parse(seven), Err(ParseError::Count));
+}
+
+#[test]
+fn day_points_set_one_at_a_time() {
+    let mut d = Day::parse("06:00 21 22:00 18").unwrap();
+    // Added in time order, in the middle, first and last.
+    d.set_point(16 * 60, Some(215)).unwrap();
+    d.set_point(60, Some(200)).unwrap();
+    d.set_point(23 * 60 + 30, Some(170)).unwrap();
+    assert_eq!(
+        d.to_string(),
+        "01:00 20.0 06:00 21.0 16:00 21.5 22:00 18.0 23:30 17.0"
+    );
+    // Replaced in place, removed, and a removal of a missing point is a no-op.
+    d.set_point(16 * 60, Some(190)).unwrap();
+    d.set_point(60, None).unwrap();
+    d.set_point(12 * 60, None).unwrap();
+    assert_eq!(d.to_string(), "06:00 21.0 16:00 19.0 22:00 18.0 23:30 17.0");
+    // A full day refuses a new point but still takes a replacement and a removal.
+    let mut full = Day::new();
+    for i in 0..POINTS as u16 {
+        full.set_point(i * 60, Some(200)).unwrap();
+    }
+    assert_eq!(full.set_point(23 * 60, Some(200)), Err(ParseError::Count));
+    assert_eq!(
+        full.set_point(30, Some(200)),
+        Err(ParseError::Count),
+        "inserted mid-day"
+    );
+    full.set_point(0, Some(210)).unwrap();
+    full.set_point(0, None).unwrap();
+    full.set_point(23 * 60, Some(200)).unwrap();
+    assert_eq!(full.points().count(), POINTS);
+    assert_eq!(
+        (parse_minute("6:05"), parse_minute("6:5"), parse_minute("24:00")),
+        (Some(365), None, None)
+    );
+    assert_eq!(
+        (parse_setpoint("18.5"), parse_setpoint("4.9"), parse_setpoint("x")),
+        (Some(185), None, None)
+    );
 }
 
 #[test]

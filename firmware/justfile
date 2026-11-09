@@ -153,6 +153,7 @@ apps:
     @echo radio_control
     @echo radio_dongle_gateway
     @echo radio_motion
+    @echo radio_thermostat
 
 # `kind` is example|app; set TOWER_FEATURES to pass cargo features (e.g. a radio example's role):
 #   just build example blinky
@@ -223,9 +224,9 @@ test *args:
 # Guard the RAM budget: fail if any product bin's statics leave too little stack.
 ram-budget:
     cargo build --locked --release --bins
-    python3 tools/check_ram_budget.py radio_button radio_dongle_gateway radio_climate radio_motion radio_control lcd_games led_strip
+    python3 tools/check_ram_budget.py radio_button radio_dongle_gateway radio_climate radio_motion radio_control radio_thermostat lcd_games led_strip
     cargo build --locked --release --bins --features core-module-r1
-    python3 tools/check_ram_budget.py radio_button radio_dongle_gateway radio_climate radio_motion radio_control lcd_games led_strip
+    python3 tools/check_ram_budget.py radio_button radio_dongle_gateway radio_climate radio_motion radio_control radio_thermostat lcd_games led_strip
 
 # rustfmt house style: the repo-root rustfmt.toml (110 cols) covers this workspace too.
 # Apply rustfmt to this workspace.

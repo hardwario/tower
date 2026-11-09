@@ -229,6 +229,8 @@ static INBOX: Channel<CriticalSectionRawMutex, (u8, i32), 2> = Channel::new();
 static BUTTON: Channel<CriticalSectionRawMutex, button::Event, 4> = Channel::new();
 /// Something for the runtime to look at (a report, an event, a pairing request).
 static WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// Raised by every clock sync, for [`clock_synced`].
+static CLOCK_SYNCED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static PAIR_REQUEST: AtomicBool = AtomicBool::new(false);
 /// The gateway this node is paired with (0 = none), for [`paired`] and `node status`.
 static GATEWAY: AtomicU32 = AtomicU32::new(0);
@@ -316,6 +318,12 @@ pub fn led_on() -> bool {
 pub fn local_time() -> Option<Local> {
     let now = crate::clock::now_ms();
     critical_section::with(|cs| SHARED.borrow_ref(cs).clock.local(now))
+}
+
+/// Wait until the host syncs the wall clock (what [`local_time`] reads changed: an app that
+/// schedules by it looks again). One waiter.
+pub async fn clock_synced() {
+    CLOCK_SYNCED.wait().await
 }
 
 /// Start OTA pairing (the gesture for an app that gave the Core button away).
@@ -431,6 +439,7 @@ fn init_shared(kind: &'static Kind, settings: &'static [Setting], kv: Nv, led: l
 fn sync_clock(unix: u32, utc_offset_min: i16) {
     let now = crate::clock::now_ms();
     critical_section::with(|cs| SHARED.borrow_ref_mut(cs).clock.sync(unix, utc_offset_min, now));
+    CLOCK_SYNCED.signal(());
 }
 
 /// Whether the node should ask the host for the time (its kind needs it, and the last sync is

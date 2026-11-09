@@ -220,6 +220,10 @@ name = "radio_motion"
 path = "apps/radio_motion.rs"
 
 [[bin]]
+name = "radio_thermostat"
+path = "apps/radio_thermostat.rs"
+
+[[bin]]
 name = "lcd_games"
 path = "apps/lcd_games.rs"
 
