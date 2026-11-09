@@ -134,7 +134,9 @@ impl Window {
         if hi <= lo {
             return "";
         }
-        let seg = &s[lo..hi];
+        // Non-panicking: the bounds are char boundaries already (a checked slice would link
+        // core's slicing panic and the Unicode tables its message needs, ~4.5 KB of flash).
+        let seg = s.get(lo..hi).unwrap_or("");
         self.captured += seg.len();
         seg
     }
@@ -183,7 +185,7 @@ pub fn common_prefix<'a>(mut texts: impl Iterator<Item = &'a str>) -> &'a str {
     while !first.is_char_boundary(len) {
         len -= 1;
     }
-    &first[..len]
+    first.get(..len).unwrap_or("")
 }
 
 /// postcard's varint (LEB128) length of `n`: the length prefix of every `&str`/`Vec` and

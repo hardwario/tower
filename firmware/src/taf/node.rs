@@ -1291,8 +1291,11 @@ impl ShellSink for RadioSink<'_> {
                 }
                 continue;
             }
-            let _ = self.buf.push_str(&rest[..take]);
-            rest = &rest[take..];
+            let Some((head, tail)) = rest.split_at_checked(take) else {
+                break;
+            };
+            let _ = self.buf.push_str(head);
+            rest = tail;
             if self.buf.len() == RADIO_SHELL_CHUNK && !self.flush(false, 0).await {
                 return false;
             }

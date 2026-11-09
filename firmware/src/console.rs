@@ -454,7 +454,9 @@ fn clip_str(s: &str, n: usize) -> &str {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    &s[..end]
+    // `get`, not a checked slice: `end` is a char boundary already, and a checked slice would
+    // link core's slicing panic, whose message pulls in ~4.5 KB of Unicode tables.
+    s.get(..end).unwrap_or("")
 }
 
 /// Copy a string into a bounded buffer, clipping at a char boundary (ASCII in practice).
@@ -481,7 +483,7 @@ impl<const N: usize> Write for Clipper<N> {
         while end > 0 && !s.is_char_boundary(end) {
             end -= 1;
         }
-        let _ = self.0.push_str(&s[..end]);
+        let _ = self.0.push_str(s.get(..end).unwrap_or(""));
         Ok(())
     }
 }
@@ -508,7 +510,13 @@ impl log::Log for ConsoleLogger {
     fn log(&self, record: &Record) {
         let mut message = Clipper::<MAX_MSG>(String::new());
         let _ = write!(message, "{}", record.args()); // truncates past MAX_MSG (never empties)
-        let module = record.target().rsplit("::").next().unwrap_or(record.target());
+        // The last `::` segment (`rfind` on a char: a `str` pattern's reverse search would link
+        // core's slicing panic and its Unicode tables).
+        let target = record.target();
+        let module = target
+            .rfind(':')
+            .and_then(|i| target.get(i + 1..))
+            .unwrap_or(target);
         try_enqueue(
             MsgType::Log,
             &Log {
@@ -1172,8 +1180,11 @@ fn short_path(file: &str) -> &str {
     if file.len() <= PANIC_PATH_MAX {
         return file;
     }
-    let tail = &file[clip_start(file, file.len() - PANIC_PATH_MAX)..];
-    tail.find('/').map_or(tail, |i| &tail[i + 1..])
+    // `get`, not checked slices (the bounds are char boundaries): see `clip_str`.
+    let tail = file
+        .get(clip_start(file, file.len() - PANIC_PATH_MAX)..)
+        .unwrap_or(file);
+    tail.find('/').and_then(|i| tail.get(i + 1..)).unwrap_or(tail)
 }
 
 /// Smallest char boundary of `s` at or after `at` (never splits UTF-8).

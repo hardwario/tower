@@ -614,7 +614,9 @@ impl ShellSink for ConsoleSink {
             while !rest.is_char_boundary(take) {
                 take -= 1;
             }
-            let (head, tail) = rest.split_at(take);
+            let Some((head, tail)) = rest.split_at_checked(take) else {
+                break;
+            };
             console::shell_response_frame(self.cmd_id, R_OK, self.chunk, false, head).await;
             self.chunk = self.chunk.wrapping_add(1);
             rest = tail;
@@ -994,8 +996,8 @@ fn settings_set(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
 /// Parse `name=value` (one token) or `name value` (two tokens).
 fn parse_assign<'a>(args: &[&'a str]) -> Option<(&'a str, &'a str)> {
     let first = args.first()?;
-    if let Some(eq) = first.find('=') {
-        Some((&first[..eq], &first[eq + 1..]))
+    if let Some(pair) = first.split_once('=') {
+        Some(pair)
     } else {
         args.get(1).map(|v| (*first, *v))
     }
@@ -1248,12 +1250,12 @@ fn complete(
     cursor: u16,
 ) -> ShellCompletions<'static> {
     let cur = clip_idx(line, cursor as usize);
-    let upto = &line[..cur];
+    let upto = line.get(..cur).unwrap_or(line);
     // The token being completed = from the last separator to the cursor (empty if the
     // cursor sits right after a separator → "list everything here").
     let partial_start = upto.rfind([' ', '\t']).map(|i| i + 1).unwrap_or(0);
-    let partial = &upto[partial_start..];
-    let prefix_toks = tokenize(&upto[..partial_start]);
+    let partial = upto.get(partial_start..).unwrap_or("");
+    let prefix_toks = tokenize(upto.get(..partial_start).unwrap_or(""));
 
     let mut candidates: Vec<Candidate<'static>, 16> = Vec::new();
     // The reply must fit ONE frame (the host matches it by req_id): stop admitting candidates
@@ -1306,10 +1308,9 @@ fn complete(
             }
             // `set name=<TAB>` → complete the value (enum choices / bool); else the name.
             Args::Settings { assign } if assign && partial.contains('=') => {
-                let eq = partial.find('=').unwrap();
-                token_start = partial_start + eq + 1;
-                let vpart = &partial[eq + 1..];
-                if let Some(s) = settings.find(&partial[..eq]) {
+                let (name, vpart) = partial.split_once('=').unwrap_or((partial, ""));
+                token_start = partial_start + name.len() + 1;
+                if let Some(s) = settings.find(name) {
                     let vals: &[&'static str] = match s.kind {
                         Kind::Enum(choices) => choices,
                         Kind::Bool => &["true", "false"],
