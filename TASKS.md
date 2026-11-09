@@ -21,19 +21,6 @@ Task status: `open`, `in progress`, `waiting (Dn)` (blocked on a decision), `don
 
 ## Decisions
 
-### D5. Where should the bridge remember node kinds across its own restart?
-
-After a bridge restart, a `set` to a node is refused until the node's next `NodeInfo`, because the
-bridge can't check the set without the node's kind. For a sleeping node that is up to one
-heartbeat (15 min). Nothing is lost on the radio; docs/cli/mqtt-api.md documents the gap. The embedded
-broker's retained topics die with the bridge process, so they can't seed it.
-
-- **(a) The gateway registry** (recommended): a kind byte in each registry entry, read with the
-  node list the bridge fetches at start. It survives a host change and a broker change.
-- **(b) A host-side cache file** next to the bridge's other state: no firmware change, but it is
-  per host.
-- **(c) Keep the gap**, documented as it is.
-
 ### D6. Report the embassy-stm32 EEPROM error-flag bug upstream?
 
 embassy-stm32 0.6 on the L0 checks `FLASH_SR` after each EEPROM program but clears the error flags
@@ -360,11 +347,14 @@ generation still targets the same modules.
 
 ## Decided
 
+
 - **D1. The LCD thermostat (RAM).** A page-mode LCD driver, later (T2). 2026-11-09.
 - **D2. Push the overnight taf work.** Yes, pushed with the morning follow-ups (to 29fdf5f).
   2026-11-09.
 - **D3. The new node apps in the release firmware bundle.** Yes (af0ea69). 2026-11-09.
 - **D4. Listening nodes on US 915.** Later (T3). 2026-11-09.
+- **D5. Where the bridge remembers node kinds across its own restart.** (a) The gateway
+  registry: a kind byte per entry, read with the node list at start (T23). 2026-11-09.
 - **D9. Nested `AGENTS.md`.** (a) Keep them, trimmed to the rules for working in that component;
   knowledge moves to `docs/`, the `CLAUDE.md` stubs stay (T16). 2026-11-09.
 - **D10. Component READMEs.** (a) Their content moves to `docs/`; a short README per component
@@ -390,6 +380,17 @@ generation still targets the same modules.
 
 (Newest first; one line each.)
 
+- **T23. The bridge knows node kinds across its own restart** (D5 (a)): a stable `id` per kind
+  in `props.rs` (`0` = unknown; pinned by test, not in the radio tag: no node sends one),
+  `NodeEntry.kind` and `NodeUpdate.kind` (console tag 0x1fc6 to 0x2c25, radio tag unchanged), a
+  kind byte in the gateway's registry records (`FORMAT` 2), stored by the bridge when a node's
+  `NodeInfo` names another kind and read back with the node list at start. Bench: the gateway's
+  three keys moved across the format change (exported with their floors, the gateway reflashed
+  and wiped, `node_add` with `tx_floor` + 4096), both connected nodes heard and their kinds
+  stored; after a bridge restart the list showed both kinds before any `NodeInfo`, and a `set`
+  sent a second later was queued for both, delivered and confirmed by each node's report
+  (control at once, r2 with its next heartbeat; docs/firmware/results/2026-11-09.md).
+  `btn-r1` (r1, unplugged) is registered and gets its kind at its next wake. 2026-11-09.
 - **T2. LCD thermostat**: `tower-hmi` canvas windows (bands; a host test checks bands against a
   frame in every rotation), `tower::lcd` page mode (`init_paged`, `Lcd<Paged>::show`, buttons
   only, band signatures, the frame linked only in frame mode, `lcd::probe`), the thermostat's

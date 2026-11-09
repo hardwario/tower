@@ -73,7 +73,7 @@ Two **separately tagged** schemas ride these frames:
 | `Describe` | both | `DeviceInfo` (role probe: the authoritative "is this a gateway?"; also the firmware name + version, for a host that missed the boot `Hello`) |
 | `NodeList` | gateway | `NodeEntry` × N (chunked) |
 | `NodeAdd {addr,key,name,flags,tx_floor,rx_floor}` | gateway | none (install a cable-paired node, or a moved key with its counter floors) |
-| `NodeRemove {addr}` / `NodeUpdate {addr,name?,flags?}` | gateway | none |
+| `NodeRemove {addr}` / `NodeUpdate {addr,name?,flags?,kind?}` | gateway | none |
 | `NodeRevealKey {addr}` | gateway | `NodeKey` (the only path that discloses a stored key; with its counter floors) |
 | `PairingOpen {window}` / `PairingCancel` | gateway | `Paired {addr, sas}` (delayed; `sas` = the handshake's 6-digit SAS) / `MGMT_TIMEOUT` |
 | `QueuePush {node_addr,ttl,data}` | gateway | `QueueId` |
@@ -102,8 +102,8 @@ value, count}` · `Shell(NodeShellChunk{cmd_id, result, chunk, last, text})`. Ev
 node rebooted (watch `NodeInfo::session_id`).
 
 Host → node (`NodeCmd`): `Set{id, value}` (a control or a setting), `Time{unix, utc_offset_min}`
-(the wall clock, answering `wants_time`), `Describe` (send an `Info` and a full report: a host
-that started after the node's last heartbeat does not know its kind yet) and `Shell{epoch,
+(the wall clock, answering `wants_time`), `Describe` (send an `Info` and a full report: for a
+host that does not know the node's kind yet, neither from its registry entry nor from an `Info`) and `Shell{epoch,
 cmd_id, line}`, each queued as a downlink. The node runs a `Shell` line in
 the standard shell dispatcher and answers with `NodeMsg::Shell` chunks (≤ `RADIO_SHELL_CHUNK` =
 56 B) correlated by `cmd_id`. `epoch` is a random per-host-process tag: the queue is at-least-once,
@@ -306,11 +306,15 @@ dongle starts without one (docs/security-model.md, 4.1).
 
 ### Node registry (`tower_gateway::registry`, EEPROM)
 
-Paired `(id, key, flags, name)` records, persisted in `NS_APP` postcard **buckets**, never
+Paired `(id, key, flags, kind, name)` records, persisted in `NS_APP` postcard **buckets**, never
 RAM-resident (bucket locals are ~270 B of transient stack), mirrored into the net peer table at
 boot. `PER_BUCKET = 6`, `BUCKETS = 3` (18 slots ≥ capacity), **`CAPACITY = 16`** (matches the net
-layer's `MAX_PEERS`), `MAX_NAME = 16`. Written only on add/remove/rename/pairing-commit, never
-per-uplink (that would burn the part). Keys: `KEY_FORMAT = 0x00`, buckets from
+layer's `MAX_PEERS`), `MAX_NAME = 16`. The `kind` byte is the host's (`props::Kind::id`, `0` =
+unknown): a pairing or a `NodeAdd` stores `0`, the host stores the node's kind with `NodeUpdate`
+when its `NodeInfo` names another one, and reads it back in `NodeEntry`, so a restarted host
+knows every node's kind at once; the gateway never interprets it. Written only on
+add/remove/rename/pairing-commit and such a kind change, never per-uplink (that would burn the
+part). Keys: `KEY_FORMAT = 0x00`, buckets from
 `KEY_BUCKET_BASE = 0x10`. The format marker is stamped once, on a fresh store (not rewritten
 on every boot); a marker of another value (firmware from another checkout) leaves the registry
 untouched: it is not

@@ -56,7 +56,7 @@ use tower_gateway::queue::{PushError, Queue};
 use tower_gateway::registry::{self, BucketIo, IoError, NodeRecord, RegistryError};
 use tower_protocol::mgmt::{self, DeviceInfo, DeviceRole, MgmtOp, NodeEntry, NodeKey, Paired, QueueId};
 use tower_protocol::msg::{MgmtRequest, RadioStat};
-use tower_protocol::{MsgType, decode_frame};
+use tower_protocol::{MsgType, decode_frame, props};
 
 // --- persistence (NS_APP) --------------------------------------------------------
 
@@ -830,6 +830,8 @@ async fn commit_pairing(peer: PairedPeer, req_id: u16, net: &mut Net, buckets: &
         // node): the safe default, a downlink waits for an uplink instead of going out to a node
         // that may be asleep.
         flags: mgmt::NODE_FLAG_UNNAMED | mgmt::NODE_FLAG_SLEEPING,
+        // Unknown until the host reads the node's `NodeInfo` and stores its kind.
+        kind: props::KIND_UNKNOWN,
         name: heapless::String::new(),
     };
     match registry::add_new(buckets, &rec) {
@@ -919,6 +921,7 @@ async fn handle_mgmt(
                         addr: rec.addr,
                         name: rec.name.as_str(),
                         flags: rec.flags,
+                        kind: rec.kind,
                         last_seen: st
                             .map(|s| now_s.saturating_sub(s.seen_s))
                             .unwrap_or(mgmt::LAST_SEEN_NEVER),
@@ -928,7 +931,7 @@ async fn handle_mgmt(
                     };
                     let mut scratch = [0u8; 64];
                     if let Ok(bytes) = postcard::to_slice(&entry, &mut scratch) {
-                        let _ = staged.extend_from_slice(bytes); // 6 × ≤42 B fits 256
+                        let _ = staged.extend_from_slice(bytes); // 6 × ≤36 B fits 256
                     }
                 }
                 stream.push(&staged).await;
@@ -971,6 +974,9 @@ async fn handle_mgmt(
                     addr,
                     key,
                     flags,
+                    // A re-provisioned board may run another app: the host stores the kind again
+                    // from its `NodeInfo`.
+                    kind: props::KIND_UNKNOWN,
                     name: n,
                 },
             ) {
@@ -1002,12 +1008,17 @@ async fn handle_mgmt(
             Err(RegistryError::NotFound) => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
             Err(_) => respond_empty(req_id, mgmt::MGMT_STORAGE).await,
         },
-        MgmtOp::NodeUpdate { addr, name, flags } => {
+        MgmtOp::NodeUpdate {
+            addr,
+            name,
+            flags,
+            kind,
+        } => {
             if name.is_some_and(|n| n.len() > mgmt::MAX_NODE_NAME) {
                 respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                 return;
             }
-            match registry::update(buckets, addr, name, flags) {
+            match registry::update(buckets, addr, name, flags, kind) {
                 Ok(()) => respond_empty(req_id, mgmt::MGMT_OK).await,
                 Err(RegistryError::NotFound) => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
                 Err(RegistryError::BadName) => respond_empty(req_id, mgmt::MGMT_BAD_ARG).await,

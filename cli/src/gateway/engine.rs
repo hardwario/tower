@@ -229,8 +229,8 @@ enum OpKind {
     NodeRemove {
         id: u32,
     },
-    /// A rename or a flags change of node `id`, mirrored when it is issued (`merge_registry`
-    /// keeps that over a listing answered before it).
+    /// A rename, a flags or a kind change of node `id`, mirrored when it is issued
+    /// (`merge_registry` keeps that over a listing answered before it).
     NodeUpdate {
         id: u32,
     },
@@ -311,7 +311,9 @@ struct PendingMgmt {
 #[derive(Debug, Clone)]
 struct NodeMirror {
     entry: NodeEntryOwned,
-    /// From the node's `NodeInfo` heartbeat: firmware name mapped to a kind.
+    /// From the node's `NodeInfo` heartbeat: firmware name mapped to a kind. Until this run hears
+    /// one, the kind the gateway's registry stored (`entry.kind`, written by an earlier run), so
+    /// a restarted bridge checks sets and publishes values at once.
     kind: String,
     /// Last `NodeInfo.session_id` (count-reset disambiguation for subscribers).
     session_id: Option<u32>,
@@ -334,8 +336,8 @@ struct PropMirror {
     /// delivered: kept by a queue resync (only an item no one queued is stale), and the one
     /// `Time` among them replaced by a newer one.
     queued: Vec<QueuedCmd>,
-    /// Values that arrived before the node's kind was known (the bridge started after the
-    /// node's last `NodeInfo`): published once its `NodeInfo` arrives.
+    /// Values that arrived before the node's kind was known (no `NodeInfo` this run and no kind
+    /// in the gateway's registry): published once its `NodeInfo` arrives.
     stash: Vec<Stashed>,
     /// A `Describe` is queued for the node (cleared by its `NodeInfo`).
     describe_asked: bool,
@@ -471,6 +473,14 @@ fn foreign_states(keep: Option<&props::Kind>) -> impl Iterator<Item = &'static s
         .filter(move |name| keep.is_none_or(|k| k.prop_named(name).is_none()))
         .collect::<BTreeSet<_>>()
         .into_iter()
+}
+
+/// The kind stored in the gateway's registry, by name; `""` for none (or a number this build has
+/// no kind for).
+fn stored_kind(id: u8) -> String {
+    props::kind_by_id(id)
+        .map(|k| k.name.to_string())
+        .unwrap_or_default()
 }
 
 /// Firmware name → device kind: `radio_button` → `button`.
@@ -868,11 +878,14 @@ impl Engine {
         }
     }
 
-    /// A `NodeInfo` heartbeat: enrich the mirror (kind/sleeping) and auto-name
-    /// unnamed nodes, `button:0` style, host-side by design (the gateway
-    /// firmware never interprets payloads).
+    /// A `NodeInfo` heartbeat: enrich the mirror (kind/sleeping), store the kind in the
+    /// gateway's registry when it differs from the stored one (once per node, or after a
+    /// reflash with another app: an EEPROM write per heartbeat would wear the part), and
+    /// auto-name unnamed nodes, `button:0` style, host-side by design (the gateway firmware
+    /// never interprets payloads).
     fn on_node_info(&mut self, src: u32, info: &radio::NodeInfo<'_>, out: &mut Vec<Output>) {
         let kind = kind_of(info.firmware_name);
+        let kind_id = props::kind(&kind).map_or(props::KIND_UNKNOWN, |k| k.id);
         let Some(i) = self.nodes.iter().position(|n| n.entry.addr == src) else {
             return; // unregistered node: forwarded but not ours to manage
         };
@@ -902,6 +915,7 @@ impl Engine {
         } else {
             flags &= !mgmt::NODE_FLAG_SLEEPING;
         }
+        let store_kind = (kind_id != self.nodes[i].entry.kind).then_some(kind_id);
 
         // The mirror takes an update only once it is queued: one refused up front (the serial
         // link is down) never reaches the dongle, and the next heartbeat tries again.
@@ -921,6 +935,7 @@ impl Engine {
                 addr: src,
                 name: Some(name.as_str()),
                 flags: Some(flags),
+                kind: store_kind,
             };
             if self
                 .issue(out, OpKind::NodeUpdate { id: src }, op, None)
@@ -928,18 +943,21 @@ impl Engine {
             {
                 self.nodes[i].entry.name = name;
                 self.nodes[i].entry.flags = flags;
+                self.nodes[i].entry.kind = kind_id;
             }
-        } else if flags != self.nodes[i].entry.flags {
+        } else if flags != self.nodes[i].entry.flags || store_kind.is_some() {
             let op = MgmtOp::NodeUpdate {
                 addr: src,
                 name: None,
-                flags: Some(flags),
+                flags: (flags != self.nodes[i].entry.flags).then_some(flags),
+                kind: store_kind,
             };
             if self
                 .issue(out, OpKind::NodeUpdate { id: src }, op, None)
                 .is_some()
             {
                 self.nodes[i].entry.flags = flags;
+                self.nodes[i].entry.kind = kind_id;
             }
         }
         self.publish_node(out, i);
@@ -956,8 +974,9 @@ impl Engine {
 
     /// One property value from node `src` (taf): a state or setting goes to its retained
     /// `state/{prop}` topic, an event (with its `count`) to `event/{prop}`, named by the node
-    /// kind's table. Before the kind is known (the bridge started after the node's last
-    /// `NodeInfo`), the value waits in the mirror and the node is asked to describe itself.
+    /// kind's table. Before the kind is known (neither a `NodeInfo` this run nor a kind in the
+    /// gateway's registry, e.g. a node paired while no bridge ran), the value waits in the
+    /// mirror and the node is asked to describe itself.
     #[allow(clippy::too_many_arguments)]
     fn on_prop(
         &mut self,
@@ -1878,6 +1897,7 @@ impl Engine {
                     addr: id,
                     name: Some(name),
                     flags: Some(flags),
+                    kind: None,
                 };
                 // Mirror the name now: the node's next `NodeInfo` may land before the gateway
                 // answers, and an unnamed mirror would auto-name it over the operator's choice.
@@ -2368,6 +2388,7 @@ impl Engine {
                 addr,
                 name: name.to_string(),
                 flags,
+                kind: props::KIND_UNKNOWN,
                 last_seen: mgmt::LAST_SEEN_NEVER,
                 rssi: mgmt::RSSI_NONE,
                 uplinks: 0,
@@ -2480,11 +2501,14 @@ impl Engine {
     }
 
     /// Merge a fresh `NodeList` into the mirror: keep host-side enrichment (kind,
-    /// session, pendings) for surviving nodes, publish adds/changes, clear removals.
+    /// session, pendings) for surviving nodes, take the registry's kind for a node whose kind
+    /// this run has not learned (a new row, or the bridge's first listing), publish
+    /// adds/changes, clear removals.
     fn merge_registry(&mut self, fresh: Vec<NodeEntryOwned>, out: &mut Vec<Output>) {
-        // A rename or flags change still waiting for its answer was mirrored when it was issued,
-        // and a listing answered before it predates it: keep the mirror's name and flags, or the
-        // node's next `NodeInfo` would see it unnamed again and auto-name over the rename.
+        // A rename, flags or kind change still waiting for its answer was mirrored when it was
+        // issued, and a listing answered before it predates it: keep the mirror's name, flags and
+        // kind, or the node's next `NodeInfo` would see it unnamed again and auto-name over the
+        // rename (or store its kind again).
         let updating: Vec<u32> = self
             .pending_mgmt
             .iter()
@@ -2498,22 +2522,27 @@ impl Engine {
             let old = self.nodes.iter_mut().find(|n| n.entry.addr == entry.addr);
             match old {
                 Some(o) => next.push(NodeMirror {
+                    kind: if o.kind.is_empty() {
+                        stored_kind(entry.kind)
+                    } else {
+                        o.kind.clone()
+                    },
                     entry: {
                         if updating.contains(&entry.addr) {
                             entry.name = std::mem::take(&mut o.entry.name);
                             entry.flags = o.entry.flags;
+                            entry.kind = o.entry.kind;
                         }
                         entry
                     },
-                    kind: o.kind.clone(),
                     session_id: o.session_id,
                     pending: std::mem::take(&mut o.pending),
                     last_counter: o.last_counter,
                     props: std::mem::take(&mut o.props),
                 }),
                 None => next.push(NodeMirror {
+                    kind: stored_kind(entry.kind),
                     entry,
-                    kind: String::new(),
                     session_id: None,
                     pending: Vec::new(),
                     last_counter: None,
@@ -2723,7 +2752,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tower_protocol::mgmt::{DeviceRole, MGMT_OK, NODE_FLAG_SLEEPING, NODE_FLAG_UNNAMED};
+    use tower_protocol::mgmt::{DeviceRole, MGMT_OK, MGMT_STORAGE, NODE_FLAG_SLEEPING, NODE_FLAG_UNNAMED};
     use tower_protocol::{MsgType, decode_frame};
 
     #[test]
@@ -2813,10 +2842,16 @@ mod tests {
     }
 
     fn node_entry_record(id: u32, name: &str, flags: u8) -> Vec<u8> {
+        stored_record(id, name, flags, props::KIND_UNKNOWN)
+    }
+
+    /// A registry row with the kind byte an earlier bridge stored.
+    fn stored_record(id: u32, name: &str, flags: u8, kind: u8) -> Vec<u8> {
         postcard::to_stdvec(&NodeEntry {
             addr: id,
             name,
             flags,
+            kind,
             last_seen: 3,
             rssi: -60,
             uplinks: 5,
@@ -2938,14 +2973,14 @@ mod tests {
                 // A listing answers with the mirror as it stands (an empty one would remove the
                 // nodes).
                 let data: Vec<u8> = if op.contains("NodeList") {
-                    let nodes: Vec<(u32, String, u8)> = e
+                    let nodes: Vec<(u32, String, u8, u8)> = e
                         .nodes
                         .iter()
-                        .map(|n| (n.entry.addr, n.entry.name.clone(), n.entry.flags))
+                        .map(|n| (n.entry.addr, n.entry.name.clone(), n.entry.flags, n.entry.kind))
                         .collect();
                     nodes
                         .iter()
-                        .flat_map(|(a, n, f)| node_entry_record(*a, n, *f))
+                        .flat_map(|(a, n, f, k)| stored_record(*a, n, *f, *k))
                         .collect()
                 } else {
                     Vec::new()
@@ -3170,6 +3205,110 @@ mod tests {
         assert!(out.iter().find_map(sent_op).is_none());
         let out = e.handle(info_uplink(0xAB12, 7, "radio_motion"));
         assert_eq!(publishes(&out, "tower/nodes/0x0000ab12/event/motion").len(), 2);
+    }
+
+    /// A bridge that starts with a kind in the gateway's registry (stored by an earlier run, T23)
+    /// knows it before the node's next `NodeInfo`: the node's retained info names it, a set is
+    /// checked and queued, a value is published without a `Describe`, and the `NodeInfo` that
+    /// follows writes nothing (the kind and the flags are what the registry holds).
+    #[test]
+    fn a_restarted_bridge_takes_the_kind_from_the_registry() {
+        let mut e = engine();
+        let start = e.start();
+        let (req, _) = start.iter().find_map(sent_op).expect("start issues NodeList");
+        let row = stored_record(0xAB12, "hall", NODE_FLAG_SLEEPING, props::thermostat::KIND.id);
+        let out = reply(&mut e, req, MGMT_OK, &row);
+        let info: serde_json::Value =
+            serde_json::from_slice(publishes(&out, "tower/nodes/0x0000ab12")[0]).unwrap();
+        assert_eq!(info["kind"], "thermostat");
+        drain(&mut e, out);
+
+        let mut waiting = queued_ops(&e).len();
+        let out = e.handle(mqtt_in("tower/nodes/0x0000ab12/set/setpoint", b"21.5"));
+        assert_eq!(pushes(&e, &out, &mut waiting), 1, "the set is checked and queued");
+        drain(&mut e, out);
+
+        let mut items = heapless::Vec::new();
+        items.push((props::thermostat::SETPOINT, 215)).unwrap();
+        let out = e.handle(msg_uplink(0xAB12, 3, &NodeMsg::Report(items)));
+        assert_eq!(publishes(&out, "tower/nodes/0x0000ab12/state/setpoint").len(), 1);
+        assert_eq!(pushes(&e, &out, &mut waiting), 0, "no Describe");
+
+        let out = e.handle(info_uplink(0xAB12, 4, "radio_thermostat"));
+        assert!(
+            all_ops(&e, &out).iter().all(|op| !op.contains("NodeUpdate")),
+            "nothing to store"
+        );
+    }
+
+    /// The kind is stored in the registry with the node's first `NodeInfo`, not again with the
+    /// next ones (an EEPROM write per heartbeat), again after the board runs another app (a
+    /// non-standard one stores `KIND_UNKNOWN`), and again after a write the gateway refused.
+    #[test]
+    fn the_kind_is_stored_when_it_changes() {
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", NODE_FLAG_SLEEPING);
+        let kind_writes = |e: &Engine, out: &[Output]| -> Vec<String> {
+            all_ops(e, out)
+                .into_iter()
+                .filter(|op| op.contains("NodeUpdate"))
+                .collect()
+        };
+        let out = e.handle(info_uplink(0xAB12, 1, "radio_motion"));
+        let w = kind_writes(&e, &out);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].contains("flags: None") && w[0].contains("kind: Some(3)"),
+            "{}",
+            w[0]
+        );
+        drain(&mut e, out);
+        let out = e.handle(info_uplink(0xAB12, 2, "radio_motion"));
+        assert!(kind_writes(&e, &out).is_empty(), "stored once");
+
+        let out = e.handle(info_uplink(0xAB12, 3, "radio_button"));
+        let w = kind_writes(&e, &out);
+        assert!(w.len() == 1 && w[0].contains("kind: Some(1)"), "{w:?}");
+        drain(&mut e, out);
+        let out = e.handle(info_uplink(0xAB12, 4, "radio_greenhouse"));
+        let w = kind_writes(&e, &out);
+        assert!(w.len() == 1 && w[0].contains("kind: Some(0)"), "{w:?}");
+        drain(&mut e, out);
+
+        // Refused: the bridge lists the registry again, and the next `NodeInfo` writes again.
+        let out = e.handle(info_uplink(0xAB12, 5, "radio_climate"));
+        let (req, op) = out.iter().find_map(sent_op).expect("the kind is written");
+        assert!(op.contains("kind: Some(2)"), "{op}");
+        let out = reply(&mut e, req, MGMT_STORAGE, &[]);
+        let (req, op) = out.iter().find_map(sent_op).expect("a fresh listing");
+        assert!(op.contains("NodeList"), "{op}");
+        let row = stored_record(0xAB12, "kitchen", NODE_FLAG_SLEEPING, props::KIND_UNKNOWN);
+        let out = reply(&mut e, req, MGMT_OK, &row);
+        drain(&mut e, out);
+        let out = e.handle(info_uplink(0xAB12, 6, "radio_climate"));
+        let w = kind_writes(&e, &out);
+        assert!(w.len() == 1 && w[0].contains("kind: Some(2)"), "{w:?}");
+    }
+
+    /// A kind number this build has no kind for reads as unknown: values wait for a `Describe`.
+    #[test]
+    fn a_stored_kind_this_build_lacks_is_unknown() {
+        let mut e = engine();
+        let start = e.start();
+        let (req, _) = start.iter().find_map(sent_op).expect("start issues NodeList");
+        let out = reply(&mut e, req, MGMT_OK, &stored_record(0xAB12, "hall", 0, 200));
+        drain(&mut e, out);
+        let ev = NodeMsg::Event {
+            id: props::motion::MOTION,
+            value: 1,
+            count: 1,
+        };
+        let out = e.handle(msg_uplink(0xAB12, 5, &ev));
+        assert!(publishes(&out, "tower/nodes/0x0000ab12/event/motion").is_empty());
+        assert!(
+            all_ops(&e, &out).iter().any(|op| op.contains("QueuePush")),
+            "a Describe"
+        );
     }
 
     /// `QueuePush` ops one call issued: sent at once (in `out`), or newly waiting for the

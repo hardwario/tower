@@ -152,6 +152,8 @@ pub enum MgmtOp<'a> {
         addr: u32,
         name: Option<&'a str>,
         flags: Option<u8>,
+        /// The node's kind ([`NodeEntry::kind`]), stored as given: the gateway never interprets it.
+        kind: Option<u8>,
     },
     /// Return the node's AES key as a [`NodeKey`] record (the only path that ever
     /// discloses a stored key). Gateway.
@@ -233,6 +235,11 @@ pub struct NodeEntry<'a> {
     pub name: &'a str,
     /// [`NODE_FLAG_SLEEPING`] | [`NODE_FLAG_UNNAMED`].
     pub flags: u8,
+    /// The node's kind, a [`props::Kind::id`](crate::props::Kind::id) the host stored with
+    /// [`MgmtOp::NodeUpdate`] when the node's `NodeInfo` named it, so a host that restarts knows it
+    /// at once; [`KIND_UNKNOWN`](crate::props::KIND_UNKNOWN) until then (and after a pairing or a
+    /// `NodeAdd`). Persisted in the registry, opaque to the gateway.
+    pub kind: u8,
     /// Seconds since the last uplink; [`LAST_SEEN_NEVER`] = not since gateway boot.
     /// RAM-only on the device (per-uplink EEPROM writes would burn the part).
     pub last_seen: u32,

@@ -55,6 +55,8 @@ pub(crate) struct NodeEntryOwned {
     pub addr: u32,
     pub name: String,
     pub flags: u8,
+    /// The kind the registry stored (`props::Kind::id`; `props::KIND_UNKNOWN` = none).
+    pub kind: u8,
     pub last_seen: u32,
     pub rssi: i8,
     pub uplinks: u32,
@@ -67,6 +69,7 @@ impl From<NodeEntry<'_>> for NodeEntryOwned {
             addr: e.addr,
             name: e.name.to_string(),
             flags: e.flags,
+            kind: e.kind,
             last_seen: e.last_seen,
             rssi: e.rssi,
             uplinks: e.uplinks,
@@ -444,6 +447,7 @@ mod tests {
             addr: 1,
             name: "a",
             flags: 0,
+            kind: 0,
             last_seen: 5,
             rssi: -60,
             uplinks: 2,
@@ -453,6 +457,7 @@ mod tests {
             addr: 2,
             name: "b",
             flags: 1,
+            kind: 3,
             last_seen: u32::MAX,
             rssi: i8::MAX,
             uplinks: 0,
@@ -465,6 +470,6 @@ mod tests {
         assert_eq!(parsed[0].addr, 1);
         assert_eq!(parsed[1].name, "b");
         let owned: Vec<NodeEntryOwned> = parsed.into_iter().map(Into::into).collect();
-        assert_eq!(owned[1].flags, 1);
+        assert_eq!((owned[1].flags, owned[1].kind), (1, 3));
     }
 }

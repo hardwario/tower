@@ -37,7 +37,8 @@ What every taf app does, so a user meets the same device whatever it measures:
 - **Boot**: the SDK's boot banner, then (when paired) an `Info` uplink (firmware name and version,
   the radio class, whether it wants the time) and a full report. An `Info` that is not delivered
   is retried 30 s later, doubling per one lost in a row and never later than the heartbeat: a
-  host that restarted learns the node's kind, and a thermostat its time, within about a minute.
+  thermostat gets its time, and a host that has not stored the node's kind in the gateway's
+  registry yet learns it, within about a minute.
 - **Reports**: the app reports values; the runtime sends what is news (any change, or for the
   temperature a change of `report-delta`), batched into one uplink, and everything again every
   `heartbeat` (with an `Info`), settings included. After an undelivered uplink the periodic
@@ -100,7 +101,9 @@ What every taf app does, so a user meets the same device whatever it measures:
    `KIND`, then add it to `KINDS`. Per property: a name (the MQTT topic leaf and the shell
    setting's name), a type (`Bool`, `Number { min, max, decimals, unit }`, `Enum(names)`), an
    access (`State`, `Control`, `Event`, `Param`, `LocalParam`) and, for a setting, a default.
-   The kind's `class` (sleeping or listening) and `time` (it needs the wall clock) go with it.
+   The kind's `class` (sleeping or listening) and `time` (it needs the wall clock) go with it,
+   and its `id`: the next free number (the bridge stores it in the gateway's registry, so a
+   number is never reused for another kind; the `kind_ids_are_pinned` test lists them).
    The tables are folded into `RADIO_TAG`: rebuild every end and reinstall the CLI.
 2. **Write the app** in `apps/radio_<kind>.rs` (the firmware name is how the bridge finds the
    kind). In outline (`apps/radio_motion.rs` is the full one):

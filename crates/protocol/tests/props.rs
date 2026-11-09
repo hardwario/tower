@@ -11,8 +11,16 @@ use tower_protocol::props::*;
 fn tables_are_consistent() {
     assert!(COMMON.iter().all(|p| p.id < APP_BASE));
     let mut kinds = HashSet::new();
+    let mut kind_ids = HashSet::new();
     for kind in KINDS {
         assert!(kinds.insert(kind.name), "kind {} twice", kind.name);
+        assert_ne!(kind.id, KIND_UNKNOWN, "{}: id 0 means an unknown kind", kind.name);
+        assert!(
+            kind_ids.insert(kind.id),
+            "{}: kind id {} twice",
+            kind.name,
+            kind.id
+        );
         assert!(
             kind.props.iter().all(|p| p.id >= APP_BASE),
             "{}: app id below APP_BASE",
@@ -57,19 +65,39 @@ fn tables_are_consistent() {
     }
 }
 
-/// Every kind is found by its name and by its firmware name.
+/// Every kind is found by its name, its firmware name and its id.
 #[test]
 fn kinds_resolve_by_name_and_firmware() {
     for k in KINDS {
         assert_eq!(kind(k.name), Some(k));
         assert_eq!(kind_of_firmware(&format!("radio_{}", k.name)), Some(k));
+        assert_eq!(kind_by_id(k.id), Some(k));
     }
+    assert_eq!(kind_by_id(KIND_UNKNOWN), None);
+    assert_eq!(kind_by_id(0xFF), None);
     assert_eq!(kind_of_firmware("radio_gateway"), None);
     assert_eq!(kind_of_firmware("button"), None);
     let b = kind("button").unwrap();
     assert_eq!(b.prop(common::TEMPERATURE).unwrap().name, "temperature");
     assert_eq!(b.prop_named("click").unwrap().id, common::CLICK);
     assert_eq!(kind("control").unwrap().class, Class::Listening);
+}
+
+/// The kind ids are stored on gateways (the registry's kind byte): pinned, so a renumbering is a
+/// decision, not an accident. A new kind takes the next free number.
+#[test]
+fn kind_ids_are_pinned() {
+    let ids: Vec<(&str, u8)> = KINDS.iter().map(|k| (k.name, k.id)).collect();
+    assert_eq!(
+        ids,
+        [
+            ("button", 1),
+            ("climate", 2),
+            ("control", 4),
+            ("motion", 3),
+            ("thermostat", 5)
+        ]
+    );
 }
 
 /// The settings keys: `0x20 + id`, above the SDK's reserved range.

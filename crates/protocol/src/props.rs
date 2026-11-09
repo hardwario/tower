@@ -85,6 +85,13 @@ pub enum Class {
 /// A standard TOWER app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Kind {
+    /// The kind's number, what the gateway's registry stores for a node (`NodeEntry::kind`,
+    /// written by the host with `NodeUpdate`), so a restarted host knows the kind before the
+    /// node's next `NodeInfo`. Never [`KIND_UNKNOWN`] and never reused for another kind: a number
+    /// is stored on gateways, and a stale one would make the host check sets against the wrong
+    /// table until the node's next `NodeInfo` corrects it. Not on the radio (nodes name their
+    /// kind by firmware name), so not in [`PROPS_HASH`].
+    pub id: u8,
     /// The MQTT kind; the firmware is `radio_<name>`.
     pub name: &'static str,
     pub class: Class,
@@ -244,6 +251,7 @@ pub mod button {
     use super::*;
 
     pub const KIND: Kind = Kind {
+        id: 1,
         name: "button",
         class: Class::Sleeping,
         time: false,
@@ -257,6 +265,7 @@ pub mod climate {
     use super::*;
 
     pub const KIND: Kind = Kind {
+        id: 2,
         name: "climate",
         class: Class::Sleeping,
         time: false,
@@ -276,6 +285,7 @@ pub mod motion {
     pub const LEVELS: &[&str] = &["low", "medium", "high", "very-high"];
 
     pub const KIND: Kind = Kind {
+        id: 3,
         name: "motion",
         class: Class::Sleeping,
         time: false,
@@ -329,6 +339,7 @@ pub mod control {
     ];
 
     pub const KIND: Kind = Kind {
+        id: 4,
         name: "control",
         class: Class::Listening,
         time: true,
@@ -388,6 +399,7 @@ pub mod thermostat {
     pub const MODES: &[&str] = &["auto", "manual", "off"];
 
     pub const KIND: Kind = Kind {
+        id: 5,
         name: "thermostat",
         class: Class::Sleeping,
         time: true,
@@ -427,9 +439,19 @@ pub const KINDS: &[Kind] = &[
     thermostat::KIND,
 ];
 
+/// The [`Kind::id`] of no kind: a node whose kind the host has not learned, or whose firmware is
+/// not a standard app.
+pub const KIND_UNKNOWN: u8 = 0;
+
 /// The kind called `name`.
 pub fn kind(name: &str) -> Option<&'static Kind> {
     KINDS.iter().find(|k| k.name == name)
+}
+
+/// The kind numbered `id` ([`Kind::id`]); `None` for [`KIND_UNKNOWN`] and for a number no kind of
+/// this build has.
+pub fn kind_by_id(id: u8) -> Option<&'static Kind> {
+    KINDS.iter().find(|k| k.id == id && id != KIND_UNKNOWN)
 }
 
 /// The kind a firmware name stands for: `radio_<kind>`.
@@ -611,5 +633,7 @@ const fn tables_hash() -> u64 {
 }
 
 /// A 64-bit fingerprint of [`COMMON`] and every [`KINDS`] table (ids, names, types, access,
-/// defaults, classes), folded into [`RADIO_TAG`](crate::radio::RADIO_TAG).
+/// defaults, classes), folded into [`RADIO_TAG`](crate::radio::RADIO_TAG). Not the
+/// [`Kind::id`]s: no node sends or reads one (they are between the host and the gateway's
+/// registry), so a new number must not make every node stale.
 pub const PROPS_HASH: u64 = tables_hash();

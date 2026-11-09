@@ -1,4 +1,4 @@
-//! The gateway's persistent node registry: `(addr, key, flags, name)` records packed
+//! The gateway's persistent node registry: `(addr, key, flags, kind, name)` records packed
 //! into buckets, one `tower-kv` value per bucket, accessed **bucket-at-a-time**
 //! through the [`BucketIo`] trait, never held resident.
 //!
@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 /// Persisted-format marker (the app stores it next to the buckets). Not a version: nothing
 /// negotiates or migrates it. A registry stamped with another marker was written with another
 /// record layout and is refused, never decoded.
-pub const FORMAT: u8 = 1;
-/// Records per bucket. 6 × ~39 B encoded ≈ 235 B, one tower-kv value.
+pub const FORMAT: u8 = 2;
+/// Records per bucket. 6 × ~40 B encoded ≈ 241 B, one tower-kv value.
 pub const PER_BUCKET: usize = 6;
 /// Bucket count. 3 × [`PER_BUCKET`] = 18 slots ≥ the 16-peer capacity.
 pub const BUCKETS: usize = 3;
@@ -47,6 +47,9 @@ pub struct NodeRecord {
     pub key: [u8; 16],
     /// `tower_protocol::mgmt::NODE_FLAG_*` bits.
     pub flags: u8,
+    /// The node's kind as the host stored it (`tower_protocol::props::Kind::id`, `0` = unknown):
+    /// opaque here, kept so a host that restarts knows it before the node's next `NodeInfo`.
+    pub kind: u8,
     /// Empty while unnamed (the UNNAMED flag is what the host keys auto-naming on).
     pub name: String<MAX_NAME>,
 }
@@ -194,6 +197,7 @@ pub fn update(
     addr: u32,
     name: Option<&str>,
     flags: Option<u8>,
+    kind: Option<u8>,
 ) -> Result<(), RegistryError> {
     for i in 0..BUCKETS {
         let mut bucket = load(io, i);
@@ -205,6 +209,9 @@ pub fn update(
             }
             if let Some(f) = flags {
                 bucket[slot].flags = f;
+            }
+            if let Some(k) = kind {
+                bucket[slot].kind = k;
             }
             return store(io, i, &bucket);
         }
@@ -249,6 +256,7 @@ mod tests {
             addr,
             key: [addr as u8; 16],
             flags: 0,
+            kind: 0,
             name: s,
         }
     }
@@ -260,7 +268,7 @@ mod tests {
     #[test]
     fn node_record_golden_bytes() {
         assert_eq!(
-            FORMAT, 1,
+            FORMAT, 2,
             "if the record layout changes, change FORMAT deliberately"
         );
         let mut name: String<MAX_NAME> = String::new();
@@ -272,6 +280,7 @@ mod tests {
                 0x1f,
             ],
             flags: 0x05,
+            kind: 0x03,
             name,
         };
         let mut out = [0u8; 64];
@@ -280,13 +289,16 @@ mod tests {
             &out[..n],
             &[
                 0x84, 0x86, 0x88, 0x08, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a,
-                0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x05, 0x07, 0x6b, 0x69, 0x74, 0x63, 0x68, 0x65, 0x6e
+                0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x05, 0x03, 0x07, 0x6b, 0x69, 0x74, 0x63, 0x68, 0x65, 0x6e
             ]
         );
         // Decode back: a reorder trips the bytes above; a decode regression trips these fields.
         let back: NodeRecord = postcard::from_bytes(&out[..n]).unwrap();
         assert_eq!(back.addr, 0x0102_0304);
-        assert_eq!((back.key[0], back.key[15], back.flags), (0x10, 0x1f, 0x05));
+        assert_eq!(
+            (back.key[0], back.key[15], back.flags, back.kind),
+            (0x10, 0x1f, 0x05, 0x03)
+        );
         assert_eq!(back.name.as_str(), "kitchen");
     }
 
@@ -295,7 +307,9 @@ mod tests {
     fn max_bucket_fits_one_kv_value() {
         let mut io = Mem::default();
         for i in 0..PER_BUCKET as u32 {
-            add(&mut io, &rec(0x1000_0000 + i, "sixteen-byte-nam")).unwrap();
+            let mut r = rec(0x1000_0000 + i, "sixteen-byte-nam");
+            (r.flags, r.kind) = (u8::MAX, u8::MAX);
+            add(&mut io, &r).unwrap();
         }
         let n = io.buckets[0].as_ref().expect("bucket 0 written").len();
         assert!(n <= MAX_BUCKET_BYTES, "encoded bucket {n} B > {MAX_BUCKET_BYTES}");
@@ -399,22 +413,31 @@ mod tests {
     }
 
     #[test]
-    fn update_name_and_flags() {
+    fn update_name_flags_and_kind() {
         let mut io = Mem::default();
         add(&mut io, &rec(5, "")).unwrap();
-        update(&mut io, 5, Some("garage-door"), Some(0b11)).unwrap();
+        update(&mut io, 5, Some("garage-door"), Some(0b11), None).unwrap();
         let n = find(&io, 5).unwrap();
         assert_eq!(n.name.as_str(), "garage-door");
-        assert_eq!(n.flags, 0b11);
+        assert_eq!((n.flags, n.kind), (0b11, 0));
+        // The kind alone: the name and flags stay.
+        update(&mut io, 5, None, None, Some(4)).unwrap();
+        let n = find(&io, 5).unwrap();
+        assert_eq!((n.name.as_str(), n.flags, n.kind), ("garage-door", 0b11, 4));
         // None keeps current values.
-        update(&mut io, 5, None, None).unwrap();
-        assert_eq!(find(&io, 5).unwrap().name.as_str(), "garage-door");
+        update(&mut io, 5, None, None, None).unwrap();
+        let n = find(&io, 5).unwrap();
+        assert_eq!((n.name.as_str(), n.flags, n.kind), ("garage-door", 0b11, 4));
         // Over-long name refused, nothing changed.
         assert_eq!(
-            update(&mut io, 5, Some("seventeen-byte-nm"), None),
+            update(&mut io, 5, Some("seventeen-byte-nm"), None, Some(1)),
             Err(RegistryError::BadName)
         );
-        assert_eq!(update(&mut io, 6, Some("x"), None), Err(RegistryError::NotFound));
+        assert_eq!(find(&io, 5).unwrap().kind, 4);
+        assert_eq!(
+            update(&mut io, 6, Some("x"), None, None),
+            Err(RegistryError::NotFound)
+        );
     }
 
     /// A failed persist reports Storage and commits nothing.
@@ -458,9 +481,9 @@ mod tests {
         assert!(!load(&io, 2).is_empty(), "node spilled into bucket 2");
         let spilled = PER_BUCKET as u32 * 2 + 1;
         assert_eq!(find(&io, spilled).unwrap().addr, spilled);
-        update(&mut io, spilled, Some("attic"), Some(0b10)).unwrap();
+        update(&mut io, spilled, Some("attic"), Some(0b10), Some(2)).unwrap();
         let n = find(&io, spilled).unwrap();
-        assert_eq!((n.name.as_str(), n.flags), ("attic", 0b10));
+        assert_eq!((n.name.as_str(), n.flags, n.kind), ("attic", 0b10, 2));
         remove(&mut io, spilled).unwrap();
         assert!(find(&io, spilled).is_none());
         assert_eq!(count(&io), PER_BUCKET * 2);
@@ -474,7 +497,7 @@ mod tests {
         add(&mut io, &rec(1, "")).unwrap();
         let max_name = "sixteen-byte-nam"; // exactly MAX_NAME bytes
         assert_eq!(max_name.len(), MAX_NAME);
-        update(&mut io, 1, Some(max_name), None).unwrap();
+        update(&mut io, 1, Some(max_name), None, None).unwrap();
         assert_eq!(find(&io, 1).unwrap().name.as_str(), max_name);
     }
 }

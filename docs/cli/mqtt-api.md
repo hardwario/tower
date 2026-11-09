@@ -226,7 +226,7 @@ queued for it, and on every broker (re)connect. The same object is an element of
 |-------|------|---------|
 | `addr` | string | The node's radio address, `0x%08x` |
 | `name` | string | Friendly name, at most 16 bytes; `""` while `unnamed` |
-| `kind` | string | Device kind from the node's firmware name (`radio_button` is `button`); `""` until the node's first `NodeInfo` heartbeat since the bridge started |
+| `kind` | string | Device kind from the node's firmware name (`radio_button` is `button`). The bridge keeps a standard app's kind in the gateway's registry, so after a bridge restart (also on another host or with another broker) it is known from the start; `""` until the bridge first hears the node's `NodeInfo`, and after a restart for a node that is not a standard app |
 | `sleeping` | bool | The node sleeps between uplinks (downlinks wait for its next uplink) |
 | `unnamed` | bool | No name assigned yet; the bridge auto-names the node `<kind>:<n>` (e.g. `button:0`; the kind clipped so the name fits 16 bytes, e.g. `greenhouse-mon:0` for a `radio_greenhouse_monitor`) on its first heartbeat |
 | `last_seen` | number or `null` | Seconds since the node's last uplink as the dongle reported it at the last registry refresh, or `0` after an uplink the bridge has seen since; not aged between refreshes, so for liveness use the `ts` of the node's events or a fresh `node_list`. `null` = not heard since the dongle booted |
@@ -265,9 +265,10 @@ other like any schema change. Every property is one of:
 its `report-delta`; it samples every `report-period`), and everything again with each
 `heartbeat`, settings included, so a subscriber has the whole picture within one heartbeat.
 A setting changed on the node's USB console (or by a remote `system settings set`) is reported
-at once, with the node's other settings. A node that boots, or whose bridge restarted,
-publishes its states once its kind is known (the bridge asks an unknown node to describe
-itself). When a board is flashed with another app (its kind changes), the old app's `state`
+at once, with the node's other settings. A node whose kind the bridge
+does not know yet (its first `NodeInfo` not heard yet) publishes its states once its kind is
+known (the bridge asks it to describe itself); after a bridge restart the kind is already known
+from the gateway's registry. When a board is flashed with another app (its kind changes), the old app's `state`
 topics are cleared.
 
 #### The kinds
@@ -362,9 +363,11 @@ number may be written in hex, `0xff8000`). The bridge checks it against the node
 property exists, is settable, the value is in range) and queues it on the gateway; a refused set
 is logged by the bridge and goes no further. There is no response topic: the node's report on
 `state/{prop}` confirms it (also when the value did not change), when the node takes it (see
-*Classes*). Until the bridge knows the node's kind, it cannot check a set and refuses it: after a
-bridge start that lasts until the node's next `NodeInfo` (which the bridge asks for), up to one
-`heartbeat` for a sleeping node. Send the set again once the node's `state` topics appear.
+*Classes*). Until the bridge knows the node's kind, it cannot check a set and refuses it. A bridge
+restart does not lose it (the kind is kept in the gateway's registry); a node the bridge has never
+heard a `NodeInfo` from (paired while no bridge ran) is unknown until its next `NodeInfo` (which
+the bridge asks for), up to one `heartbeat` for a sleeping node. Send the set again once the
+node's `state` topics appear.
 
 ```sh
 mosquitto_pub -h 127.0.0.1 -q 1 -t tower/nodes/0x0000ab12/set/setpoint -m 21.5
