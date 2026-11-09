@@ -13,8 +13,8 @@ button's backoff and the gateway's request pacing. Everything that needs only on
 checked on hardware (KATs, watchdog, gateway end to end, key floors, a join with no gateway in
 range); nothing that needs a node and a gateway on air was.
 
-**What to run** (a Core Module with `radio_push_button`, a Radio Dongle with
-`radio_dongle_gateway`, `tower` from the same commit, EEPROM wiped first):
+**What to run** (a Core Module with `radio_button`, a Radio Dongle with
+`radio_gateway`, `tower` from the same commit, EEPROM wiped first):
 - OTA pairing: `tower nodes add --ota`, hold 1 s; the node's `net: pairing: SAS`, the CLI's
   `paired ... (SAS n)` and the gateway log show the same six digits; `node: paired with gateway
   ...` follows on the node and its NodeInfo names it.
@@ -39,6 +39,22 @@ range); nothing that needs a node and a gateway on air was.
 OTA pairing, lost confirm, re-pair, window end, backoff, key move and the HIL gateway group
 pass. Open: the replay item (nothing can reboot the dongle under a running `tower gateway`; a
 reboot RPC would make it testable) and the PPK2 look at the idle floor (no PPK2 on the bench).
+
+## Listening node on US 915
+
+**Why.** The listening class (`radio_control`; docs/radio.md, "Node classes") runs on EU 868
+only. A node that keeps its receiver on would have to follow the gateway's hop schedule all the
+time, and one fixed channel at full power is not allowed on US 915 (FCC §15.247), so a listening
+kind refuses `us915` for now (no pairing, no provisioning, radio off; firmware/docs/taf.md).
+
+**What it takes.** The network layer (`firmware/src/radio/net`, `crates/net`): a listening node
+that tracks the hop schedule between its own sends (a sleeping node acquires it with each uplink
+and re-acquires by prediction after a sleep); the gateway (`radio_gateway`) sending a listening
+node's downlink at once in the current slot, which today it does on EU 868 only.
+
+**Done when.** `radio_control` on `us915` pairs, a `set` over MQTT is confirmed within the
+listening budget (`hil/tests/listening.rs` on `us915`), and the per-channel airtime in `gateway
+status` stays even.
 
 ## Test layers to add
 

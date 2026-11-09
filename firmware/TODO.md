@@ -5,7 +5,7 @@ we'll know it's done.
 
 ## FHSS in the product apps (US 915 compliance): remaining verification
 
-**Done 2026-10-18.** `radio_dongle_gateway` and `radio_push_button` hop on `us915` (FCC
+**Done 2026-10-18.** `radio_gateway` and `radio_button` hop on `us915` (FCC
 §15.247): the gateway is the hop master, the node follows the schedule with every send, pairs on
 the rendezvous carrier at low power (§15.249) and re-acquires after a sleep by prediction on the
 crystal clock (`clock::now_ms`; embassy's `Instant` runs on HSI16, ±1 %). docs/radio.md
