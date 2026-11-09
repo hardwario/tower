@@ -33,16 +33,19 @@ default:
 # Run every gate (host, firmware, audit).
 check: check-host check-firmware audit
 
-# `tower-hil --features power` adds the PPK2 power group (compiled, never run). The no_std build
-# proves the shared crates still build for the MCU on their own (the firmware job builds them with
-# the SDK's feature set). Rustdoc covers the libraries; cli and hil are binaries/harness.
-# Host workspace gates: fmt, clippy, tests, the no_std build of the shared crates, rustdoc.
+# `tower-hil --features power` adds the PPK2 power group (compiled, never run). The fuzz targets
+# (their own workspace, fuzzed on nightly) are checked on the stable pin, so a wire or API change
+# that breaks one fails here on the day of the change, as in CI. The no_std build proves the
+# shared crates still build for the MCU on their own (the firmware job builds them with the SDK's
+# feature set). Rustdoc covers the libraries; cli and hil are binaries/harness.
+# Host workspace gates: fmt, clippy, tests, fuzz targets compile, the no_std build, rustdoc.
 check-host: doc test-sha2-compact
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --locked -- -D warnings
     cargo clippy -p tower-hil --all-targets --features power --locked -- -D warnings
     cargo test --workspace --locked
     cargo test -p tower-hil --features power --no-run --locked
+    CARGO_TARGET_DIR=target/fuzz-check cargo check --locked --manifest-path fuzz/Cargo.toml --bins
     cargo build --locked --target thumbv6m-none-eabi -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi -p tower-strip -p tower-taf
 
 # Firmware gates: `ci` is exactly CI's firmware job; the blinky build also exercises the

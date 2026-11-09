@@ -14,7 +14,7 @@ use libfuzzer_sys::fuzz_target;
 use tower_fuzz::{
     check_encode_node_cmd, check_encode_node_msg, check_node_cmd, check_node_msg, check_records,
 };
-use tower_protocol::radio::{AccelKind, ButtonKind, NodeCmd, NodeInfo, NodeMsg, NodeShellChunk};
+use tower_protocol::radio::{MAX_REPORT, NodeCmd, NodeInfo, NodeMsg, NodeShellChunk};
 
 #[derive(Arbitrary, Debug)]
 enum MsgSpec<'a> {
@@ -23,17 +23,15 @@ enum MsgSpec<'a> {
         firmware_version: &'a str,
         session_id: u32,
         sleeping: bool,
+        wants_time: bool,
     },
-    Button {
-        kind: u8,
+    Report {
+        values: Vec<(u8, i32)>,
+    },
+    Event {
+        id: u8,
+        value: i32,
         count: u32,
-    },
-    Temperature {
-        millic: i32,
-    },
-    Accel {
-        orientation: bool,
-        face: u8,
     },
     Shell {
         cmd_id: u16,
@@ -52,30 +50,19 @@ impl<'a> MsgSpec<'a> {
                 firmware_version,
                 session_id,
                 sleeping,
+                wants_time,
             } => NodeMsg::Info(NodeInfo {
                 firmware_name,
                 firmware_version,
                 session_id,
                 sleeping,
+                wants_time,
             }),
-            MsgSpec::Button { kind, count } => NodeMsg::Button {
-                kind: [
-                    ButtonKind::Press,
-                    ButtonKind::Release,
-                    ButtonKind::Click,
-                    ButtonKind::Hold,
-                ][kind as usize % 4],
-                count,
-            },
-            MsgSpec::Temperature { millic } => NodeMsg::Temperature { millic },
-            MsgSpec::Accel { orientation, face } => NodeMsg::Accel {
-                kind: if orientation {
-                    AccelKind::Orientation
-                } else {
-                    AccelKind::Motion
-                },
-                face,
-            },
+            // A node never packs more than MAX_REPORT values into one Report.
+            MsgSpec::Report { ref values } => {
+                NodeMsg::Report(values.iter().copied().take(MAX_REPORT).collect())
+            }
+            MsgSpec::Event { id, value, count } => NodeMsg::Event { id, value, count },
             MsgSpec::Shell {
                 cmd_id,
                 result,
@@ -93,6 +80,25 @@ impl<'a> MsgSpec<'a> {
     }
 }
 
+#[derive(Arbitrary, Debug)]
+enum CmdSpec<'a> {
+    Shell { epoch: u32, cmd_id: u16, line: &'a str },
+    Set { id: u8, value: i32 },
+    Time { unix: u32, utc_offset_min: i16 },
+    Describe,
+}
+
+impl<'a> CmdSpec<'a> {
+    fn build(&self) -> NodeCmd<'a> {
+        match *self {
+            CmdSpec::Shell { epoch, cmd_id, line } => NodeCmd::Shell { epoch, cmd_id, line },
+            CmdSpec::Set { id, value } => NodeCmd::Set { id, value },
+            CmdSpec::Time { unix, utc_offset_min } => NodeCmd::Time { unix, utc_offset_min },
+            CmdSpec::Describe => NodeCmd::Describe,
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     // Decoder side: the same bytes under every interpretation a consumer may apply.
     check_node_msg(data);
@@ -103,10 +109,10 @@ fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
     while let Ok(spec) = MsgSpec::arbitrary(&mut u) {
         check_encode_node_msg(&spec.build());
-        let Ok((epoch, cmd_id, line)) = <(u32, u16, &str)>::arbitrary(&mut u) else {
+        let Ok(cmd) = CmdSpec::arbitrary(&mut u) else {
             break;
         };
-        check_encode_node_cmd(&NodeCmd::Shell { epoch, cmd_id, line });
+        check_encode_node_cmd(&cmd.build());
         if u.is_empty() {
             break;
         }
