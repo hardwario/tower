@@ -58,7 +58,7 @@ pub(crate) enum NodesCmd {
     Remove { node: String },
     /// Rename a node.
     Rename { node: String, name: String },
-    /// Run a remote shell command on a node (queued until it wakes).
+    /// Run a remote shell command on a node (a listening node runs it at once, a sleeping one when it wakes).
     Shell {
         node: String,
         /// The command line, e.g. "system settings set therm-period=30".
@@ -363,7 +363,9 @@ fn shell(s: &mut Session, node: &str, line: &str, ttl: u16, timeout: Duration, n
         );
         return Ok(EXIT_OK);
     }
-    eprintln!("[tower] sent; waiting for the node to wake (Ctrl-C to stop waiting)…");
+    eprintln!(
+        "[tower] sent; waiting for the reply (a sleeping node runs it when it next wakes; Ctrl-C to stop waiting)…"
+    );
     let mut result = 0u8;
     // The CR that ended the previous chunk: the radio's chunking can split a CRLF.
     let mut held_cr = false;

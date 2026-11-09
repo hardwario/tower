@@ -101,7 +101,11 @@ STM32L0 AES engine, attacks requiring decapping the chip.
   persists its gateway's lane on **every** accepted frame (it hears a few downlinks per boot; with
   the lazy period of 32 its lane was never written, and a recorded `system reboot` downlink could
   be replayed after every reboot of the node, repeatedly, since the remote-shell dedup is
-  RAM-only). The gateway keeps 32 (wear), so after a gateway reboot up to 31 recorded uplinks per
+  RAM-only). A taf **listening** node (always receiving, `radio_control`) persists on every
+  accepted frame too, although it may hear many downlinks: with a lagging lane a recorded `system
+  reboot` would replay into it after every reboot, a reboot loop on a node that switches mains.
+  One small KV record per command is negligible wear at command rates (docs/storage.md: one
+  write per second exhausts the store in about a year). The gateway keeps 32 (wear), so after a gateway reboot up to 31 recorded uplinks per
   node are accepted again; the host bridge drops every uplink whose counter is not above the
   highest it published for that node (counters only grow; a re-key resets it), so they never reach
   MQTT as new events.
@@ -334,6 +338,13 @@ registered address by design (an authenticated host action: the re-provision pat
     downlink is lost, the gateway delivers it again under a fresh counter, and a node that
     rebooted in between (a `system reboot`) runs it again, bounded by the item's TTL. A failed
     lane write on a node (EEPROM fault) leaves its persisted lane behind the live one.
+12. **Listening nodes spend the gateway's airtime.** A downlink to a taf listening node
+    (`radio_control`) goes out at once from the gateway, under the gateway's EU duty budget (1 %),
+    so anyone allowed to publish `nodes/{addr}/set/...` or a remote shell line can drain that
+    budget and delay every node's downlinks (and the gateway's ACKs) until it refills. The MQTT
+    access policy (4.4) is the control; the queue's per-node cap (2 items) bounds what one burst
+    holds. A listening node absent from the air costs one attempt per `LISTEN_RETRY` (2 s) until
+    the item's TTL ends.
 
 ## 6. Questions for the reviewer
 

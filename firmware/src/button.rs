@@ -270,8 +270,9 @@ impl Source {
     }
 }
 
-/// Up to this many buttons (EXTI + polled combined) can run concurrently.
-#[embassy_executor::task(pool_size = 2)]
+/// Up to this many buttons (EXTI + polled combined) can run concurrently. One: the Core Module has
+/// one, and an idle slot is 232 B of RAM every app pays for. Raise it for a board with more.
+#[embassy_executor::task(pool_size = 1)]
 async fn scan_task(mut input: Source, active_high: bool, config: Config, ch: &'static ButtonChannel) {
     let mut pressed = false; // debounced state
     let mut candidate_since: Option<Instant> = None; // when raw first differed

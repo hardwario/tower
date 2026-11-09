@@ -2949,7 +2949,7 @@ mod tests {
         assert_eq!(pushes(&e, &out, &mut waiting), 1, "the set is queued");
         for (prop, body) in [
             ("relay", "maybe"),
-            ("pixels", "10"),
+            ("band", "us915"),
             ("temperature", "20"),
             ("nonsense", "1"),
             ("brightness", "101"),

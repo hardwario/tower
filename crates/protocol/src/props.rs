@@ -317,8 +317,6 @@ pub mod control {
     pub const BRIGHTNESS: u8 = APP_BASE + 4;
     pub const COLOR: u8 = APP_BASE + 5;
     pub const SPEED: u8 = APP_BASE + 6;
-    pub const PIXELS: u8 = APP_BASE + 7;
-    pub const RGBW: u8 = APP_BASE + 8;
 
     /// [`RELAY_BOOT`] values: the relay after a power-up.
     pub const RELAY_BOOT_STATES: &[&str] = &["off", "on", "last"];
@@ -368,18 +366,10 @@ pub mod control {
             Prop {
                 id: SPEED,
                 name: "speed",
-                ty: number(10, 400, 0, "%"),
+                ty: number(10, 1000, 0, "%"),
                 access: Access::Control,
                 default: "",
             },
-            Prop {
-                id: PIXELS,
-                name: "pixels",
-                ty: number(1, 144, 0, ""),
-                access: Access::LocalParam,
-                default: "144",
-            },
-            bool_prop(RGBW, "rgbw", Access::LocalParam, "on"),
         ],
     };
 }
@@ -456,8 +446,9 @@ impl Type {
         }
     }
 
-    /// Parse the text form (`on`/`off`/`true`/`false`/`1`/`0`, a decimal like `21.5`, an enum
-    /// name) into a wire value; `None` when it is not valid for the type.
+    /// Parse the text form (`on`/`off`/`true`/`false`/`1`/`0`, a decimal like `21.5`, a whole
+    /// number in hex like `0x00ff00`, an enum name) into a wire value; `None` when it is not valid
+    /// for the type.
     pub fn parse(&self, text: &str) -> Option<i32> {
         let value = match *self {
             Type::Bool => match text {
@@ -465,6 +456,10 @@ impl Type {
                 "off" | "false" | "0" => 0,
                 _ => return None,
             },
+            // A whole number may also be hex (`0x00ff00`: a colour reads best that way).
+            Type::Number { decimals: 0, .. } if text.starts_with("0x") || text.starts_with("0X") => {
+                i32::try_from(u32::from_str_radix(&text[2..], 16).ok()?).ok()?
+            }
             Type::Number { decimals, .. } => parse_fixed(text, decimals)?,
             Type::Enum(names) => names.iter().position(|n| *n == text)? as i32,
         };

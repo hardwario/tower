@@ -161,8 +161,10 @@ pub fn init(spawner: Spawner, pin: Output<'static>, channel: &'static LedChannel
     Led { ch: channel }
 }
 
-/// Up to this many LEDs can be driven concurrently (one task per LED).
-#[embassy_executor::task(pool_size = 4)]
+/// Up to this many LEDs can be driven concurrently (one task per LED). One: the Core Module has
+/// one, and every slot is RAM every app pays for (168 B each; three idle ones cost a strip node its
+/// stack floor). Raise it for a board with more.
+#[embassy_executor::task(pool_size = 1)]
 async fn dispatcher(mut pin: Output<'static>, ch: &'static LedChannel, active_high: bool) {
     let mut background: Option<Pattern> = None;
     let mut switch_delay = DEFAULT_SWITCH_DELAY;

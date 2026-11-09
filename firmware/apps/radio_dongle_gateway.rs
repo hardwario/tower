@@ -196,6 +196,9 @@ const DOWNLINK_TURNAROUND: Duration = Duration::from_millis(20);
 /// single-owner loop out of `recv` while a mid-response node is uplinking its next
 /// shell chunk.
 const DOWNLINK_REPS: u8 = 2;
+/// The pause after a listening node did not take its downlink, before the next attempt (the queue's
+/// TTL ends the attempts).
+const LISTEN_RETRY: Duration = Duration::from_secs(2);
 /// US 915: how long the gateway stays on the pairing carrier after a commit, so the new node's
 /// commit uplinks (confirmed NodeInfo, retried for up to ~15 s) are ACKed before it hops again.
 const COMMIT_GRACE: Duration = Duration::from_secs(15);
@@ -542,6 +545,7 @@ async fn run(b: Board) {
     let mut last_hop_stat = Instant::now();
 
     let mut queue = Queue::new();
+    let mut listen_retry_at = Instant::MIN;
     let mut stats = Stats::new();
     let mut pairing: Option<PairingSession> = None;
     let mut last_stat = Instant::now();
@@ -664,6 +668,21 @@ async fn run(b: Board) {
             // 3. One authenticated uplink.
             on_uplink(&rx, &mut net, &mut stats, &mut queue, now_ms).await;
         }
+        // 3b. A listening node (taf, its registry flag says not sleeping) keeps its receiver on:
+        //     its queued downlink goes out now, not after its next uplink. EU 868 only (a listening
+        //     node does not follow the US 915 hop schedule yet). After a failed attempt the node
+        //     is given `LISTEN_RETRY` before the next, so an absent one cannot hold the radio.
+        if pairing.is_none() && !hopping && !queue.is_empty() && Instant::now() >= listen_retry_at {
+            let target = queue.iter().map(|i| i.node_addr).find(|&addr| {
+                registry::find(&buckets, addr).is_some_and(|r| r.flags & mgmt::NODE_FLAG_SLEEPING == 0)
+            });
+            if let Some(node) = target
+                && !deliver(&mut net, &mut queue, node, now_ms).await
+            {
+                listen_retry_at = Instant::now() + LISTEN_RETRY;
+            }
+        }
+
         // A registered node's keyed join (E4) was answered inside recv(): nothing to
         // install (its key and lane already are), just say so.
         if let Some(node_addr) = net.take_keyed_join() {
@@ -738,35 +757,49 @@ async fn on_uplink(rx: &Received, net: &mut Net, stats: &mut Stats, queue: &mut 
     );
     console::uplink(rx.src, rx.counter, rx.rssi, rx.lqi, rx.data()).await;
 
-    if let Some(item) = queue.peek_for(rx.src, now_ms) {
-        let (item_id, mut data, len) = (item.id, [0u8; 74], item.data().len());
-        data[..len].copy_from_slice(item.data());
+    if queue.peek_for(rx.src, now_ms).is_some() {
         Timer::after(DOWNLINK_TURNAROUND).await;
-        let result = if net.access() == Access::Fhss {
-            net.fhss_send(rx.src, &data[..len], true).await
-        } else {
-            net.send(rx.src, &data[..len], true, DOWNLINK_REPS).await
-        };
-        let outcome = match result {
-            SendResult::Delivered => {
-                queue.pop(item_id);
-                mgmt::TX_DELIVERED
-            }
-            SendResult::NotDelivered => mgmt::TX_NOT_DELIVERED,
-            SendResult::Busy => mgmt::TX_BUSY,
-            SendResult::DutyLimited => mgmt::TX_DUTY_LIMITED,
-            _ => mgmt::TX_ERROR,
-        };
-        console::radio_stat(RadioStat::Tx {
-            dest: rx.src,
-            item: item_id,
-            outcome,
-            ack_rssi: net.last_ack().map(|m| m.rssi),
-        })
-        .await;
+        deliver(net, queue, rx.src, now_ms).await;
     }
     net.set_pending(rx.src, queue.count_for(rx.src) > 0);
     STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
+}
+
+/// Send `node` its oldest queued downlink: hopping, in the current slot (one attempt), else in duty
+/// mode with `DOWNLINK_REPS`. Reports the outcome to the host; pops the item on delivery. Whether it
+/// was delivered.
+async fn deliver(net: &mut Net, queue: &mut Queue, node: u32, now_ms: u64) -> bool {
+    let Some(item) = queue.peek_for(node, now_ms) else {
+        return false;
+    };
+    let (item_id, mut data, len) = (item.id, [0u8; 74], item.data().len());
+    data[..len].copy_from_slice(item.data());
+    let result = if net.access() == Access::Fhss {
+        net.fhss_send(node, &data[..len], true).await
+    } else {
+        net.send(node, &data[..len], true, DOWNLINK_REPS).await
+    };
+    let delivered = matches!(result, SendResult::Delivered);
+    let outcome = match result {
+        SendResult::Delivered => {
+            queue.pop(item_id);
+            mgmt::TX_DELIVERED
+        }
+        SendResult::NotDelivered => mgmt::TX_NOT_DELIVERED,
+        SendResult::Busy => mgmt::TX_BUSY,
+        SendResult::DutyLimited => mgmt::TX_DUTY_LIMITED,
+        _ => mgmt::TX_ERROR,
+    };
+    console::radio_stat(RadioStat::Tx {
+        dest: node,
+        item: item_id,
+        outcome,
+        ack_rssi: net.last_ack().map(|m| m.rssi),
+    })
+    .await;
+    net.set_pending(node, queue.count_for(node) > 0);
+    STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
+    delivered
 }
 
 /// Commit a joined node: persist it (UNNAMED: the host auto-names from the first
@@ -782,7 +815,10 @@ async fn commit_pairing(peer: PairedPeer, req_id: u16, net: &mut Net, buckets: &
     let rec = NodeRecord {
         addr: node_addr,
         key: peer.key,
-        flags: mgmt::NODE_FLAG_UNNAMED,
+        // Sleeping until its `NodeInfo` says otherwise (the host clears the flag for a listening
+        // node): the safe default, a downlink waits for an uplink instead of going out to a node
+        // that may be asleep.
+        flags: mgmt::NODE_FLAG_UNNAMED | mgmt::NODE_FLAG_SLEEPING,
         name: heapless::String::new(),
     };
     match registry::add_new(buckets, &rec) {

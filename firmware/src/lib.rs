@@ -16,6 +16,7 @@
 //!   framework; pairs with [`console`] and the `tower` host CLI.
 //! - [`led`]: non-blocking single-LED blink dispatcher (background + instant).
 //! - [`button`]: debounced button (click/hold), EXTI-gated or polled.
+//! - [`power_module`]: the TOWER Power Module's relay (header P0).
 //! - [`power`]: the SDK's USB-presence-gated STOP policy (implemented in `console`).
 //! - [`radio`]: SPIRIT1 sub-GHz radio stack (driver + AES-CCM + network layer).
 //! - [`tmp112`]: TMP112 temperature sensor driver (HAL-independent).
@@ -24,6 +25,8 @@
 //!   or the raw pyroelectric signal.
 //! - [`storage`]: EEPROM non-volatile storage: raw byte area + a key-value store (raw or postcard values).
 //! - [`ws2812`]: WS2812B/SK6812 strip driver (timer PWM + DMA).
+//! - [`strip_player`]: the effects render loop with its `strip` shell commands (`led_strip`,
+//!   `radio_control`).
 //! - [`strip`]: addressable-LED effects (rainbow, chase, …) with brightness+gamma.
 //! - [`lcd`]: the TOWER LCD Module (128 x 128 memory LCD, buttons, RGB LED, gesture sensor) with
 //!   the [`hmi`] framework: drawing, Spleen fonts, images, declarative menus, button gestures.
@@ -48,11 +51,13 @@ pub mod led;
 pub mod lis2dh12;
 pub mod pir;
 pub mod power;
+pub mod power_module;
 pub mod radio;
 pub mod shell;
 pub mod stack;
 pub mod storage;
 pub mod strip;
+pub mod strip_player;
 pub mod sysboot;
 pub mod taf;
 pub mod tca9534a;

@@ -20,8 +20,8 @@ use embassy_stm32::gpio::{Flex, Level, Output, Pull, Speed};
 use embassy_stm32::i2c::{Config as I2cConfig, I2c, Master};
 use embassy_stm32::mode::{Async, Blocking};
 use embassy_stm32::peripherals::{
-    DMA1_CH3, DMA1_CH6, DMA1_CH7, EXTI2, EXTI13, IWDG, PA1, PA15, PB0, PB2, PB3, PB4, PB5, PB7, PB10, PB11,
-    PB12, PB13, PB14, PB15, PC13, PH1, SPI1, SPI2, TIM2,
+    DMA1_CH3, DMA1_CH6, DMA1_CH7, EXTI2, EXTI13, IWDG, PA0, PA1, PA15, PB0, PB2, PB3, PB4, PB5, PB7, PB10,
+    PB11, PB12, PB13, PB14, PB15, PC13, PH1, SPI1, SPI2, TIM2,
 };
 use embassy_stm32::rcc::{LsConfig, Sysclk};
 use embassy_stm32::time::Hertz;
@@ -125,6 +125,9 @@ pub struct Board {
     pub header_int: HeaderInt,
     /// The PIR Module's lines (header P8 and P9); see [`PirPins`].
     pub pir: PirPins,
+    /// Header P0 (PA0): the Power Module's relay ([`power_module::Relay`](crate::power_module::Relay)),
+    /// or the Battery Module's voltage sense. Not configured at boot.
+    pub header_p0: Peri<'static, PA0>,
 }
 
 /// The TOWER header's SPI bus: SPI2 on header pins P14 (PB13, SCK), P13 (PB15, MOSI), P12
@@ -333,6 +336,7 @@ impl Board {
                 dl: p.PB2,
                 exti: p.EXTI2,
             },
+            header_p0: p.PA0,
         }
     }
 }

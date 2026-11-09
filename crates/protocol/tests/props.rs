@@ -120,6 +120,12 @@ fn types_parse_validate_and_display() {
     assert_eq!(Type::Bool.parse("false"), Some(0));
     assert_eq!(Type::Bool.parse("2"), None);
     assert_eq!(Type::Bool.display(1).to_string(), "on");
+    let color = kind("control").unwrap().prop_named("color").unwrap().ty;
+    assert_eq!(color.parse("0x00ff00"), Some(0x00ff00));
+    assert_eq!(color.parse("65280"), Some(65280));
+    assert_eq!(color.parse("0x1000000"), None, "above 0xffffff");
+    assert_eq!(color.parse("0xzz"), None);
+    assert_eq!(setpoint.parse("0x10"), None, "hex only for whole numbers");
 }
 
 /// The tables are part of the radio tag: the fingerprint is a pure function of them.

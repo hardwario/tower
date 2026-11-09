@@ -79,9 +79,6 @@ static UNACKED: AtomicU8 = AtomicU8::new(0);
 /// waits for the radio loop. A receive is never cancelled mid-frame (that loses the frame: the
 /// replay lane has advanced), so the loop polls everything else between slices.
 const LISTEN_SLICE: Duration = Duration::from_millis(50);
-/// A listening node persists its gateway's replay lane every this many accepted downlinks, like
-/// the gateway does (it may hear many: a strip being dimmed); a sleeping node persists each.
-const LISTEN_LANE_PERSIST: u8 = 32;
 /// Hop-slot ticks one send may spend scanning for the schedule (US 915): ~28 s.
 const FHSS_SCAN_TICKS: u16 = 80;
 /// Slots in a row a synced send may miss the beacon before it gives up.
@@ -218,9 +215,12 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
     };
     net.set_default_lane(false);
     let listening = kind.class == Class::Listening;
-    // A sleeping node hears a handful of downlinks per boot: persist the lane on each, or a recorded
-    // downlink (a `system reboot`) would replay as fresh after every reboot.
-    net.set_lane_persist_period(if listening { LISTEN_LANE_PERSIST } else { 1 });
+    // Persist the gateway's lane on every accepted downlink, both classes. A lane that lags (the
+    // gateway's period of 32) lets recorded downlinks replay into a rebooted node, and a recorded
+    // `system reboot` would then reboot it again after every reboot, a loop (the remote-shell dedup
+    // is RAM only). The wear is one small record per command: a relay switched a thousand times a
+    // day compacts the store about ten times a day (docs/security-model.md, docs/storage.md).
+    net.set_lane_persist_period(1);
     if let Some(p) = provision
         && !net.add_peer(p.gw_addr, &p.key)
     {

@@ -212,6 +212,10 @@ name = "radio_climate"
 path = "apps/radio_climate.rs"
 
 [[bin]]
+name = "radio_control"
+path = "apps/radio_control.rs"
+
+[[bin]]
 name = "radio_motion"
 path = "apps/radio_motion.rs"
 
