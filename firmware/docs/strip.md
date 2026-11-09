@@ -158,20 +158,25 @@ off and on. Everything else is the `strip` shell menu (`tower shell`, the consol
 | `strip palette <name>` | The palette of `palette` and `plasma` |
 | `strip speed <10-1000>` | Animation speed, % of normal |
 | `strip gamma <linear\|2.0\|2.2\|2.8>`, `strip dither <on\|off>`, `strip reverse <on\|off>` | The render settings |
-| `strip limit <mA\|off>` | The current cap (1500 mA by default) |
-| `strip time <hh:mm[:ss]>` | Set the clock (it counts from 00:00 at boot) |
+| `strip limit <mA\|off>` | The current cap (1500 mA by default); USB console only |
+| `strip time <hh:mm[:ss]>` | Set the clock (it counts from 00:00 at boot; on `radio_control` the gateway host syncs it) |
 | `strip sunrise <minutes>` | Start a sunrise of that length |
-| `strip save` | Keep the settings in EEPROM; they load at boot |
+| `strip save` | Keep the settings in EEPROM; they load at boot; USB console only |
 
 Its statics are 9.0 KB, so 11.5 KB of stack is left (measured peak 2.8 KB), well over the RAM
 budget's 8 KB floor. `strip status` also shows the driver's underrun and cut counts.
 
+## On the radio: `radio_control`
+
+`radio_control` (`docs/taf.md`) is the strip on the radio: a listening node with the Power
+Module's relay and the same player (`tower::strip_player`), so `strip`, `effect`, `brightness`,
+`color` and `speed` are MQTT properties and the `strip` commands work over the radio's remote
+shell too, except `strip limit` and `strip save`, which are USB console only: anyone who can
+publish to the gateway's MQTT can queue a remote line, a raised limit can overload the supply,
+and `radio_control` stores its changes by itself 10 s after the last one. Bench: an MQTT set
+takes effect in about 0.7 s, with no underruns while the radio works.
+
 ## Not (yet) here
 
-- **A radio-controlled strip** (planned). With the streaming driver the strip costs about 1.3 KB,
-  so a strip node with the radio stack (pairing, keys in EEPROM, the remote shell) fits the 20 KB
-  part with the standard 8 KB stack floor (estimated statics about 11.3 KB). It is to be a
-  *listening* node, always receiving, so commands (and later relay control) take effect at once
-  rather than on the node's next uplink; the network layer does not have that mode yet.
 - **Temporal dithering**, which would also vary the pattern over time: at about 70 to 80 fps it
   could shimmer near black, so only the spatial pattern is used.

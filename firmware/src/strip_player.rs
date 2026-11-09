@@ -399,6 +399,9 @@ fn cmd_save(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     }
 }
 
+/// Over the radio (`radio_control`'s remote shell) anyone who can publish to the gateway's MQTT can
+/// queue a line, so two commands are console-only: `limit` (raising or lifting the current limit
+/// can overload the supply) and `save` (EEPROM wear; `radio_control` stores changes by itself).
 static STRIP_COMMANDS: &[Entry] = &[
     Entry::cmd("status", Args::None, cmd_status),
     Entry::cmd("effect", Args::Names(&EFFECTS), cmd_effect),
@@ -412,10 +415,10 @@ static STRIP_COMMANDS: &[Entry] = &[
     Entry::cmd("gamma", Args::Names(&GAMMAS), cmd_gamma),
     Entry::cmd("dither", Args::Names(&ON_OFF), cmd_dither),
     Entry::cmd("reverse", Args::Names(&ON_OFF), cmd_reverse),
-    Entry::cmd("limit", Args::None, cmd_limit),
+    Entry::cmd_console_only("limit", Args::None, cmd_limit),
     Entry::cmd("time", Args::None, cmd_time),
     Entry::cmd("sunrise", Args::None, cmd_sunrise),
-    Entry::cmd("save", Args::None, cmd_save),
+    Entry::cmd_console_only("save", Args::None, cmd_save),
 ];
 
 /// The `strip` shell commands: mount them in the app's command tree.
