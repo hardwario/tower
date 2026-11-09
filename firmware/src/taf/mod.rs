@@ -250,6 +250,8 @@ static PARAMS_DUE: AtomicBool = AtomicBool::new(false);
 /// Raised by every clock sync, for [`clock_synced`].
 static CLOCK_SYNCED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static PAIR_REQUEST: AtomicBool = AtomicBool::new(false);
+/// The newest step of an OTA pairing, for [`pairing`].
+static PAIRING: Signal<CriticalSectionRawMutex, Pairing> = Signal::new();
 /// The gateway this node is paired with (0 = none), for [`paired`] and `node status`.
 static GATEWAY: AtomicU32 = AtomicU32::new(0);
 /// This node's radio address, for `node status`.
@@ -370,6 +372,29 @@ pub async fn clock_synced() {
 pub fn request_pairing() {
     PAIR_REQUEST.store(true, Ordering::Relaxed);
     WAKE.signal(());
+}
+
+/// A step of an OTA pairing, for an app that shows it (a screen): see [`pairing`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pairing {
+    /// Started: the node looks for a gateway's window.
+    Started,
+    /// Paired, the gateway confirmed. `sas` is the six digits to compare with the ones the host
+    /// shows (`tower nodes add --ota`); show them zero-padded.
+    Paired {
+        /// The short authentication string, `0..1_000_000`.
+        sas: u32,
+    },
+    /// Not paired: no gateway window in range, or the gateway did not confirm. A pairing in force
+    /// before stays.
+    Failed,
+}
+
+/// The next step of an OTA pairing, whoever started it (the power-up gesture, [`request_pairing`],
+/// `node pair`, the host over the cable). Only the newest step is kept, and every pairing ends
+/// with [`Pairing::Paired`] or [`Pairing::Failed`]. One waiter.
+pub async fn pairing() -> Pairing {
+    PAIRING.wait().await
 }
 
 /// Whether the node is paired with a gateway.

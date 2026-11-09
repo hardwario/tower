@@ -1,7 +1,8 @@
 //! The thermostat's screen on the LCD Module, in page mode: [`render`] draws the whole screen from
 //! [`SCREEN`] (what the regulator last showed, and the page the user is on) whenever the driver
-//! asks, band by band; [`Ui`] is the regulator task's side: it updates [`SCREEN`], shows it, and
-//! turns button presses into setpoint steps and menu choices.
+//! asks, band by band; [`Ui`] is the regulator task's side: it updates [`SCREEN`], shows it,
+//! turns button presses into setpoint steps and menu choices, and shows how an OTA pairing goes
+//! (the SAS to compare with the host's once it is paired).
 //!
 //! The main page (128 x 128, buttons below):
 //!
@@ -22,6 +23,7 @@ use core::cell::RefCell;
 use core::fmt::{self, Write as _};
 
 use embassy_executor::Spawner;
+use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_time::{Duration, Instant};
@@ -46,8 +48,8 @@ const STEP: i16 = 5;
 const COMMIT: Duration = Duration::from_secs(3);
 /// The menu and the info page go back to the main page after this long without input.
 const IDLE: Duration = Duration::from_secs(30);
-/// How long a notice stays.
-const NOTICE: Duration = Duration::from_secs(4);
+/// How long the SAS of a new pairing stays, for whoever compares it with the host's.
+const SAS_SHOWN: Duration = Duration::from_secs(60);
 
 // ---- what the screen shows ----------------------------------------------------------------------
 
@@ -57,6 +59,8 @@ enum Page {
     Menu,
     Info,
     Notice(&'static str),
+    /// Paired a moment ago: the SAS to compare with the one the host shows.
+    Paired(u32),
 }
 
 /// The regulator's state as the screen shows it, and the page.
@@ -179,6 +183,7 @@ pub fn render(c: &mut Canvas<'_>) {
                 c.clear(Color::White);
                 c.text(64, 56, text, &SMALL.align(Align::Center));
             }
+            Page::Paired(sas) => paired_page(c, sas),
         }
     })
 }
@@ -315,10 +320,25 @@ fn temperature(c: &mut Canvas<'_>, centi: Option<i32>) {
     degrees(c, x + 9, Y + 12);
 }
 
-fn info_page(c: &mut Canvas<'_>, v: &View) {
+/// A page's title bar.
+fn title(c: &mut Canvas<'_>, text: &str) {
     c.clear(Color::White);
     c.fill_rect(Rect::new(0, 0, 128, 18), Color::Black);
-    c.text(64, 1, "Info", &SMALL.inverted().align(Align::Center));
+    c.text(64, 1, text, &SMALL.inverted().align(Align::Center));
+}
+
+/// A new pairing's SAS, six digits as the host prints them (`paired ... (SAS 012345)`).
+fn paired_page(c: &mut Canvas<'_>, sas: u32) {
+    let center = SMALL.align(Align::Center);
+    title(c, "Paired");
+    c.text(64, 24, "SAS", &center);
+    c.text_fmt(64, 42, format_args!("{sas:06}"), &DIGITS.align(Align::Center));
+    c.text(64, 84, "the host must", &center);
+    c.text(64, 102, "show the same", &center);
+}
+
+fn info_page(c: &mut Canvas<'_>, v: &View) {
+    title(c, "Info");
     c.text_fmt(LEFT, 24, format_args!("addr {:08x}", taf::addr()), &SMALL);
     match taf::gateway() {
         Some(gw) => c.text_fmt(LEFT, 42, format_args!("gw   {gw:08x}"), &SMALL),
@@ -341,6 +361,14 @@ fn info_page(c: &mut Canvas<'_>, v: &View) {
 }
 
 // ---- the regulator task's side ------------------------------------------------------------------
+
+/// What the screen reacts to.
+pub enum Input {
+    /// A button press or a swipe on the module.
+    Event(Event),
+    /// A step of an OTA pairing.
+    Pairing(taf::Pairing),
+}
 
 /// The screen as the regulator's task drives it (its state is in [`SCREEN`]: a task argument is
 /// stored twice in the task's future).
@@ -393,8 +421,12 @@ impl Ui {
         })
     }
 
-    pub async fn next_event(&self) -> Event {
-        self.lcd.next_event().await
+    /// The next button press or swipe, or the next step of an OTA pairing.
+    pub async fn next_input(&self) -> Input {
+        match select(self.lcd.next_event(), taf::pairing()).await {
+            Either::First(ev) => Input::Event(ev),
+            Either::Second(step) => Input::Pairing(step),
+        }
     }
 
     /// Apply a setpoint chosen with the buttons, close a page that timed out.
@@ -415,8 +447,26 @@ impl Ui {
         }
     }
 
+    pub async fn on_input(&mut self, input: Input, s: &mut State, kv: Nv) {
+        match input {
+            Input::Event(ev) => self.on_event(ev, s, kv).await,
+            Input::Pairing(step) => self.on_pairing(step),
+        }
+    }
+
+    /// An OTA pairing started or ended, whoever started it (the menu, `node pair`, the host over
+    /// the cable): its page over whatever is open. "pairing" stays until the runtime reports the
+    /// end (it always does), the outcome until a press or its time is up.
+    fn on_pairing(&mut self, step: taf::Pairing) {
+        match step {
+            taf::Pairing::Started => self.open(Page::Notice("pairing"), None),
+            taf::Pairing::Paired { sas } => self.open(Page::Paired(sas), Some(SAS_SHOWN)),
+            taf::Pairing::Failed => self.open(Page::Notice("pairing failed"), Some(IDLE)),
+        }
+    }
+
     /// A button press or a swipe.
-    pub async fn on_event(&mut self, ev: Event, s: &mut State, kv: Nv) {
+    async fn on_event(&mut self, ev: Event, s: &mut State, kv: Nv) {
         let page = SCREEN.lock(|sc| sc.borrow().view.page);
         let Event::Button(button, kind) = ev else { return };
         match page {
@@ -446,7 +496,8 @@ impl Ui {
                     Some(Outcome::Action(PAIR)) => {
                         info!(target: "thermostat", "pairing from the menu");
                         taf::request_pairing();
-                        self.open(Page::Notice("pairing"), Some(NOTICE));
+                        // At once; the runtime's steps follow (`on_pairing`).
+                        self.open(Page::Notice("pairing"), None);
                     }
                     Some(Outcome::Action(INFO)) => self.open(Page::Info, Some(IDLE)),
                     Some(Outcome::Action(RESET)) => {
@@ -459,7 +510,7 @@ impl Ui {
                     _ => {}
                 }
             }
-            Page::Info | Page::Notice(_) => {
+            Page::Info | Page::Notice(_) | Page::Paired(_) => {
                 if kind == Kind::Click || kind == Kind::Hold {
                     self.open(Page::Main, None);
                 }

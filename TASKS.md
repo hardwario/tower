@@ -36,11 +36,14 @@ build or its dependencies after 0ec5ca8 (T26 does) needs the dry run again.
 
 ### T22. The LCD thermostat: what the bench left open
 
-Status: open
+Status: waiting (a PPK2): the SAS on the screen done 2026-11-09
 
-- [ ] **The pairing SAS on the screen.** With the LCD Module the thermostat pairs from its menu,
-  but the SAS to compare shows only on the USB console (`net: pairing: SAS n`) and on the host. A
-  hook from the runtime (the SAS, pairing done or failed) would let the screen show it.
+- [x] **The pairing SAS on the screen.** The runtime reports each step of an OTA pairing
+  (`taf::pairing`: `Started`, then `Paired { sas }` or `Failed`), whoever started it; the screen
+  shows "pairing", then the page *Paired* with the SAS in the big digits (60 s, or until a press)
+  or "pairing failed" (30 s). The CLI's hints and the docs name the screen. Bench: the three
+  pages by `lcd dump`, SAS 819990 on the screen and in `tower nodes add --ota`; stack peak
+  7136 B of 8312 B, 3492 B of flash free (docs/firmware/results/2026-11-09.md). 2026-11-09.
 - [ ] **PPK2**: the idle floor with the module attached, a VCOM toggle, a page-mode show (its
   drawing runs sixteen times per show; estimated a few ms of CPU at 16 MHz).
 - [x] **The `button simulate` command** stayed mounted on the thermostat with the module, where

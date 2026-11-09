@@ -20,7 +20,7 @@ use tower_protocol::radio::{
 };
 use tower_protocol::{MsgType, decode_frame};
 
-use super::{Base, INBOX, PAIR_REQUEST, WAKE};
+use super::{Base, INBOX, PAIR_REQUEST, PAIRING, Pairing, WAKE};
 use crate::board::UniqueId;
 use crate::radio::Spirit1;
 use crate::radio::config::{self, Band};
@@ -1094,7 +1094,13 @@ impl Node {
         let Some((window, req)) = self.pair_due.take() else {
             return;
         };
+        // For an app's screen (`taf::pairing`): the start, then how it ended.
+        PAIRING.signal(Pairing::Started);
         let outcome = self.pair(window).await;
+        PAIRING.signal(match outcome {
+            Some((_, sas, _)) => Pairing::Paired { sas },
+            None => Pairing::Failed,
+        });
         if let Some(req_id) = req {
             match outcome {
                 Some((rec, sas, true)) => {

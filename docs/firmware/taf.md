@@ -65,7 +65,9 @@ What every taf app does, so a user meets the same device whatever it measures:
 - **An app whose LCD Module takes the Core button** (`radio_thermostat` with the module: the
   module's buttons share the Core button's line, so its driver reads all three): the Core button's
   gestures are the screen's input, not `button` events, and the power-up gesture is the menu's
-  *Pair* and *Reset* (`taf::request_pairing`, `taf::factory_reset`).
+  *Pair* and *Reset* (`taf::request_pairing`, `taf::factory_reset`). The screen follows every
+  pairing, whoever started it (`taf::pairing`): "pairing" while the node looks for a window, then
+  the SAS to compare with the host's (for a minute, or until a press), or "pairing failed".
 - **USB console**: logs, the shell and the management channel, always. Every app has
   `node status`, `node pair` (console only) and `button simulate <ms>` (console only: a press of
   that length, for tests without hands; where a module owns the Core button it refuses and names
@@ -147,6 +149,7 @@ What every taf app does, so a user meets the same device whatever it measures:
 | `taf::local_time()` | Local wall-clock time (`weekday`, `minute`, ...) once the host synced it |
 | `taf::clock_synced().await` | Wakes when the clock is synced (a scheduler looks again) |
 | `taf::request_pairing()`, `taf::paired()` | Start OTA pairing from an app gesture; whether paired |
+| `taf::pairing().await` | The next step of an OTA pairing, whoever started it: `Started`, then `Paired { sas }` or `Failed`. For an app with a screen: the SAS is otherwise only in the log |
 | `taf::factory_reset().await` | The power-up gesture's factory reset (wipe, reboot), for an app that gave the Core button away |
 | `taf::addr()`, `taf::gateway()` | This node's radio address; the gateway it is paired with |
 | `taf::temperature()` | The Core Module's temperature (centi °C) as the runtime last read it; `None` before the first read |
@@ -186,8 +189,8 @@ menu, 2026-11-09). So the floor is real margin, not slack. What keeps an app sma
   without a waiting future. The runtime's sensor task is 200 B.
 
 **Flash is the other limit.** The runtime is in every app, so code added to it lands in all of
-them; the tightest are `radio_thermostat` on the r2 (4.5 KB of its 192 KB free at opt-level "z",
-with the screen, 2026-11-09) and `radio_control` on the r2 (5.6 KB). `just fw ci` prints every
+them; the tightest are `radio_thermostat` on the r2 (3.4 KB of its 192 KB free at opt-level "z",
+with the screen, 2026-11-09) and `radio_control` on the r2 (5.3 KB). `just fw ci` prints every
 bin's free flash and warns under 2 KB (`tools/check_ram_budget.py`). Lessons from winning it back:
 
 - **No checked `str` slices** (`&s[a..b]`, `split_at`, a `str` pattern's reverse search) in
@@ -211,6 +214,6 @@ bin's free flash and warns under 2 KB (`tools/check_ram_budget.py`). Lessons fro
 `docs/firmware/hmi.md`, *Page mode*): no frame, the screen drawn band by band as it is sent, about
 1.5 KB of statics. Its UI lives in the regulator task (one task, the state in one place) and draws
 from a `static` the task updates. On the r2 that leaves 8.3 KB of stack; the measured peak with
-the screen is 7.3 KB (OTA pairing from the menu; 6.6 KB after a remote shell command with an
-EEPROM write). The r1 has 0.9 KB above the floor, too little even for page mode: its build stays
+the screen is 7.1 KB (OTA pairing from the menu, its SAS page shown; 6.6 KB after a remote shell
+command with an EEPROM write). The r1 has 0.9 KB above the floor, too little even for page mode: its build stays
 headless.

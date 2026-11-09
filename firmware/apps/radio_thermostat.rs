@@ -184,7 +184,7 @@ async fn regulator(kv: Nv, ui: Option<screen::Ui>) {
         }
         let input = async {
             match &ui {
-                Some(ui) => ui.next_event().await,
+                Some(ui) => ui.next_input().await,
                 None => core::future::pending().await,
             }
         };
@@ -221,9 +221,9 @@ async fn regulator(kv: Nv, ui: Option<screen::Ui>) {
                 info!(target: "thermostat", "weekly program changed");
             }
             Either4::Third(Either::Second(())) => {}
-            Either4::Fourth(ev) => {
+            Either4::Fourth(input) => {
                 if let Some(ui) = &mut ui {
-                    ui.on_event(ev, &mut s, kv).await;
+                    ui.on_input(input, &mut s, kv).await;
                 }
             }
         }
@@ -395,20 +395,20 @@ mod screen;
 #[cfg(feature = "core-module-r1")]
 mod screen {
     use super::{Nv, State};
-    use tower::lcd::Event;
 
     pub enum Ui {}
+    pub enum Input {}
 
     impl Ui {
         pub async fn show(&mut self, _: &mut State) {}
         pub fn deadline(&self) -> Option<embassy_time::Instant> {
             None
         }
-        pub async fn next_event(&self) -> Event {
+        pub async fn next_input(&self) -> Input {
             match *self {}
         }
         pub fn on_timer(&mut self, _: &mut State, _: Nv) {}
-        pub async fn on_event(&mut self, _: Event, _: &mut State, _: Nv) {}
+        pub async fn on_input(&mut self, _: Input, _: &mut State, _: Nv) {}
     }
 }
 

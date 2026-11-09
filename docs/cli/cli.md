@@ -296,7 +296,8 @@ until the LED goes off at 10 s, release within 5 s; docs/firmware/taf.md). On su
 it prints the node and the handshake's 6-digit short authentication string,
 `paired 0x0000ab12 (SAS 123456)` (also in the bridge's log and on `gateway/pairing` as
 `"sas":"123456"`). Compare it with the SAS the node logs, `net: pairing: SAS 123456` (watch it
-with `tower -d <node port> logs` while the node is on USB and pairing): equal values rule out a
+with `tower -d <node port> logs` while the node is on USB and pairing; a node with a screen, the
+thermostat with its LCD Module, shows it for a minute once it is paired): equal values rule out a
 man in the middle (a 1 in 10⁶ chance for an attacker); different values mean one sat in between,
 so remove the node and pair again. The node keeps the new key only once the gateway acknowledges
 its first uplink under it, so a lost handshake frame leaves it unpaired (another gesture

@@ -269,9 +269,9 @@ fn table_row(n: &Node) -> String {
 /// What to do with the SAS `nodes add --ota` printed for the node `addr`.
 fn sas_hint(addr: &str) -> String {
     format!(
-        "[tower] compare this SAS with the one the node logged (`net: pairing: SAS ...`, also in its \
-         `node: paired with gateway` line); they must match. A mismatch means a man in the middle: remove the \
-         node (`tower nodes remove {addr}`) and pair it again."
+        "[tower] compare this SAS with the one on the node's screen, or the one it logged (`net: pairing: \
+         SAS ...`, also in its `node: paired with gateway` line); they must match. A mismatch means a man in \
+         the middle: remove the node (`tower nodes remove {addr}`) and pair it again."
     )
 }
 
@@ -279,11 +279,12 @@ fn add_ota(s: &mut Session, window: u16, name: Option<&str>) -> Result<u8> {
     // Printed before the gateway answers (it answers only when the window ends, or at once with
     // a refusal such as a full registry), so it must not claim the window is open.
     eprintln!(
-        "[tower] opening a pairing window ({window}s): power the node up, hold its button 10 s, release when the LED goes off…"
+        "[tower] opening a pairing window ({window}s): power the node up, hold its button 10 s, release when \
+         the LED goes off (a node with a screen: Pair in its menu)…"
     );
     eprintln!(
-        "[tower] to check the pairing's SAS, watch the node's console meanwhile (USB attached: \
-         `tower -d <node port> logs`)"
+        "[tower] to check the pairing's SAS, watch the node's screen, or its console meanwhile (USB \
+         attached: `tower -d <node port> logs`)"
     );
     // The RPC resolves when the window does (join / expiry), up to the bridge's pairing slack
     // after it (`PAIRING_SLACK_S`); wait that plus a margin for the broker round trip.
@@ -497,6 +498,7 @@ mod tests {
     #[test]
     fn sas_hint_names_the_node_log_line_and_the_removal() {
         let hint = sas_hint("0x0000ab12");
+        assert!(hint.contains("the node's screen"), "{hint}");
         assert!(hint.contains("net: pairing: SAS"), "{hint}");
         assert!(hint.contains("tower nodes remove 0x0000ab12"), "{hint}");
     }
