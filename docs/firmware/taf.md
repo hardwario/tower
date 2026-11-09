@@ -40,7 +40,9 @@ What every taf app does, so a user meets the same device whatever it measures:
   host that restarted learns the node's kind, and a thermostat its time, within about a minute.
 - **Reports**: the app reports values; the runtime sends what is news (any change, or for the
   temperature a change of `report-delta`), batched into one uplink, and everything again every
-  `heartbeat` (with an `Info`), settings included.
+  `heartbeat` (with an `Info`), settings included. After an undelivered uplink the periodic
+  reports wait (`report-period` doubled per miss in a row, at most the heartbeat), so a node whose
+  gateway is gone does not spend an uplink every period; a delivery or a button press ends it.
 - **The Core button**: every gesture (press, release, click, hold) is a `button` event when its
   setting is on (`press` and `release` off, `click` and `hold` on by default; `hold-time` and
   `click-timeout` tune the recognition), answered on the LED when `led` is on (a pulse, a double

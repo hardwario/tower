@@ -160,7 +160,8 @@ docs/firmware/storage.md.
 
 ### T9. Two-board verification of the 2026-10-17 batch
 
-Status: open (two items left; D8)
+Status: waiting (D8, a PPK2): everything else re-run and passed on the taf firmware
+2026-11-09 (docs/firmware/results/2026-11-09.md)
 
 **Why.** The night of 2026-10-17 changed pairing (the node commits its key only on an ACKed
 uplink, the 12 s re-pair hold, the SAS in `Paired`/`Joined`, the window rule), replay and nonce
@@ -195,6 +196,25 @@ from the same commit, EEPROM wiped first):
 OTA pairing, lost confirm, re-pair, window end, backoff, key move and the HIL gateway group
 pass. Open: the replay item (nothing can reboot the dongle under a running `tower gateway`; D8)
 and the PPK2 look at the idle floor (no PPK2 on the bench).
+
+**Re-run 2026-11-09** (since 10-18 the node side is taf: the power-up gesture instead of the
+holds, the `Info` retry; `radio_button` on the motion board, the HIL [core] slot, EEPROM wiped):
+- [x] OTA pairing with the gesture: one SAS on the node, the CLI and the gateway; named on its
+      first `Info`
+- [x] Re-pair: refused while registered (the old pairing keeps working), a new SAS after removal
+- [x] Window end: a join in a window's last seconds refused, nothing committed
+- [x] Lost confirm (a node build that skips its confirm, not committed): key discarded, a
+      second gesture pairs after the removal
+- [x] Backoff: the gateway held in its bootloader, the node's uplinks space out; a click ends it.
+      First run FAILED (a taf regression): an undelivered report stays due and every sample
+      retried it, an uplink every `report-period` forever; fixed (reports wait out the backoff),
+      re-run: attempts 31, 61, 121 s apart, a click delivered at once with the held report
+- [x] Key move: keys exported, the gateway wiped, every node re-added with its floors; uplinks
+      and remote-shell downlinks keep working
+- [x] The HIL gateway group (`just hil bench`)
+- [ ] Replay (D8) and the PPK2 idle floor: need a reboot RPC or a hand, and a PPK2
+- [x] The bench restored (`radio_motion` back on its board, every node paired and named);
+      results in docs/firmware/results/2026-11-09.md, test-plan.md points to them; commit
 
 ### T10. FHSS in the product apps (US 915): remaining verification
 

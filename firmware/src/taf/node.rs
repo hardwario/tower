@@ -118,6 +118,10 @@ struct Node {
     misses: u8,
     /// Consecutive undelivered `Info`s: the retry backs off on them ([`INFO_RETRY`]).
     info_lost: u8,
+    /// After an undelivered uplink, periodic reports wait until then: `report-period` doubled per
+    /// miss in a row, at most the heartbeat (an undelivered value stays due, so without this every
+    /// new sample would retry it, a confirmed uplink a period forever for a gateway that is gone).
+    reports_after: Instant,
     next_heartbeat: Instant,
     cue_until: Option<Instant>,
     /// The power-up gesture: a press may start it until then.
@@ -294,6 +298,7 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
         provision,
         misses: 0,
         info_lost: 0,
+        reports_after: Instant::MIN,
         next_heartbeat: Instant::now(),
         cue_until: None,
         gesture_open: Instant::MIN,
@@ -450,6 +455,7 @@ impl Node {
         } else if self.misses > 0 {
             // Someone is at the node: end the backoff.
             self.misses = 0;
+            self.reports_after = Instant::MIN;
         }
         super::button_event(ev, &mut self.presses);
         let _ = super::BUTTON.try_send(ev);
@@ -617,6 +623,10 @@ impl Node {
     /// to [`MAX_REPORT`] at a time: built per uplink, so no list of every value is held across the
     /// uplink's awaits (RAM: the runtime's future is the app's largest static).
     async fn send_reports(&mut self, full: bool) {
+        if !full && Instant::now() < self.reports_after {
+            // Backing off after a miss: what is due waits (a heartbeat's full report still goes).
+            return;
+        }
         let now_s = Instant::now().as_secs();
         let mut from = Some(0);
         while let Some(at) = from
@@ -682,11 +692,16 @@ impl Node {
     }
 
     fn note(&mut self, delivered: bool) {
-        self.misses = if delivered {
-            0
+        if delivered {
+            self.misses = 0;
+            self.reports_after = Instant::MIN;
         } else {
-            self.misses.saturating_add(1)
-        };
+            self.misses = self.misses.saturating_add(1);
+            let period = super::param(props::common::REPORT_PERIOD).clamp(5, 86_400) as u64;
+            let cap = self.heartbeat_period().as_secs();
+            let wait = tower_radio::uplink_backoff_s(period, cap, self.misses);
+            self.reports_after = Instant::now() + Duration::from_secs(wait);
+        }
     }
 
     // ---- uplink and downlink ------------------------------------------------------------------
@@ -754,7 +769,13 @@ impl Node {
         if delivered {
             UNACKED.store(0, Ordering::Relaxed);
         } else {
-            warn!(target: "node", "uplink {result}");
+            let what = match msg {
+                NodeMsg::Info(_) => "info",
+                NodeMsg::Report(_) => "report",
+                NodeMsg::Event { .. } => "event",
+                NodeMsg::Shell(_) => "shell reply",
+            };
+            warn!(target: "node", "{} uplink {}", what, result);
             let streak = match result {
                 SendResult::DutyLimited => UNACKED.load(Ordering::Relaxed),
                 _ => UNACKED.load(Ordering::Relaxed).saturating_add(1),
