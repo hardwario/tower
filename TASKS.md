@@ -17,40 +17,7 @@ Task status: `open`, `in progress`, `waiting (Dn)` (blocked on a decision), `don
 
 ## In progress
 
-### T17. Thermometer and accelerometer in the taf runtime, for every node app
-
-Status: in progress (2026-11-09)
-
-**Why.** Every radio node app (button, climate, control, motion, thermostat; not the gateway)
-should report the Core Module's temperature and raise accelerometer tilt events the way
-`radio_button` does. Today each app wires the sensors itself or not at all: the button has its own
-sensor task (temperature + tilt), climate and motion spawn the temperature-only
-`taf::thermometer`, control reads the TMP112 inside its own task, the thermostat samples it for
-its regulation, and only the button has tilt. It belongs to taf.
-
-- [x] Props: `tilt` (event, the face up 0..6) and `accel` (setting: off, low, medium, high;
-      default medium) move from the button kind to the common table; the button kind renumbered
-- [x] Runtime: a sensor task spawned by `taf::run` owns the TMP112 and the LIS2DH12 on the shared
-      `I2cBus` (from `taf_base!`): the temperature every `report-period`, tilt events with the
-      button's logic (one uplink per 10 s, the latest face coalesced, interrupt backoff), `accel`
-      re-armed when it changes (not only at boot); `taf::temperature()` and a new-sample signal
-      for apps that use the reading; the bus handle for app drivers
-- [x] Apps: the button drops its sensor task; climate and motion drop `taf::thermometer`;
-      control drops its temperature code; the thermostat regulates on the runtime's reading
-- [x] RAM budget and flash on both boards (control's stack margin and the r1 thermostat's flash
-      are tight); stack peaks measured on the bench
-- [x] Docs: taf.md (the contract), mqtt-api.md (the common properties), gateway.md (the button's
-      settings), console.md (log targets), protocol.md (a stale `NodeMsg` line)
-**Measured (2026-11-09).** RAM: every app still above the 8 KB stack floor (`radio_control` 8304
-B, was 8432; the sensor task is 200 B). Flash: the sensor task first overflowed `radio_control`
-by 32 B; slimmed (no console event per tilt, one back-off warning, one tilt send path: 3.3 KB to
-2.6 KB of code) it leaves 924 B on the r2 (was 5.5 KB), and the r1 `radio_thermostat` 268 B
-(was 4.5 KiB). T18 tracks the headroom.
-
-- [x] CLI tests that name the button's properties; `just check`
-- [ ] Bench: reflash motion, control and thermostat; temperature and tilt over MQTT from each; an
-      `accel` set re-arms the accelerometer
-- [ ] Commit
+(None.)
 
 ## Decisions
 
@@ -90,6 +57,23 @@ reboot operation would make it testable (and useful in the field); otherwise the
 and the host's uplink dedup stays covered by unit tests only.
 
 ## Tasks
+
+### T19. A lost `Info` is resent only with the next heartbeat
+
+Status: open (found on the bench 2026-11-09)
+
+**Why.** A node sends its `Info` at boot and with every heartbeat. When that uplink is not
+delivered (bench: three nodes reset at once, the motion node's boot `Info` collided), the next
+`Info` waits for the next heartbeat, 15 min by default. Meanwhile a bridge that restarted does
+not know the node's kind (its reports and sets wait, D5), and a thermostat has no wall-clock
+time, so its weekly program does not run.
+
+**What it takes.** In the runtime, retry an undelivered `Info` soon (for instance with the
+uplink backoff from a short base, not the heartbeat), still within the duty budget and the
+backoff for a gateway that is gone.
+
+**Done when.** A node whose boot `Info` is lost is known to the bridge (and a thermostat synced)
+within about a minute, and a node without a gateway still backs off as today.
 
 ### T18. Flash headroom of `radio_control` (r2) and `radio_thermostat` (r1)
 
@@ -419,6 +403,11 @@ generation still targets the same modules.
 
 (Newest first; one line each.)
 
+- **T17. Thermometer and accelerometer in the taf runtime, for every node app**: `tilt` and
+  `accel` common, the runtime's sensor task, `accel` applied at once. Bench (motion, control, r1
+  thermostat): armed at boot, temperature on MQTT, an `accel` set re-armed in 70 ms, a tilt of
+  each board on MQTT (the face, 10 s apart), stack peaks 5.2 KB on each. Flash headroom: T18; a
+  lost boot `Info` found on the way: T19. 2026-11-09, 4d976ed.
 - **T16. Repository topology; domain documentation into `docs/`** (D9, D10, D11): the docs
   moved to `docs/` by component with every reference rewritten, the nested `AGENTS.md` trimmed
   to their rules, short component READMEs. 2026-11-09, 102ff61 and the short READMEs after it.
