@@ -675,18 +675,24 @@ async fn run(b: Board) {
         //     downlink waits before the next attempt, longer per miss, and the next listening node
         //     that is due goes first (`tower_gateway::listen`): an absent node can neither hold up
         //     the others' commands nor keep the radio out of receive.
+        // Forget the pauses of nodes with nothing queued, also once the queue is empty: a new
+        // command for such a node goes out at once, not after a pause its old one earned.
+        listen_backoff.retain(|addr| queue.count_for(addr) > 0);
         if pairing.is_none() && !hopping && !queue.is_empty() {
-            listen_backoff.retain(|addr| queue.count_for(addr) > 0);
             let now = Instant::now().as_millis();
             let target = queue.iter().map(|i| i.node_addr).find(|&addr| {
                 listen_backoff.due(addr, now)
                     && registry::find(&buckets, addr).is_some_and(|r| r.flags & mgmt::NODE_FLAG_SLEEPING == 0)
             });
             if let Some(node) = target {
-                if deliver(&mut net, &mut queue, node, now_ms).await {
-                    listen_backoff.clear(node);
-                } else {
-                    listen_backoff.missed(node, Instant::now().as_millis());
+                let now = Instant::now().as_millis();
+                match deliver(&mut net, &mut queue, node, now_ms).await {
+                    Some(SendResult::Delivered) => listen_backoff.clear(node),
+                    Some(SendResult::NotDelivered) => listen_backoff.missed(node, now),
+                    // Not transmitted (the duty budget, a busy channel): nothing learnt about the
+                    // node, so no miss, but no attempt again at once either.
+                    Some(_) => listen_backoff.held(node, now),
+                    None => {}
                 }
             }
         }
@@ -767,19 +773,17 @@ async fn on_uplink(rx: &Received, net: &mut Net, stats: &mut Stats, queue: &mut 
 
     if queue.peek_for(rx.src, now_ms).is_some() {
         Timer::after(DOWNLINK_TURNAROUND).await;
-        deliver(net, queue, rx.src, now_ms).await;
+        let _ = deliver(net, queue, rx.src, now_ms).await;
     }
     net.set_pending(rx.src, queue.count_for(rx.src) > 0);
     STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
 }
 
 /// Send `node` its oldest queued downlink: hopping, in the current slot (one attempt), else in duty
-/// mode with `DOWNLINK_REPS`. Reports the outcome to the host; pops the item on delivery. Whether it
-/// was delivered.
-async fn deliver(net: &mut Net, queue: &mut Queue, node: u32, now_ms: u64) -> bool {
-    let Some(item) = queue.peek_for(node, now_ms) else {
-        return false;
-    };
+/// mode with `DOWNLINK_REPS`. Reports the outcome to the host; pops the item on delivery. The send's
+/// result, or `None` when nothing is queued for `node`.
+async fn deliver(net: &mut Net, queue: &mut Queue, node: u32, now_ms: u64) -> Option<SendResult> {
+    let item = queue.peek_for(node, now_ms)?;
     let (item_id, mut data, len) = (item.id, [0u8; 74], item.data().len());
     data[..len].copy_from_slice(item.data());
     let result = if net.access() == Access::Fhss {
@@ -787,7 +791,6 @@ async fn deliver(net: &mut Net, queue: &mut Queue, node: u32, now_ms: u64) -> bo
     } else {
         net.send(node, &data[..len], true, DOWNLINK_REPS).await
     };
-    let delivered = matches!(result, SendResult::Delivered);
     let outcome = match result {
         SendResult::Delivered => {
             queue.pop(item_id);
@@ -807,7 +810,7 @@ async fn deliver(net: &mut Net, queue: &mut Queue, node: u32, now_ms: u64) -> bo
     .await;
     net.set_pending(node, queue.count_for(node) > 0);
     STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
-    delivered
+    Some(result)
 }
 
 /// Commit a joined node: persist it (UNNAMED: the host auto-names from the first

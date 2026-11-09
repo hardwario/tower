@@ -458,7 +458,6 @@ fn json<T: serde::Serialize>(v: &T) -> Vec<u8> {
     serde_json::to_vec(v).unwrap_or_default()
 }
 
-/// Firmware name → device kind: `radio_button` → `button`.
 /// The names of the retained properties (states, controls, settings) of every kind that are not
 /// `keep`'s: what a node may have published under another app.
 fn foreign_states(keep: Option<&props::Kind>) -> impl Iterator<Item = &'static str> {
@@ -472,6 +471,7 @@ fn foreign_states(keep: Option<&props::Kind>) -> impl Iterator<Item = &'static s
         .into_iter()
 }
 
+/// Firmware name → device kind: `radio_button` → `button`.
 fn kind_of(firmware_name: &str) -> String {
     firmware_name
         .strip_prefix("radio_")

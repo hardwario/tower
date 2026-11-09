@@ -7,7 +7,9 @@
 //! fail: each one keeps the gateway out of receive for about half a second. So every node that
 //! missed gets a retry time of its own, doubling per miss from [`FIRST_BACKOFF_MS`] up to
 //! [`MAX_BACKOFF_MS`], and the gateway tries the first queued node that is due. A delivery, or an
-//! uplink from the node (it is there), clears it; a node with nothing queued is forgotten.
+//! uplink from the node (it is there), clears it; a node with nothing queued is forgotten. An
+//! attempt the gateway could not transmit at all (its duty budget, a busy channel) says nothing
+//! about the node: it waits the first pause, without counting a miss ([`held`](ListenBackoff::held)).
 //!
 //! Time is the caller's (`now_ms`): kernel style, host-testable.
 
@@ -50,18 +52,36 @@ impl ListenBackoff {
 
     /// `addr` did not take its downlink at `now_ms`: its next attempt waits, longer per miss.
     pub fn missed(&mut self, addr: u32, now_ms: u64) {
-        let misses = self
-            .entries
-            .iter()
-            .flatten()
-            .find(|e| e.addr == addr)
-            .map_or(1, |e| e.misses.saturating_add(1));
+        let misses = self.misses(addr).saturating_add(1);
         let pause = (FIRST_BACKOFF_MS << (misses - 1).min(5)).min(MAX_BACKOFF_MS);
-        let entry = Entry {
+        self.put(Entry {
             addr,
             retry_at_ms: now_ms + pause,
             misses,
-        };
+        });
+    }
+
+    /// The gateway could not transmit `addr`'s downlink at `now_ms` (its duty budget, a busy
+    /// channel): no news about the node, so no miss counted, but not again at once either.
+    pub fn held(&mut self, addr: u32, now_ms: u64) {
+        let misses = self.misses(addr);
+        self.put(Entry {
+            addr,
+            retry_at_ms: now_ms + FIRST_BACKOFF_MS,
+            misses,
+        });
+    }
+
+    fn misses(&self, addr: u32) -> u8 {
+        self.entries
+            .iter()
+            .flatten()
+            .find(|e| e.addr == addr)
+            .map_or(0, |e| e.misses)
+    }
+
+    fn put(&mut self, entry: Entry) {
+        let addr = entry.addr;
         let slot = self
             .entries
             .iter()
@@ -116,6 +136,27 @@ mod tests {
         assert!(b.due(1, 100_000 + MAX_BACKOFF_MS), "capped");
         b.clear(1);
         assert!(b.due(1, 100_000), "a delivery or an uplink clears it");
+    }
+
+    #[test]
+    fn an_attempt_not_transmitted_pauses_without_counting_a_miss() {
+        let mut b = ListenBackoff::new();
+        b.held(1, 0);
+        assert!(!b.due(1, FIRST_BACKOFF_MS - 1), "not again at once");
+        assert!(b.due(1, FIRST_BACKOFF_MS));
+        for _ in 0..10 {
+            b.held(1, 0);
+        }
+        assert!(b.due(1, FIRST_BACKOFF_MS), "no doubling");
+        b.missed(1, 0);
+        b.missed(1, 0);
+        b.held(1, 100_000);
+        b.missed(1, 200_000);
+        assert!(
+            !b.due(1, 200_000 + 4 * FIRST_BACKOFF_MS - 1),
+            "the misses before it still count"
+        );
+        assert!(b.due(1, 200_000 + 4 * FIRST_BACKOFF_MS));
     }
 
     #[test]

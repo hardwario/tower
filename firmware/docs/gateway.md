@@ -331,8 +331,9 @@ uplink cycle. A **listening** node (its registry flag `NODE_FLAG_SLEEPING` clear
 the flag from the node's `NodeInfo.sleeping`) keeps its receiver on, so it is not waited for: the
 main loop sends its first queued item at once (EU 868 only, see docs/radio.md, "Node classes").
 A listening node that does not ACK is tried again after a pause of its own, 2 s doubling per miss
-up to 64 s and cleared by any uplink from it or a delivery (`tower_gateway::listen`), while the
-next listening node that is due goes first: an absent node neither holds up the others'
+up to 64 s and cleared by any uplink from it or a delivery (`tower_gateway::listen`; an attempt
+the gateway could not transmit at all, for its duty budget or a busy channel, waits 2 s without
+counting as a miss), while the next listening node that is due goes first: an absent node neither holds up the others'
 commands nor keeps the radio out of receive. The TTL still ends the attempts.
 
 ### Settings
