@@ -144,7 +144,7 @@ fn gateway_bridges_push_button_end_to_end() {
         &NodeCmd::Shell {
             epoch: 0x4849_4C00,
             cmd_id: 77,
-            line: "system settings get therm-period",
+            line: "system settings get report-period",
         },
         &mut env,
     )
