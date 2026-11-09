@@ -846,6 +846,17 @@ impl Engine {
         let Some(i) = self.nodes.iter().position(|n| n.entry.addr == src) else {
             return; // unregistered node: forwarded but not ours to manage
         };
+        if !self.nodes[i].kind.is_empty() && self.nodes[i].kind != kind {
+            // The board was flashed with another app: the old app's properties are not its
+            // properties any more. Clear them; the report after this `NodeInfo` publishes the new.
+            for topic in self.nodes[i].props.retained.drain(..) {
+                out.push(Output::Publish {
+                    topic,
+                    payload: Vec::new(),
+                    retain: true,
+                });
+            }
+        }
         self.nodes[i].kind = kind.clone();
         self.nodes[i].session_id = Some(info.session_id);
 
@@ -2825,6 +2836,23 @@ mod tests {
         with_node(e, id, "kitchen", 0);
         let out = e.handle(info_uplink(id, 1, fw));
         drain(e, out);
+    }
+
+    #[test]
+    fn reflashed_node_drops_the_old_apps_states() {
+        let mut e = engine();
+        with_kind(&mut e, 0xAB12, "radio_motion");
+        let mut items = heapless::Vec::new();
+        items.push((props::motion::HOLDOFF, 10)).unwrap();
+        let out = e.handle(msg_uplink(0xAB12, 2, &NodeMsg::Report(items)));
+        assert_eq!(publishes(&out, "tower/nodes/0x0000ab12/state/holdoff").len(), 1);
+        // The same board, now a thermostat: `holdoff` is not one of its properties.
+        let out = e.handle(info_uplink(0xAB12, 3, "radio_thermostat"));
+        let cleared = publishes(&out, "tower/nodes/0x0000ab12/state/holdoff");
+        assert_eq!(cleared, [&b""[..]], "the old app's state is cleared");
+        // A heartbeat of the same app keeps what it has.
+        let out = e.handle(info_uplink(0xAB12, 4, "radio_thermostat"));
+        assert!(publishes(&out, "tower/nodes/0x0000ab12/state/holdoff").is_empty());
     }
 
     #[test]
