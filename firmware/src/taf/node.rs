@@ -747,7 +747,8 @@ impl Node {
     /// A `set` from the host: a setting is stored here, a control goes to the app. Either way the
     /// property is reported back (the confirmation the host waits for) by the loop, after the
     /// downlink chain: an uplink from inside the window that received the command would open a
-    /// window of its own.
+    /// window of its own. A control's report is made due here and goes up once the app applied it
+    /// (its own report of a change, or its next [`next_set`](super::next_set) for no change).
     fn on_set(&mut self, id: u8, value: i32) {
         let Some(prop) = self.kind.prop(id) else {
             warn!(target: "node", "set of unknown property {}", id);

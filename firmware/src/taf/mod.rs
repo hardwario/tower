@@ -225,6 +225,9 @@ static SLOT_TABLE: Mutex<RefCell<heapless::Vec<Slot, SLOTS>>> =
 static EVENTS: Channel<CriticalSectionRawMutex, (u8, i32), 4> = Channel::new();
 /// `set`s for the app's controls (and notices of settings changed over the radio).
 static INBOX: Channel<CriticalSectionRawMutex, (u8, i32), 2> = Channel::new();
+/// The app took a `set` from [`next_set`] and has not asked for the next one yet. Only the app's
+/// task touches it, so a load and a store are enough on the M0+.
+static SET_TAKEN: AtomicBool = AtomicBool::new(false);
 /// The Core button's events, past the runtime's pairing gestures.
 static BUTTON: Channel<CriticalSectionRawMutex, button::Event, 4> = Channel::new();
 /// Something for the runtime to look at (a report, an event, a pairing request).
@@ -270,9 +273,21 @@ pub fn event(id: u8, value: i32) {
 
 /// The next `set` for one of the app's controls, `(id, value)` (validated against its type),
 /// or the notice that a setting changed over the radio (already stored; re-read it with [`param`]).
-/// Report a control's new value once applied: that confirms it to the host.
+/// Apply it and [`report`] the control's new value. The runtime confirms the set to the host
+/// when the app comes back here for the next one, so wait on this in the app's loop: the
+/// control's report goes up then even when the set changed nothing (the app reports only a
+/// change, which would leave an unchanged value unconfirmed until the heartbeat).
 pub async fn next_set() -> (u8, i32) {
-    INBOX.receive().await
+    // Back for the next set, so the last one is applied: wake the runtime, which sends the
+    // control's report (made due when the set arrived; a changed value already went up with the
+    // app's own report, and is not sent twice).
+    if SET_TAKEN.load(Ordering::Relaxed) {
+        SET_TAKEN.store(false, Ordering::Relaxed);
+        WAKE.signal(());
+    }
+    let set = INBOX.receive().await;
+    SET_TAKEN.store(true, Ordering::Relaxed);
+    set
 }
 
 /// The next Core button event the runtime passed on (not those spent on pairing).

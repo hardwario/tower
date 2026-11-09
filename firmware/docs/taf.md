@@ -51,7 +51,7 @@ What every taf app does, so a user meets the same device whatever it measures:
   can be set over the radio too; `band` is console only (a wrong band cuts the link).
 - **Downlinks**: `Set` (a control or a setting; a setting is stored before the app hears of it),
   `Time`, `Describe` (the bridge asks a node it does not know yet) and remote shell lines. Every
-  set is confirmed by a report.
+  set is confirmed by a report, also one that changed nothing.
 - **Classes**: a **sleeping** node wakes the radio only to send, and hears its downlinks in the
   second after each uplink; a **listening** node (mains powered) keeps receiving in 50 ms slices,
   and the gateway sends it a queued command at once. EU868 only for now: a listening node does not
@@ -106,7 +106,7 @@ What every taf app does, so a user meets the same device whatever it measures:
 | `taf::run(base, &KIND, &SETTINGS)` | The runtime; never returns. `tower::taf_base!(b)` moves what it needs out of the `Board`; `taf_base!(b, no_button)` leaves the Core button to the app (an LCD Module shares its line; pair with `request_pairing` then) |
 | `taf::report(id, value)` | A state's or control's current value; cheap, the runtime decides when it goes up |
 | `taf::event(id, value)` | Something happened; up to four wait for the radio, more are dropped |
-| `taf::next_set().await` | The next `set` of a control (apply it, then report it), or the notice that a setting changed |
+| `taf::next_set().await` | The next `set` of a control (apply it, then report it), or the notice that a setting changed. Wait on it in the app's loop: the runtime confirms a set when the app comes back for the next one |
 | `taf::next_button().await` | Core button events the runtime did not spend on pairing |
 | `taf::param(id)` | A setting's value (its default when unset) |
 | `taf::led()`, `taf::led_on()` | The board LED, and whether the `led` setting allows event feedback |
