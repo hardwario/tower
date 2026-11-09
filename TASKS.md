@@ -21,16 +21,7 @@ Task status: `open`, `in progress`, `waiting (Dn)` (blocked on a decision), `don
 
 ## Decisions
 
-### D7. The next CLI release: when, and after a dry run?
-
-`main` carries taf, the five node apps, `radio_gateway` and a firmware bundle that now ships every
-node app; `cli/Cargo.toml` is still 1.1.0. AGENTS.md asks for a dry run of `release-cli.yml` before
-tagging (the bundle step changed). Decide the version and when to tag; the dry run can go first
-at any time.
-
-2026-11-09: the dry run passed on 0ec5ca8 (T25), so the workflow is ready. Proposed:
-`cli-v1.2.0`; the version and the tag stay the maintainer's call. A commit that touches the
-build or its dependencies after 0ec5ca8 (T26 does) needs the dry run again.
+(None.)
 
 ## Tasks
 
@@ -404,10 +395,17 @@ not, the gates and the bench pass, and the release dry run is green on that comm
 
 - **D6. Report the embassy-stm32 EEPROM error-flag bug upstream.** Check first that upstream
   still has it; if so, an issue with the fix (T24). 2026-11-09.
+- **D7. The next CLI release.** `cli-v1.2.0`, now, before T26 (which changes the build and its
+  dependencies and gets a release of its own): the dry run passed on 0ec5ca8 (T25), nothing in
+  the build changed since (T28). 2026-11-09.
 
 ## Done
 
 (Newest first; one line each.)
+
+- **T28. `tower` 1.2.0** (D7): `cli/Cargo.toml`, `Cargo.lock` and AGENTS.md at 1.2.0; the tag
+  `cli-v1.2.0` goes on this commit once its CI run finished green, and `release-cli.yml`
+  publishes the binaries and the firmware zip from it. 2026-11-09.
 
 - **T27. One spelling for a bool setting**: the shell printed a stored bool as `true` / `false`
   and an unset one as its default's text, `on` / `off` in the taf tables, so `led = on` became
