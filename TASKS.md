@@ -17,47 +17,7 @@ Task status: `open`, `in progress`, `waiting (Dn)` (blocked on a decision), `don
 
 ## In progress
 
-### T16. Review the repository topology; domain documentation into `docs/`
-
-Status: in progress (2026-11-09; D9, D10, D11 answered: all (a))
-
-**Why.** The repo keeps several `AGENTS.md` (each with a `CLAUDE.md` stub), `README.md` files and
-`docs/` directories from its multi-repo past. The maintainer wants the topology reviewed and the
-domain documentation moved to `docs/`.
-
-- [x] Inventory: every `AGENTS.md`, `CLAUDE.md`, `README.md` and docs directory, what each holds,
-      who reads it, what is duplicated
-- [x] Proposal: the target layout, with the choices as decisions for the maintainer (D9 to D11)
-- [x] Move: `firmware/docs/*` and the hwtest results to `docs/firmware/`, `docs/mqtt-api.md` to
-      `docs/cli/`, `hil/docs/bench.md` to `docs/hil/`; the READMEs' content to
-      `docs/firmware/sdk.md`, `docs/firmware/hwtest.md`, `docs/cli/cli.md`, `docs/hil/hil.md`,
-      `docs/protocol.md`, `docs/flasher.md`, `docs/fuzzing.md`
-- [x] Rewrite every reference (Markdown links resolved per file, plain paths in code and config),
-      and any tool that reads a moved file (the app and example list check)
-- [x] The moved docs lose their per-repo leftovers (License sections, repeated build recipes)
-- [x] Short READMEs in `cli/`, `firmware/`, `firmware/tools/hwtest/`, `hil/`, `fuzz/`,
-      `crates/protocol/`, `crates/flasher/`; `docs/README.md` as the index
-- [x] D9: trim the nested `AGENTS.md` (no repeated root sections; knowledge to `docs/`, linked)
-- [x] The root `AGENTS.md` and `README.md` describe the new layout
-- [ ] A link check over every Markdown file and every doc path in code; `just check`; commit
-
-**Inventory (2026-11-09).** The code layout is sound: `crates/`, `firmware/`, `cli/`, `hil/`,
-`fuzz/`, with separate workspaces only where they are needed (the firmware's target and profiles,
-fuzz's nightly). The leftovers are in the documentation, which lives in five kinds of places:
-- `docs/` (3 files: the MQTT API, the security model, the test strategy), `firmware/docs/` (9
-  guides), `hil/docs/` (the bench).
-- Seven READMEs that are manuals of their own: `cli/` (504 lines, the CLI manual), `firmware/`
-  (312, the SDK overview), `crates/flasher/` (230), `crates/protocol/` (100), `fuzz/` (95), `hil/`
-  (75), `firmware/tools/hwtest/` (53). Each still carries a License section and a build recipe
-  from its own repository; the protocol README a History section.
-- Six `AGENTS.md` (root, `cli/`, `crates/flasher/`, `crates/protocol/`, `firmware/`, `hil/`), each
-  with a one-line `CLAUDE.md` importing it. The five nested ones repeat the root's *Writing style*
-  and *Git workflow*, and most re-explain the path dependencies and the wire runbook. Some hold
-  knowledge rather than agent rules: `firmware/AGENTS.md`'s log style guide duplicates
-  `firmware/docs/console.md` (*Logging*).
-- Links: about 290 references to these paths, 180 of them in code comments and config
-  (`docs/radio.md` alone has 99), so every move comes with a mechanical link rewrite and a link
-  check.
+(None.)
 
 ## Decisions
 
@@ -406,5 +366,8 @@ generation still targets the same modules.
 
 (Newest first; one line each.)
 
+- **T16. Repository topology; domain documentation into `docs/`** (D9, D10, D11): the docs
+  moved to `docs/` by component with every reference rewritten, the nested `AGENTS.md` trimmed
+  to their rules, short component READMEs. 2026-11-09, 102ff61 and the short READMEs after it.
 - **T1. Merge TODO.md and firmware/TODO.md into TASKS.md**, with the session rule in AGENTS.md.
   2026-11-09, 2a5bfa1.
