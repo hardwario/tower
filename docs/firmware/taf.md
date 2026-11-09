@@ -35,7 +35,9 @@ build for both boards.
 What every taf app does, so a user meets the same device whatever it measures:
 
 - **Boot**: the SDK's boot banner, then (when paired) an `Info` uplink (firmware name and version,
-  the radio class, whether it wants the time) and a full report.
+  the radio class, whether it wants the time) and a full report. An `Info` that is not delivered
+  is retried 30 s later, doubling per one lost in a row and never later than the heartbeat: a
+  host that restarted learns the node's kind, and a thermostat its time, within about a minute.
 - **Reports**: the app reports values; the runtime sends what is news (any change, or for the
   temperature a change of `report-delta`), batched into one uplink, and everything again every
   `heartbeat` (with an `Info`), settings included.

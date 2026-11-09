@@ -80,6 +80,10 @@ const BOOT_FLASH_MS: u32 = 200;
 /// The gesture's first blink (pairing next) and its second (factory reset next).
 static GESTURE_PAIR: led::Pattern = &[led::Step::on(250), led::Step::off(250)];
 static GESTURE_RESET: led::Pattern = &[led::Step::on(50), led::Step::off(50)];
+/// An undelivered `Info` is retried this long after, doubling per `Info` lost in a row (never
+/// later than the heartbeat's own backoff): the host needs it soon (the node's kind after its own
+/// restart, a time sync), not a heartbeat (15 min) later.
+const INFO_RETRY: Duration = Duration::from_secs(30);
 /// Unacknowledged uplinks in a row after which the node hints that its gateway may have forgotten
 /// it (once per streak).
 const UNACKED_HINT: u8 = 8;
@@ -112,6 +116,8 @@ struct Node {
     provision: Option<Provisioned>,
     /// Consecutive undelivered uplinks: the heartbeat backs off on them.
     misses: u8,
+    /// Consecutive undelivered `Info`s: the retry backs off on them ([`INFO_RETRY`]).
+    info_lost: u8,
     next_heartbeat: Instant,
     cue_until: Option<Instant>,
     /// The power-up gesture: a press may start it until then.
@@ -287,6 +293,7 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
         channel,
         provision,
         misses: 0,
+        info_lost: 0,
         next_heartbeat: Instant::now(),
         cue_until: None,
         gesture_open: Instant::MIN,
@@ -700,7 +707,18 @@ impl Node {
             firmware_name: name.as_str(),
             ..self.info()
         };
-        self.uplink(&NodeMsg::Info(info), UPLINK_REPS).await
+        let ok = self.uplink(&NodeMsg::Info(info), UPLINK_REPS).await;
+        if ok {
+            self.info_lost = 0;
+        } else {
+            // Retried by the heartbeat timer, brought forward (a later heartbeat stays later).
+            let retry = tower_radio::uplink_backoff_s(INFO_RETRY.as_secs(), 86_400, self.info_lost);
+            self.info_lost = self.info_lost.saturating_add(1);
+            self.next_heartbeat = self
+                .next_heartbeat
+                .min(Instant::now() + Duration::from_secs(retry));
+        }
+        ok
     }
 
     /// After an `Info` (a heartbeat, a `Describe`): the full report, unless a downlink came first

@@ -58,23 +58,6 @@ and the host's uplink dedup stays covered by unit tests only.
 
 ## Tasks
 
-### T19. A lost `Info` is resent only with the next heartbeat
-
-Status: open (found on the bench 2026-11-09)
-
-**Why.** A node sends its `Info` at boot and with every heartbeat. When that uplink is not
-delivered (bench: three nodes reset at once, the motion node's boot `Info` collided), the next
-`Info` waits for the next heartbeat, 15 min by default. Meanwhile a bridge that restarted does
-not know the node's kind (its reports and sets wait, D5), and a thermostat has no wall-clock
-time, so its weekly program does not run.
-
-**What it takes.** In the runtime, retry an undelivered `Info` soon (for instance with the
-uplink backoff from a short base, not the heartbeat), still within the duty budget and the
-backoff for a gateway that is gone.
-
-**Done when.** A node whose boot `Info` is lost is known to the bridge (and a thermostat synced)
-within about a minute, and a node without a gateway still backs off as today.
-
 ### T2. LCD thermostat: a page-mode LCD driver, then the thermostat's screen
 
 Status: open (D1: later)
@@ -392,6 +375,11 @@ generation still targets the same modules.
 
 (Newest first; one line each.)
 
+- **T19. A lost `Info` is resent only with the next heartbeat**: an undelivered `Info` (a
+  heartbeat's or a `Describe`'s) is retried 30 s later, doubling, never later than the heartbeat.
+  Bench: the gateway held in its ROM bootloader while the motion and r1 thermostat nodes booted
+  (both boot `Info`s lost), released after 12 s: both retried 30 s later, the restarted bridge
+  knew both kinds 32 s after boot and the thermostat synced its time. 2026-11-09.
 - **T20. The Core button the same in every node app; pairing and factory reset at power-up**
   (D12 (a), D13 (a)): the gestures common and reported by the runtime, the power-up gesture
   (press within 3 s of the boot flash: 10 s pairs, 20 s resets, 25 s stuck), the old gestures
