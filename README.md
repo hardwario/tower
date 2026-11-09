@@ -51,7 +51,8 @@ tower/
 ├── fuzz/                 cargo-fuzz targets for the decoders and kernels (own workspace)
 ├── docs/                 the security model, the MQTT API
 ├── AGENTS.md             the operating manual for coding agents (CLAUDE.md imports it)
-├── SECURITY.md, TODO.md  vulnerability reporting; open items
+├── SECURITY.md           vulnerability reporting
+├── TASKS.md              open work and decisions (every session keeps it current)
 ├── .claude/skills/       /bootstrap, /build
 └── .github/              CI, the CLI release workflow, Dependabot
 ```

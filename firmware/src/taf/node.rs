@@ -243,7 +243,7 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
     }
     if listening && band == Band::Us915 {
         // A listening node would have to follow the hop schedule continuously, which is not done
-        // yet (TODO.md). Anything else on US 915 is one fixed channel at full power, which FCC
+        // yet (TASKS.md, T3). Anything else on US 915 is one fixed channel at full power, which FCC
         // §15.247 does not allow outside the bench (docs/radio.md): no radio at all instead.
         log::error!(target: "node", "a listening node runs on EU 868 only for now, radio off (set band eu868)");
         provision = None;

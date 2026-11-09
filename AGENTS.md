@@ -163,6 +163,25 @@ it. Details: `crates/protocol/AGENTS.md`, "Changing the wire".
 
 ---
 
+## Tasks and sessions (`TASKS.md`)
+
+[TASKS.md](TASKS.md) is the one list of work: numbered **decisions** for the maintainer (`D1`,
+`D2`, ...) and numbered **tasks** (`T1`, `T2`, ...). Every working session must be resumable from
+it alone, so:
+
+- **Before you begin** any piece of work, add its task (or set an existing one `in progress`)
+  with the plan as a checklist. A question only the maintainer can answer becomes a new decision,
+  with the options and your recommendation.
+- **While you work**, tick the checklist as steps finish (an interrupted session resumes from the
+  first unticked step).
+- **Once it is resolved**, mark the task `done` with the date and its commits and move it to
+  *Done*; an answered decision gets the answer and its date and moves to *Decided*.
+- Numbers are never reused or renumbered. Refer to items by number (`T3`, `D6`) in commits,
+  comments and reports.
+
+The file changes with the work it tracks and is committed with it (commits still only when the
+user asks).
+
 ## Conventions
 
 - **Develop straight on `main`.** No feature branches unless the user explicitly asks.
@@ -199,7 +218,7 @@ release" shims. When something changes, change it everywhere in the same commit.
 mismatch **detection** (the schema tags), so a stale board or an old installed `tower` is caught
 instead of silently mis-decoding.
 
-This rule ends when TOWER gets its first users: the root [TODO.md](TODO.md) ("Compatibility
+This rule ends when TOWER gets its first users: [TASKS.md](TASKS.md) (T14, "Compatibility
 gate") lists what to decide and reintroduce before that, and removing this section is part of it.
 
 ## Writing style
@@ -219,6 +238,8 @@ No em or en dashes. This applies everywhere: code, comments, docs, UI texts and 
 - Don't reference a GitHub Action by tag or branch, or widen a workflow's `permissions:`; pin
   the full commit SHA (with its `# vX.Y.Z` comment) and grant write only to the job that needs it.
 - Don't commit, tag or push anything unless the user asked.
+- Don't start or finish a piece of work without updating [TASKS.md](TASKS.md) (see *Tasks and
+  sessions*).
 - Don't use em or en dashes anywhere (see *Writing style*).
 - Don't add backward-compatibility code (legacy formats, migrations, shims) while TOWER has no
   users (see *Compatibility*).

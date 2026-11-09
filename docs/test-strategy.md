@@ -129,7 +129,7 @@ dongle, check the sensors, record the chip UID, provision. Every shipped board p
 
 Run the HIL suite and a short soak on the exact release artifacts (the `tower-firmware-cli-*.zip`
 and the `tower` binaries from `release-cli.yml`), not development builds. With the compatibility
-gate ([TODO.md](../TODO.md)), add upgrade tests: EEPROM layouts and the radio protocol across
+gate ([TASKS.md](../TASKS.md), T14), add upgrade tests: EEPROM layouts and the radio protocol across
 adjacent releases.
 
 ## Order
