@@ -17,6 +17,15 @@ use super::engine::{Input, SerialMsg};
 use crate::port::open_console_responsive;
 use crate::session::Mismatch;
 
+/// What the engine hands the serial thread.
+#[derive(Debug)]
+pub(crate) enum Outbound {
+    /// Write one pre-encoded frame to the dongle.
+    Frame(Vec<u8>),
+    /// Pulse the dongle's reset line (the modem lines, as `tower reset` does): a hardware reboot.
+    Reset,
+}
+
 /// Decode one inner frame into an owned engine message (`None` = not engine-relevant).
 pub(crate) fn to_serial_msg(inner: &[u8]) -> Option<SerialMsg> {
     let (mt, _seq, payload) = match decode_frame(inner) {
@@ -123,7 +132,7 @@ pub(crate) fn run(
     mut sp: Box<dyn serialport::SerialPort>,
     port: String,
     input: Sender<Input>,
-    frames: Receiver<Vec<u8>>,
+    frames: Receiver<Outbound>,
 ) {
     let mut dec = FrameDecoder::new();
     let mut buf = [0u8; 512];
@@ -133,7 +142,19 @@ pub(crate) fn run(
         // Outbound first: mgmt requests are latency-sensitive (the TUI is waiting).
         loop {
             match frames.try_recv() {
-                Ok(frame) => {
+                Ok(Outbound::Reset) => {
+                    // Ignored while down: the reconnect finds the dongle as it is.
+                    if up {
+                        dec.reset();
+                        if crate::port::pulse_reset_into_app(&mut *sp).is_err() {
+                            up = false;
+                            let _ = input.send(Input::SerialDown {
+                                error: "reset failed".into(),
+                            });
+                        }
+                    }
+                }
+                Ok(Outbound::Frame(frame)) => {
                     if up && (sp.write_all(&frame).is_err() || sp.flush().is_err()) {
                         up = false;
                         dec.reset();

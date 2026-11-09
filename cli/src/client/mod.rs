@@ -249,6 +249,38 @@ impl Session {
         Ok(got)
     }
 
+    /// Wait up to `window` for a message on `topic` (retained or live) whose payload `accept`s;
+    /// `None` when none came.
+    pub(crate) fn wait_published(
+        &mut self,
+        topic: &str,
+        window: Duration,
+        accept: impl Fn(&[u8]) -> bool,
+    ) -> Result<Option<Vec<u8>>> {
+        self.client
+            .subscribe(topic, QoS::AtLeastOnce)
+            .context("subscribing")?;
+        let deadline = Instant::now() + window;
+        let got = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break None;
+            }
+            match self.connection.recv_timeout(remaining) {
+                Ok(Ok(MqttEvent::Incoming(Incoming::Publish(p))))
+                    if p.topic == topic && accept(&p.payload) =>
+                {
+                    break Some(p.payload.to_vec());
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(e)) => bail!("broker connection lost: {e}"),
+                Err(_) => break None,
+            }
+        };
+        let _ = self.client.unsubscribe(topic);
+        Ok(got)
+    }
+
     /// Resolve a `<node>` argument (canonical hex or friendly name) to its id, via
     /// the gateway's authoritative registry.
     pub(crate) fn resolve_node(&mut self, arg: &str) -> Result<u32> {

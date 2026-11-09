@@ -277,7 +277,7 @@ the TLS flags and `--prefix`; `<node>` is a `0xHHHHHHHH` address or a friendly n
 ```sh
 tower nodes list                                   # the gateway's registered nodes
 tower nodes show <node> [--keys]                   # one node (--keys: its AES key + counter floors)
-tower nodes add --ota [--window 60] [--name N]     # pair over the air (node held in join mode)
+tower nodes add --ota [--window 60] [--name N]     # pair over the air (the node's power-up gesture)
 tower nodes add --port <SERIAL> [--name N]         # pair a node over its USB cable
 tower nodes rename <node> <name>
 tower nodes remove <node>
@@ -285,12 +285,14 @@ tower nodes shell <node> "<line>" [--timeout MS] [--no-wait]   # remote shell, q
 tower nodes pending <node>                         # commands queued or awaiting the reply
 tower nodes dequeue <node> <ref>                   # drop a queued command by ref
 tower net status                                   # gateway online/offline + stats summary
+tower net reboot                                   # reboot the gateway, wait for its new session
 ```
 
 Role is enforced: `tower gateway` at a node, or `nodes add --port` at a gateway, exits `126`.
 
-**Pairing over the air.** `tower nodes add --ota` opens the gateway's window; hold the node's
-button (an unpaired push button) for at least its `hold-time` (1 s by default) to join. On success
+**Pairing over the air.** `tower nodes add --ota` opens the gateway's window; run the node's
+power-up gesture to join (power it up, press the button within 3 s of the LED's flash, hold it
+until the LED goes off at 10 s, release within 5 s; docs/firmware/taf.md). On success
 it prints the node and the handshake's 6-digit short authentication string,
 `paired 0x0000ab12 (SAS 123456)` (also in the bridge's log and on `gateway/pairing` as
 `"sas":"123456"`). Compare it with the SAS the node logs, `net: pairing: SAS 123456` (watch it

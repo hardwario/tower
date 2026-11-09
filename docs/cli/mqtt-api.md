@@ -542,6 +542,7 @@ Errors common to the ops (all but the last come from requests that reach the don
 | [`queue_list`](#queue_list) | `addr`? | array of `{addr, age, ref, ttl}` |
 | [`queue_drop`](#queue_drop) | `addr`, `ref`? | none |
 | [`stats_config`](#stats_config) | `period_ms`? | none |
+| [`reboot`](#reboot) | none | none |
 
 #### `describe`
 
@@ -632,6 +633,24 @@ registry written by another firmware build).
 ```
 ```json
 {"id":"u-ota","ok":true,"data":{"joined":"0x0000cd34","sas":"004321"}}
+```
+
+#### `reboot`
+
+Reboots the gateway in hardware: the bridge pulses the dongle's reset line through the serial
+port it holds (the Radio Dongle's USB-UART bridge drives the chip's reset, as `tower reset`
+does), so it also recovers a gateway whose firmware is wedged. No params, no `data`; the answer
+comes at once, before the reboot. When the dongle is back, `gateway/status` carries its new
+`session_id` and the bridge resyncs as after any reboot: downlinks queued on the gateway are lost
+(their pending shell commands answer with an error), the registry is read again. Refused with
+`serial link down` while the bridge has no serial link. `tower net reboot` sends it and waits for
+the new session.
+
+```json
+{"id":"u-r","op":"reboot"}
+```
+```json
+{"id":"u-r","ok":true}
 ```
 
 #### `pairing_cancel`

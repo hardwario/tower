@@ -20,11 +20,50 @@ pub(crate) enum NetCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Reboot the gateway: the bridge pulses the dongle's reset line (as `tower reset` does,
+    /// through the port it holds); waits until the gateway is back with a new session.
+    Reboot,
 }
+
+/// How long `tower net reboot` waits for the gateway's new session (it boots in a few seconds).
+const REBOOT_WAIT: Duration = Duration::from_secs(20);
 
 pub(crate) fn run(cmd: NetCmd, opts: MqttOpts) -> Result<u8> {
     match cmd {
         NetCmd::Status { json } => status(&opts, json),
+        NetCmd::Reboot => reboot(&opts),
+    }
+}
+
+fn reboot(opts: &MqttOpts) -> Result<u8> {
+    let mut s = connect(opts)?;
+    let topic = topics::gateway_status(&s.prefix.clone());
+    let session = |raw: &[u8]| {
+        serde_json::from_slice::<Status>(raw)
+            .ok()
+            .filter(|st| st.state == "online" && st.serial_up)
+            .map(|st| st.session_id)
+    };
+    let before = s
+        .read_retained(&topic, Duration::from_secs(2))?
+        .and_then(|raw| session(&raw));
+    s.rpc_ok("reboot", serde_json::Value::Null)?;
+    eprintln!("[tower] gateway rebooting…");
+    let back = s.wait_published(&topic, REBOOT_WAIT, |raw| {
+        session(raw).is_some_and(|id| Some(id) != before)
+    })?;
+    match back.as_deref().and_then(session) {
+        Some(id) => {
+            println!("gateway back, session {id}");
+            Ok(EXIT_OK)
+        }
+        None => {
+            eprintln!(
+                "[tower] no new gateway session within {} s; see `tower net status`",
+                REBOOT_WAIT.as_secs()
+            );
+            Ok(EXIT_ERROR)
+        }
     }
 }
 

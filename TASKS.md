@@ -49,13 +49,6 @@ node app; `cli/Cargo.toml` is still 1.1.0. AGENTS.md asks for a dry run of `rele
 tagging (the bundle step changed). Decide the version and when to tag; the dry run can go first
 at any time.
 
-### D8. The replay check of the 2026-10-17 batch: add a reboot RPC or drop the item?
-
-T9's last bench item (reboot the dongle under a running `tower gateway`, no event published
-twice) can't be run: nothing reboots the dongle while the bridge holds its port. A management
-reboot operation would make it testable (and useful in the field); otherwise the item is dropped
-and the host's uplink dedup stays covered by unit tests only.
-
 ## Tasks
 
 ### T2. LCD thermostat: a page-mode LCD driver, then the thermostat's screen
@@ -160,7 +153,7 @@ docs/firmware/storage.md.
 
 ### T9. Two-board verification of the 2026-10-17 batch
 
-Status: waiting (D8, a PPK2): everything else re-run and passed on the taf firmware
+Status: waiting (a PPK2): everything else re-run and passed on the taf firmware
 2026-11-09 (docs/firmware/results/2026-11-09.md)
 
 **Why.** The night of 2026-10-17 changed pairing (the node commits its key only on an ACKed
@@ -212,7 +205,8 @@ holds, the `Info` retry; `radio_button` on the motion board, the HIL [core] slot
 - [x] Key move: keys exported, the gateway wiped, every node re-added with its floors; uplinks
       and remote-shell downlinks keep working
 - [x] The HIL gateway group (`just hil bench`)
-- [ ] Replay (D8) and the PPK2 idle floor: need a reboot RPC or a hand, and a PPK2
+- [x] Replay: with the `reboot` RPC (T21), under traffic: no event published twice
+- [ ] The PPK2 idle floor: needs a PPK2
 - [x] The bench restored (`radio_motion` back on its board, every node paired and named);
       results in docs/firmware/results/2026-11-09.md, test-plan.md points to them; commit
 
@@ -390,11 +384,17 @@ generation still targets the same modules.
   2026-11-09.
 - **D13. A node's own button actions.** (a) Kept on top of the reported `button` events
   (`radio_control`'s click and hold) (T20). 2026-11-09.
+- **D8. The replay check of the 2026-10-17 batch.** Add a reboot command to the bridge (T21),
+  then run the check (T9). 2026-11-09.
 
 ## Done
 
 (Newest first; one line each.)
 
+- **T21. A reboot command for the gateway** (D8): the `reboot` RPC, the bridge pulses the
+  dongle's reset line through the port it holds (no firmware or wire change, works on a wedged
+  gateway); `tower net reboot` waits for the new session. Bench: back within a second, the resync
+  logged, no event published twice under traffic (T9's replay check). 2026-11-09.
 - **T19. A lost `Info` is resent only with the next heartbeat**: an undelivered `Info` (a
   heartbeat's or a `Describe`'s) is retried 30 s later, doubling, never later than the heartbeat.
   Bench: the gateway held in its ROM bootloader while the motion and r1 thermostat nodes booted

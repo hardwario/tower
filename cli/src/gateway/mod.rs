@@ -313,7 +313,7 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
 
     // ---- threads ----
     let (input_tx, input_rx) = mpsc::channel::<Input>();
-    let (frame_tx, frame_rx) = mpsc::channel::<Vec<u8>>();
+    let (frame_tx, frame_rx) = mpsc::channel::<serial::Outbound>();
     let (event_tx, event_rx) = mpsc::channel::<Event>();
 
     {
@@ -402,14 +402,17 @@ pub(crate) fn run(port: Option<String>, opts: GatewayOpts) -> Result<u8> {
 fn execute(
     outputs: Vec<Output>,
     publisher: &mut mqtt::Publisher<rumqttc::Client>,
-    frames: &mpsc::Sender<Vec<u8>>,
+    frames: &mpsc::Sender<serial::Outbound>,
     events: &mpsc::Sender<Event>,
 ) {
     publisher.flush();
     for o in outputs {
         match o {
             Output::SerialSend(frame) => {
-                let _ = frames.send(frame);
+                let _ = frames.send(serial::Outbound::Frame(frame));
+            }
+            Output::SerialReset => {
+                let _ = frames.send(serial::Outbound::Reset);
             }
             Output::Publish {
                 topic,

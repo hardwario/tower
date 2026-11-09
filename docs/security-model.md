@@ -299,7 +299,8 @@ registered address by design (an authenticated host action: the re-provision pat
 4. **No firmware authenticity.** Anyone with bootloader access can flash arbitrary firmware; RDP
    level 1 protects readout, not code integrity. There is no secure boot or signed update.
 5. **Loopback MQTT is anonymous**, by decision, with or without TLS: every local process on the
-   gateway host can control the network, read keys and queue remote shell lines. TLS is available
+   gateway host can control the network, read keys, queue remote shell lines and reboot the
+   gateway (the `reboot` RPC). TLS is available
    for everything that crosses the network (required for a non-loopback embedded broker unless
    waived). Limits of the embedded broker's TLS (section 4.4): no client certificates
    (authentication is the login), and its slots are bounded, not reserved: a network peer that

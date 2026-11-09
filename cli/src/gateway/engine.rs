@@ -139,6 +139,8 @@ pub(crate) enum FrontendCmd {
 pub(crate) enum Output {
     /// Write one pre-encoded frame to the dongle.
     SerialSend(Vec<u8>),
+    /// Pulse the dongle's reset line: a hardware reboot (the `reboot` RPC).
+    SerialReset,
     Publish {
         topic: String,
         payload: Vec<u8>,
@@ -1936,6 +1938,19 @@ impl Engine {
                     self.publish_pairing(out, None, None);
                 }
             }
+            "reboot" => {
+                // A hardware reset through the port's modem lines (on the Radio Dongle they drive
+                // the chip's reset, as `tower reset` does), so it also reboots a wedged gateway.
+                // Its next `Hello`, a new session, runs the usual reboot resync.
+                if !self.serial_up {
+                    return self.rpc_err_direct(out, &me, "serial link down");
+                }
+                out.push(Output::Event(Event::Log(
+                    "rebooting the gateway (reset line)".into(),
+                )));
+                out.push(Output::SerialReset);
+                self.rpc_ok_direct(out, &me, serde_json::Value::Null);
+            }
             "pairing_cancel" => {
                 self.pairing_req = None;
                 self.pairing_until = None;
@@ -2278,6 +2293,19 @@ impl Engine {
         if let Some(r) = &p.rpc {
             self.rpc_err_direct(out, r, error);
         }
+    }
+
+    fn rpc_ok_direct(&self, out: &mut Vec<Output>, rpc: &RpcRef, data: serde_json::Value) {
+        self.rpc_respond(
+            out,
+            rpc.origin,
+            RpcResponse {
+                id: rpc.id.clone(),
+                ok: true,
+                error: None,
+                data,
+            },
+        );
     }
 
     fn rpc_err_direct(&self, out: &mut Vec<Output>, rpc: &RpcRef, error: &str) {
@@ -4453,6 +4481,25 @@ mod tests {
         ));
         let (_, op) = out.iter().find_map(sent_op).expect("a named node is listed");
         assert!(op.contains("43794"), "{op}"); // 0xAB12
+    }
+
+    /// `reboot` pulses the dongle's reset line and answers at once; the new session's `Hello` does
+    /// the rest. While the serial link is down it is refused, and nothing is pulsed.
+    #[test]
+    fn reboot_pulses_the_reset_line_only_while_the_link_is_up() {
+        let mut e = engine();
+        let _ = e.start();
+        let out = e.handle(mqtt_in("tower/gateway/cmd", br#"{"id":"r-1","op":"reboot"}"#));
+        assert!(out.contains(&Output::SerialReset), "{out:?}");
+        assert!(rpc_rsp(&out, "r-1").ok);
+        let _ = e.handle(Input::SerialDown { error: "gone".into() });
+        let out = e.handle(mqtt_in("tower/gateway/cmd", br#"{"id":"r-2","op":"reboot"}"#));
+        assert!(!out.contains(&Output::SerialReset), "{out:?}");
+        let rsp = rpc_rsp(&out, "r-2");
+        assert!(
+            !rsp.ok && rsp.error.as_deref() == Some("serial link down"),
+            "{rsp:?}"
+        );
     }
 
     /// The dongle takes management requests through a one-deep inbox, so the engine sends one
