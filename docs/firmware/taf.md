@@ -66,8 +66,9 @@ What every taf app does, so a user meets the same device whatever it measures:
   gestures are the screen's input, not `button` events, and the power-up gesture is the menu's
   *Pair* and *Reset* (`taf::request_pairing`, `taf::factory_reset`).
 - **USB console**: logs, the shell and the management channel, always. Every app has
-  `node status`, `node pair` (console only) and, when it has the Core button, `button simulate
-  <ms>` (console only: a press of that length, for tests without hands).
+  `node status`, `node pair` (console only) and `button simulate <ms>` (console only: a press of
+  that length, for tests without hands; where a module owns the Core button it refuses and names
+  the module's own command, `lcd press core <ms>`).
 - **Sensors**: every node reports the Core Module's temperature (`temperature`, sampled every
   `report-period`) and raises a `tilt` event when the board moves (the face up after it settled,
   1 to 6, or 0 while moving; at most one uplink per 10 s, the latest face coalesced). `accel`

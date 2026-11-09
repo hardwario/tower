@@ -455,11 +455,25 @@ fn cmd_pair(ctx: &mut shell::Ctx<'_>, _args: &[&str]) -> shell::Outcome {
 /// outcome (pairing, factory reset, a stuck button) can be tested from the console.
 const SIM_MAX_MS: u32 = 30_000;
 
+/// Set when the runtime started without the Core button (`taf_base!(b, no_button)` and the app
+/// kept it: the thermostat with the LCD Module, whose driver owns the line). The command list is
+/// fixed at build time but the module is found at boot, so `button simulate` stays mounted and
+/// checks this instead: nothing would read its press. Cleared until then, so a press sent before
+/// the runtime starts still lands on its button once the scan task runs.
+static NO_BUTTON: AtomicBool = AtomicBool::new(false);
+
 /// `button simulate <ms>`: a synthetic press of `<ms>` through the real recognition (debounce,
 /// click, hold): the console "finger" for tests and the HIL bench. Within 3 s of the runtime's
 /// boot flash it is the power-up gesture's press. Console only: over the radio it would inject
 /// events integrations act on, or pair or factory-reset nodes fleet-wide after a reboot.
 fn cmd_simulate(ctx: &mut shell::Ctx<'_>, args: &[&str]) -> shell::Outcome {
+    if NO_BUTTON.load(Ordering::Relaxed) {
+        let _ = write!(
+            ctx,
+            "no Core button here: a module owns it (the LCD Module: lcd press core <ms>)"
+        );
+        return shell::Outcome::code(shell::R_NOT_FOUND);
+    }
     match args.first().and_then(|s| s.parse::<u32>().ok()) {
         Some(ms) if (1..=SIM_MAX_MS).contains(&ms) => {
             button::simulate(ms);
@@ -482,7 +496,7 @@ pub const NODE_COMMANDS: shell::Entry = shell::Entry::menu(
     ],
 );
 
-/// `button simulate <ms>`, for an app whose runtime owns the Core button.
+/// `button simulate <ms>`, for every taf app (refused where the runtime has no Core button).
 pub const BUTTON_COMMANDS: shell::Entry = shell::Entry::menu(
     "button",
     &[shell::Entry::cmd_console_only(

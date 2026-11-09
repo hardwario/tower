@@ -55,13 +55,16 @@ at any time.
 
 Status: open
 
-- **The pairing SAS on the screen.** With the LCD Module the thermostat pairs from its menu, but
-  the SAS to compare shows only on the USB console (`net: pairing: SAS n`) and on the host. A
+- [ ] **The pairing SAS on the screen.** With the LCD Module the thermostat pairs from its menu,
+  but the SAS to compare shows only on the USB console (`net: pairing: SAS n`) and on the host. A
   hook from the runtime (the SAS, pairing done or failed) would let the screen show it.
-- **PPK2**: the idle floor with the module attached, a VCOM toggle, a page-mode show (its drawing
-  runs sixteen times per show; estimated a few ms of CPU at 16 MHz).
-- **The `button simulate` command** stays mounted on the thermostat with the module, where it does
-  nothing (the LCD driver owns the button; `lcd press core` is the equivalent).
+- [ ] **PPK2**: the idle floor with the module attached, a VCOM toggle, a page-mode show (its
+  drawing runs sixteen times per show; estimated a few ms of CPU at 16 MHz).
+- [x] **The `button simulate` command** stayed mounted on the thermostat with the module, where
+  it did nothing (the LCD driver owns the button). The runtime now records that it started
+  without the Core button, and the command refuses there (result 1) and names `lcd press core`.
+  Bench: refused on the thermostat with the module, `lcd press core` works there; on
+  `radio_control` a simulated click still reaches MQTT. 2026-11-09.
 
 ### T3. Listening node on US 915
 

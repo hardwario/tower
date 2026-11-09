@@ -185,6 +185,7 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
     super::init_shared(kind, settings, kv, led, addr);
     base.spawner
         .spawn(super::sensors::task(base.accel_int, base.i2c).unwrap());
+    super::NO_BUTTON.store(base.button.is_none(), Ordering::Relaxed);
     let btn = base.button.map(|pin| {
         let hold = super::param(props::common::HOLD_TIME).clamp(100, 10_000) as u64;
         let click = super::param(props::common::CLICK_TIMEOUT).clamp(50, 5000) as u64;

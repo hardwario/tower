@@ -215,13 +215,15 @@ runs in the main loop, from the Press, so it does not need the polling).
 
 ### `button simulate <ms>`
 
-Injects a synthetic press of `<ms>` (1..15000) through the **real** recognition machine
+Injects a synthetic press of `<ms>` (1..30000) through the **real** recognition machine
 (debounce → click/hold classification) and on into reporting, the console "finger" for testing
 without a physical press. A `100` ms press is a click (> debounce, < click-timeout); a `1500` ms
 press is a hold; within 3 s of the runtime's boot flash a press is the power-up gesture's
 (`12000` pairs, `22000` factory-resets, up to 30000). Used by the HIL gateway test. **Console
 only:** over the radio it would let anyone who can publish a remote shell command inject clicks
-into the event stream, or pair or factory-reset nodes after a reboot.
+into the event stream, or pair or factory-reset nodes after a reboot. Refused (`no Core button
+here`, result 1) on a node whose runtime started without the button: the thermostat with the LCD
+Module, where `lcd press core <ms>` presses it.
 
 ### Pairing (node side)
 
