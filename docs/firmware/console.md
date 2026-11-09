@@ -500,7 +500,7 @@ The partition is load-bearing: a key collision silently aliases two settings' st
 use tower::shell::{Setting, Kind};
 static SETTINGS: &[Setting] = &[
     Setting { key: 0x10, name: "interval", kind: Kind::Uint { min: 1, max: 3600 }, default: "30" },
-    Setting { key: 0x11, name: "verbose",  kind: Kind::Bool,                       default: "false" },
+    Setting { key: 0x11, name: "verbose",  kind: Kind::Bool,                       default: "off" },
     Setting { key: 0x12, name: "mode",     kind: Kind::Enum(&["p2p","star","mesh"]),default: "star" },
     Setting { key: 0x13, name: "tx_power", kind: Kind::Int { min: -30, max: 20 },   default: "14" },
 ];
@@ -513,7 +513,7 @@ static SETTINGS: &[Setting] = &[
 | `Str { max }` | 1..=`max` bytes of UTF-8 (`max` ≤ 64) | raw bytes | names, SSIDs, tokens |
 | `Uint { min, max }` | decimal `u32` in range | 4 LE bytes | intervals, ports, counts, thresholds |
 | `Int { min, max }` | decimal `i32` in range | 4 LE bytes | offsets, tx-power dBm, calibration |
-| `Bool` | `true`/`false`, `on`/`off`, `1`/`0` | 1 byte | flags |
+| `Bool` | `on`/`off`, `true`/`false`, `1`/`0`; shown as `on`/`off` | 1 byte | flags |
 | `Enum(&[&str])` | one of the listed values | raw bytes | modes, regions, roles |
 | `Addr` | 32-bit hex (`0x1a2b3c4d`), or `auto` / `random` | 4 LE bytes | radio addresses (`0` = auto sentinel) |
 
@@ -529,7 +529,7 @@ static SETTINGS: &[Setting] = &[
   tx_power = -10  [int -30..=20, default 14]
   ```
 - **Completion is value-aware:** completing after `=` offers the `Enum` choices or
-  `Bool` true/false:
+  `Bool` on/off:
   ```
   > system settings set mode=⇥     →  p2p  star  mesh
   ```

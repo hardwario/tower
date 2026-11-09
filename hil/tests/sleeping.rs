@@ -302,10 +302,6 @@ fn sleeping_node_pairs_over_the_air_and_takes_a_set_on_its_next_uplink() {
         confirmed.is_some(),
         "the node reported led off within {SET_BUDGET:?}"
     );
-    // The shell prints a stored bool as `false` (an unset one as its default's text, `on`).
-    assert!(
-        matches!(stored.as_str(), "false" | "off"),
-        "the node stored the setting: led = {stored}"
-    );
+    assert_eq!(stored, "off", "the node stored the setting");
     assert_eq!(gw.seq_gaps(), 0, "no frames lost on the gateway console");
 }

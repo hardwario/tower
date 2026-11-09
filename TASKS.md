@@ -371,22 +371,6 @@ reason, not skipped silently.
 **Done when.** Every pin is at its newest stable release or listed here with the reason it is
 not, the gates and the bench pass, and the release dry run is green on that commit.
 
-### T27. A bool setting prints `on` while unset and `true` once stored
-
-Status: open
-
-**Why.** The shell prints a stored bool as `true` / `false` (`firmware/src/shell.rs`) and an
-unset one as its default's text, which the taf property tables write as `on` / `off`
-(`crates/protocol/src/props.rs`): `led = on [bool, default on]` becomes `led = true [bool,
-default on]` after any `set`, also one to the same value. The node's log and MQTT say `on` /
-`off`. Found by `hil/tests/sleeping.rs` (T7), which accepts both.
-
-**What it takes.** One spelling: the shell prints a bool as `on` / `off` (it accepts all of
-`true`, `on`, `1` already), TAB completion offers the same, the SDK's own defaults (`"true"` /
-`"false"` in examples and docs) follow; then the test's `"false" | "off"` becomes `"off"`.
-
-**Done when.** `system settings get` shows the same text for a bool before and after a `set`.
-
 ## Decided
 
 
@@ -424,6 +408,16 @@ default on]` after any `set`, also one to the same value. The node's log and MQT
 ## Done
 
 (Newest first; one line each.)
+
+- **T27. One spelling for a bool setting**: the shell printed a stored bool as `true` / `false`
+  and an unset one as its default's text, `on` / `off` in the taf tables, so `led = on` became
+  `led = true` after any `set`. It now prints `on` / `off` for a stored bool, for an unset one
+  whatever spelling its table's default uses, and for the `default` in `get`; a menu's write and
+  TAB completion follow, `set` accepts `true`, `on`, `1` and their opposites as before (MQTT
+  carries JSON, `true` / `false`, unchanged). The examples' defaults and console.md say `on` /
+  `off`; `hil/tests/sleeping.rs` expects `off`. Bench (r2): `get` the same before and after a
+  `set`, `set led false` shown as `off`; the HIL sleeping group passed again; about 90 B of flash
+  per app (docs/firmware/results/2026-11-09.md). 2026-11-09.
 
 - **T7. HIL: OTA pairing of a taf node and a sleeping-node `set`**: the group
   `hil/tests/sleeping.rs` (the Dongle with `radio_gateway`, the Core with `radio_button`, no

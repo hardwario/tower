@@ -75,7 +75,7 @@ static APP_SETTINGS: &[Setting] = &[
         key: 0x11,
         name: "verbose",
         kind: Kind::Bool,
-        default: "false",
+        default: "off",
     },
     Setting {
         key: 0x12,

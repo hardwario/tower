@@ -113,7 +113,8 @@ pub struct Setting {
     pub name: &'static str,
     /// Value type (drives validation + formatting).
     pub kind: Kind,
-    /// Shown by `get`/`print` when the key has never been set.
+    /// Shown by `get`/`print` when the key has never been set. A bool's is `"on"` or `"off"`
+    /// (the shell prints either spelling of it that way).
     pub default: &'static str,
 }
 
@@ -910,7 +911,7 @@ fn settings_get(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
     };
     let mut val = String::<MAX_SETTING>::new();
     read_value(ctx.kv, s, &mut val);
-    let (kind, default) = (s.kind, s.default);
+    let (kind, default) = (s.kind, default_text(s));
     let _ = write!(ctx, "{} = {} [", s.name, val);
     write_constraint(ctx, kind);
     let _ = write!(ctx, ", default {default}]");
@@ -1011,6 +1012,21 @@ fn parse_bool(s: &str) -> Option<bool> {
     }
 }
 
+/// A bool as the shell prints it, stored or not, and as TAB completion offers it: one spelling
+/// (`set` accepts the others too), the one the taf property tables and the node's log use.
+fn bool_text(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// A setting's default as `get` and `print` show it: a bool in the shell's spelling, whichever
+/// one its table uses (`"false"` reads `off`), so an unset bool reads like a stored one.
+fn default_text(s: &Setting) -> &'static str {
+    match s.kind {
+        Kind::Bool => parse_bool(s.default).map_or(s.default, bool_text),
+        _ => s.default,
+    }
+}
+
 /// Validate `value` against `kind` and encode it into `buf`; returns the byte count, or
 /// `Err(())` if it's out of range / malformed (the caller prints the constraint).
 fn encode_value(kind: Kind, value: &str, buf: &mut [u8; MAX_SETTING]) -> Result<usize, ()> {
@@ -1098,7 +1114,7 @@ fn read_value(kv: Scoped, s: &Setting, out: &mut String<MAX_SETTING>) {
                 return;
             }
             Kind::Bool if n >= 1 => {
-                let _ = out.push_str(if buf[0] != 0 { "true" } else { "false" });
+                let _ = out.push_str(bool_text(buf[0] != 0));
                 return;
             }
             // Show the *effective* address (hex): a stored 0 = "auto" resolves to the
@@ -1116,7 +1132,7 @@ fn read_value(kv: Scoped, s: &Setting, out: &mut String<MAX_SETTING>) {
     if matches!(s.kind, Kind::Addr) {
         let _ = write!(out, "0x{:08x}", crate::board::unique_id32());
     } else {
-        let _ = out.push_str(s.default);
+        let _ = out.push_str(default_text(s));
     }
 }
 
@@ -1179,7 +1195,7 @@ impl tower_hmi::menu::Values for SettingsValues {
                 let _ = tower_protocol::props::write_fixed(&mut text, value, decimals);
             }
             Kind::Bool => {
-                let _ = text.push_str(if value != 0 { "true" } else { "false" });
+                let _ = text.push_str(bool_text(value != 0));
             }
             Kind::Enum(choices) => match usize::try_from(value).ok().and_then(|i| choices.get(i)) {
                 Some(c) => {
@@ -1313,7 +1329,7 @@ fn complete(
                 if let Some(s) = settings.find(name) {
                     let vals: &[&'static str] = match s.kind {
                         Kind::Enum(choices) => choices,
-                        Kind::Bool => &["true", "false"],
+                        Kind::Bool => &["on", "off"],
                         Kind::Addr => &["auto", "random"],
                         _ => &[],
                     };

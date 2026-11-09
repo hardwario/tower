@@ -61,7 +61,7 @@ static SETS: &[Setting] = &[
         key: BACKLIGHT,
         name: "backlight",
         kind: SettingKind::Bool,
-        default: "false",
+        default: "off",
     },
     Setting {
         key: LED,
@@ -86,7 +86,7 @@ static SETS: &[Setting] = &[
         key: SWIPES,
         name: "swipes",
         kind: SettingKind::Bool,
-        default: "false",
+        default: "off",
     },
     Setting {
         key: ROTATION,
