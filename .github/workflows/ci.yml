@@ -159,7 +159,7 @@ jobs:
       # flip-link puts the stack below the statics on the 20 KB part; guard that every product
       # bin still leaves enough stack (see tools/check_ram_budget.py + docs/gateway.md).
       - name: RAM budget guard
-        run: python3 tools/check_ram_budget.py radio_button radio_dongle_gateway radio_climate radio_motion radio_control radio_thermostat
+        run: python3 tools/check_ram_budget.py radio_button radio_gateway radio_climate radio_motion radio_control radio_thermostat
       # clippy can't run --all-targets on thumbv6m (tests need host libtest), so the buildable
       # targets are linted. The ~20 two-board examples gate their sender/node/peer halves behind
       # role features: lint AND build each role, so a warning or an API break inside a

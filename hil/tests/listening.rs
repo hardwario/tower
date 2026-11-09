@@ -1,4 +1,4 @@
-//! HIL listening-node group: Dongle = `radio_dongle_gateway`, Core = `radio_control`, a taf
+//! HIL listening-node group: Dongle = `radio_gateway`, Core = `radio_control`, a taf
 //! **listening** node (mains powered, receiver always on). The gateway sends such a node its queued
 //! downlink at once instead of holding it for the node's next uplink (docs/taf.md, "Classes"):
 //! here a property `Set` and a remote shell line each complete, end to end (queued on the gateway,
@@ -90,7 +90,7 @@ fn await_round_trip(
 #[ignore = "requires the HIL bench (Dongle=gateway + Core=radio_control in RF range)"]
 fn listening_node_takes_downlinks_at_once() {
     let bench = bench_or_fail();
-    let gw_bin = build_image("app", "radio_dongle_gateway", "").expect("build gateway");
+    let gw_bin = build_image("app", "radio_gateway", "").expect("build gateway");
     bench.flash(Role::Dongle, &gw_bin).expect("flash gateway");
     let node_bin = build_image("app", "radio_control", "").expect("build radio_control");
     bench.flash(Role::Core, &node_bin).expect("flash radio_control");

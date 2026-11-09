@@ -12,7 +12,7 @@ also holds the app contract every one of them keeps): `radio_button` (button ges
 `radio_climate` (temperature; the Climate Module's sensors are still to come), `radio_motion`
 (PIR Module), `radio_control` (listening node: the Power Module relay and the LED strip; r2 only)
 and `radio_thermostat` (setpoint, mode, weekly program, heating demand; headless until the LCD
-fits, see `docs/taf.md` "RAM"). `radio_dongle_gateway` is the radio↔serial bridge + node
+fits, see `docs/taf.md` "RAM"). `radio_gateway` is the radio↔serial bridge + node
 coordinator. A new radio app goes on taf: declare its kind, write its task, nothing else.
 `lcd_games` is five games on the LCD Module (one file per game in
 `apps/lcd_games/`, pulled in with `#[path]`, so `just lists` still sees one `apps/*.rs`); `led_strip` is an

@@ -2,7 +2,7 @@
 
 > **Status:** shipped and HW-verified. The two product
 > apps, `apps/radio_button.rs` (a sleeping sensor node) and
-> `apps/radio_dongle_gateway.rs` (the network coordinator), are complete firmwares, not
+> `apps/radio_gateway.rs` (the network coordinator), are complete firmwares, not
 > skeletons. The host side (`tower gateway`, `tower nodes`, `tower net`, MQTT) lives in the
 > `tower` CLI (`cli/`); this guide is the **device** side and the wire contract between them.
 
@@ -19,14 +19,14 @@ the radio stack itself (framing, CCM, pairing handshake, FHSS, duty cycle) see
 
 ```
    push-button node  ──radio (CCM, NodeMsg schema)──▶  gateway dongle  ──serial──▶  tower gateway  ──▶ MQTT
-   apps/radio_button        transparent bridge       apps/radio_dongle_gateway       (cli/)          tower nodes / net
+   apps/radio_button        transparent bridge       apps/radio_gateway              (cli/)          tower nodes / net
    (STM32L083, sleeps)           forwards Uplink verbatim  registry + queue + pairing      TUI | --service
 ```
 
 1. **Node** (`radio_button`): a battery product. Button events (with per-kind counts),
    periodic temperature, accelerometer tilt events. STOPs between events (µA); the SPIRIT1
    sleeps. Downlinks reach it through the gateway's queue on its next uplink.
-2. **Gateway** (`radio_dongle_gateway`): the USB Radio Dongle. A **transparent bridge**: it
+2. **Gateway** (`radio_gateway`): the USB Radio Dongle. A **transparent bridge**: it
    authenticates/decrypts each uplink at the net layer and forwards the application payload
    *verbatim* to the host; it never decodes the node's app schema. What it owns is
    *coordination*: the node registry, the downlink queue, pairing, and radio diagnostics.
@@ -280,7 +280,7 @@ command inject clicks into the event stream, or start the re-pair gesture on eve
 
 ---
 
-## The gateway dongle (`radio_dongle_gateway`)
+## The gateway dongle (`radio_gateway`)
 
 One main loop owns `Net` + the registry + the queue (no `&mut Net` shared across tasks) and
 multiplexes: recv slices, management requests, the pairing window, and the stats tick.
@@ -424,7 +424,7 @@ flip-link splits the 20 KB SRAM into **statics at the top** (`.data`/`.bss`/`.un
 | App | Statics | Stack budget | Measured peak (SWD stack-paint, 2026-07-11) |
 |---|---:|---:|---|
 | `radio_button` | ~10.8 KB | ~9.4 KB | **~6.8 KB** (radio-send + button + KV; stable under compaction churn) |
-| `radio_dongle_gateway` | ~11.4 KB | ~8.6 KB | ~3.3 KB console-idle; deep registry/mgmt paths not bench-driveable standalone, **est. ~7.5 KB** |
+| `radio_gateway` | ~11.4 KB | ~8.6 KB | ~3.3 KB console-idle; deep registry/mgmt paths not bench-driveable standalone, **est. ~7.5 KB** |
 
 The statics are **~67 % async task futures**: Embassy stores each task's across-`await` state
 resident, so `__embassy_main`'s future alone is ~4.3 KB (the app's own main-loop state, not
@@ -437,7 +437,7 @@ EEPROM (transient bucket locals), the 4-item queue, and 12-byte packed link stat
 
 **Guard:** `just ram-budget` (and CI) fails if any product bin leaves less than an 8 KB stack.
 It is a regression tripwire so a future-inflating change is caught at PR time, not at a bench HardFault.
-Re-check `just size app radio_dongle_gateway` after growing anything resident; if a bin genuinely
+Re-check `just size app radio_gateway` after growing anything resident; if a bin genuinely
 needs more, raise the floor *and re-measure the high-water mark on hardware*, don't just nudge it.
 
 **Measured high-water:** the boot painter (`stack::paint`) fills the free stack with a sentinel
@@ -490,9 +490,9 @@ example `radio_control`'s `strip limit` and `strip save`); see [console.md](cons
 ## Building, flashing, testing
 
 ```bash
-just build app radio_button      # or radio_dongle_gateway
+just build app radio_button      # or radio_gateway
 just run   app radio_button      # build + flash + open the console TUI
-just size  app radio_dongle_gateway   # on-chip footprint (watch the RAM budget)
+just size  app radio_gateway     # on-chip footprint (watch the RAM budget)
 ```
 
 The end-to-end product path is covered by the HIL bench group `hil/tests/gateway.rs` (two boards,

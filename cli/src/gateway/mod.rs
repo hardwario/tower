@@ -126,7 +126,7 @@ fn gate_describe(port: &str, outcome: DescribeOutcome) -> GateDecision {
         DescribeOutcome::Info(info) => {
             if info.role != DeviceRole::Gateway {
                 eprintln!(
-                    "[tower] {port} runs \"{}\" (role {:?}), not the gateway firmware; flash apps/radio_dongle_gateway first",
+                    "[tower] {port} runs \"{}\" (role {:?}), not the gateway firmware; flash apps/radio_gateway first",
                     sanitize_line(&info.firmware_name),
                     info.role
                 );
@@ -551,7 +551,7 @@ mod tests {
             MsgType::Hello,
             0,
             &Hello {
-                firmware_name: "radio_dongle_gateway",
+                firmware_name: "radio_gateway",
                 firmware_version: "v0.1.0",
                 session_id: 1,
             },
@@ -658,7 +658,7 @@ mod tests {
         match outcome {
             DescribeOutcome::Mismatch(ref m) => {
                 assert_eq!(m.tag, FOREIGN);
-                assert_eq!(m.device.as_deref(), Some("radio_dongle_gateway v0.1.0"));
+                assert_eq!(m.device.as_deref(), Some("radio_gateway v0.1.0"));
             }
             _ => panic!("a foreign-tag reply must be a mismatch"),
         }

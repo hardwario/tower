@@ -1,4 +1,4 @@
-//! radio_dongle_gateway (TOWER IoT Kit product firmware): the network coordinator.
+//! radio_gateway (TOWER IoT Kit product firmware): the network coordinator.
 //!
 //! The USB Radio Dongle bridges its secured radio network to the host over the framed
 //! console, as a **transparent bridge**: every authenticated uplink is forwarded
@@ -27,11 +27,11 @@
 //! (2026-07-12, `system stack print`); see the stack-overflow history): everything this app keeps resident beyond the SDK
 //! baseline must fit in ~2 KB, or the stack loses the difference. Hence: registry on
 //! EEPROM (transient ~270 B bucket locals on the stack), a 4-item downlink queue,
-//! and 12-byte packed link stats. Check `just size app radio_dongle_gateway` after
+//! and 12-byte packed link stats. Check `just size app radio_gateway` after
 //! growing anything here.
 //!
-//!   just build app radio_dongle_gateway
-//!   just run   app radio_dongle_gateway
+//!   just build app radio_gateway
+//!   just run   app radio_gateway
 
 #![no_std]
 #![no_main]

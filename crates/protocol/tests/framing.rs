@@ -561,7 +561,7 @@ fn every_mgmt_record_roundtrips() {
             node_count: 3,
             provisioned: true,
             gw_addr: 0x2222_2222,
-            firmware_name: "radio_dongle_gateway",
+            firmware_name: "radio_gateway",
             firmware_version: "v0.1.0",
         };
         assert_eq!(rec_roundtrip(&info, &mut buf), info);

@@ -200,8 +200,8 @@ core-module-r1 = ["dep:embassy-usb"]
 # NOTE: binaries cannot use `[dev-dependencies]` (those are examples/tests/benches only); apps
 # use the library's regular dependencies. Add a product by dropping `apps/<name>.rs` + a `[[bin]]`.
 [[bin]]
-name = "radio_dongle_gateway"
-path = "apps/radio_dongle_gateway.rs"
+name = "radio_gateway"
+path = "apps/radio_gateway.rs"
 
 [[bin]]
 name = "radio_button"

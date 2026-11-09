@@ -371,7 +371,7 @@ registered address by design (an authenticated host action: the re-provision pat
 | CCM, frame format, nonce | `firmware/src/radio/{aes,ccm,frame}.rs` | `firmware/docs/radio.md` |
 | Counters, replay, pairing, keyed join kernels | `crates/net` (host-tested) | `firmware/docs/radio.md` |
 | Network layer runtime | `firmware/src/radio/net/` | `firmware/docs/radio.md` |
-| Gateway registry and queue | `crates/gateway`, `firmware/apps/radio_dongle_gateway.rs` | `firmware/docs/gateway.md` |
+| Gateway registry and queue | `crates/gateway`, `firmware/apps/radio_gateway.rs` | `firmware/docs/gateway.md` |
 | Console framing and schema tags | `crates/protocol` | `crates/protocol/README.md` |
 | Storage | `crates/kv`, `firmware/src/storage.rs` | `firmware/docs/storage.md` |
 | Readout protection | `crates/flasher/src/rdp.rs`, `cli/` | `crates/flasher/README.md`, `cli/README.md` |

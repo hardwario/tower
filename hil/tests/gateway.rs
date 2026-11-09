@@ -1,5 +1,5 @@
 //! HIL gateway group: the full gateway product path on two boards: Dongle =
-//! `radio_dongle_gateway`, Core = `radio_button`. Exercises cable provisioning
+//! `radio_gateway`, Core = `radio_button`. Exercises cable provisioning
 //! (typed mgmt frames on both consoles), the transparent uplink bridge (typed
 //! `Frame::Uplink` with a decodable `radio::NodeMsg`), the downlink queue with the
 //! ACK-pending delivery window (remote shell round-trip), and the RadioStat stream.
@@ -53,7 +53,7 @@ fn describe_full(console: &mut Console, req_id: u16) -> (DeviceRole, u32, u8, u8
 fn gateway_bridges_push_button_end_to_end() {
     let bench = bench_or_fail();
 
-    build_and_flash_app(&bench, Role::Dongle, "radio_dongle_gateway").expect("flash gateway");
+    build_and_flash_app(&bench, Role::Dongle, "radio_gateway").expect("flash gateway");
     build_and_flash_app(&bench, Role::Core, "radio_button").expect("flash radio_button");
 
     let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
@@ -219,7 +219,7 @@ fn stack_bytes(text: &str, prefix: &str) -> Option<u32> {
 #[ignore = "requires the HIL bench (Dongle in the gateway role)"]
 fn gateway_stack_high_water_within_budget() {
     let bench = bench_or_fail();
-    build_and_flash_app(&bench, Role::Dongle, "radio_dongle_gateway").expect("flash gateway");
+    build_and_flash_app(&bench, Role::Dongle, "radio_gateway").expect("flash gateway");
 
     let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
     gw.reset_into_app().expect("reset gateway");

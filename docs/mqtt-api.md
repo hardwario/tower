@@ -1,6 +1,6 @@
 # TOWER gateway: the MQTT API
 
-`tower gateway` bridges a Radio Dongle running the `radio_dongle_gateway` firmware to MQTT. Its
+`tower gateway` bridges a Radio Dongle running the `radio_gateway` firmware to MQTT. Its
 topic tree is the public API of a TOWER radio network: telemetry and node state flow out of it,
 management requests and remote shell lines flow into it. This page is the reference for
 integrators (Node-RED, Home Assistant, custom backends) who talk to the gateway over a broker
@@ -151,7 +151,7 @@ goes up or down, and when the dongle reboots or answers an identity probe.
 | `state` | string | `online` (the dongle's serial link is up), `degraded` (the bridge runs but has lost the dongle; nothing new arrives and requests fail at once), `offline` (the last will: the bridge is gone) |
 | `schema` | number | Version of this API (section 1), currently `4` |
 | `gateway` | string | The dongle's radio address, `0x%08x` |
-| `firmware` | string | Firmware name the dongle reports (`radio_dongle_gateway`) |
+| `firmware` | string | Firmware name the dongle reports (`radio_gateway`) |
 | `firmware_version` | string | Its version string, e.g. `v0.1.0` |
 | `session_id` | number | The dongle's console session id from the last boot announcement this bridge saw; `0` until one is seen (the one at attach is consumed by the startup probe). A change means the dongle rebooted and its RAM downlink queue was lost |
 | `wire` | string | The bridge's serial and radio schema tags, `console 0xXXXX radio 0xXXXX` (diagnostic; firmware and `tower` from the same checkout show the same tags) |
@@ -159,7 +159,7 @@ goes up or down, and when the dongle reboots or answers an identity probe.
 | `serial_up` | bool | The serial link to the dongle is up |
 
 ```json
-{"state":"online","schema":4,"gateway":"0x0000ab12","firmware":"radio_dongle_gateway","firmware_version":"v0.1.0","session_id":7,"wire":"console 0x1234 radio 0xabcd","serial_port":"/dev/ttyACM0","serial_up":true}
+{"state":"online","schema":4,"gateway":"0x0000ab12","firmware":"radio_gateway","firmware_version":"v0.1.0","session_id":7,"wire":"console 0x1234 radio 0xabcd","serial_port":"/dev/ttyACM0","serial_up":true}
 ```
 
 The last will carries only two keys, so parse every other field as optional:

@@ -384,7 +384,7 @@ mod tests {
             node_count: 2,
             provisioned: true,
             gw_addr: 0xAB12,
-            firmware_name: "radio_dongle_gateway",
+            firmware_name: "radio_gateway",
             firmware_version: "v0.1.0",
         })
         .unwrap()
@@ -400,7 +400,7 @@ mod tests {
             DescribeOutcome::Info(d) => {
                 assert_eq!(d.role, DeviceRole::Gateway);
                 assert_eq!(d.addr, 0xAB12);
-                assert_eq!(d.firmware_name, "radio_dongle_gateway");
+                assert_eq!(d.firmware_name, "radio_gateway");
                 // The version too: the bridge's status does not need the boot Hello.
                 assert_eq!(d.firmware_version, "v0.1.0");
             }

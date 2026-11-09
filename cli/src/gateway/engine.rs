@@ -2731,7 +2731,7 @@ mod tests {
                 node_count: 0,
                 provisioned: true,
                 gw_addr: 0x0000_0001,
-                firmware_name: "radio_dongle_gateway".into(),
+                firmware_name: "radio_gateway".into(),
                 firmware_version: "v0.1.0".into(),
             },
         )
@@ -2831,13 +2831,13 @@ mod tests {
         let mut e = engine();
         let out = e.handle(Input::SerialFrame(SerialMsg::Foreign(Mismatch {
             tag: 0xBEEF,
-            device: Some("radio_dongle_gateway v0.0.9".into()),
+            device: Some("radio_gateway v0.0.9".into()),
         })));
         assert!(out.iter().any(|o| matches!(
             o,
             Output::Event(Event::Log(l)) if l.contains("SCHEMA MISMATCH")
                 && l.contains("0xbeef")
-                && l.contains("radio_dongle_gateway v0.0.9")
+                && l.contains("radio_gateway v0.0.9")
                 && l.contains("same checkout")
         )));
     }
@@ -3368,7 +3368,7 @@ mod tests {
         let mut e = engine();
         queue_shell(&mut e, 0xAB12, 3, "u-2", "/x");
         let out = e.handle(Input::SerialFrame(SerialMsg::Hello {
-            firmware_name: "radio_dongle_gateway".into(),
+            firmware_name: "radio_gateway".into(),
             firmware_version: "v0.1.0".into(),
             session_id: 8,
         }));
@@ -3382,7 +3382,7 @@ mod tests {
         );
         // The same session again (a console restart without a reboot) is benign…
         let out = e.handle(Input::SerialFrame(SerialMsg::Hello {
-            firmware_name: "radio_dongle_gateway".into(),
+            firmware_name: "radio_gateway".into(),
             firmware_version: "v0.1.0".into(),
             session_id: 8,
         }));
@@ -3390,7 +3390,7 @@ mod tests {
         // …a new one is the next reboot.
         let queued = queued_ops(&e).len();
         let _ = e.handle(Input::SerialFrame(SerialMsg::Hello {
-            firmware_name: "radio_dongle_gateway".into(),
+            firmware_name: "radio_gateway".into(),
             firmware_version: "v0.1.0".into(),
             session_id: 9,
         }));

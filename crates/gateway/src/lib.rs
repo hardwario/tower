@@ -1,5 +1,5 @@
 //! tower-gateway (`crates/gateway`): the hardware-free, `no_std` decision core of the TOWER
-//! Radio Dongle gateway FIRMWARE (`firmware/apps/radio_dongle_gateway.rs`). It is not the
+//! Radio Dongle gateway FIRMWARE (`firmware/apps/radio_gateway.rs`). It is not the
 //! host-side `tower gateway` radio-to-MQTT bridge, which lives in the CLI (`cli/src/gateway/`).
 //!
 //! Two kernels, both free of I/O and time sources (callers pass `now_ms` in), so the

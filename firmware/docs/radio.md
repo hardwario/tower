@@ -555,7 +555,7 @@ confirmed delivery on hopping channels; `sync lost, rescanning` and a relock on 
 `fhss_compliance` (≥50 channels used, max per-channel airtime ≪ 0.4 s, band edges
 exercised). The hop seed is key-derived (not sent on air).
 
-**In the product apps** (`radio_dongle_gateway` + `radio_button` on `us915`, docs/gateway.md):
+**In the product apps** (`radio_gateway` + `radio_button` on `us915`, docs/gateway.md):
 the gateway is the hop master, its main loop one `fhss_master_tick` per slot; a queued downlink
 goes out in the slot of the node's uplink, right after the ACK (`fhss_send` from the master). The
 node is a sleeping sensor, which the SDK serves with:

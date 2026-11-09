@@ -452,7 +452,7 @@ mod tests {
             state: "online".into(),
             schema: SCHEMA,
             gateway: "0x0000ab12".into(),
-            firmware: "radio_dongle_gateway".into(),
+            firmware: "radio_gateway".into(),
             firmware_version: "v0.1.0".into(),
             session_id: 7,
             wire: "console 0x1234 radio 0xabcd".into(),
@@ -461,7 +461,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&s).unwrap(),
-            r#"{"state":"online","schema":4,"gateway":"0x0000ab12","firmware":"radio_dongle_gateway","firmware_version":"v0.1.0","session_id":7,"wire":"console 0x1234 radio 0xabcd","serial_port":"/dev/ttyACM0","serial_up":true}"#
+            r#"{"state":"online","schema":4,"gateway":"0x0000ab12","firmware":"radio_gateway","firmware_version":"v0.1.0","session_id":7,"wire":"console 0x1234 radio 0xabcd","serial_port":"/dev/ttyACM0","serial_up":true}"#
         );
     }
 

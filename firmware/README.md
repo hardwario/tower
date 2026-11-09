@@ -168,7 +168,7 @@ Flashable programs come in two kinds:
   alike (pairing, settings, reports, MQTT properties): `radio_button` (button gestures, tilt),
   `radio_climate` (temperature), `radio_motion` (PIR Module), `radio_control` (Power Module
   relay and LED strip, a listening node) and `radio_thermostat` (setpoint, weekly program,
-  heating demand). `radio_dongle_gateway` is the radio↔serial bridge and node coordinator
+  heating demand). `radio_gateway` is the radio↔serial bridge and node coordinator
   they talk to. `lcd_games` is five
   small games on the LCD Module (buttons, swipes and tilt as controls; see
   [`docs/hmi.md`](docs/hmi.md)). `led_strip` is an LED strip controller: every effect, live

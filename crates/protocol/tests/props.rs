@@ -64,7 +64,7 @@ fn kinds_resolve_by_name_and_firmware() {
         assert_eq!(kind(k.name), Some(k));
         assert_eq!(kind_of_firmware(&format!("radio_{}", k.name)), Some(k));
     }
-    assert_eq!(kind_of_firmware("radio_dongle_gateway"), None);
+    assert_eq!(kind_of_firmware("radio_gateway"), None);
     assert_eq!(kind_of_firmware("button"), None);
     let b = kind("button").unwrap();
     assert_eq!(b.prop(common::TEMPERATURE).unwrap().name, "temperature");

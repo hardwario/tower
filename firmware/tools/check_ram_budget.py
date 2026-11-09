@@ -10,7 +10,7 @@ section headers directly so it runs in CI with only python3).
 Every product bin must leave at least `STACK_FLOOR` of stack. The floor is calibrated to the
 measured stack high-water mark (SWD stack-painting on real hardware, 2026-07-11):
   * radio_button  ~6.8 KB peak, stable under KV-compaction churn  (budget 9.4 KB)
-  * radio_dongle_gateway console-idle ~3.3 KB; its deep registry/mgmt paths were not
+  * radio_gateway console-idle ~3.3 KB; its deep registry/mgmt paths were not
     bench-driveable standalone, est. ~7.5 KB worst-case                 (budget 8.6 KB)
 An 8 KB floor keeps ~1 KB over the measured/estimated peaks. If a bin legitimately needs
 more statics, raise STACK_FLOOR *consciously* and re-measure the high-water mark on hardware

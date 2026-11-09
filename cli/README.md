@@ -54,7 +54,7 @@ tag of the wire types, and a mismatch is refused (exit `125`). Each release ther
 `tower-firmware-cli-vX.Y.Z.zip`, the product firmware of the same commit for `tower flash`
 (the radio nodes `radio_button.bin`, `radio_climate.bin`, `radio_motion.bin`,
 `radio_control.bin` and `radio_thermostat.bin` for the Core Module r2, the gateway
-`radio_dongle_gateway.bin`, and `blinky.bin`); to build
+`radio_gateway.bin`, and `blinky.bin`); to build
 firmware yourself with a release binary, build it from the release's tag (`git checkout
 cli-vX.Y.Z`). `tower --version` prints the tags it speaks.
 
@@ -143,7 +143,7 @@ bootloader commands below.
 
 ### Gateway & MQTT bridge
 
-With a Radio Dongle running the `radio_dongle_gateway` firmware, `tower gateway` bridges
+With a Radio Dongle running the `radio_gateway` firmware, `tower gateway` bridges
 its radio network to MQTT: a full-screen TUI by default, or headless with `--service`. It
 hosts an embedded MQTT broker unless pointed at an external one:
 

@@ -336,7 +336,7 @@ mod tests {
         let inner = inner_of(
             MsgType::Hello,
             &Hello {
-                firmware_name: "radio_dongle_gateway",
+                firmware_name: "radio_gateway",
                 firmware_version: "v0.1.0",
                 session_id: 9,
             },
@@ -348,7 +348,7 @@ mod tests {
                 session_id,
             } => assert_eq!(
                 (firmware_name.as_str(), firmware_version.as_str(), session_id),
-                ("radio_dongle_gateway", "v0.1.0", 9)
+                ("radio_gateway", "v0.1.0", 9)
             ),
             other => panic!("expected Hello, got {other:?}"),
         }
@@ -377,7 +377,7 @@ mod tests {
         // the firmware (its Hello), not one per frame; a Hello with our tag re-arms it.
         let foreign_tag = tower_protocol::CONSOLE_TAG ^ 0x0100;
         let hello = Hello {
-            firmware_name: "radio_dongle_gateway",
+            firmware_name: "radio_gateway",
             firmware_version: "v0.1.0",
             session_id: 10,
         };
@@ -385,7 +385,7 @@ mod tests {
         match &foreign_hello {
             SerialMsg::Foreign(m) => {
                 assert_eq!(m.tag, foreign_tag);
-                assert_eq!(m.device.as_deref(), Some("radio_dongle_gateway v0.1.0"));
+                assert_eq!(m.device.as_deref(), Some("radio_gateway v0.1.0"));
             }
             other => panic!("expected Foreign, got {other:?}"),
         }

@@ -274,7 +274,7 @@ jobs:
         shell: bash
         working-directory: firmware
         run: |
-          apps=(radio_button radio_climate radio_motion radio_control radio_thermostat radio_dongle_gateway)
+          apps=(radio_button radio_climate radio_motion radio_control radio_thermostat radio_gateway)
           examples=(blinky)
           args=()
           for a in "${apps[@]}"; do args+=(--bin "$a"); done
@@ -296,7 +296,7 @@ jobs:
           - \`radio_motion.bin\`: the motion node (Core Module, PIR Module)
           - \`radio_control.bin\`: the relay and LED strip node (Core Module, Power Module)
           - \`radio_thermostat.bin\`: the thermostat node (Core Module)
-          - \`radio_dongle_gateway.bin\`: the gateway (Radio Dongle)
+          - \`radio_gateway.bin\`: the gateway (Radio Dongle)
           - \`blinky.bin\`: the LED blink example
 
           The node images are for the Core Module r2. For a Core Module r1, build from the tag
@@ -394,7 +394,7 @@ jobs:
             `tower-firmware-${{ github.ref_name }}.zip` holds the product firmware built from the
             same commit: the radio nodes for the Core Module r2 (`radio_button.bin`,
             `radio_climate.bin`, `radio_motion.bin`, `radio_control.bin`,
-            `radio_thermostat.bin`), the gateway (`radio_dongle_gateway.bin`) and `blinky.bin`.
+            `radio_thermostat.bin`), the gateway (`radio_gateway.bin`) and `blinky.bin`.
             This `tower` talks only to firmware of the same sources: flash these images (`tower
             flash radio_button.bin`) or build from the tag.
 
