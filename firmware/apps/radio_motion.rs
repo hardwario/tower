@@ -6,8 +6,8 @@
 //! someone keeps moving, detections within `holdoff` seconds travel as one uplink whose value is
 //! how many they were, so a busy room cannot drain the radio's duty budget. `sensitivity` picks
 //! the detector's threshold (low, medium, high, very-high: 128, 64, 32, 16 counts), applied at once
-//! when set over the radio. The Core Module's temperature is reported too. Everything else
-//! (pairing, settings, the remote shell, the heartbeat) is the taf runtime's.
+//! when set over the radio. Everything else (pairing, settings, the remote shell, the heartbeat,
+//! the temperature and the accelerometer's `tilt` events) is the taf runtime's.
 //!
 //!   just run app radio_motion
 
@@ -96,7 +96,6 @@ async fn detector(mut pir: Pir) {
 
 async fn run(b: Board) {
     b.spawner.spawn(detector(Pir::new(b.pir)).unwrap());
-    b.spawner.spawn(taf::thermometer(b.tmp112).unwrap());
     taf::run(tower::taf_base!(b), &KIND, &SETTINGS).await
 }
 

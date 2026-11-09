@@ -139,10 +139,14 @@ pub mod common {
     pub const LED: u8 = 4;
     pub const BAND: u8 = 5;
     pub const HOLD_TIME: u8 = 6;
+    pub const TILT: u8 = 7;
+    pub const ACCEL: u8 = 8;
 }
 
 /// The radio bands, by [`common::BAND`] index.
 pub const BANDS: &[&str] = &["eu868", "us915"];
+/// [`common::ACCEL`] (tilt sensitivity) values; `off` powers the accelerometer down.
+pub const SENSITIVITY: &[&str] = &["off", "low", "medium", "high"];
 
 /// The properties every standard app has.
 pub const COMMON: &[Prop] = &[
@@ -189,25 +193,36 @@ pub const COMMON: &[Prop] = &[
         access: Access::Param,
         default: "1000",
     },
+    // The accelerometer: the face up (1..=6, 0 while moving) after the board moved.
+    Prop {
+        id: common::TILT,
+        name: "tilt",
+        ty: number(0, 6, 0, ""),
+        access: Access::Event,
+        default: "",
+    },
+    Prop {
+        id: common::ACCEL,
+        name: "accel",
+        ty: Type::Enum(SENSITIVITY),
+        access: Access::Param,
+        default: "medium",
+    },
 ];
 
-/// `radio_button`: a battery push button with a tilt alarm.
+/// `radio_button`: a battery push button.
 pub mod button {
     use super::*;
 
     pub const BUTTON: u8 = APP_BASE;
-    pub const TILT: u8 = APP_BASE + 1;
-    pub const PRESS: u8 = APP_BASE + 2;
-    pub const RELEASE: u8 = APP_BASE + 3;
-    pub const CLICK: u8 = APP_BASE + 4;
-    pub const HOLD: u8 = APP_BASE + 5;
-    pub const ACCEL: u8 = APP_BASE + 6;
-    pub const CLICK_TIMEOUT: u8 = APP_BASE + 7;
+    pub const PRESS: u8 = APP_BASE + 1;
+    pub const RELEASE: u8 = APP_BASE + 2;
+    pub const CLICK: u8 = APP_BASE + 3;
+    pub const HOLD: u8 = APP_BASE + 4;
+    pub const CLICK_TIMEOUT: u8 = APP_BASE + 5;
 
     /// [`BUTTON`] event values.
     pub const EVENTS: &[&str] = &["press", "release", "click", "hold"];
-    /// [`ACCEL`] (tilt alarm sensitivity) values.
-    pub const SENSITIVITY: &[&str] = &["off", "low", "medium", "high"];
 
     pub const KIND: Kind = Kind {
         name: "button",
@@ -221,24 +236,10 @@ pub mod button {
                 access: Access::Event,
                 default: "",
             },
-            Prop {
-                id: TILT,
-                name: "tilt",
-                ty: number(0, 6, 0, ""),
-                access: Access::Event,
-                default: "",
-            },
             bool_prop(PRESS, "press", Access::Param, "off"),
             bool_prop(RELEASE, "release", Access::Param, "off"),
             bool_prop(CLICK, "click", Access::Param, "on"),
             bool_prop(HOLD, "hold", Access::Param, "on"),
-            Prop {
-                id: ACCEL,
-                name: "accel",
-                ty: Type::Enum(SENSITIVITY),
-                access: Access::Param,
-                default: "medium",
-            },
             Prop {
                 id: CLICK_TIMEOUT,
                 name: "click-timeout",

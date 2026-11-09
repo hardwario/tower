@@ -165,8 +165,9 @@ Flashable programs come in two kinds:
   recipe OS-independent; `just lists`, run by CI, fails if it drifts from `examples/*.rs`).
 - **Applications**: TOWER IoT Kit **products** in [`apps/`](../../firmware/apps). The radio nodes are
   built on **taf**, the TOWER Application Framework ([`docs/firmware/taf.md`](taf.md)), and behave
-  alike (pairing, settings, reports, MQTT properties): `radio_button` (button gestures, tilt),
-  `radio_climate` (temperature), `radio_motion` (PIR Module), `radio_control` (Power Module
+  alike (pairing, settings, reports, MQTT properties, and the temperature and tilt events every
+  one of them has): `radio_button` (button gestures), `radio_climate` (the common sensors for
+  now), `radio_motion` (PIR Module), `radio_control` (Power Module
   relay and LED strip, a listening node) and `radio_thermostat` (setpoint, weekly program,
   heating demand). `radio_gateway` is the radio↔serial bridge and node coordinator
   they talk to. `lcd_games` is five

@@ -12,8 +12,8 @@
 //! removes one, which is what fits a remote shell line (`tower nodes shell <node> "thermostat
 //! point workdays 06:00 21"`).
 //!
-//! Headless for now: the room temperature comes from the Core Module's TMP112, settings and
-//! state go over MQTT. The LCD Module's screen does not fit next to the radio yet: its driver
+//! Headless for now: the room temperature is the taf runtime's reading of the Core Module's
+//! TMP112, settings and state go over MQTT. The LCD Module's screen does not fit next to the radio yet: its driver
 //! keeps a 2.6 KB frame in RAM that this node lacks (`docs/firmware/taf.md`, "RAM"), so the screen waits
 //! for a frame-less (page mode) LCD driver.
 //!
@@ -24,16 +24,15 @@
 
 use core::fmt::Write as _;
 
-use embassy_futures::select::{Either4, select4};
+use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use log::{info, warn};
 use tower::shell::{self, Args, Ctx, Entry, Outcome};
 use tower::storage::{NS_APP, Nv};
-use tower::tmp112::{self, Tmp112};
-use tower::{app, board::Board, i2c::I2cBus, taf};
-use tower_protocol::props::{self, common, thermostat};
+use tower::{app, board::Board, taf};
+use tower_protocol::props::{self, thermostat};
 use tower_taf::program::{
     DAY_NAMES, Day, MAX_DECI, MIN_DECI, Week, minutes_until, parse_minute, parse_setpoint,
 };
@@ -131,13 +130,12 @@ impl State {
     }
 }
 
-/// The thermostat: sampling, regulation, the reports.
+/// The thermostat: regulation on the runtime's temperature samples, the reports.
 #[embassy_executor::task]
-async fn regulator(bus: I2cBus, kv: Nv) {
-    let mut tmp = Tmp112::new(bus, tmp112::ADDR_VPLUS);
+async fn regulator(kv: Nv) {
     let saved = kv.scope(NS_APP).get::<Saved>(KEY_STATE).ok().flatten();
     let mut s = State {
-        temperature: None,
+        temperature: taf::temperature(),
         mode: saved
             .and_then(|s| Mode::from_index(i32::from(s.mode)))
             .unwrap_or(Mode::Auto),
@@ -146,29 +144,17 @@ async fn regulator(bus: I2cBus, kv: Nv) {
         week: load_week(kv),
         demand: Demand::new(),
     };
-    let mut next_sample = Instant::now();
     loop {
-        if Instant::now() >= next_sample {
-            match tmp.oneshot().await {
-                Ok(raw) => {
-                    let centi = tmp112::raw_to_millicelsius(raw) / 10;
-                    s.temperature = Some(centi);
-                    taf::report(common::TEMPERATURE, centi);
-                }
-                Err(_) => warn!(target: "thermostat", "thermometer not read (I2C)"),
-            }
-            let period = taf::param(common::REPORT_PERIOD).clamp(5, 86_400) as u64;
-            next_sample = Instant::now() + Duration::from_secs(period);
-        }
         s.update();
-        // Wake at the next sample, or at the next minute (a switch point).
+        // Wake at the runtime's next temperature sample (every `report-period`), or at the next
+        // minute (a switch point).
         let minute = match taf::local_time() {
             Some(t) => Instant::now() + Duration::from_secs(60 - u64::from(t.second)),
             None => Instant::now() + Duration::from_secs(60),
         };
         match select4(
             taf::next_set(),
-            Timer::at(next_sample.min(minute)),
+            select(taf::temperature_sampled(), Timer::at(minute)),
             PROGRAM_CHANGED.wait(),
             // The wall clock arrived (or moved): the program's setpoint is looked up again.
             taf::clock_synced(),
@@ -190,7 +176,8 @@ async fn regulator(bus: I2cBus, kv: Nv) {
                 }
                 _ => {} // hysteresis and the common settings: read when used
             },
-            Either4::Second(()) | Either4::Fourth(()) => {}
+            Either4::Second(Either::First(centi)) => s.temperature = Some(centi),
+            Either4::Second(Either::Second(())) | Either4::Fourth(()) => {}
             Either4::Third(()) => {
                 s.week = load_week(kv);
                 s.over.clear();
@@ -328,8 +315,7 @@ static THERMOSTAT_COMMANDS: &[Entry] = &[
 ];
 
 async fn run(b: Board) {
-    let bus = I2cBus::share(b.tmp112.release());
-    b.spawner.spawn(regulator(bus, b.kv).unwrap());
+    b.spawner.spawn(regulator(b.kv).unwrap());
     taf::run(tower::taf_base!(b), &KIND, &SETTINGS).await
 }
 

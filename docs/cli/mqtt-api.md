@@ -283,15 +283,15 @@ Every kind has the **common** properties:
 | `led` | bool | setting | `true` | Event feedback on the board LED |
 | `band` | `eu868`, `us915` | local setting | `eu868` | The radio band |
 | `hold-time` | number ms, 100..10000 | setting | `1000` | How long a button press is a hold (pairing gesture) |
+| `tilt` | number 0..6 | event | | The board moved: the die face up after it settled (`0`: still moving); at most one a 10 s |
+| `accel` | `off`, `low`, `medium`, `high` | setting | `medium` | The tilt threshold (`off` powers the accelerometer down); takes effect at once |
 
 and its own:
 
 | Kind (firmware) | Class | Property | Type | Access | Default | Meaning |
 |-----------------|-------|----------|------|--------|---------|---------|
 | `button` (`radio_button`) | sleeping | `button` | `press`, `release`, `click`, `hold` | event | | A button gesture (each kind only when its setting below is on) |
-| | | `tilt` | number 0..6 | event | | The die face up after a tilt (`0`: moving) |
 | | | `press`, `release`, `click`, `hold` | bool | setting | `false`, `false`, `true`, `true` | Which gestures are reported |
-| | | `accel` | `off`, `low`, `medium`, `high` | setting | `medium` | Tilt alarm sensitivity |
 | | | `click-timeout` | number ms, 50..5000 | setting | `500` | The longest press that is a click |
 | `climate` (`radio_climate`) | sleeping | (the common ones) | | | | |
 | `motion` (`radio_motion`) | sleeping | `motion` | number 1..65535 | event | | Motion: `1` when it starts; at the end of a `holdoff` that saw more, their number |

@@ -9,7 +9,8 @@
 //! locally and over the radio's remote shell, and what they change is reported too. Changes are
 //! kept in EEPROM 10 s after the last one, so a power cut restores the strip (and the relay, with
 //! `relay-boot last`). The button: a click switches the relay, a hold the strip. The strip's clock
-//! effect shows the wall-clock time the gateway host syncs.
+//! effect shows the wall-clock time the gateway host syncs. The temperature and the
+//! accelerometer's `tilt` events are the taf runtime's, as in every taf app.
 //!
 //! Hardware: Core Module + Power Module (relay on P0) + the 144-pixel RGBW strip on PA1. The
 //! Power Module is mains powered, which is what a listening node needs.
@@ -29,11 +30,9 @@ mod control {
     use embassy_stm32::{Peri, bind_interrupts};
     use embassy_time::{Duration, Instant, Timer};
     use log::{info, warn};
-    use tower::board::Tmp112Sensor;
     use tower::power_module::Relay;
     use tower::storage::{NS_APP, Nv};
     use tower::strip::{LedKind, Strip};
-    use tower::tmp112;
     use tower::{board::Board, button, shell, strip_player, taf, ws2812};
     use tower_protocol::props::{self, control};
 
@@ -98,7 +97,7 @@ mod control {
     }
 
     #[embassy_executor::task]
-    async fn control_task(mut relay: Relay, kv: Nv, mut thermometer: Tmp112Sensor) {
+    async fn control_task(mut relay: Relay, kv: Nv) {
         // Settings read from here on: the task runs once the runtime has started.
         relay.set(relay_at_boot(kv));
         let mut last = snapshot(&relay);
@@ -106,8 +105,6 @@ mod control {
             taf::report(id, value);
         }
         let mut save_at: Option<Instant> = None;
-        // The Core Module's temperature, sampled here (a task of its own costs RAM this node lacks).
-        let mut next_temp = Instant::now();
         loop {
             match select3(taf::next_set(), taf::next_button(), Timer::after(POLL)).await {
                 Either3::First((id, value)) => match id {
@@ -134,13 +131,6 @@ mod control {
                 last = now;
                 save_at = Some(Instant::now() + SAVE_AFTER);
             }
-            if Instant::now() >= next_temp {
-                if let Ok(raw) = thermometer.oneshot().await {
-                    taf::report(props::common::TEMPERATURE, tmp112::raw_to_millicelsius(raw) / 10);
-                }
-                let period = taf::param(props::common::REPORT_PERIOD).clamp(5, 86_400) as u64;
-                next_temp = Instant::now() + Duration::from_secs(period);
-            }
             if save_at.is_some_and(|t| Instant::now() >= t) {
                 save_at = None;
                 let relay_ok = kv.scope(NS_APP).set(KEY_RELAY, &relay.is_on()).is_ok();
@@ -157,7 +147,7 @@ mod control {
             .spawn(strip_task(b.strip_tim, b.strip_data, b.strip_dma).unwrap());
         // Off until the task applies `relay-boot` (settings read 0 before the runtime starts).
         let relay = Relay::new(b.header_p0, false);
-        b.spawner.spawn(control_task(relay, b.kv, b.tmp112).unwrap());
+        b.spawner.spawn(control_task(relay, b.kv).unwrap());
         taf::run(tower::taf_base!(b), &KIND, &SETTINGS).await
     }
 }

@@ -338,7 +338,7 @@ follow them in your app too:
 
 - **Target = the subject.** `target:` names what the line is about, short and lowercase: an
   SDK subsystem (`boot`, `crash`, `net`, `radio`, `rng`, `storage`, `watchdog`) or a part of the
-  app (the push button logs `node`, `button` and `accel`; the gateway `gateway`). The console
+  app (a taf node logs `node` and `accel`, the push button `button` too; the gateway `gateway`). The console
   shows `target: message`, so the message never repeats the target. A message may open with a
   sub-subject and a colon when a subsystem logs several kinds of things (`net: pairing: SAS
   123456`).

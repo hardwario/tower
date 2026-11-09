@@ -17,7 +17,40 @@ Task status: `open`, `in progress`, `waiting (Dn)` (blocked on a decision), `don
 
 ## In progress
 
-(None.)
+### T17. Thermometer and accelerometer in the taf runtime, for every node app
+
+Status: in progress (2026-11-09)
+
+**Why.** Every radio node app (button, climate, control, motion, thermostat; not the gateway)
+should report the Core Module's temperature and raise accelerometer tilt events the way
+`radio_button` does. Today each app wires the sensors itself or not at all: the button has its own
+sensor task (temperature + tilt), climate and motion spawn the temperature-only
+`taf::thermometer`, control reads the TMP112 inside its own task, the thermostat samples it for
+its regulation, and only the button has tilt. It belongs to taf.
+
+- [x] Props: `tilt` (event, the face up 0..6) and `accel` (setting: off, low, medium, high;
+      default medium) move from the button kind to the common table; the button kind renumbered
+- [x] Runtime: a sensor task spawned by `taf::run` owns the TMP112 and the LIS2DH12 on the shared
+      `I2cBus` (from `taf_base!`): the temperature every `report-period`, tilt events with the
+      button's logic (one uplink per 10 s, the latest face coalesced, interrupt backoff), `accel`
+      re-armed when it changes (not only at boot); `taf::temperature()` and a new-sample signal
+      for apps that use the reading; the bus handle for app drivers
+- [x] Apps: the button drops its sensor task; climate and motion drop `taf::thermometer`;
+      control drops its temperature code; the thermostat regulates on the runtime's reading
+- [x] RAM budget and flash on both boards (control's stack margin and the r1 thermostat's flash
+      are tight); stack peaks measured on the bench
+- [x] Docs: taf.md (the contract), mqtt-api.md (the common properties), gateway.md (the button's
+      settings), console.md (log targets), protocol.md (a stale `NodeMsg` line)
+**Measured (2026-11-09).** RAM: every app still above the 8 KB stack floor (`radio_control` 8304
+B, was 8432; the sensor task is 200 B). Flash: the sensor task first overflowed `radio_control`
+by 32 B; slimmed (no console event per tilt, one back-off warning, one tilt send path: 3.3 KB to
+2.6 KB of code) it leaves 924 B on the r2 (was 5.5 KB), and the r1 `radio_thermostat` 268 B
+(was 4.5 KiB). T18 tracks the headroom.
+
+- [x] CLI tests that name the button's properties; `just check`
+- [ ] Bench: reflash motion, control and thermostat; temperature and tilt over MQTT from each; an
+      `accel` set re-arms the accelerometer
+- [ ] Commit
 
 ## Decisions
 
@@ -58,6 +91,22 @@ and the host's uplink dedup stays covered by unit tests only.
 
 ## Tasks
 
+### T18. Flash headroom of `radio_control` (r2) and `radio_thermostat` (r1)
+
+Status: open
+
+**Why.** Since the common sensors moved into the taf runtime (T17), `radio_control` has 924 B of
+the r2's 192 KB flash left and `radio_thermostat` 268 B on the r1. Code added to the runtime lands
+in every app, so the next runtime feature overflows one of them.
+
+**What it takes.** Find what to win back across the SDK, measured per symbol (`llvm-nm -S
+--size-sort` on the ELF): the largest futures (`Node::run_pairing` 6.9 KB, `Node::on_downlink`
+6 KB, the shell's and the console's tasks 6 KB each), log strings and their formatting,
+`opt-level = "z"` for cold code (never for the strip's refill interrupt or the radio's timing).
+
+**Done when.** Both builds have at least 4 KB free, and `just fw ci` warns when an app's image
+comes within 2 KB of its flash.
+
 ### T2. LCD thermostat: a page-mode LCD driver, then the thermostat's screen
 
 Status: open (D1: later)
@@ -71,6 +120,10 @@ against the thermostat's measured 6.2 KB peak.
 and `tower::lcd` (a frame-less path the linker keeps apart from the frame). Then the screen: big
 temperature, setpoint, clock, demand; buttons adjust the setpoint, a hold opens a menu. Needs an
 r2 with the LCD Module: the r1 build has 4.5 KiB of flash left headless.
+
+**Mind the accelerometer.** The LCD's auto-rotate owns the LIS2DH12 (its 4D orientation
+interrupt on INT1), and since T17 the taf runtime does too (tilt events): a thermostat with a
+screen keeps one of them (a wall unit needs no auto-rotate) or hands the chip over.
 
 **Done when.** The thermostat with its screen passes `just fw ci` (RAM budget, 8 KB floor) with a
 measured stack peak under it, the UI checks out with `lcd dump`, and the radio side works as

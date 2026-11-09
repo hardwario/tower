@@ -20,14 +20,15 @@ The MQTT side of the same properties (topics, payloads, the kinds' tables) is
 
 | App | Kind | Class | Hardware | What it does |
 |-----|------|-------|----------|--------------|
-| `radio_button` | `button` | sleeping | Core Module | Button gestures (press, release, click, hold, each switchable), tilt alarm |
-| `radio_climate` | `climate` | sleeping | Core Module | The temperature (the Climate Module's sensors are still to come) |
+| `radio_button` | `button` | sleeping | Core Module | Button gestures (press, release, click, hold, each switchable) |
+| `radio_climate` | `climate` | sleeping | Core Module | The common sensors only for now (the Climate Module's are still to come) |
 | `radio_motion` | `motion` | sleeping | Core Module r2 + PIR Module | Motion events with a holdoff, PIR sensitivity |
 | `radio_control` | `control` | listening | Core Module r2 + Power Module + LED strip | The relay (P0) and the strip (every `led_strip` effect) |
 | `radio_thermostat` | `thermostat` | sleeping | Core Module | Setpoint, mode, weekly program, heating demand (headless for now, see *RAM*) |
 
-`radio_control` does not fit a Core Module r1's flash (its USB console's code): the r1 build is a
-stub that says so. The others build for both boards.
+Every one of them also has the common sensors (*Sensors* in the contract below). `radio_control` does not fit a
+Core Module r1's flash (its USB console's code): the r1 build is a stub that says so. The others
+build for both boards.
 
 ## The standard app contract
 
@@ -45,8 +46,15 @@ What every taf app does, so a user meets the same device whatever it measures:
 - **USB console**: logs, the shell and the management channel, always. Every app has
   `node status`, `node pair` (console only) and, when it has the Core button, `button simulate
   <ms>` (console only: a press of that length, for tests without hands).
+- **Sensors**: every node reports the Core Module's temperature (`temperature`, sampled every
+  `report-period`) and raises a `tilt` event when the board moves (the face up after it settled,
+  1 to 6, or 0 while moving; at most one uplink per 10 s, the latest face coalesced). `accel`
+  (`off`, `low`, `medium`, `high`; default `medium`) is the tilt threshold and takes effect at once;
+  `off` powers the accelerometer down. The runtime owns both chips: `taf_base!` hands it the
+  TMP112's bus and the accelerometer's interrupt line, and an app that works with the temperature
+  reads the runtime's (`taf::temperature()`).
 - **Settings**: the common ones (`heartbeat`, `report-period`, `report-delta`, `led`, `band`,
-  `hold-time`) plus the kind's, in `system settings` like any SDK setting, derived from the
+  `hold-time`, `accel`) plus the kind's, in `system settings` like any SDK setting, derived from the
   property table (no hand-written setting list, no key collisions). A setting other than `band`
   can be set over the radio too; `band` is console only (a wrong band cuts the link).
 - **Downlinks**: `Set` (a control or a setting; a setting is stored before the app hears of it),
@@ -103,7 +111,7 @@ What every taf app does, so a user meets the same device whatever it measures:
 
 | Call | What |
 |------|------|
-| `taf::run(base, &KIND, &SETTINGS)` | The runtime; never returns. `tower::taf_base!(b)` moves what it needs out of the `Board`; `taf_base!(b, no_button)` leaves the Core button to the app (an LCD Module shares its line; pair with `request_pairing` then) |
+| `taf::run(base, &KIND, &SETTINGS)` | The runtime; never returns. `tower::taf_base!(b)` moves what it needs out of the `Board` (the radio, the LED, the Core button, the TMP112's I²C bus, shared as `base.i2c` for app drivers on it, and the accelerometer's interrupt); `taf_base!(b, no_button)` leaves the Core button to the app (an LCD Module shares its line; pair with `request_pairing` then) |
 | `taf::report(id, value)` | A state's or control's current value; cheap, the runtime decides when it goes up |
 | `taf::event(id, value)` | Something happened; up to four wait for the radio, more are dropped |
 | `taf::next_set().await` | The next `set` of a control (apply it, then report it), or the notice that a setting changed. Wait on it in the app's loop: the runtime confirms a set when the app comes back for the next one |
@@ -113,7 +121,8 @@ What every taf app does, so a user meets the same device whatever it measures:
 | `taf::local_time()` | Local wall-clock time (`weekday`, `minute`, ...) once the host synced it |
 | `taf::clock_synced().await` | Wakes when the clock is synced (a scheduler looks again) |
 | `taf::request_pairing()`, `taf::paired()` | Start OTA pairing from an app gesture; whether paired |
-| `taf::thermometer(sensor)` | A ready task that reports the Core Module's temperature every `report-period` |
+| `taf::temperature()` | The Core Module's temperature (centi °C) as the runtime last read it; `None` before the first read |
+| `taf::temperature_sampled().await` | Wakes with each new temperature sample (one waiter: the app) |
 | `taf::NODE_COMMANDS`, `taf::BUTTON_COMMANDS` | The standard shell commands, for the app's `COMMANDS` |
 
 ### EEPROM keys
@@ -145,7 +154,13 @@ r1). So the floor is real margin, not slack. What keeps an app small:
   downlink or a pairing from its loop's top level (flags), not from inside the send that
   received it.
 - **Fewer tasks**: a task's future is resident for good. `console::event_now` sends an event
-  without a waiting future.
+  without a waiting future. The runtime's sensor task is 200 B.
+
+**Flash is as tight as RAM for two builds** (2026-11-09, after the sensors moved into the
+runtime): `radio_control` on the r2 has 924 B of its 192 KB left, `radio_thermostat` on the r1
+268 B. The runtime is in every app, so code added to it
+lands in both; check `just fw build app <name>` (and with `TOWER_FEATURES=core-module-r1`)
+before and after (TASKS.md, T18).
 
 **The LCD Module does not fit next to the radio yet.** Its driver keeps the 2 KB frame, 512 B of
 row signatures and its tasks resident (about 4.3 KB), which leaves a radio node 5.9 KB of stack,

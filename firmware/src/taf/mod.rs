@@ -16,7 +16,9 @@
 //! The runtime ([`run`], which never returns) owns the radio and gives every app the same
 //! behaviour: OTA pairing (Core button held while unpaired; a 12 s hold re-pairs), cable
 //! provisioning over USB, the unpaired LED cue, the heartbeat `Info` + full report, the remote
-//! shell, settings over the radio, wall-clock time from the host ([`local_time`]), the watchdog.
+//! shell, settings over the radio, wall-clock time from the host ([`local_time`]), the watchdog,
+//! and the Core Module's sensors: the temperature (read it with [`temperature`]) and the
+//! accelerometer's `tilt` events.
 //! Two radio classes: a **sleeping** node wakes the radio for an uplink and hears downlinks right
 //! after it; a **listening** node (mains powered) keeps its receiver on, so a `set` takes effect at
 //! once. The guide is `docs/firmware/taf.md`.
@@ -27,16 +29,18 @@
 //!
 //! async fn run(b: Board) {
 //!     b.spawner.spawn(detector(Pir::new(b.pir)).unwrap());
+//!     // The TMP112 and the accelerometer go to the runtime with `taf_base!`.
 //!     taf::run(tower::taf_base!(b), &KIND, &SETTINGS).await
 //! }
 //! app!(run, commands: COMMANDS, settings: &SETTINGS);
 //! ```
 
 mod node;
+mod sensors;
 
 use core::cell::RefCell;
 use core::fmt::Write as _;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use critical_section::Mutex;
 use embassy_executor::Spawner;
@@ -79,10 +83,16 @@ pub struct Base {
     /// [`request_pairing`] then.
     pub button: Option<ExtiInput<'static, Async>>,
     pub radio: RadioPins,
+    /// The accelerometer's interrupt (INT1), for the runtime's tilt events.
+    pub accel_int: ExtiInput<'static, Async>,
+    /// I²C2, shared: the runtime's thermometer and accelerometer use it, and an app driver on the
+    /// same bus copies the handle before [`run`] takes the base.
+    pub i2c: crate::i2c::I2cBus,
 }
 
 /// Move the runtime's resources out of a [`Board`](crate::board::Board) (the app keeps the rest):
-/// `taf_base!(b)`, or `taf_base!(b, no_button)` to leave the Core button to the app.
+/// `taf_base!(b)`, or `taf_base!(b, no_button)` to leave the Core button to the app. The base
+/// takes the TMP112's bus (shared as `i2c`) and the accelerometer's interrupt line.
 #[macro_export]
 macro_rules! taf_base {
     ($b:ident) => {
@@ -107,6 +117,8 @@ macro_rules! taf_base {
                 miso: $b.radio_miso,
                 irq: $b.radio_irq,
             },
+            accel_int: $b.accel_int,
+            i2c: $crate::i2c::I2cBus::share($b.tmp112.release()),
         }
     };
 }
@@ -343,6 +355,7 @@ pub fn local_time() -> Option<Local> {
 /// next heartbeat. A no-op wake in an app without the taf runtime.
 pub(crate) fn setting_changed() {
     PARAMS_DUE.store(true, Ordering::Relaxed);
+    sensors::SETTINGS_CHANGED.signal(());
     WAKE.signal(());
 }
 
@@ -538,20 +551,28 @@ fn forget_sent() {
 
 // ---- common sensors ---------------------------------------------------------------------------
 
-/// The Core Module's thermometer as the common `temperature` property: a one-shot read every
-/// `report-period` (the runtime sends it when it moved past `report-delta`, or on a heartbeat).
-/// Spawn it when the app leaves the TMP112 its own bus: `spawner.spawn(taf::thermometer(b.tmp112)?)`.
-#[embassy_executor::task]
-pub async fn thermometer(mut sensor: crate::board::Tmp112Sensor) {
-    loop {
-        match sensor.oneshot().await {
-            Ok(raw) => report(
-                props::common::TEMPERATURE,
-                crate::tmp112::raw_to_millicelsius(raw) / 10,
-            ),
-            Err(_) => log::warn!(target: "node", "thermometer not read (I2C)"),
-        }
-        let period = param(props::common::REPORT_PERIOD).clamp(5, 86_400) as u64;
-        embassy_time::Timer::after_secs(period).await;
+/// The latest temperature in centi °C ([`i32::MIN`]: none yet).
+static TEMPERATURE: AtomicI32 = AtomicI32::new(i32::MIN);
+/// Raised with every temperature sample, for [`temperature_sampled`].
+static TEMPERATURE_SAMPLED: Signal<CriticalSectionRawMutex, i32> = Signal::new();
+
+/// The Core Module's temperature in centi °C, as last read by the runtime (every
+/// `report-period`); `None` before the first good read.
+pub fn temperature() -> Option<i32> {
+    match TEMPERATURE.load(Ordering::Relaxed) {
+        i32::MIN => None,
+        t => Some(t),
     }
+}
+
+/// Wait for the runtime's next temperature sample (centi °C). One waiter: the app's.
+pub async fn temperature_sampled() -> i32 {
+    TEMPERATURE_SAMPLED.wait().await
+}
+
+/// A temperature sample from the sensor task: kept, reported, handed to a waiting app.
+fn sampled(centi: i32) {
+    TEMPERATURE.store(centi, Ordering::Relaxed);
+    report(props::common::TEMPERATURE, centi);
+    TEMPERATURE_SAMPLED.signal(centi);
 }

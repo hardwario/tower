@@ -1,10 +1,11 @@
 //! radio_climate (TOWER IoT Kit product firmware): a climate sensor on the radio, a sleeping taf
 //! node (`docs/firmware/taf.md`).
 //!
-//! Today it reports the Core Module's temperature (`nodes/{addr}/state/temperature`), sampled every
-//! `report-period` and sent when it moves past `report-delta` or on a heartbeat. The Climate
-//! Module's sensors (humidity, illuminance, pressure) join as properties of this kind once their
-//! drivers exist. Pairing, settings, the remote shell and the heartbeat are the taf runtime's.
+//! Today it reports what every taf node reports: the Core Module's temperature
+//! (`nodes/{addr}/state/temperature`, sampled every `report-period` and sent when it moves past
+//! `report-delta` or on a heartbeat) and the accelerometer's `tilt` events, both the taf runtime's
+//! like pairing, settings, the remote shell and the heartbeat. The Climate Module's sensors
+//! (humidity, illuminance, pressure) join as properties of this kind once their drivers exist.
 //!
 //!   just run app radio_climate
 
@@ -19,7 +20,6 @@ static SETTINGS: [shell::Setting; taf::settings_len(&KIND)] = taf::settings(&KIN
 static COMMANDS: &[shell::Entry] = &[taf::NODE_COMMANDS, taf::BUTTON_COMMANDS];
 
 async fn run(b: Board) {
-    b.spawner.spawn(taf::thermometer(b.tmp112).unwrap());
     taf::run(tower::taf_base!(b), &KIND, &SETTINGS).await
 }
 

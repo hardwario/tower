@@ -29,7 +29,8 @@ the [hardwario/tower](https://github.com/hardwario/tower) monorepo as `crates/pr
   stats cadence, cable provisioning, join) and the typed reply records streamed in
   `MgmtResponse.data`, plus the result / TX-outcome code sets.
 - **Radio application schema** (`radio.rs`): what node apps put inside their encrypted radio
-  frames (`NodeMsg`: info / button / temperature / accel / shell chunk; `NodeCmd`: shell). The
+  frames (`NodeMsg`: info / report / event / shell chunk; `NodeCmd`: shell / set / time /
+  describe), the values being the taf apps' properties (`props.rs`). The
   gateway forwards it opaquely, so it is tagged on its own: every envelope leads with
   `RADIO_TAG` (2 bytes, LE), independent of the console's `CONSOLE_TAG`.
 - **Schema tags** (`fingerprint.rs`): a compile-time structural hash of each surface (every

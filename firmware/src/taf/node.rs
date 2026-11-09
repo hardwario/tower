@@ -152,6 +152,8 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
     let kv = base.kv;
     let addr = shell::radio_addr(kv);
     super::init_shared(kind, settings, kv, led, addr);
+    base.spawner
+        .spawn(super::sensors::task(base.accel_int, base.i2c).unwrap());
     let btn = base.button.map(|pin| {
         let hold = super::param(props::common::HOLD_TIME).clamp(100, 10_000) as u64;
         // An app with a `click-timeout` setting (the button) tunes the click recognition too.

@@ -124,9 +124,9 @@ with the text `(reply lost on the air: ran once, not run again)`, never an empty
 ## The push-button node (`radio_button`)
 
 A sleeping taf node (`docs/firmware/taf.md`, kind `button`). Every enabled button gesture is a `button`
-event with its running count; the temperature is measured every `report-period` and sent on a
-change of `report-delta` or at the latest with the heartbeat; the accelerometer's tilt interrupt
-wakes the node for `tilt` events. Every setting is remote-settable (MQTT `set/<name>`, or
+event with its running count. Like every taf node, it also measures the temperature every
+`report-period` (sent on a change of `report-delta`, or at the latest with the heartbeat) and
+raises `tilt` events from the accelerometer's tilt interrupt. Every setting is remote-settable (MQTT `set/<name>`, or
 `system settings set ...` over the remote shell).
 
 ### Settings
@@ -136,7 +136,7 @@ wakes the node for `tilt` events. Every setting is remote-settable (MQTT `set/<n
 | `report-period` | uint s | `60` | 5..86400 | temperature measure cadence |
 | `report-delta` | fixed °C | `0.50` | 0..10.00 | send when |ΔT| ≥ this; `0` = every period |
 | `led` | bool | `on` | on/off | event feedback on the LED |
-| `accel` | enum | `medium` | off/low/medium/high | tilt sensitivity (**boot-applied**) |
+| `accel` | enum | `medium` | off/low/medium/high | tilt threshold (applied at once; `off` powers the accelerometer down) |
 | `heartbeat` | uint s | `900` | 60..86400 | max interval between uplinks (`NodeInfo`) |
 | `press` | bool | `off` | on/off | master enable: Press events |
 | `release` | bool | `off` | on/off | master enable: Release events |
