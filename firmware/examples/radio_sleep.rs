@@ -1,4 +1,4 @@
-//! radio_sleep: low-power SLEEP / SHUTDOWN between transfers (docs/radio.md).
+//! radio_sleep: low-power SLEEP / SHUTDOWN between transfers (docs/firmware/radio.md).
 //!
 //!   TOWER_FEATURES=role-node    just flash example radio_sleep   # duty-cycled sender
 //!   TOWER_FEATURES=role-gateway just flash example radio_sleep   # always-on receiver

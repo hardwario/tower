@@ -1,4 +1,4 @@
-//! net_star: star topology with per-node keys (docs/radio.md).
+//! net_star: star topology with per-node keys (docs/firmware/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway              just flash example net_star  # hub (holds both nodes)
 //!   TOWER_FEATURES=role-node                 just flash example net_star  # node A

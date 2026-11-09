@@ -1,6 +1,6 @@
 //! HIL listening-node group: Dongle = `radio_gateway`, Core = `radio_control`, a taf
 //! **listening** node (mains powered, receiver always on). The gateway sends such a node its queued
-//! downlink at once instead of holding it for the node's next uplink (docs/taf.md, "Classes"):
+//! downlink at once instead of holding it for the node's next uplink (docs/firmware/taf.md, "Classes"):
 //! here a property `Set` and a remote shell line each complete, end to end (queued on the gateway,
 //! delivered, run, answered over the radio), within [`LISTEN_BUDGET`], with nothing waking the node.
 //! The sleeping path is `gateway.rs`.

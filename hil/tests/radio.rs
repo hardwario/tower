@@ -3,7 +3,7 @@
 //! exchange over the air (the node logs `delivered`/ACKed, the gateway logs the received frame).
 //!
 //! Sequential flash, then concurrent capture (concurrent FTDI flashing is unreliable; see
-//! firmware/tools/hwtest/README.md). `#[ignore]`d: needs the bench + two boards in RF
+//! docs/firmware/hwtest.md). `#[ignore]`d: needs the bench + two boards in RF
 //! range; run with `just bench` (`--test-threads=1`, exclusive ports).
 
 use std::time::{Duration, Instant};

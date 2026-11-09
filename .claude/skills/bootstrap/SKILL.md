@@ -98,7 +98,7 @@ mismatch, exit 125, against freshly flashed firmware): suggest `just install-cli
 ## 5. hil (only if in scope)
 
 `just`, the `tower` CLI and `python3` as above; the power group also needs `probe-rs` and a
-`hil/.venv` with the PPK2 deps (`hil/docs/bench.md`). Report, don't install. Never run the
+`hil/.venv` with the PPK2 deps (`docs/hil/bench.md`). Report, don't install. Never run the
 bench recipes.
 
 ## 6. Report

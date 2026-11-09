@@ -8,15 +8,15 @@ button, TMP112 thermometer, LIS2DH12 accelerometer, addressable-LED strip, PIR m
 framed host↔target **console** (logs/events/shell), EEPROM storage, USB-gated low
 power) plus a **SPIRIT1 sub-GHz radio stack** (secured AES-128-CCM network layer:
 confirmed delivery, replay protection, bulk transfer, OTA pairing); flashable
-programs live in [`examples/`](examples) and are built/flashed by name with
+programs live in [`examples/`](../../firmware/examples) and are built/flashed by name with
 [`just`](https://just.systems). Apps link to the full 192 KB flash at `0x0800_0000`.
-Each subsystem has a guide: [`docs/console.md`](docs/console.md),
-[`docs/radio.md`](docs/radio.md), [`docs/storage.md`](docs/storage.md),
-[`docs/gateway.md`](docs/gateway.md) (the push-button + gateway product),
-[`docs/hmi.md`](docs/hmi.md) (the LCD Module and the HMI framework),
-[`docs/strip.md`](docs/strip.md) (the LED strip: driver, effects, the `led_strip` app),
-[`docs/pir.md`](docs/pir.md) (the PIR Module: the DigiPyro detector, its timing, tuning), and
-[`docs/taf.md`](docs/taf.md) (taf, the application framework the radio apps are built on).
+Each subsystem has a guide: [`docs/firmware/console.md`](console.md),
+[`docs/firmware/radio.md`](radio.md), [`docs/firmware/storage.md`](storage.md),
+[`docs/firmware/gateway.md`](gateway.md) (the push-button + gateway product),
+[`docs/firmware/hmi.md`](hmi.md) (the LCD Module and the HMI framework),
+[`docs/firmware/strip.md`](strip.md) (the LED strip: driver, effects, the `led_strip` app),
+[`docs/firmware/pir.md`](pir.md) (the PIR Module: the DigiPyro detector, its timing, tuning), and
+[`docs/firmware/taf.md`](taf.md) (taf, the application framework the radio apps are built on).
 
 | | |
 |---|---|
@@ -27,13 +27,13 @@ Each subsystem has a guide: [`docs/console.md`](docs/console.md),
 | Button | PA8, active-high (external pull-down), EXTI |
 | I2C | I2C2, PB10/PB11 (AF6), 100 kHz; TMP112 @ `0x49`, LIS2DH12 @ `0x19` |
 | Accelerometer | LIS2DH12, INT1 → PB6 (EXTI); orientation/dice + tilt |
-| Console | USART1, TX PA9 / RX PA10, 115200 8N1 (behind the FT231X USB-UART bridge); framed host↔target link (logs/events/shell), see [`docs/console.md`](docs/console.md). Rev 1.3 board (`core-module-r1`): a USB CDC-ACM port on PA11/PA12 instead |
-| RGB strip | WS2812B/SK6812 on PA1 (TIM2_CH2 PWM + DMA1_CH3), see [`docs/strip.md`](docs/strip.md) |
+| Console | USART1, TX PA9 / RX PA10, 115200 8N1 (behind the FT231X USB-UART bridge); framed host↔target link (logs/events/shell), see [`docs/firmware/console.md`](console.md). Rev 1.3 board (`core-module-r1`): a USB CDC-ACM port on PA11/PA12 instead |
+| RGB strip | WS2812B/SK6812 on PA1 (TIM2_CH2 PWM + DMA1_CH3), see [`docs/firmware/strip.md`](strip.md) |
 | EEPROM | 6 KB byte-addressable data EEPROM @ `0x0808_0000` (no erase, ~100k+ cycles) |
 | USB sense | VBUS on PA12; gates STOP (stay awake while plugged in). Rev 1.3 board: no VBUS line, a pulse of the USB D+ pull-up finds the host |
-| Radio | SPIRIT1 (SPSGRF), SPI1 on PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 (EXTI); EU 868 / US 915 (runtime-switchable); see [`docs/radio.md`](docs/radio.md) |
-| PIR Module | Excelitas PYQ 1648 DigiPyro: SERIN on P8 (PB0), DIRECT LINK on P9 (PB2, EXTI line 2); see [`docs/pir.md`](docs/pir.md) |
-| Header bus | SPI2 on P14/P13/P12/P15 (PB13 SCK, PB15 MOSI, PB14 MISO, PB12 CS; DMA1_CH7/CH6), `INT` on PC13 (EXTI); used by the LCD Module, see [`docs/hmi.md`](docs/hmi.md) |
+| Radio | SPIRIT1 (SPSGRF), SPI1 on PB3/PB5/PB4, CS PA15, SDN PB7, nIRQ PA7 (EXTI); EU 868 / US 915 (runtime-switchable); see [`docs/firmware/radio.md`](radio.md) |
+| PIR Module | Excelitas PYQ 1648 DigiPyro: SERIN on P8 (PB0), DIRECT LINK on P9 (PB2, EXTI line 2); see [`docs/firmware/pir.md`](pir.md) |
+| Header bus | SPI2 on P14/P13/P12/P15 (PB13 SCK, PB15 MOSI, PB14 MISO, PB12 CS; DMA1_CH7/CH6), `INT` on PC13 (EXTI); used by the LCD Module, see [`docs/firmware/hmi.md`](hmi.md) |
 
 ## Quick start
 
@@ -57,41 +57,41 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | Module | Responsibility |
 |---|---|
 | `src/button.rs` | Debounced button driver (click/hold) over any GPIO; `init_exti` (low-power, sleeps when idle) or `init_polled` (when the EXTI line is taken) |
-| `src/console.rs` | Framed host↔target console (`tower-protocol`): `log` backend, `print!`/`println!`, structured `event`s, and chunked shell responses over an interrupt-driven UART, paired with the `tower` host CLI; see [`docs/console.md`](docs/console.md) |
-| `src/shell.rs` | RouterOS-style shell with target-authoritative TAB completion and a declarative, EEPROM-backed settings framework (`Str`/`Uint`/`Int`/`Bool`/`Enum`/`Addr`); apps deep-merge their own commands + settings via `serve_ext`; see [`docs/console.md`](docs/console.md) |
-| `src/lcd.rs` | The TOWER LCD Module: Sharp memory LCD (dirty-row flushes over SPI2 + DMA, software VCOM), buttons (PA8-gated), RGB LED patterns, backlight, APDS-9960 swipes, menu runner, `lcd` shell commands; with the `tower-hmi` framework (`tower::hmi`), see [`docs/hmi.md`](docs/hmi.md) |
+| `src/console.rs` | Framed host↔target console (`tower-protocol`): `log` backend, `print!`/`println!`, structured `event`s, and chunked shell responses over an interrupt-driven UART, paired with the `tower` host CLI; see [`docs/firmware/console.md`](console.md) |
+| `src/shell.rs` | RouterOS-style shell with target-authoritative TAB completion and a declarative, EEPROM-backed settings framework (`Str`/`Uint`/`Int`/`Bool`/`Enum`/`Addr`); apps deep-merge their own commands + settings via `serve_ext`; see [`docs/firmware/console.md`](console.md) |
+| `src/lcd.rs` | The TOWER LCD Module: Sharp memory LCD (dirty-row flushes over SPI2 + DMA, software VCOM), buttons (PA8-gated), RGB LED patterns, backlight, APDS-9960 swipes, menu runner, `lcd` shell commands; with the `tower-hmi` framework (`tower::hmi`), see [`docs/firmware/hmi.md`](hmi.md) |
 | `src/i2c.rs` | The board's I2C2 bus as a `Copy` handle shared by several drivers, with an async ATSHA204A re-sleep for bursts |
 | `src/tca9534a.rs`, `src/apds9960.rs` | TCA9534A I/O expander and APDS-9960 gesture sensor drivers (HAL-independent) |
 | `src/led.rs` | Non-blocking LED blink dispatcher (background pattern + priority instant sequences) |
 | `src/lis2dh12.rs` | LIS2DH12 accelerometer (HAL-independent): 10 Hz/normal mode, `dice()` orientation (1-6), and a hardware tilt/movement interrupt with selectable sensitivity + report `min_interval` |
-| `src/pir.rs` | The TOWER PIR Module (Excelitas DigiPyro PYQ 1648 / 1548): writes the detection criteria over SERIN and reads them back over DIRECT LINK (bit-banged within the detector's timing), motion events that wake the MCU from STOP, or the raw band-pass / low-pass / temperature signal; see [`docs/pir.md`](docs/pir.md) |
-| `src/taf/` | **taf**, the TOWER Application Framework's runtime: radio, pairing, settings from the property tables, reports and heartbeat, downlinks (sets, time, remote shell), the two node classes; see [`docs/taf.md`](docs/taf.md) |
+| `src/pir.rs` | The TOWER PIR Module (Excelitas DigiPyro PYQ 1648 / 1548): writes the detection criteria over SERIN and reads them back over DIRECT LINK (bit-banged within the detector's timing), motion events that wake the MCU from STOP, or the raw band-pass / low-pass / temperature signal; see [`docs/firmware/pir.md`](pir.md) |
+| `src/taf/` | **taf**, the TOWER Application Framework's runtime: radio, pairing, settings from the property tables, reports and heartbeat, downlinks (sets, time, remote shell), the two node classes; see [`docs/firmware/taf.md`](taf.md) |
 | `src/power_module.rs` | The Power Module's relay (P0) |
 | `src/strip_player.rs` | The LED strip player shared by `led_strip` and `radio_control`: the effects, their settings, the `strip` shell commands |
-| `src/power.rs` | Notes on the SDK's low-power (STOP) policy; the USB-presence gating itself lives in `console::manager` (see [`docs/console.md`](docs/console.md)) |
+| `src/power.rs` | Notes on the SDK's low-power (STOP) policy; the USB-presence gating itself lives in `console::manager` (see [`docs/firmware/console.md`](console.md)) |
 | `src/storage.rs` | Non-volatile storage in the data EEPROM: a raw byte area (`read`/`write` at offset) and a key-value store (`Kv`); values are raw scalars or postcard structs, CRC-framed, updated in place |
-| `src/strip.rs` | The LED strip: the `tower-strip` effects core (re-exported) on the `ws2812` driver; `Strip` = a frame of effects + the render settings (brightness, gamma, RGBW white, dithering, orientation, current limit), see [`docs/strip.md`](docs/strip.md) |
+| `src/strip.rs` | The LED strip: the `tower-strip` effects core (re-exported) on the `ws2812` driver; `Strip` = a frame of effects + the render settings (brightness, gamma, RGBW white, dithering, orientation, current limit), see [`docs/firmware/strip.md`](strip.md) |
 | `src/tmp112.rs` | TMP112 driver, generic over `embedded_hal::i2c::I2c` (HAL-independent) |
 | `src/ws2812.rs` | WS2812B/SK6812 strip driver (PA1): TIM2 PWM fed by DMA from a 256 B ring the highest-priority interrupt refills just in time (a 144-pixel RGBW frame costs 576 B of levels), RGB & RGBW, arbitrary length, cancel-safe, EEPROM writes cut a frame cleanly |
-| `src/radio/` | SPIRIT1 sub-GHz radio stack: chip driver (SPI/state machine/CSMA/sleep), RF config, hardware AES-128-CCM, frame codec, EU duty governor, and a secured network layer (`net`) with per-peer keys, confirmed delivery, replay protection, bulk transfer and OTA pairing; see [`docs/radio.md`](docs/radio.md) |
+| `src/radio/` | SPIRIT1 sub-GHz radio stack: chip driver (SPI/state machine/CSMA/sleep), RF config, hardware AES-128-CCM, frame codec, EU duty governor, and a secured network layer (`net`) with per-peer keys, confirmed delivery, replay protection, bulk transfer and OTA pairing; see [`docs/firmware/radio.md`](radio.md) |
 | `src/board.rs` | `Board::take()` + `app!`, the common entry: clock, console, TMP112→one-shot, EXTI, radio pins, and USB-aware low power (auto-spawns the USB-gated `console::manager`); logs a uniform `Example booted: <name>` banner and hands the app ready resources |
 
 The SDK builds on the monorepo's shared `no_std` crates, all **path dependencies** in
-[`Cargo.toml`](Cargo.toml): [`tower-protocol`](../crates/protocol) (the console wire format:
-COBS + CRC + postcard), [`tower-kv`](../crates/kv) (the EEPROM key-value codec behind
-`storage::Kv`), [`tower-net`](../crates/net) (the network layer's security decision kernels),
-[`tower-radio`](../crates/radio) (hardware-free radio timing / CCM / compliance arithmetic; the
-SPIRIT1 driver itself is `src/radio/`), [`tower-gateway`](../crates/gateway) (the gateway app's
-node registry + downlink queue core) and [`tower-shell`](../crates/shell) (the shell's parser,
+[`Cargo.toml`](../../firmware/Cargo.toml): [`tower-protocol`](../../crates/protocol) (the console wire format:
+COBS + CRC + postcard), [`tower-kv`](../../crates/kv) (the EEPROM key-value codec behind
+`storage::Kv`), [`tower-net`](../../crates/net) (the network layer's security decision kernels),
+[`tower-radio`](../../crates/radio) (hardware-free radio timing / CCM / compliance arithmetic; the
+SPIRIT1 driver itself is `src/radio/`), [`tower-gateway`](../../crates/gateway) (the gateway app's
+node registry + downlink queue core) and [`tower-shell`](../../crates/shell) (the shell's parser,
 PRNG, pagination and completion kernels). Their host tests run with `just test` (here) or from
-the repo root. Because the [`tower`](../cli) CLI and the [HIL harness](../hil) build the very
+the repo root. Because the [`tower`](../../cli) CLI and the [HIL harness](../../hil) build the very
 same `crates/protocol` source, the two ends of the console link cannot drift at build time
 (postcard is not self-describing, so that matters); after a wire change, reflash the board and
 reinstall the CLI.
 
 ### LED indication
 
-[`led`](src/led.rs) runs a dispatcher task that owns the pin (any GPIO via
+[`led`](../../firmware/src/led.rs) runs a dispatcher task that owns the pin (any GPIO via
 embassy's type-erased `Output`, with an `active_high` polarity flag). The app
 holds a cheap, copyable [`Led`] handle:
 
@@ -124,15 +124,15 @@ running continuously (~hundreds of µA). The TMP112 is independently low-power:
 one-shot + shutdown keeps it at ~1 µA between conversions.
 
 While USB is connected the board keeps itself awake instead, but via the console
-rather than a separate task: [`Board::take`](src/board.rs) auto-spawns the USB-gated
-[`console::manager`](src/console.rs), which builds the console UART whenever VBUS (PA12)
+rather than a separate task: [`Board::take`](../../firmware/src/board.rs) auto-spawns the USB-gated
+[`console::manager`](../../firmware/src/console.rs), which builds the console UART whenever VBUS (PA12)
 is high. On the STM32L0 an enabled USART holds embassy's STOP refcount, so idle drops to
 plain Sleep (clocks live, so the console and EXTI stay responsive) rather than STOP.
 Unplug and the manager **drops** the UART, releasing the refcount so the executor returns
 to STOP; a PA12 edge (or the manager's ~500 ms poll) brings the console back on plug-in.
-Every app gets this for free; see [`docs/console.md`](docs/console.md).
+Every app gets this for free; see [`docs/firmware/console.md`](console.md).
 
-Two settings in [`board::init`](src/board.rs) matter here:
+Two settings in [`board::init`](../../firmware/src/board.rs) matter here:
 
 - `config.min_stop_pause` (`0`): STOP threshold. **In embassy-stm32 0.6.0 a
   nonzero value is a hard floor on the shortest awaitable delay, not a power
@@ -158,22 +158,22 @@ Two settings in [`board::init`](src/board.rs) matter here:
 
 Flashable programs come in two kinds:
 
-- **Examples**: each file in [`examples/`](examples) is a complete program that demonstrates
+- **Examples**: each file in [`examples/`](../../firmware/examples) is a complete program that demonstrates
   one block. Add your own by dropping a `.rs` there. Cargo picks it up automatically
   (`just build example <name>`); also add an `@echo <name>` line to the `examples` recipe in the
-  [`justfile`](justfile) so `just examples` lists it (that list is hand-maintained to keep the
+  [`justfile`](../../firmware/justfile) so `just examples` lists it (that list is hand-maintained to keep the
   recipe OS-independent; `just lists`, run by CI, fails if it drifts from `examples/*.rs`).
-- **Applications**: TOWER IoT Kit **products** in [`apps/`](apps). The radio nodes are
-  built on **taf**, the TOWER Application Framework ([`docs/taf.md`](docs/taf.md)), and behave
+- **Applications**: TOWER IoT Kit **products** in [`apps/`](../../firmware/apps). The radio nodes are
+  built on **taf**, the TOWER Application Framework ([`docs/firmware/taf.md`](taf.md)), and behave
   alike (pairing, settings, reports, MQTT properties): `radio_button` (button gestures, tilt),
   `radio_climate` (temperature), `radio_motion` (PIR Module), `radio_control` (Power Module
   relay and LED strip, a listening node) and `radio_thermostat` (setpoint, weekly program,
   heating demand). `radio_gateway` is the radio↔serial bridge and node coordinator
   they talk to. `lcd_games` is five
   small games on the LCD Module (buttons, swipes and tilt as controls; see
-  [`docs/hmi.md`](docs/hmi.md)). `led_strip` is an LED strip controller: every effect, live
+  [`docs/firmware/hmi.md`](hmi.md)). `led_strip` is an LED strip controller: every effect, live
   control over the shell (`strip effect fire`, `strip brightness 40`, ...), settings in EEPROM (see
-  [`docs/strip.md`](docs/strip.md)). They're Cargo binaries:
+  [`docs/firmware/strip.md`](strip.md)). They're Cargo binaries:
   list them with `just apps`, build with `just build app <name>`. Add one by dropping
   `apps/<name>.rs` and a matching `[[bin]]` in `Cargo.toml`.
 
@@ -195,14 +195,14 @@ Flashable programs come in two kinds:
 
 The radio stack adds the rest (`radio_*`, `net_*`, `crypto_*`, `edge_*`, `fhss_*`). The
 reference apps `radio_gateway`/`radio_node` are the happy path; see the full table
-and protocol guide in [`docs/radio.md`](docs/radio.md). Two-board examples are one
+and protocol guide in [`docs/firmware/radio.md`](radio.md). Two-board examples are one
 file built twice with a role feature, e.g. `TOWER_FEATURES=role-gateway just flash
 example net_confirmed`. Every target also builds for the first Core Module (rev 1.3, native USB,
 no USB-UART bridge) with `TOWER_FEATURES=core-module-r1`; its console is then a USB CDC-ACM port
 and `tower flash` programs it over the ROM bootloader's USB DFU (see
-[`docs/console.md`](docs/console.md), "Core Module rev 1.3"). The console examples (`console_demo`, `console_full`,
+[`docs/firmware/console.md`](console.md), "Core Module rev 1.3"). The console examples (`console_demo`, `console_full`,
 `console_panic`, `events_demo`, `shell_demo`) exercise the framed console / shell (see
-[`docs/console.md`](docs/console.md)), and three are bench/diagnostic tools: `kv_wipe`
+[`docs/firmware/console.md`](console.md)), and three are bench/diagnostic tools: `kv_wipe`
 (factory-reset the EEPROM key-value store), `led_on` (a deliberately high-current anchor for
 power measurements) and `lse_probe` (per-boot reset-cause / RTC-domain forensics).
 `just examples` lists them all.
@@ -212,7 +212,7 @@ power measurements) and `lse_probe` (per-boot reset-cause / RTC-domain forensics
 The `app!` macro supplies the entry point and the always-on board setup:
 clock, the serial console, the TMP112 put into one-shot (shutdown) mode, and
 USB-aware low power (see above). It logs a uniform `Example booted: <name>` line,
-then hands you a [`Board`](src/board.rs) of ready resources. A whole app is just:
+then hands you a [`Board`](../../firmware/src/board.rs) of ready resources. A whole app is just:
 
 ```rust
 #![no_std]
@@ -245,13 +245,13 @@ Prerequisites (one-time): `cargo install --locked just flip-link cargo-binutils`
 `flip-link` is the linker `.cargo/config.toml` selects (nothing links without it) and
 `cargo-binutils` provides the `cargo objcopy`/`cargo size` that `just build` runs. The Rust
 toolchain itself (1.99.1, the `thumbv6m-none-eabi` target, `rustfmt`/`clippy`/`llvm-tools`) is
-pinned in the repo-root [`rust-toolchain.toml`](../rust-toolchain.toml) and installed by rustup.
+pinned in the repo-root [`rust-toolchain.toml`](../../rust-toolchain.toml) and installed by rustup.
 Add `probe-rs-tools` only for SWD flashing (`cargo run`). `just check` compile-checks the
 library, every app and every example for the MCU; `just ci` runs every hardware-free firmware
 gate (fmt, that build, the RAM budget, clippy + the role-feature variants, rustdoc, the example
 list check), exactly what CI's `firmware` job runs.
 
-This directory is its own Cargo workspace (the repo root's host workspace excludes it), so run
+`firmware/` is its own Cargo workspace (the repo root's host workspace excludes it), so run
 cargo **inside `firmware/`**: `.cargo/config.toml` (thumbv6m target, flip-link linker) is read
 from the current directory, and `cargo build --manifest-path firmware/Cargo.toml` from the repo
 root would silently skip it. From the root, `just fw <recipe>` runs any recipe here.
@@ -268,7 +268,7 @@ tower logs                           # stream the framed console from the runnin
 just flash example blinky --no-verify  # extra args pass through to `tower flash`
 ```
 
-Flashing + console use the [`tower`](../cli) CLI (it programs the STM32L0 over the UART
+Flashing + console use the [`tower`](../../cli) CLI (it programs the STM32L0 over the UART
 bootloader and decodes the framed console); install it on your `PATH` with `just install-cli`
 at the repo root (or grab a `cli-v*` release archive). Set
 `TOWER_DEVICE=/dev/cu.usbserial-XXXX` if more than one serial port is present.
@@ -303,10 +303,6 @@ live in each `examples/*.rs` and are meant to be edited or copied. Common knobs:
   `kv.get::<T>(local)` (postcard) for structs. Add a new `u8` local to persist new
   data without disturbing existing keys. See `examples/storage.rs`.
 - **I2C speed / pull-ups**: `i2c_config.frequency`, `scl_pullup`/`sda_pullup`.
-- **Clock & low power**: all in [`board::init`](src/board.rs): sysclk, RTC
+- **Clock & low power**: all in [`board::init`](../../firmware/src/board.rs): sysclk, RTC
   source, `min_stop_pause`, debug-during-sleep.
 - **TMP112 conversion-wait**: `POLL_MS` × `POLL_TRIES` in `src/tmp112.rs`.
-
-## License
-
-MIT (see the repo-root [LICENSE](../LICENSE)). © 2026 HARDWARIO a.s.

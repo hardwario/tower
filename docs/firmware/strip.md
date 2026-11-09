@@ -168,7 +168,7 @@ budget's 8 KB floor. `strip status` also shows the driver's underrun and cut cou
 
 ## On the radio: `radio_control`
 
-`radio_control` (`docs/taf.md`) is the strip on the radio: a listening node with the Power
+`radio_control` (`docs/firmware/taf.md`) is the strip on the radio: a listening node with the Power
 Module's relay and the same player (`tower::strip_player`), so `strip`, `effect`, `brightness`,
 `color` and `speed` are MQTT properties and the `strip` commands work over the radio's remote
 shell too, except `strip limit` and `strip save`, which are USB console only: anyone who can

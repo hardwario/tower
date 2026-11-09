@@ -67,7 +67,7 @@ fn probe_rs_download(elf: &PathBuf) -> Result<(), String> {
     // `--connect-under-reset` asserts NRST across the connect, halting the core at reset, before
     // the running firmware drops it into STOP, which gates the debug AP ("AP has the wrong type").
     // NOTE: that needs NRST wired from the J-Link to the Core, and on THIS bench it is NOT (see
-    // docs/bench.md); there the flag is inert and what makes the attach work is the SEQUENCING
+    // docs/hil/bench.md); there the flag is inert and what makes the attach work is the SEQUENCING
     // in the test: a fresh PPK2 power-cycle immediately before this call, so probe-rs connects
     // inside the post-power-on RUN window (clock/LSE start-up, before the app first sleeps).
     let out = Command::new("probe-rs")

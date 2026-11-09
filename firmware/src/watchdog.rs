@@ -73,7 +73,7 @@ static LAST_FEED: AtomicU32 = AtomicU32::new(0);
 static FEED_INTERVAL_TICKS: AtomicU32 = AtomicU32::new(0);
 
 /// Longest synchronous stall [`pet_during_stall`] will cover past the feeder's schedule:
-/// comfortably above the worst legitimate one (a ~5.2 s wipe / in-line flip, docs/storage.md)
+/// comfortably above the worst legitimate one (a ~5.2 s wipe / in-line flip, docs/firmware/storage.md)
 /// yet bounded, so code that wedges *inside* an EEPROM loop still gets reset.
 const STALL_MAX: Duration = Duration::from_secs(10);
 

@@ -1,17 +1,17 @@
 # tower-hil
 
 Hardware-in-the-loop (HIL) test harness for the [HARDWARIO TOWER firmware
-SDK](../firmware) (`hil/` in the [hardwario/tower](https://github.com/hardwario/tower)
+SDK](../../firmware) (`hil/` in the [hardwario/tower](https://github.com/hardwario/tower)
 monorepo). It drives a real bench (a **TOWER Core Module** with SEGGER J-Link SWD + Nordic
 PPK2, and a **TOWER Radio Dongle** on USB) and asserts smoke, radio, extended, and power
 behaviour against the firmware's **framed console decoded natively** with
-[`tower-protocol`](../crates/protocol): tests match on typed `Log`/`Event` frames and on
+[`tower-protocol`](../../crates/protocol): tests match on typed `Log`/`Event` frames and on
 sequence gaps, not `strings | grep`.
 
-**Bench inventory, cabling, and setup live in [`docs/bench.md`](docs/bench.md)**; start there
+**Bench inventory, cabling, and setup live in [`docs/hil/bench.md`](bench.md)**; start there
 to assemble the bench from scratch. The test *catalogue* (what each firmware example asserts,
 the example×role matrix) is documented in the firmware's
-[`docs/test-plan.md`](../firmware/docs/test-plan.md).
+[`docs/firmware/test-plan.md`](../firmware/test-plan.md).
 
 ## Layout: where the firmware comes from
 
@@ -37,14 +37,14 @@ just bench-power  # bench: STOP-floor current measurement (J-Link + PPK2, no USB
 just bench-full   # bench: everything, on the fully-cabled bench
 ```
 
-Prerequisites: the [`tower` CLI](../cli) (`just install-cli` at the repo root) and
+Prerequisites: the [`tower` CLI](../../cli) (`just install-cli` at the repo root) and
 [`just`](https://just.systems) on `PATH`; the power group also needs
 [`probe-rs`](https://probe.rs) and `python3` (the `ppk2d.py` PPK2 sidecar; real hardware needs
-its `.venv`, see [`docs/bench.md`](docs/bench.md)). The Rust toolchain (1.99.1) is pinned in the
+its `.venv`, see [`docs/hil/bench.md`](bench.md)). The Rust toolchain (1.99.1) is pinned in the
 repo-root `rust-toolchain.toml`. Linux builds need `libudev-dev` + `pkg-config` (the `serialport`
 dependency). The images under test are built by the firmware's own `just` recipes, so its
-prerequisites (`flip-link`, `cargo-binutils`) apply too; see the [firmware
-README](../firmware/README.md).
+prerequisites (`flip-link`, `cargo-binutils`) apply too; see the [firmware SDK
+guide](../firmware/sdk.md).
 
 The bench roster (which serial port is the Core, which is the Dongle, the PPK2 supply voltage)
 lives in **`hil.toml`** and is re-resolved against the live port roster and identity-checked
@@ -69,7 +69,3 @@ another checkout (or built from one via `TOWER_FIRMWARE_DIR`): every console fra
 firmware's schema tag, and the harness fails fast on a foreign one ("the device's console frames
 carry schema tag ..."); rebuild and reflash from the same checkout. The reset pulses come from
 `tower-flasher` (`crates/flasher`), also by path.
-
-## License
-
-MIT © 2026 HARDWARIO a.s. (see the repo-root `LICENSE`).

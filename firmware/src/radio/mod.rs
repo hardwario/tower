@@ -1,7 +1,7 @@
 //! SPIRIT1 sub-GHz radio stack for the TOWER Core Module.
 //!
 //! Built on the SPIRIT1 transceiver (in the SPSGRF module) wired to the
-//! STM32L083CZ. The stack is layered (the guide is `docs/radio.md`):
+//! STM32L083CZ. The stack is layered (the guide is `docs/firmware/radio.md`):
 //!
 //! - **Radio layer**: [`regs`] (register map), [`spi`] ([`Spirit1Spi`]
 //!   transport, software CS), [`device`] ([`Spirit1`] chip handle: power states,
@@ -12,7 +12,7 @@
 //! - **Network layer** ([`net`]): addressing + per-peer keys, confirmed delivery,
 //!   replay protection + counter persistence, bulk transfer, and OTA pairing.
 //!
-//! See `docs/radio.md` for the user-facing guide and `examples/radio_*.rs` /
+//! See `docs/firmware/radio.md` for the user-facing guide and `examples/radio_*.rs` /
 //! `examples/net_*.rs` for runnable demos. Pins and parameters come from the
 //! board (PB7 SDN, PA15 CS, SPI1 on PB3/PB5/PB4, PA7 nIRQ); see
 //! [`board::Board`](crate::board::Board).

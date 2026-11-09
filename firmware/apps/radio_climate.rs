@@ -1,5 +1,5 @@
 //! radio_climate (TOWER IoT Kit product firmware): a climate sensor on the radio, a sleeping taf
-//! node (`docs/taf.md`).
+//! node (`docs/firmware/taf.md`).
 //!
 //! Today it reports the Core Module's temperature (`nodes/{addr}/state/temperature`), sampled every
 //! `report-period` and sent when it moves past `report-delta` or on a heartbeat. The Climate

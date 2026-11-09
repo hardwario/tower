@@ -4,7 +4,7 @@
 //! drains all incoming frames through one `FrameDecoder`, and redraws. Everything is
 //! async-via-drain: TAB sends a `ShellComplete` and Enter sends a `ShellCommand`; the
 //! responses (`ShellCompletions` / `ShellResponse`) are handled when they arrive in the
-//! drain, so nothing blocks. Layout/keys follow `docs/console.md` (in the firmware repo).
+//! drain, so nothing blocks. Layout/keys follow `docs/firmware/console.md` (in the firmware repo).
 //!
 //! Caveat: a TUI needs a real terminal; this is build- + clippy-verified, but NOT
 //! interactively driven here (no TTY available). The completion/command round-trips
@@ -114,7 +114,7 @@ struct App {
     last_open_attempt: Instant,
     /// Set when the session opened with `--reset`: the moment the pulse released. Cleared by
     /// the first `Hello`; while set, the header animates "booting…" so a slow boot (a fallback
-    /// EEPROM compaction can hold the chip ~5 s; firmware/docs/storage.md) reads as
+    /// EEPROM compaction can hold the chip ~5 s; docs/firmware/storage.md) reads as
     /// progress, not a dead UI. Past the CLI's 8 s Hello ceiling it escalates to a warning.
     boot_wait: Option<Instant>,
     /// High-water mark of hint rows ever rendered under the prompt: once TAB completion
@@ -1038,7 +1038,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     }
     // Post-reset boot wait: animated while the device is (possibly slowly) booting, loud once
     // it exceeds the 8 s worst case the CLI tolerates (a fallback EEPROM compaction can
-    // legitimately hold the chip ~5 s; see firmware/docs/storage.md).
+    // legitimately hold the chip ~5 s; see docs/firmware/storage.md).
     if let Some(t0) = app.boot_wait {
         let el = t0.elapsed();
         if el < Duration::from_secs(8) {

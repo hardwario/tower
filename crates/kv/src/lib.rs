@@ -84,7 +84,7 @@
 //! [`maintain`] as the policy driver. All state is RAM-only; a reboot mid-flip restarts from
 //! scratch with nothing lost. The synchronous [`compact`]/in-line flip remains as the fallback,
 //! semantics unchanged. Motivation: on the STM32L0 each EEPROM word program stalls the CPU
-//! ~3.4 ms, so a synchronous full-half flip freezes the chip for seconds (firmware/docs/storage.md).
+//! ~3.4 ms, so a synchronous full-half flip freezes the chip for seconds (docs/firmware/storage.md).
 
 #![cfg_attr(not(test), no_std)]
 
@@ -374,7 +374,7 @@ fn append_end<S: Eeprom>(
 /// **Read-first**: only words that are actually nonzero get programmed, so blanking an
 /// already-blank span (e.g. a dead half pre-blanked by [`blank_dead_step`]) costs reads only:
 /// no wear, and on the STM32L0 no CPU-stalling word programs. This is what shrinks the in-line
-/// fallback flip from "blank + copy" to "copy" once maintenance has pre-blanked (firmware/docs/storage.md).
+/// fallback flip from "blank + copy" to "copy" once maintenance has pre-blanked (docs/firmware/storage.md).
 fn blank<S: Eeprom>(store: &mut S, at: u32, len: u32) -> Result<(), KvError<S::Error>> {
     let mut unbounded = u32::MAX;
     blank_step_span(store, at, len, 0, &mut unbounded).map(|_| ())
@@ -693,7 +693,7 @@ fn flip<S: Eeprom>(store: &mut S, capacity: u32, src_h: u8, src_gen: u32) -> Res
     // uses are strictly sequential, so one buffer serves both. This keeps a second MAX_VALUE
     // array off the compaction stack: flip runs synchronously inside the executor poll (via
     // set_bytes ← Nv::with ← net.send), the deepest stack path in a radio app, where peak
-    // headroom is tight (see firmware/docs/radio.md: no stack guard on this target).
+    // headroom is tight (see docs/firmware/radio.md: no stack guard on this target).
     let mut latest: [(u16, u32); MAX_KEYS] = [(0, 0); MAX_KEYS];
     let mut nkeys = 0usize;
     let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
@@ -788,7 +788,7 @@ fn walk_latest<S: Eeprom>(
 //
 // A synchronous flip costs *time*, not just wear: on the STM32L0 every EEPROM word program stalls
 // the whole CPU ~3.4 ms (instruction fetch halts, ISRs freeze), so blanking + re-packing a full
-// half is seconds of chip freeze (firmware/docs/storage.md, bench-measured). The pieces below split the
+// half is seconds of chip freeze (docs/firmware/storage.md, bench-measured). The pieces below split the
 // same work into bounded, RAM-tracked steps a background task can run a few word-programs at a
 // time. Power-loss safety is inherited from the two-half + superblock-commit design: nothing
 // before [`flip_commit`]'s single superblock write changes the active half, so a reboot anywhere
@@ -2971,7 +2971,7 @@ mod tests {
     /// may cycle more than once every other flip: at most `ceil(flips / 2)`, i.e. 0.5 cycle per
     /// flip (the pre-blanking runs right after a flip, one flip ahead of the next pass, hence the
     /// rounding up). The unpadded layout cycled its record-boundary words ~2 times per flip. The
-    /// workload is the SDK's (docs/storage.md, "What the SDK writes"): an odd-length provisioning
+    /// workload is the SDK's (docs/firmware/storage.md, "What the SDK writes"): an odd-length provisioning
     /// record, the u32 TX watermark, 12-byte replay lanes, the per-boot session counter and a
     /// 7-byte setting, with and without the background maintenance task (in-line flips only).
     #[test]

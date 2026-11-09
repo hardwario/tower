@@ -1,5 +1,5 @@
 //! TX-counter reserve-ahead watermark + fail-closed nonce-safety kernel (moved from
-//! `firmware/src/radio/net/mod.rs`; firmware/docs/radio.md §Security model).
+//! `firmware/src/radio/net/mod.rs`; docs/firmware/radio.md §Security model).
 //!
 //! The TX counter is the CCM nonce input, so the one invariant that must survive everything
 //! (including power loss mid-write) is: **a counter value is never used twice under one key**.
@@ -32,13 +32,13 @@
 
 /// TX-counter reserve block: persist the watermark only once per `RESERVE`
 /// transfers, and on boot resume *at* the watermark (> any value actually sent,
-/// so a counter is never reused; ≤ one block is skipped per reboot, firmware/docs/radio.md).
+/// so a counter is never reused; ≤ one block is skipped per reboot, docs/firmware/radio.md).
 pub const RESERVE: u32 = 1024;
 
 /// The TX-counter state: live counter, reserved (persisted) limit, and the fail-closed lock.
 #[derive(Debug, Clone, Copy)]
 pub struct TxCounter {
-    /// Monotonic TX counter, advanced by one per transfer (firmware/docs/radio.md).
+    /// Monotonic TX counter, advanced by one per transfer (docs/firmware/radio.md).
     counter: u32,
     /// Highest reserved (persisted) counter value; `counter < reserve_limit`
     /// holds as an invariant only while [`locked`](Self::locked) is false:

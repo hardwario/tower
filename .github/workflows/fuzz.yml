@@ -1,4 +1,4 @@
-# Coverage-guided fuzzing of the shared crates (fuzz/: cargo-fuzz + libFuzzer, see fuzz/README.md).
+# Coverage-guided fuzzing of the shared crates (fuzz/: cargo-fuzz + libFuzzer, see docs/fuzzing.md).
 #
 # Weekly and on demand, every target runs for a fixed time, starting from the committed seed corpus
 # (fuzz/seeds/<target>). A crash, a hang (-timeout) or an out-of-memory fails that target's job and

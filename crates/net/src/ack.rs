@@ -1,5 +1,5 @@
 //! ACK acceptance / delivery resolution for the sender's ACK window (moved from
-//! `firmware/src/radio/net/mod.rs::await_ack`; firmware/docs/radio.md).
+//! `firmware/src/radio/net/mod.rs::await_ack`; docs/firmware/radio.md).
 //!
 //! The sender of a confirmed frame opens an ACK window and offers every frame it hears to this
 //! kernel; the kernel decides which single frame resolves the delivery. Everything else (a
@@ -146,7 +146,7 @@ mod tests {
     }
 
     /// A late/stale ACK for an old counter is ignored; the window keeps waiting for the right
-    /// one instead of failing (the star-contention false-NotDelivered fix, firmware/docs/radio.md).
+    /// one instead of failing (the star-contention false-NotDelivered fix, docs/firmware/radio.md).
     #[test]
     fn stale_counter_ignored_then_right_one_resolves() {
         let mut w = AckWait::new(ME, PEER, 42);

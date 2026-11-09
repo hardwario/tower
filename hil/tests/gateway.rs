@@ -206,7 +206,7 @@ fn stack_bytes(text: &str, prefix: &str) -> Option<u32> {
 }
 
 /// Measured gateway stack **high-water** on its console-reachable deep paths, replacing the
-/// ~7.5 KB estimate in the budget (docs/gateway.md) with a bench number. Fills the node registry
+/// ~7.5 KB estimate in the budget (docs/firmware/gateway.md) with a bench number. Fills the node registry
 /// across all EEPROM buckets (each `NodeAdd` loads/rewrites one ~270 B bucket stack-local, the
 /// deepest registry-codec path, and can trigger a KV compaction flip), pushes downlink-queue
 /// items, and lists the whole registry (the mgmt-response chunking path over many entries), then

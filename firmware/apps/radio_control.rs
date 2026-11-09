@@ -1,5 +1,5 @@
 //! radio_control (TOWER IoT Kit product firmware): the Power Module's relay and LED strip on the
-//! radio, a **listening** taf node (`docs/taf.md`): it keeps its receiver on, so a command from
+//! radio, a **listening** taf node (`docs/firmware/taf.md`): it keeps its receiver on, so a command from
 //! MQTT takes effect within about one radio round trip.
 //!
 //! Properties (`nodes/{addr}/state/...`, set with `nodes/{addr}/set/...`): `relay` (on/off),

@@ -361,7 +361,7 @@ pub fn init() -> Peripherals {
     // reset fired. (Added for the 2026-07-05 bimodal-boot investigation, where it RULED OUT
     // the LSE/backup domain: every slow boot inherited a fully-matched domain + pin reset;
     // the proven cause is the EEPROM KV compaction CPU stall in init_session, ≈5.2 s, see
-    // docs/storage.md. Kept: cheap, and reset-cause + domain state are generally useful.)
+    // docs/firmware/storage.md. Kept: cheap, and reset-cause + domain state are generally useful.)
     // Read it back with [`preinit_csr`]; `examples/lse_probe.rs` decodes and logs it each boot.
     let csr = embassy_stm32::pac::RCC.csr().read();
     PREINIT_CSR.store(csr.0, core::sync::atomic::Ordering::Relaxed);

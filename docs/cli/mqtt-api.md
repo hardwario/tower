@@ -8,9 +8,9 @@ and never read its source. The `tower nodes` and `tower net` commands are client
 this API.
 
 For the product (the button node, the Radio Dongle, pairing, the downlink queue) see
-[`firmware/docs/gateway.md`](../firmware/docs/gateway.md); for running the bridge and its
-flags see the [CLI README](../cli/README.md) (*Gateway & MQTT bridge*); for the threat model
-see [`security-model.md`](security-model.md).
+[`docs/firmware/gateway.md`](../firmware/gateway.md); for running the bridge and its
+flags see the [CLI manual](cli.md) (*Gateway & MQTT bridge*); for the threat model
+see [`security-model.md`](../security-model.md).
 
 ## 1. Overview
 
@@ -110,7 +110,7 @@ mosquitto_sub -h gateway.local -p 8883 --cafile ca.pem -u ops -P "$TOWER_MQTT_PA
 
 Dial a name the broker certificate holds (`gateway.local` above, or an IP address listed in its
 subject alternative names). Making the CA and the broker identity is shown in the
-[CLI README](../cli/README.md) (*MQTT over TLS*).
+[CLI manual](cli.md) (*MQTT over TLS*).
 
 ## 2. Topics
 
@@ -244,7 +244,7 @@ if that node disappeared while no bridge was running; `node_list` is the authori
 ### Node properties
 
 A node runs one of the TOWER product apps, built on the TOWER Application Framework
-([`firmware/docs/taf.md`](../firmware/docs/taf.md)), and its **kind** (the `kind` of
+([`docs/firmware/taf.md`](../firmware/taf.md)), and its **kind** (the `kind` of
 `nodes/{addr}`) names a table of **properties**: the values it reports and the settings it
 takes, each with a name, a type and an access. The tables are part of the radio schema
 (`crates/protocol/src/props.rs`), so a node and a bridge built from different tables refuse each
@@ -783,9 +783,9 @@ starts the node's replay window at `rx_floor`, so frames recorded earlier cannot
 into it. A freshly minted key carries `0` for both. The floors are a **snapshot**: read them
 with `reveal_key` right before the move and let the old gateway send nothing more; a key read
 earlier (a backup), or one with `tx_floor` `4294967295`, cannot safely move to a gateway at the
-old address: re-pair those nodes instead. Details: [`firmware/docs/radio.md`](../firmware/docs/radio.md)
+old address: re-pair those nodes instead. Details: [`docs/firmware/radio.md`](../firmware/radio.md)
 (*Network layer*, "A key's counter history moves with the key") and
-[`security-model.md`](security-model.md) (4.1 and residual risk 10).
+[`security-model.md`](../security-model.md) (4.1 and residual risk 10).
 
 ## 5. Remote shell
 

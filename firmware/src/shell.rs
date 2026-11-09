@@ -738,7 +738,7 @@ fn cmd_eeprom(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     // Wear gauge: the KV compaction-flip count (the persisted superblock generation; a pure read,
     // no added wear) vs the conservative flip budget (FLIP_BUDGET), plus the store's occupancy
     // (live/free) and the background-maintenance pre-blank state. All pure reads. See
-    // docs/storage.md.
+    // docs/firmware/storage.md.
     let nv = ctx.kv.raw();
     let flips = nv.flip_generation();
     // Per-mille of budget in integer math (no FPU on the M0+): rendered as X.X%.
@@ -766,7 +766,7 @@ fn cmd_eeprom(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
 fn cmd_stack(ctx: &mut Ctx<'_>, _args: &[&str]) -> Outcome {
     // Measured stack high-water: the boot painter (`stack::paint`) filled the free stack with a
     // sentinel; this reports how much has since been overwritten: the deepest the call graph +
-    // ISR frames ever reached. Weigh `used` against the 8 KB budget floor (docs/gateway.md); a
+    // ISR frames ever reached. Weigh `used` against the 8 KB budget floor (docs/firmware/gateway.md); a
     // small `free` is a near-overflow warning on this 20 KB part. All pure reads.
     let total = crate::stack::total();
     let used = crate::stack::used();
@@ -824,7 +824,7 @@ erases the WHOLE store (keys, peers, settings) and reboots"
         );
         return Outcome::code(R_BAD_ARG);
     }
-    // A flip to an empty store (`storage::factory_wipe`): ~2.6-5.2 s CPU stall (docs/storage.md),
+    // A flip to an empty store (`storage::factory_wipe`): ~2.6-5.2 s CPU stall (docs/firmware/storage.md),
     // atomic and power-loss-safe. The store is then frozen (every other task's write fails), so
     // nothing re-populates it from pre-wipe RAM state before the reboot. Reboot on failure too:
     // a failed wipe still leaves a consistent store (old or empty), but this boot's store is

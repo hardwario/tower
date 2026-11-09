@@ -4,7 +4,7 @@ A **reusable**, end-to-end validation suite for the TOWER firmware SDK (STM32L08
 SPIRIT1). It covers every subsystem (drivers, console/shell, crypto, storage, the full
 radio/network stack, and spectrum-access: EU AFA / US FHSS) with concrete
 **pass signals** and a catalogue of **edge cases**. Run it whole for a release gate, or pick a
-section for a focused regression. Companion guides: `docs/console.md`, `docs/radio.md`.
+section for a focused regression. Companion guides: `docs/firmware/console.md`, `docs/firmware/radio.md`.
 Host-only unit tests: `just test` (here: the shared crates the firmware builds on; at the repo
 root: the whole host workspace).
 

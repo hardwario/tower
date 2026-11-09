@@ -4,7 +4,7 @@ What TOWER tests today, and the layers still missing for product quality, in the
 off. Written 2026-10-18 after a three-board bench campaign; each item says why it matters (most
 cite a bug that the missing layer would have caught), what to set up, what to automate and when
 it passes. The per-test catalogue of the firmware stays in
-[firmware/docs/test-plan.md](../firmware/docs/test-plan.md); bench results go to
+[docs/firmware/test-plan.md](firmware/test-plan.md); bench results go to
 `firmware/tools/hwtest/RESULTS-<date>.md`.
 
 ## What exists
@@ -17,7 +17,7 @@ it passes. The per-test catalogue of the firmware stays in
 | Supply chain: `cargo audit` on every lockfile, pinned actions | `.github/workflows` | CI |
 | HIL bench: smoke, KATs, two-board radio and network, gateway end to end, stack high-water | `just hil bench` | by hand |
 | HIL power group (PPK2 + J-Link) | `just hil bench-power` | by hand |
-| Manual product checks and the remaining examples | `firmware/docs/test-plan.md`, `tools/hwtest` | by hand |
+| Manual product checks and the remaining examples | `docs/firmware/test-plan.md`, `tools/hwtest` | by hand |
 
 The weak spot is the last three rows: everything that needs hardware runs only when someone
 starts it, briefly, on one bench.
@@ -99,7 +99,7 @@ debounce and EXTI are covered, not only `button simulate`. Fail on a budget over
 
 - **TUI snapshots:** ratatui's test backend with `insta`, both TUIs at a few terminal sizes. The
   truncated `/export`, the margins and the zoom/pause contrast were all visual bugs.
-- **MQTT contract:** every topic and payload of [mqtt-api.md](mqtt-api.md) checked against a
+- **MQTT contract:** every topic and payload of [mqtt-api.md](cli/mqtt-api.md) checked against a
   JSON schema; a CI job against a real mosquitto with TLS, logins and a broker restart.
 - **USB plug cycling:** a power-switching hub cycling a node's and the dongle's USB while the
   gateway streams, which exercises the console teardown and rebuild (the TX ring's drain and

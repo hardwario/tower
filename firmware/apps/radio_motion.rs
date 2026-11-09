@@ -1,5 +1,5 @@
 //! radio_motion (TOWER IoT Kit product firmware): a PIR motion detector on the radio, a sleeping
-//! taf node (`docs/taf.md`).
+//! taf node (`docs/firmware/taf.md`).
 //!
 //! The PIR Module's detector judges motion itself and wakes the MCU only for an event
 //! (`tower::pir`); each detection is a `motion` event on MQTT (`nodes/{addr}/event/motion`). While

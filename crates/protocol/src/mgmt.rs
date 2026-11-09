@@ -267,7 +267,7 @@ pub struct Paired {
     pub addr: u32,
     /// The handshake's 6-digit short authentication string, `0..1_000_000` (show it zero-padded
     /// to 6 digits). The node logs the same value (`net: pairing: SAS 012345`); comparing the two
-    /// is OTA pairing's man-in-the-middle check (firmware/docs/radio.md, "OTA pairing").
+    /// is OTA pairing's man-in-the-middle check (docs/firmware/radio.md, "OTA pairing").
     pub sas: u32,
 }
 

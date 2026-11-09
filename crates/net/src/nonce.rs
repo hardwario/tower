@@ -1,4 +1,4 @@
-//! CCM nonce construction (moved from `firmware/src/radio/frame.rs`; firmware/docs/radio.md
+//! CCM nonce construction (moved from `firmware/src/radio/frame.rs`; docs/firmware/radio.md
 //! §Security model).
 //!
 //! The 13-byte nonce is *derived* from the clear frame header (never transmitted), which is
@@ -44,7 +44,7 @@ mod tests {
 
     /// Golden byte layout: `src ‖ counter ‖ bulk_index[..3] ‖ 0x0000`, little-endian. A layout
     /// change (field order, endianness, trailing zeros) must fail THIS test loudly: the layout
-    /// is the wire-compatibility and nonce-uniqueness contract (firmware/docs/radio.md).
+    /// is the wire-compatibility and nonce-uniqueness contract (docs/firmware/radio.md).
     #[test]
     fn golden_layout() {
         let n = nonce_for(0x0403_0201, 0x0807_0605, 0x000B_0A09);
@@ -98,7 +98,7 @@ mod tests {
     }
 
     /// Direction/id separation: two distinct senders never share a nonce, whatever the counter;
-    /// this is why the same per-node key can protect both directions (firmware/docs/radio.md: "`src`
+    /// this is why the same per-node key can protect both directions (docs/firmware/radio.md: "`src`
     /// fixes the sender").
     #[test]
     fn distinct_src_never_collides() {

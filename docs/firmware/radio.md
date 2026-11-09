@@ -192,14 +192,14 @@ every `P=32` accepts (replay window ≤ P across a receiver reboot), or on every
 `net.set_lane_persist_period(1)`: what a sleeping node does (the push-button), since it hears a
 handful of downlinks per boot and a lazy lane would never be written at all (a recorded
 `system reboot` downlink then replayed after every reboot). The gateway keeps `P`: its lanes see
-every uplink, and its host drops a replayed uplink by counter instead (docs/gateway.md). CCM
+every uplink, and its host drops a replayed uplink by counter instead (docs/firmware/gateway.md). CCM
 verify happens *before* the replay comparison, so a forged frame can't poison the state.
 
 **Node classes: when a downlink can arrive.** The network layer does not decide when a node
-listens; the app does, and taf names two classes (docs/taf.md). A **sleeping** node (battery)
+listens; the app does, and taf names two classes (docs/firmware/taf.md). A **sleeping** node (battery)
 turns its receiver on only after its own confirmed uplinks: when the gateway's ACK carries
 `PENDING`, the node stays in receive for a short window and takes the queued downlink there
-(docs/gateway.md). A **listening** node (mains powered) keeps the SPIRIT1 in receive between its
+(docs/firmware/gateway.md). A **listening** node (mains powered) keeps the SPIRIT1 in receive between its
 own sends, in `recv` slices of 50 ms that are awaited to their end and never cancelled from
 outside, so the gateway can send it a confirmed downlink at any time and has its ACK at once.
 Both classes use the same frames, CCM, replay lanes and counter invariants (the class changes
@@ -355,7 +355,7 @@ three-frame v2 started with `2`, is refused on it with a logged reason). Every p
   (`GATEWAY_COMMIT_STALL_MS`, a registry write absorbing a synchronous EEPROM compaction; pinned by
   a host test). No acknowledgement: the key is discarded and the node is unpaired again, free to
   retry. The product gateway closes its window on the commit and serves the node's uplinks from
-  its next loop turn (docs/gateway.md). The residual asymmetry (the host committed but every
+  its next loop turn (docs/firmware/gateway.md). The residual asymmetry (the host committed but every
   acknowledgement was lost) leaves a registered node that can re-pair only after it is removed
   on the host, like any node its host still knows.
 - **SAS** (BLE g2): `u64 LE(SHA-256("tower pairing v3 sas" ‖ th)[..8]) mod 10⁶`. Both ends log
@@ -555,7 +555,7 @@ confirmed delivery on hopping channels; `sync lost, rescanning` and a relock on 
 `fhss_compliance` (≥50 channels used, max per-channel airtime ≪ 0.4 s, band edges
 exercised). The hop seed is key-derived (not sent on air).
 
-**In the product apps** (`radio_gateway` + `radio_button` on `us915`, docs/gateway.md):
+**In the product apps** (`radio_gateway` + `radio_button` on `us915`, docs/firmware/gateway.md):
 the gateway is the hop master, its main loop one `fhss_master_tick` per slot; a queued downlink
 goes out in the slot of the node's uplink, right after the ACK (`fhss_send` from the master). The
 node is a sleeping sensor, which the SDK serves with:

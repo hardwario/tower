@@ -64,7 +64,7 @@ pub const EEPROM_ENDURANCE_CYCLES: u32 = 100_000;
 /// SDK's write mix), true life is ~2× this, and the gauge errs toward reporting *more* wear,
 /// never less. (The earlier unpadded record layout broke that margin: appends byte-programmed
 /// the words shared by neighbouring records, ~2 cycles per flip on those words, 4× the figure.)
-/// See `docs/storage.md`.
+/// See `docs/firmware/storage.md`.
 pub const FLIP_BUDGET: u32 = EEPROM_ENDURANCE_CYCLES;
 
 /// A non-volatile storage error.
@@ -170,7 +170,7 @@ fn program(
 ///
 /// **Watchdog hook.** Every codec write is one bounded EEPROM program, and the only way the SDK
 /// stalls the whole CPU for *seconds* is a long synchronous run of them (a wipe, the in-line
-/// fallback flip: up to ~5.2 s, docs/storage.md) during which the executor, and so the
+/// fallback flip: up to ~5.2 s, docs/firmware/storage.md) during which the executor, and so the
 /// watchdog feeder, cannot run. Each write therefore reloads an armed IWDG via
 /// [`watchdog::pet_during_stall`](crate::watchdog::pet_during_stall), which refuses once the
 /// app's liveness check-ins are stale or the stall outlasts any legitimate EEPROM operation, so
@@ -261,7 +261,7 @@ pub struct Kv<'d> {
     /// ([`set_bytes`](Self::set_bytes)) and the [`maintenance`] task share it: a store that
     /// fills mid-flip *finishes* the pending flip instead of restarting one. Losing it (reboot)
     /// is always safe (see [`tower_kv::FlipState`]). Costs ~540 B of `.bss`, deliberately off
-    /// the stack: the flip plan otherwise sat in the deepest call paths (docs/radio.md: no
+    /// the stack: the flip plan otherwise sat in the deepest call paths (docs/firmware/radio.md: no
     /// stack guard on this target).
     maint: MaintState,
     /// Set by [`wipe`](Self::wipe) (success *or* failure): every later write fails with
@@ -275,7 +275,7 @@ impl<'d> Kv<'d> {
     /// Build a key-value store over the whole EEPROM region of `storage`: an initialized
     /// double-buffered region mounts as it is; anything else (a blank part, or bytes in any other
     /// layout, e.g. an older firmware's store) is formatted empty, never migrated
-    /// ([`tower_kv::init`], docs/storage.md). The init is best-effort: a flash fault leaves the
+    /// ([`tower_kv::init`], docs/firmware/storage.md). The init is best-effort: a flash fault leaves the
     /// store empty rather than failing `new`, the same fallback as a blank/corrupt key.
     pub fn new(mut storage: Storage<'d>) -> Self {
         let capacity = storage.len() as u32;
@@ -301,7 +301,7 @@ impl<'d> Kv<'d> {
     /// Factory reset: drop **every** key (pairing keys, peers, replay lanes, the TX watermark,
     /// settings, the session counter) via [`factory_wipe`]: a flip to an empty store, atomic and
     /// power-loss-safe at every step, with the wear-gauge generation preserved. ~2.6 s of
-    /// CPU-stalling word programs (~5.2 s if the dead half wasn't pre-blanked; docs/storage.md).
+    /// CPU-stalling word programs (~5.2 s if the dead half wasn't pre-blanked; docs/firmware/storage.md).
     ///
     /// The store is then **frozen**: every write fails with [`Error::Frozen`], also when the
     /// wipe itself failed part-way (the store is still consistent: old or empty), so no subsystem
@@ -593,7 +593,7 @@ impl Scoped {
 /// stalls the whole CPU ~3.4 ms (NVM stall: instruction fetch and thus ISRs freeze), so 4 words
 /// ≈ **14 ms** of stall per slice, comfortably under the radio's ACK window (200 ms) and the
 /// console's tolerance, where the old synchronous flip froze the chip for seconds
-/// (docs/storage.md). The budget is exact: every codec write is whole words at a word-aligned
+/// (docs/firmware/storage.md). The budget is exact: every codec write is whole words at a word-aligned
 /// offset, so the HAL never adds the single-byte head/tail programs an unaligned span costs (see
 /// `tower_kv`'s `words`). Only the one commit slice per flip goes over, by the tail catch-up + a
 /// 12-byte superblock (still tens of ms).

@@ -1,4 +1,4 @@
-//! edge_recovery: stuck-state / timeout recovery (docs/radio.md). Single board.
+//! edge_recovery: stuck-state / timeout recovery (docs/firmware/radio.md). Single board.
 //!
 //!   just flash example edge_recovery
 //!

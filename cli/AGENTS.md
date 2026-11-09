@@ -1,72 +1,46 @@
-# tower-cli: working notes for coding agents
+# tower-cli: rules for agents
 
-The `tower` host CLI (`cli/` in the hardwario/tower monorepo; read the root `AGENTS.md` first):
-decodes the framed serial link from the TOWER firmware (logs / events / shell / TUI) and
-flashes/erases/resets/identifies the chip over the UART bootloader, or over USB DFU on a Core
-Module r1.x (`tower flash` / `erase` / `reset` / `chip`, via the `tower-flasher` library in
-`crates/flasher`; `src/target.rs` picks the route and reboots a running r1 into DFU through its
-USB console), and sets or
-clears the opt-in production readout protection (`tower protect` / `unprotect`: RDP level 1
-only, both confirmed interactively or by `--yes`; `unprotect` mass-erases flash + data EEPROM).
-It is also the gateway/MQTT host: `tower gateway` bridges a Radio Dongle's network to MQTT
-(embedded `rumqttd` broker or external, TUI + `--service`), and `tower nodes` / `tower net` are
-the MQTT client commands (`src/gateway/`, `src/client/`). MQTT over TLS (`src/gateway/tls.rs`)
-uses the platform's TLS stack through native-tls (rumqttc `use-native-tls`); never enable the
-rustls features of rumqttc/rumqttd, whose rustls versions fail `cargo audit`. rumqttd is built
-without TLS: the embedded broker's TLS port is our own front end (`src/gateway/tls_front.rs`,
-the crate's only async code, a current-thread tokio runtime on its own thread), which
-handshakes under a deadline with capped slots and proxies to a plain rumqttd listener on
-loopback (rumqttd's own TLS listener handshakes inside its accept loop, so one stalled peer
-blocks every client). Every rumqttd listener (the one behind the front end, the bridge's own)
-enforces the same login. The embedded broker's
-access policy is the pure `mqtt::broker_access` (loopback anonymous, anything else login + TLS
-unless `--broker-allow-plaintext`); change it together with its test matrix, `README.md` and
-`docs/security-model.md`.
+The `tower` host CLI: it decodes the firmware's framed console (logs, events, the shell, the TUI);
+flashes, erases, resets and identifies the chip over the UART bootloader, or over USB DFU on a Core
+Module r1.x (through `crates/flasher`; `src/target.rs` picks the route and reboots a running r1
+into DFU through its USB console); sets or clears the production readout protection (`tower
+protect` / `unprotect`: RDP level 1 only, both confirmed interactively or by `--yes`; `unprotect`
+mass-erases flash and data EEPROM); and is the gateway and MQTT host (`tower gateway`, `tower
+nodes`, `tower net`; `src/gateway/`, `src/client/`). Its manual is
+[docs/cli/cli.md](../docs/cli/cli.md), its MQTT API [docs/cli/mqtt-api.md](../docs/cli/mqtt-api.md).
 
-## Shared crates (path dependencies)
+## MQTT and TLS
 
-`tower-protocol` (`crates/protocol`, the wire format) and `tower-flasher` (`crates/flasher`, the
-bootloader engine) come from the root workspace (`tower-protocol.workspace = true`,
-`tower-flasher.workspace = true`). The firmware and the HIL harness build the same
-`crates/protocol` source, so the wire format cannot drift at build time; there is no tag to
-bump and nothing to keep in step by hand. A protocol change is made together with its callers
-here in the same commit (see `crates/protocol/AGENTS.md`, "Changing the wire").
+- MQTT over TLS (`src/gateway/tls.rs`) uses the platform's TLS stack through native-tls (rumqttc
+  `use-native-tls`). **Never enable the rustls features of rumqttc/rumqttd**: their rustls
+  versions fail `cargo audit`.
+- rumqttd is built without TLS: the embedded broker's TLS port is our own front end
+  (`src/gateway/tls_front.rs`, the crate's only async code, a current-thread tokio runtime on its
+  own thread), which handshakes under a deadline with capped slots and proxies to a plain rumqttd
+  listener on loopback (rumqttd's own TLS listener handshakes inside its accept loop, so one
+  stalled peer blocks every client). Every rumqttd listener (the one behind the front end, the
+  bridge's own) enforces the same login.
+- The embedded broker's access policy is the pure `mqtt::broker_access` (loopback anonymous,
+  anything else login + TLS unless `--broker-allow-plaintext`); change it together with its test
+  matrix, docs/cli/cli.md and docs/security-model.md.
 
-What a build cannot fix is an installed binary: after a wire change, reinstall `tower`
-(`just install-cli` at the repo root, = `cargo install --locked --path cli`), or it reports a
-schema mismatch (`SchemaMismatch`: the device's frames carry another schema tag; a banner naming
-the device's firmware, exit 125) against freshly flashed firmware. A stream in which every frame
-fails its CRC (a framing difference the tags can't see) is reported once as such.
+## The wire
+
+An installed `tower` is the one thing a build cannot keep in step: after a wire change, reinstall
+it (`just install-cli`), or it reports a schema mismatch (a banner naming the device's firmware,
+exit 125) against freshly flashed firmware. A stream in which every frame fails its CRC (a
+framing difference the tags can't see) is reported once as such.
 
 ## Checks
 
 From the repo root (`just check` runs every gate):
 
 ```sh
-cargo fmt --all -- --check
 cargo clippy -p tower-cli --all-targets -- -D warnings
 cargo test -p tower-cli          # unit tests + the assert_cmd tests in tests/cli.rs; no hardware
 ```
 
 Linux needs `libudev-dev` + `pkg-config`, plus `perl` + `make` + a C compiler for the vendored
 OpenSSL. The TLS tests mint a throwaway CA and identities at test time and talk only to
-localhost. The tests never open a real serial port; don't flash
-or attach to a board unless the user asks.
-
-## Releasing
-
-A `cli-vX.Y.Z` tag releases the `tower` binary (`.github/workflows/release-cli.yml`): it gates on
-the tag matching `version` in `cli/Cargo.toml`, the tagged commit being on `main` and CI being
-green for it, then builds cross-platform archives (`tower-cli-vX.Y.Z-<target>`) with checksums and
-signed build-provenance attestations. Bump the version, commit, then tag; push only when the user
-asks.
-
-## Writing style
-
-No em or en dashes. This applies everywhere: code, comments, docs, UI texts and commit messages. Use a comma, a semicolon, a colon or parentheses, or split the sentence. A plain hyphen is fine.
-
-## Git workflow
-
-- Part of the hardwario/tower monorepo, developed straight on `main`; no feature branches or PRs
-  unless the user asks.
-- Commit, tag and push only when the user requests it.
+localhost. The tests never open a real serial port; don't flash or attach to a board unless the
+user asks.

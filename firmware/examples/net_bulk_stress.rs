@@ -1,4 +1,4 @@
-//! net_bulk_stress: large bulk transfer stress (docs/radio.md).
+//! net_bulk_stress: large bulk transfer stress (docs/firmware/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash example net_bulk_stress   # sender: serves a big blob
 //!   TOWER_FEATURES=role-node    just flash example net_bulk_stress   # requester: pulls + verifies

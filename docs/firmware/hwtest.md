@@ -1,8 +1,9 @@
-# tools/hwtest: hardware test harness
+# The hardware test scripts (`firmware/tools/hwtest/`)
 
-Scripts that drive the reusable hardware test suite in [`docs/test-plan.md`](../../docs/test-plan.md)
+Scripts that drive the reusable hardware test suite in [`docs/firmware/test-plan.md`](test-plan.md)
 on two TOWER Core Modules over their FTDI serial ports. See the test plan for the full matrix,
-pass signals, and edge-case catalogue; this README is just the runner mechanics.
+pass signals, and edge-case catalogue; this page is just the runner mechanics. Run the recipes
+from `firmware/`.
 
 ## Why these exist
 - One-shot KAT examples print their verdict ~ms after boot then idle, so a capture must reset
@@ -48,6 +49,8 @@ tower -d "$P1" complete "system settings set m"
 ```
 
 ## Notes
-- `RESULTS-2026-06-29.md` is a recorded full run (≈33 PASS + 4 findings), captured with the
-  tooling of that day (mode B was `jolt monitor --reset` + `strings`).
+- Recorded runs: [`results/2026-06-29.md`](results/2026-06-29.md), a full run (≈33 PASS + 4
+  findings), captured with the tooling of that day (mode B was `jolt monitor --reset` +
+  `strings`); [`results/2026-10-18.md`](results/2026-10-18.md) and
+  [`results/2026-10-19.md`](results/2026-10-19.md), the three-board campaigns.
 - The inline shell is **zsh**: no `mapfile`; `${v:+--flag "$v"}` collapses to one arg (use explicit `if`).

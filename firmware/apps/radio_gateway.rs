@@ -166,7 +166,7 @@ fn cmd_status(ctx: &mut shell::Ctx<'_>, _args: &[&str]) -> shell::Outcome {
     let used = STAT_HOP_USED.load(Ordering::Relaxed);
     if used != u32::MAX {
         // Each channel is tuned for one 300 ms slot per 24 s cycle, so its occupancy in any 20 s
-        // window is one slot at most; the airtime spread shows the even use (docs/radio.md).
+        // window is one slot at most; the airtime spread shows the even use (docs/firmware/radio.md).
         let _ = write!(
             ctx,
             "hopping: {} of {} channels used, airtime per channel max {} ms, mean {} ms (since boot)\r\n",
@@ -215,7 +215,7 @@ static PAIRING: Pattern = &[Step::on(100), Step::off(150)];
 
 /// RAM-only per-node link stats. Packed to 12 B/entry (16 entries = 192 B of the app
 /// future); deliberately NOT persisted; per-uplink EEPROM writes would burn the part
-/// (docs/storage.md). `NodeEntry.last_seen` is documented as "since gateway boot".
+/// (docs/firmware/storage.md). `NodeEntry.last_seen` is documented as "since gateway boot".
 #[derive(Clone, Copy)]
 struct LinkStat {
     addr: u32,
@@ -618,7 +618,7 @@ async fn run(b: Board) {
                 pairing = None;
             } else {
                 // `open_pairing` never answers a JOIN_REQ for an already-registered (or reserved,
-                // or our own) address; OTA pairing only adds NEW nodes (docs/gateway.md). Nor one
+                // or our own) address; OTA pairing only adds NEW nodes (docs/firmware/gateway.md). Nor one
                 // whose handshake would end after the window (`HOST_HANDSHAKE_TIME`), so a node is
                 // never committed after the host was told the window expired. One call stops
                 // listening at the slice's end but finishes a handshake it started: ~7 s worst
@@ -630,7 +630,7 @@ async fn run(b: Board) {
                 if let Some(peer) = joined {
                     let req_id = sess.req_id;
                     // The window closes on the first commit, so this node's commit uplinks (it
-                    // keeps the key provisional until one is ACKed, docs/radio.md) reach the
+                    // keeps the key provisional until one is ACKed, docs/firmware/radio.md) reach the
                     // receive slices from the next iteration on.
                     led.set_background(Some(HEARTBEAT));
                     pairing = None;
@@ -1018,7 +1018,7 @@ async fn handle_mgmt(
             // The one deliberate key-disclosure path (host asked explicitly; keys are
             // otherwise never emitted on any interface). With the counter history that must
             // travel with the key: our TX floor (above everything we sent, under any key) and
-            // the node's last-seen, for a `NodeAdd` elsewhere (docs/gateway.md).
+            // the node's last-seen, for a `NodeAdd` elsewhere (docs/firmware/gateway.md).
             Some(rec) => {
                 let record = NodeKey {
                     addr,
@@ -1030,7 +1030,7 @@ async fn handle_mgmt(
             }
             None => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
         },
-        // No key in the request: the link key comes from the X25519 key agreement (docs/radio.md).
+        // No key in the request: the link key comes from the X25519 key agreement (docs/firmware/radio.md).
         MgmtOp::PairingOpen { window } => {
             if pairing.is_some() {
                 respond_empty(req_id, mgmt::MGMT_BUSY).await;

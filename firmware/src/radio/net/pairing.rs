@@ -1,5 +1,5 @@
 //! OTA pairing (v3): an X25519 key agreement with a commitment round (numeric comparison)
-//! between a joining node and a host with an open pairing window (docs/radio.md "OTA
+//! between a joining node and a host with an open pairing window (docs/firmware/radio.md "OTA
 //! pairing"), plus the keyed join (E4) for nodes whose key the host already holds. `impl Net`
 //! block over [`super::Net`].
 //!
@@ -88,7 +88,7 @@ use crate::radio::duty;
 use crate::radio::frame::{self, FrameType, Header, MAX_FRAME, flags};
 
 /// Public CCM framing key of the four pairing frames before the link key (JOIN_REQ, JOIN_RESP,
-/// JOIN_NONCE, JOIN_REVEAL; docs/radio.md). **Not a secret** and never used for anything else:
+/// JOIN_NONCE, JOIN_REVEAL; docs/firmware/radio.md). **Not a secret** and never used for anything else:
 /// it gives those frames a uniform CCM format, so a corrupted frame fails its tag and is
 /// dropped. The key agreement's secrecy and authentication do not depend on it. The bytes keep
 /// their original spelling on purpose: a JOIN_REQ from a node built from an older checkout still

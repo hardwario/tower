@@ -1,5 +1,5 @@
 //! HIL smoke group: flash a self-checking KAT example to the Dongle, decode its framed boot
-//! output natively, and await the `all checks PASS` verdict (firmware/docs/test-plan.md §1:
+//! output natively, and await the `all checks PASS` verdict (docs/firmware/test-plan.md §1:
 //! self-checking KATs).
 //!
 //! These need the bench, so they are `#[ignore]`d: `cargo test` COMPILES them (proving the

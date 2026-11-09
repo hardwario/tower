@@ -30,7 +30,7 @@ const REFDIV: u64 = 2;
 /// (modulation, deviation, RX filter, IF); only the base frequency and channel
 /// spacing differ, derived from these accessors.
 ///
-/// **Regulatory note:** EU 868 operation here respects the 1 % duty cycle (docs/radio.md).
+/// **Regulatory note:** EU 868 operation here respects the 1 % duty cycle (docs/firmware/radio.md).
 /// US 915 is provided for **test/development**: this is a ~216 kHz narrowband
 /// signal, which is *not* FCC 15.247-compliant (that requires FHSS over ≥50
 /// channels or ≥500 kHz digital bandwidth). Use it on the bench, not in a product,
@@ -99,7 +99,7 @@ impl Default for RfConfig {
     }
 }
 
-/// Per-reception signal quality (docs/radio.md).
+/// Per-reception signal quality (docs/firmware/radio.md).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SignalQuality {
     /// RSSI in dBm.
@@ -110,7 +110,7 @@ pub struct SignalQuality {
     pub lqi: u8,
     /// Sync quality indicator.
     pub sqi: u8,
-    /// AFC correction word of the packet (signed), for the BW-narrowing sweep (docs/radio.md).
+    /// AFC correction word of the packet (signed), for the BW-narrowing sweep (docs/firmware/radio.md).
     pub afc_raw: i8,
 }
 
@@ -294,7 +294,7 @@ pub async fn apply(radio: &mut Spirit1, cfg: &RfConfig) -> Result<(), RadioError
         // with the ST library's exact search algorithms for f_XO=50 MHz, divider on:
         //   MOD1 = DATARATE_M = 147 (0x93), MOD0 = GFSK|DATARATE_E(9) = 0x19  -> 19.2 kbps
         //   FDEV0 = FDEV_E(4)<<4 | FDEV_M(5) = 0x45                           -> ~20 kHz
-        //   CHFLT = 0x02 -> ~216 kHz (docs/radio.md, covers ±40 ppm crystal tolerance).
+        //   CHFLT = 0x02 -> ~216 kHz (docs/firmware/radio.md, covers ±40 ppm crystal tolerance).
         spi.write_reg(regs::MOD1, 147)?;
         spi.write_reg(regs::MOD0, 0x19)?;
         spi.write_reg(regs::FDEV0, 0x45)?;

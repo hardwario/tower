@@ -1,4 +1,4 @@
-//! TOWER network frame codec (docs/radio.md).
+//! TOWER network frame codec (docs/firmware/radio.md).
 //!
 //! Wire layout (little-endian, fits the 96-byte SPIRIT1 FIFO):
 //!
@@ -38,7 +38,7 @@ pub const MAX_BULK_PAYLOAD: usize = 64;
 /// Full frame buffer size (the FIFO).
 pub const MAX_FRAME: usize = 96;
 
-/// Frame types (docs/radio.md).
+/// Frame types (docs/firmware/radio.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FrameType {
@@ -81,12 +81,12 @@ impl FrameType {
     }
 }
 
-/// Frame flag bits (docs/radio.md).
+/// Frame flag bits (docs/firmware/radio.md).
 pub mod flags {
     /// bit0: confirmed delivery requested.
     pub const CONFIRMED: u8 = 1 << 0;
     /// bit1: keyed join (JOIN_REQ / JOIN_RESP only): sealed under the per-node key, not
-    /// the public pairing key (E4, docs/radio.md "Keyed join").
+    /// the public pairing key (E4, docs/firmware/radio.md "Keyed join").
     pub const KEYED: u8 = 1 << 1;
     /// bit2: last chunk (BULK_DATA).
     pub const LAST_CHUNK: u8 = 1 << 2;

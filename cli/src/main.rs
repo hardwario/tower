@@ -85,7 +85,7 @@ const EXIT_PROTOCOL_MISMATCH: u8 = 125;
 /// Default per-command response timeout (`--timeout`), in milliseconds.
 ///
 /// Sized above the firmware's worst-case EEPROM compaction stall (~5.2 s with the whole
-/// chip frozen; see firmware/docs/storage.md): any command that writes EEPROM
+/// chip frozen; see docs/firmware/storage.md): any command that writes EEPROM
 /// (`settings set`, …) can land on the append that fills the KV half and pay for the whole
 /// compaction before it can respond. With the old 1.5 s default such a command *executed*
 /// but the CLI reported "no response (timeout)": a phantom failure (2026-07-05). It is an

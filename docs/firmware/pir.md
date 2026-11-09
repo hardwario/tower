@@ -14,7 +14,7 @@ the **PYQ 1548-7659**, works the same way, and the driver keeps to the timing of
 | Supply | header VDD through 10 Ω, 470 nF |
 | Schematic | PIR Module rev 1.5 (`bc-module-pir-rev-1-5-sch.pdf`) |
 
-[`Board::pir`](../src/board.rs) hands out the two pins and the EXTI channel; nothing touches them
+[`Board::pir`](../../firmware/src/board.rs) hands out the two pins and the EXTI channel; nothing touches them
 until an app builds a `Pir`.
 
 ## Using it

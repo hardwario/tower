@@ -16,7 +16,7 @@
 //! OUT: every ~5.2 s boot inherited a fully-matched domain (`lseon=1 lserdy=1 rtcsel=1
 //! rtcen=1`) with a pin reset, and a Low/MediumHigh/High drive sweep showed no effect. The
 //! proven cause (flip-counter 1:1 with slow boots) is the EEPROM KV **compaction CPU stall**
-//! in `init_session`'s session bump (see docs/storage.md).
+//! in `init_session`'s session bump (see docs/firmware/storage.md).
 //!
 //!   just build example lse_probe
 //!   TOWER_FEATURES=lse-drive-high just build example lse_probe

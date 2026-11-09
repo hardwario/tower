@@ -1,11 +1,14 @@
-# tower-hil: working notes for coding agents
+# tower-hil: rules for agents
 
-Std host crate: the HIL bench harness for the TOWER firmware SDK (`hil/` in the hardwario/tower
-monorepo, a member of the root host workspace; read the root `AGENTS.md` first). A plain
-`cargo test` (here, or `cargo test -p tower-hil` at the root) compiles the `#[ignore]`d hardware
-tests and runs only the host unit tests, safe anywhere. The `just bench` / `just bench-power` /
-`just bench-full` recipes (also `just hil <recipe>` from the repo root) opt INTO the bench run and
-**flash real hardware**: never run them unless the user asks and the bench is cabled.
+The hardware-in-the-loop bench harness, a member of the root host workspace. Its guides:
+[docs/hil/hil.md](../docs/hil/hil.md) (the harness) and [docs/hil/bench.md](../docs/hil/bench.md)
+(the bench).
+
+A plain `cargo test` (here, or `cargo test -p tower-hil` at the root) compiles the `#[ignore]`d
+hardware tests and runs only the host unit tests, safe anywhere. The `just bench` / `just
+bench-power` / `just bench-full` recipes (`just hil <recipe>` from the repo root) opt INTO the
+bench run and **flash real hardware**: never run them unless the user asks and the bench is
+cabled.
 
 ## Load-bearing invariants
 
@@ -22,15 +25,11 @@ tests and runs only the host unit tests, safe anywhere. The `just bench` / `just
   (thumbv6m + flip-link) applies.
 - **hil.toml** is bench-local operator config (port serials re-enumerate); don't assert on
   its concrete values in tests.
-
-## Shared crates (path dependencies)
-
-`tower-protocol` (`crates/protocol`) and `tower-flasher` (`crates/flasher`, the NRST/BOOT0 reset
-pulses) come from the root workspace by path. The harness decodes exactly the schema the
-firmware and the `tower` CLI build, so a wire mismatch cannot arise at build time; a protocol
-change updates the harness in the same commit (see `crates/protocol/AGENTS.md`, "Changing the
-wire"). At run time a board flashed from another checkout carries another schema tag in every
-console frame, and `Console::next` fails fast with the lockstep message.
+- **The wire:** a protocol change updates the harness in the same commit. A board flashed from
+  another checkout carries another schema tag in every console frame, and `Console::next` fails
+  fast with the lockstep message.
+- The design-rationale comments (confounders, reset sequencing, TIOCEXCL handling) are hard-won;
+  don't strip them.
 
 ## Checks
 
@@ -40,15 +39,3 @@ cargo clippy -p tower-hil --all-targets --features power -- -D warnings   # from
 ```
 
 The repo-root `just check` runs both (CI's `host` job too).
-
-## Writing style
-
-No em or en dashes. This applies everywhere: code, comments, docs, UI texts and commit messages. Use a comma, a semicolon, a colon or parentheses, or split the sentence. A plain hyphen is fine.
-
-## Git workflow
-
-- Part of the hardwario/tower monorepo, developed straight on `main`; no feature branches or PRs
-  unless the user asks.
-- Commit and push only when the user requests it.
-- MIT © 2026 HARDWARIO a.s. Design-rationale comments (confounders, reset sequencing,
-  TIOCEXCL handling) are hard-won; don't strip them.

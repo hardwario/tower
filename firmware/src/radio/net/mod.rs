@@ -1,7 +1,7 @@
 //! Network layer: confirmed delivery, ACK, retransmit and replay protection
-//! over the secured frame codec (docs/radio.md).
+//! over the secured frame codec (docs/firmware/radio.md).
 //!
-//! `Net` owns the radio + CCM and serializes one transfer at a time (docs/radio.md). A
+//! `Net` owns the radio + CCM and serializes one transfer at a time (docs/firmware/radio.md). A
 //! *node* `send(confirmed)` transmits a DATA frame then opens a 200 ms ACK
 //! window, retransmitting the byte-identical frame on timeout (random 0-100 ms
 //! backoff, 1-10 reps). A *receiver* `recv()` authenticates the frame, applies
@@ -9,18 +9,18 @@
 //! a retransmit re-sends the identical bytes without re-delivering.
 //!
 //! Keys are per-peer: [`Net::add_peer`] binds a peer address to its own AES key and
-//! replay lane (star ≤16 / P2P ≤8, docs/radio.md); any unregistered peer falls back to the
+//! replay lane (star ≤16 / P2P ≤8, docs/firmware/radio.md); any unregistered peer falls back to the
 //! [`NetConfig::key`] default lane (the single-link case), unless the device runs
 //! **registered peers only** ([`Net::set_default_lane`]`(false)`, what a gateway must do), in
 //! which case an unregistered sender is dropped before any CCM work or ACK. The TX counter and
 //! each lane's last-seen are EEPROM-persisted (reserve-ahead watermark / lazy-persist,
-//! docs/radio.md); every TX path takes its counter from the one allocator,
+//! docs/firmware/radio.md); every TX path takes its counter from the one allocator,
 //! `Net::alloc_counter`, *before* it awaits anything.
 //!
 //! This module holds the core (peer table + confirmed unicast). The two larger
 //! sub-protocols live alongside it as `impl Net` blocks: [`bulk`] (pull-based bulk
-//! transfer, docs/radio.md) and [`pairing`] (OTA pairing by X25519 key agreement, and the keyed
-//! join, docs/radio.md).
+//! transfer, docs/firmware/radio.md) and [`pairing`] (OTA pairing by X25519 key agreement, and the keyed
+//! join, docs/firmware/radio.md).
 
 mod afa;
 mod bulk;
@@ -51,7 +51,7 @@ pub fn gateway_network_key(addr: u32) -> [u8; 16] {
 pub use pairing::{
     HOST_HANDSHAKE_TIME, JOIN_FRAME_KEY, JoinError, PAIRING_WINDOW, PEER_KEX_TIME, PairedPeer, PairingHost,
 };
-/// The joiner's commit round after [`Net::join`] (docs/radio.md "OTA pairing"): the key stays
+/// The joiner's commit round after [`Net::join`] (docs/firmware/radio.md "OTA pairing"): the key stays
 /// provisional until a confirmed uplink under it is acknowledged.
 pub use tower_net::pairing::{COMMIT_SETTLE_MS, CommitStep, commit_step};
 
@@ -62,7 +62,7 @@ use embassy_time::{Duration, Instant, Timer};
 pub use tower_net::ack::AckMeta;
 use tower_net::ack::{ACK_LEN, AckVerdict, AckWait, ack_flags, ack_meta};
 /// Reserved-address rules shared by pairing, the gateway's `NodeAdd`, a node's `Provision` and
-/// [`Net::add_peer`] (docs/radio.md "Reserved IDs").
+/// [`Net::add_peer`] (docs/firmware/radio.md "Reserved IDs").
 pub use tower_net::addr::{ADDR_BROADCAST, ADDR_UNASSIGNED, is_reserved_addr, peer_addr_valid};
 /// Confirmed-send repetition ceiling (`reps` is clamped to `1..=MAX_REPS`); also bounds the
 /// receiver's re-ACKs per counter (`tower_net::replay::MAX_REACKS`).
@@ -77,7 +77,7 @@ use super::duty::{self, DutyGovernor};
 use super::frame::{self, FrameType, Header, MAX_FRAME, MAX_PAYLOAD, flags};
 use crate::storage::{NS_NET, Nv, Scoped};
 
-/// ACK window the sender waits for an acknowledgement (docs/radio.md). The measured ACK
+/// ACK window the sender waits for an acknowledgement (docs/firmware/radio.md). The measured ACK
 /// round-trip is ~35 ms (turnaround + ACK ToA + RX set-up), so 200 ms is ample.
 const ACK_WINDOW: Duration = Duration::from_millis(200);
 /// Turnaround the receiver waits before sending the ACK, so the sender has
@@ -140,7 +140,7 @@ const KEY_LASTSEEN: u8 = 0x01;
 const KEY_FHSS_EPOCH: u8 = 0x02;
 
 /// Peer-table capacity. A gateway in a star holds up to 16 nodes; a P2P device
-/// holds up to 8 peers (docs/radio.md). One table size covers both: the topology
+/// holds up to 8 peers (docs/firmware/radio.md). One table size covers both: the topology
 /// is a usage policy, not a different type. Sized at 16 (was 64, then 32): the
 /// table (`[Option<Peer>; MAX_PEERS]`, ~36 B/slot) lives in every Net app's
 /// statically-allocated future, and with flip-link each slot is stack headroom the
@@ -154,7 +154,7 @@ pub const MAX_PEERS: usize = 16;
 /// [`lane_record`].
 const KEY_LASTSEEN_BASE: u8 = 0x10;
 
-/// A registered peer: its address, per-peer AES key, and replay state (docs/radio.md).
+/// A registered peer: its address, per-peer AES key, and replay state (docs/firmware/radio.md).
 #[derive(Clone, Copy)]
 struct Peer {
     addr: u32,
@@ -281,7 +281,7 @@ pub struct Net<const P: usize = MAX_PEERS> {
     /// [`set_default_lane`](Self::set_default_lane)).
     default_lane_enabled: bool,
     /// Per-peer (addr, key, last-seen) table; a registered peer overrides the
-    /// default key and gets its own replay lane (docs/radio.md).
+    /// default key and gets its own replay lane (docs/firmware/radio.md).
     peers: [Option<Peer>; P],
     /// Replay lane for senders not in the peer table (the single-link lane).
     default_lane: ReplayLane,
@@ -381,7 +381,7 @@ impl<const P: usize> Net<P> {
             }
         }
 
-        // Duty policy follows the band: EU 1 %, US 915 unrestricted (docs/radio.md).
+        // Duty policy follows the band: EU 1 %, US 915 unrestricted (docs/firmware/radio.md).
         let duty = match cfg.band {
             Band::Eu868 => DutyGovernor::eu(),
             Band::Us915 => DutyGovernor::us915(),
@@ -437,7 +437,7 @@ impl<const P: usize> Net<P> {
     /// downlinks per boot, so a lazy lane would never be persisted at all and a recorded
     /// `system reboot` downlink could be replayed after every reboot). A gateway keeps the
     /// default: its lanes see every uplink, and per-frame writes would wear the part
-    /// (docs/storage.md); its host drops replayed uplinks by counter instead.
+    /// (docs/firmware/storage.md); its host drops replayed uplinks by counter instead.
     pub fn set_lane_persist_period(&mut self, period: u8) {
         self.lane_persist = tower_net::replay::persist_period(period);
     }
@@ -526,14 +526,14 @@ impl<const P: usize> Net<P> {
     /// [`lane_record`]). Returns `false` if the table is full (and the peer is new), or if
     /// `peer_addr` is reserved or our own address ([`peer_addr_valid`]: a peer sharing our
     /// address would collide CCM nonces). Check the return in production code. Up to
-    /// [`MAX_PEERS`] peers (star ≤16 / P2P ≤8 by policy, docs/radio.md).
+    /// [`MAX_PEERS`] peers (star ≤16 / P2P ≤8 by policy, docs/firmware/radio.md).
     pub fn add_peer(&mut self, peer_addr: u32, key: &[u8; 16]) -> bool {
         if !peer_addr_valid(peer_addr, self.addr) {
             return false;
         }
         let kcv = self.ccm.key_check(key);
         if let Some(i) = self.peer_slot(peer_addr) {
-            // Re-key in place. A *changed* key is a disjoint CCM nonce space (docs/radio.md:
+            // Re-key in place. A *changed* key is a disjoint CCM nonce space (docs/firmware/radio.md:
             // "a re-key resets both ends"), so the old last-seen is meaningless, and if the
             // re-keyed peer restarts its counter (a re-pair), a stale-high lane would reject
             // its fresh frames as replays. Reset + persist the lane on a key change so a reboot
@@ -640,14 +640,14 @@ impl<const P: usize> Net<P> {
         self.last_ack
     }
 
-    /// The registered peer whose keyed join (E4, docs/radio.md) [`recv`](Self::recv) answered
+    /// The registered peer whose keyed join (E4, docs/firmware/radio.md) [`recv`](Self::recv) answered
     /// since the last call, if any: for the host's log / UI. `recv` answers keyed joins
     /// inline and never returns them as an uplink.
     pub fn take_keyed_join(&mut self) -> Option<u32> {
         self.keyed_join.take()
     }
 
-    /// Act as a keyed-join host (E4, docs/radio.md): answer keyed joins of registered peers
+    /// Act as a keyed-join host (E4, docs/firmware/radio.md): answer keyed joins of registered peers
     /// inside [`recv`](Self::recv) (`true`) or refuse them (`false`: the request is dropped
     /// before any CCM work and the refusal is logged, rate-limited). The gateway calls it at boot
     /// and whenever its `keyed-join` setting (default on: the exchange is mutually authenticated
@@ -703,7 +703,7 @@ impl<const P: usize> Net<P> {
     }
 
     /// Record acceptance of `counter` from `src`: advance that lane's last-seen
-    /// and lazy-persist every `P` accepts (replay window ≤ P across a reboot, docs/radio.md),
+    /// and lazy-persist every `P` accepts (replay window ≤ P across a reboot, docs/firmware/radio.md),
     /// or every [`set_lane_persist_period`](Self::set_lane_persist_period) accepts.
     /// The cadence decision is the lane kernel's ([`ReplayLane::accept_every`]); the EEPROM
     /// write is ours.
@@ -754,7 +754,7 @@ impl<const P: usize> Net<P> {
     /// ~5 s compaction stall if it happened to fill the KV half. With the default
     /// `storage::maintenance` task the store compacts incrementally ahead of time, so the
     /// persist stays a single small append; the synchronous flip is only the fallback path
-    /// (docs/storage.md).
+    /// (docs/firmware/storage.md).
     pub(crate) fn alloc_counter(&mut self) -> Option<u32> {
         let (counter, persist) = self.txc.alloc()?;
         if let Some(next) = persist {
@@ -772,7 +772,7 @@ impl<const P: usize> Net<P> {
 
     /// Send `data` to `dest`. Confirmed sends open an ACK window and retransmit
     /// the byte-identical frame up to `reps` times; unconfirmed sends transmit
-    /// once. The transfer consumes exactly one TX counter value (docs/radio.md).
+    /// once. The transfer consumes exactly one TX counter value (docs/firmware/radio.md).
     pub async fn send(&mut self, dest: u32, data: &[u8], confirmed: bool, reps: u8) -> SendResult {
         self.last_ack = None; // stale ACK metadata must not outlive its send
         if self.txc.locked() {
@@ -784,7 +784,7 @@ impl<const P: usize> Net<P> {
             return SendResult::WrongMode;
         }
         if data.len() > MAX_PAYLOAD {
-            return SendResult::Error(RadioError::TooLong); // MTU: use bulk for >74 B (docs/radio.md)
+            return SendResult::Error(RadioError::TooLong); // MTU: use bulk for >74 B (docs/firmware/radio.md)
         }
         if !self.may_send_to(dest) {
             return SendResult::Error(RadioError::NotRegistered); // registered peers only
@@ -819,10 +819,10 @@ impl<const P: usize> Net<P> {
         let mut result = SendResult::NotDelivered;
         for attempt in 0..reps {
             if attempt > 0 {
-                // Random 0-100 ms backoff before a retransmit (docs/radio.md).
+                // Random 0-100 ms backoff before a retransmit (docs/firmware/radio.md).
                 Timer::after(Duration::from_millis(self.backoff_ms() as u64)).await;
             }
-            // Duty governor: every TX (incl. retransmits) counts (docs/radio.md).
+            // Duty governor: every TX (incl. retransmits) counts (docs/firmware/radio.md).
             if !self.duty.try_tx(toa) {
                 result = SendResult::DutyLimited;
                 break;
@@ -938,7 +938,7 @@ impl<const P: usize> Net<P> {
                 // lane last-seen), do NOT re-deliver. Keying the re-ACK by (src, counter) rather than
                 // a single global cache means interleaved senders in a star can't evict each other's
                 // pending ACK; the old single-slot cache reported false NotDelivered + app-level
-                // duplicates under that race (see docs/radio.md). Only confirmed frames were ACKed,
+                // duplicates under that race (see docs/firmware/radio.md). Only confirmed frames were ACKed,
                 // so only re-ACK confirmed ones, and at most `MAX_REACKS` times per counter (the
                 // most a legitimate sender can ask for): a byte-identical capture needs no key, so
                 // an unbounded re-ACK let anyone spend our TX counters and duty budget.
@@ -1046,7 +1046,7 @@ impl<const P: usize> Net<P> {
     }
 
     /// Build, cache and transmit an ACK for a received confirmed frame. The ACK
-    /// uses the ACKer's *own* fresh counter (docs/radio.md); the acknowledged counter rides
+    /// uses the ACKer's *own* fresh counter (docs/firmware/radio.md); the acknowledged counter rides
     /// in the payload.
     async fn send_ack(&mut self, dest: u32, acked: u32, rssi: i16) {
         if self.txc.locked() {
@@ -1082,7 +1082,7 @@ impl<const P: usize> Net<P> {
         if !may_tx {
             return;
         }
-        // The ACK consumes a counter of its own (docs/radio.md), allocated before the TX await.
+        // The ACK consumes a counter of its own (docs/firmware/radio.md), allocated before the TX await.
         let Some(ack_counter) = self.alloc_counter() else {
             return; // fail closed (nonce safety); the sender retries
         };

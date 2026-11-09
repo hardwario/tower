@@ -21,8 +21,9 @@ loaded over the wire (`tower flash`, or SWD); there is no over-the-air update pa
 | [`crates/radio`](crates/radio) | `tower-radio` | Radio timing / CCM / compliance logic the SDK builds on (duty cycle, time-on-air, FHSS hops); not the SPIRIT1 driver. |
 | [`crates/gateway`](crates/gateway) | `tower-gateway` | Decision core of the Radio Dongle gateway firmware (node registry, downlink queue); not the `tower gateway` command. |
 | [`crates/shell`](crates/shell) | `tower-shell` | Pure kernels behind the device shell (address parsing, pagination, TAB completion). |
+| [`crates/hmi`](crates/hmi) | `tower-hmi` | The HMI core behind the LCD Module: a 1-bit framebuffer, drawing, the bundled Spleen fonts, images, menus, button gestures (`no_std`, hardware-free); not the LCD driver. |
 | [`crates/strip`](crates/strip) | `tower-strip` | The LED strip effects core: frame, effects, colours and palettes, the render pipeline (gamma, RGBW white, dithering, current limit); not the WS2812 driver (`no_std`, hardware-free). |
-| [`crates/taf`](crates/taf) | `tower-taf` | The TOWER Application Framework's kernels: report policy, wall clock, weekly program, thermostat demand (`no_std`, hardware-free); the runtime is `tower::taf` ([`firmware/docs/taf.md`](firmware/docs/taf.md)). |
+| [`crates/taf`](crates/taf) | `tower-taf` | The TOWER Application Framework's kernels: report policy, wall clock, weekly program, thermostat demand (`no_std`, hardware-free); the runtime is `tower::taf` ([`docs/firmware/taf.md`](docs/firmware/taf.md)). |
 | [`crates/flasher`](crates/flasher) | `tower-flasher` | The flasher, around the STM32 ROM bootloader: UART flash / erase / verify, chip info, readout protection, NRST/BOOT0 reset pulses; USB DFU for the Core Module r1.x. |
 | [`firmware/`](firmware) | `tower-sdk` (lib `tower`) | Embassy firmware SDK, `examples/` and the TOWER IoT Kit product `apps/`. Its own Cargo workspace for `thumbv6m-none-eabi`. |
 | [`cli/`](cli) | `tower-cli` (bin `tower`) | Host CLI/TUI: logs, events, shell, flash / erase / reset / chip / protect, `tower gateway` (radio to MQTT), `tower nodes`, `tower net`. |
@@ -44,18 +45,25 @@ tower/
 ├── rust-toolchain.toml   the one toolchain (1.99.1 + rustfmt, clippy, llvm-tools, thumbv6m)
 ├── rustfmt.toml          the one house style (110 columns), applied everywhere
 ├── justfile              just check / test / fw / hil
-├── crates/               protocol, kv, net, radio, gateway, shell, hmi, strip, flasher
-├── firmware/             tower-sdk: src/, examples/, apps/, docs/, tools/ (own workspace)
+├── crates/               protocol, kv, net, radio, gateway, shell, hmi, strip, taf, flasher
+├── firmware/             tower-sdk: src/, examples/, apps/, tools/ (own workspace)
 ├── cli/                  tower-cli: the `tower` binary
 ├── hil/                  tower-hil: the bench harness
 ├── fuzz/                 cargo-fuzz targets for the decoders and kernels (own workspace)
-├── docs/                 the security model, the MQTT API
+├── docs/                 all documentation, by component (index: docs/README.md)
 ├── AGENTS.md             the operating manual for coding agents (CLAUDE.md imports it)
 ├── SECURITY.md           vulnerability reporting
 ├── TASKS.md              open work and decisions (every session keeps it current)
 ├── .claude/skills/       /bootstrap, /build
 └── .github/              CI, the CLI release workflow, Dependabot
 ```
+
+## Documentation
+
+Everything is in [`docs/`](docs/README.md), by component: the firmware SDK and its subsystem
+guides (console, radio, storage, taf and the apps, the gateway, the LCD, the LED strip, PIR), the
+`tower` CLI and its MQTT API, the protocol and the flasher, testing (HIL, fuzzing) and the
+security model. [TASKS.md](TASKS.md) holds the open work and the decisions.
 
 ## Quick start
 
@@ -81,10 +89,10 @@ tower exec "system resource print"  # one shell command, its reply, exit
 ```
 
 The radio products (a push button node, a Radio Dongle gateway, MQTT) are described in
-[`firmware/docs/gateway.md`](firmware/docs/gateway.md).
+[`docs/firmware/gateway.md`](docs/firmware/gateway.md).
 
 Bench runs (`just hil bench`, `bench-power`, `bench-full`) flash real hardware; see
-[`hil/README.md`](hil/README.md). Working with [Claude Code](https://claude.com/claude-code)?
+[`docs/hil/hil.md`](docs/hil/hil.md). Working with [Claude Code](https://claude.com/claude-code)?
 Open it here and run `/bootstrap`; `AGENTS.md` gives it the whole-stack context.
 
 ## Releases

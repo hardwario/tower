@@ -1,5 +1,5 @@
 //! net_keyed_join: the keyed join (E4) under a per-node key the host already holds
-//! (docs/radio.md "Keyed join").
+//! (docs/firmware/radio.md "Keyed join").
 //!
 //!   TOWER_FEATURES=role-gateway just flash example net_keyed_join   # host: knows the node
 //!   TOWER_FEATURES=role-node    just flash example net_keyed_join   # joiner: has the key
@@ -15,7 +15,7 @@
 //! uplink. Duty mode only: under LBT+AFA or FHSS `join_keyed` returns `WrongMode`. A refused
 //! request (wrong key, stale counter, switched off) leaves the host's `net` log with a
 //! rate-limited `keyed join from … refused: <reason>` line and the joiner with `no host
-//! answered` (docs/test-plan.md J1b).
+//! answered` (docs/firmware/test-plan.md J1b).
 
 #![no_std]
 #![no_main]

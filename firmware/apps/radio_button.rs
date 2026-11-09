@@ -1,5 +1,5 @@
 //! radio_button (TOWER IoT Kit product firmware): a wireless push button with a tilt alarm and a
-//! thermometer, a sleeping taf node (`docs/taf.md`).
+//! thermometer, a sleeping taf node (`docs/firmware/taf.md`).
 //!
 //! Every button press, release, click and hold is a `button` event (`nodes/{addr}/event/button`,
 //! the value `press`/`release`/`click`/`hold` with its running count), each switchable by its

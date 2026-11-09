@@ -3,7 +3,7 @@
 This is the in-repo source of truth for physically assembling and configuring the bench that
 `just bench` / `just bench-power` / `just bench-full` drive. The *test catalogue* (what each firmware
 example asserts, the full example×role matrix) lives in the firmware's
-[`docs/test-plan.md`](../../firmware/docs/test-plan.md); this file is what that plan assumes you
+[`docs/firmware/test-plan.md`](../firmware/test-plan.md); this file is what that plan assumes you
 already have on the desk.
 
 ## Inventory

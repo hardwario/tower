@@ -1,10 +1,10 @@
 //! OTA-pairing admission rules (moved from `firmware/src/radio/net/pairing.rs`;
-//! firmware/docs/radio.md): which JOIN_REQ the host may answer and which JOIN_RESP is the
+//! docs/firmware/radio.md): which JOIN_REQ the host may answer and which JOIN_RESP is the
 //! joiner's. The pairing-v3 key agreement itself (X25519, the commitment round, the key
 //! schedule, the confirmation tags, the SAS) is the [`handshake`](crate::handshake) kernel;
 //! the TRNG draw, the windows and the JOIN frame exchange stay in the firmware's radio flow.
 //!
-//! The **keyed join** (E4, docs/radio.md) has its own three predicates below: a node whose
+//! The **keyed join** (E4, docs/firmware/radio.md) has its own three predicates below: a node whose
 //! per-node key the gateway already holds (NodeAdd) joins under that key: no key on air,
 //! both ends prove the key, and the node learns the gateway address.
 //!
@@ -41,7 +41,7 @@ pub const COMMIT_SETTLE_MS: u32 = 500;
 pub const COMMIT_RETRY_MS: u32 = 2_000;
 /// The longest a gateway can stay deaf to uplinks after it accepted a JOIN_CONFIRM: its registry
 /// commit absorbing a synchronous EEPROM compaction (~5.2 s worst case,
-/// firmware/docs/storage.md), the console response and the rest of its loop turn. The commit
+/// docs/firmware/storage.md), the console response and the rest of its loop turn. The commit
 /// round must outlast it (pinned by a test), or a node whose gateway did commit would give the
 /// key up.
 pub const GATEWAY_COMMIT_STALL_MS: u32 = 6_000;

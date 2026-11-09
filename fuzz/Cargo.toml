@@ -7,7 +7,7 @@
 # for this directory; from the repo root use `cargo +nightly fuzz ...` or `just fuzz`.
 #
 # The crates under test are path dependencies, exactly like every other consumer in the monorepo,
-# so a fuzz build always exercises the source tree it sits in. See fuzz/README.md.
+# so a fuzz build always exercises the source tree it sits in. See docs/fuzzing.md.
 [package]
 name = "tower-fuzz"
 version = "0.0.0"

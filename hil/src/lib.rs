@@ -1,6 +1,6 @@
 //! Hardware-in-the-loop harness library for the TOWER firmware SDK. Bench inventory,
-//! cabling, and setup: `hil/docs/bench.md`; the test catalogue is
-//! `firmware/docs/test-plan.md`.
+//! cabling, and setup: `docs/hil/bench.md`; the test catalogue is
+//! `docs/firmware/test-plan.md`.
 //!
 //! The bench (see `hil.toml`):
 //!
@@ -329,7 +329,7 @@ impl Bench {
     /// Flash `bin` to the board in `role` over the UART bootloader (`tower flash`), re-verifying the
     /// slot's identity against the live roster IMMEDIATELY before the erase, since a build can take long
     /// enough for a cable to be moved. Sequential by design (concurrent FTDI flashing is unreliable
-    /// (Write-Memory timeouts / re-enumeration, see firmware/tools/hwtest/README.md).
+    /// (Write-Memory timeouts / re-enumeration, see docs/firmware/hwtest.md).
     pub fn flash(&self, role: Role, bin: &Path) -> Result<(), String> {
         let path = resolve_board(role, self.board(role), &live_ports())
             .map_err(|e| format!("HIL: refusing to flash: {e}"))?;

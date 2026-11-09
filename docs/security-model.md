@@ -104,7 +104,7 @@ STM32L0 AES engine, attacks requiring decapping the chip.
   RAM-only). A taf **listening** node (always receiving, `radio_control`) persists on every
   accepted frame too, although it may hear many downlinks: with a lagging lane a recorded `system
   reboot` would replay into it after every reboot, a reboot loop on a node that switches mains.
-  One small KV record per command is negligible wear at command rates (docs/storage.md: one
+  One small KV record per command is negligible wear at command rates (docs/firmware/storage.md: one
   write per second exhausts the store in about a year). The gateway keeps 32 (wear), so after a gateway reboot up to 31 recorded uplinks per
   node are accepted again; the host bridge drops every uplink whose counter is not above the
   highest it published for that node (counters only grow; a re-key resets it), so they never reach
@@ -129,7 +129,7 @@ registered address by design (an authenticated host action: the re-provision pat
    the air, but the key does cross the MQTT link, in plain text when that link leaves loopback
    without TLS (`--broker-allow-plaintext`, or a plain external broker): run the command on the
    gateway host or over TLS (section 4.4, residual risk 5, and "Key material and counter floors"
-   in [`mqtt-api.md`](mqtt-api.md)). The key is fresh for every provision (a node's counter
+   in [`mqtt-api.md`](cli/mqtt-api.md)). The key is fresh for every provision (a node's counter
    restarts with its store).
 2. **OTA pairing v3** (`tower nodes add --ota`, an operator-opened window): X25519 key agreement
    with a commitment round modelled on Bluetooth LE Secure Connections numeric comparison:
@@ -368,12 +368,12 @@ registered address by design (an authenticated host action: the re-provision pat
 
 | Topic | Code | Docs |
 |---|---|---|
-| CCM, frame format, nonce | `firmware/src/radio/{aes,ccm,frame}.rs` | `firmware/docs/radio.md` |
-| Counters, replay, pairing, keyed join kernels | `crates/net` (host-tested) | `firmware/docs/radio.md` |
-| Network layer runtime | `firmware/src/radio/net/` | `firmware/docs/radio.md` |
-| Gateway registry and queue | `crates/gateway`, `firmware/apps/radio_gateway.rs` | `firmware/docs/gateway.md` |
-| Console framing and schema tags | `crates/protocol` | `crates/protocol/README.md` |
-| Storage | `crates/kv`, `firmware/src/storage.rs` | `firmware/docs/storage.md` |
-| Readout protection | `crates/flasher/src/rdp.rs`, `cli/` | `crates/flasher/README.md`, `cli/README.md` |
-| MQTT gateway | `cli/src/gateway`, `cli/src/client` | `cli/README.md` |
-| Fuzzing | `fuzz/` | `fuzz/README.md` |
+| CCM, frame format, nonce | `firmware/src/radio/{aes,ccm,frame}.rs` | `docs/firmware/radio.md` |
+| Counters, replay, pairing, keyed join kernels | `crates/net` (host-tested) | `docs/firmware/radio.md` |
+| Network layer runtime | `firmware/src/radio/net/` | `docs/firmware/radio.md` |
+| Gateway registry and queue | `crates/gateway`, `firmware/apps/radio_gateway.rs` | `docs/firmware/gateway.md` |
+| Console framing and schema tags | `crates/protocol` | `docs/protocol.md` |
+| Storage | `crates/kv`, `firmware/src/storage.rs` | `docs/firmware/storage.md` |
+| Readout protection | `crates/flasher/src/rdp.rs`, `cli/` | `docs/flasher.md`, `docs/cli/cli.md` |
+| MQTT gateway | `cli/src/gateway`, `cli/src/client` | `docs/cli/cli.md` |
+| Fuzzing | `fuzz/` | `docs/fuzzing.md` |

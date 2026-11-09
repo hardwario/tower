@@ -1,6 +1,6 @@
 //! Pairing v3 handshake kernel: X25519 key agreement with a commitment round (numeric
 //! comparison), the HKDF-SHA256 key schedule, the HMAC-SHA256 key-confirmation tags and the
-//! 6-digit short authentication string (SAS) (firmware/docs/radio.md "OTA pairing").
+//! 6-digit short authentication string (SAS) (docs/firmware/radio.md "OTA pairing").
 //!
 //! The firmware's `tower::radio::net` runs the radio exchange; everything that decides a key
 //! or accepts a peer's proof is here, so it is tested on the host against published vectors and

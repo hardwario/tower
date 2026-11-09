@@ -1,4 +1,4 @@
-# fuzz: coverage-guided fuzzing of the shared crates
+# Fuzzing: coverage-guided fuzzing of the shared crates (`fuzz/`)
 
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) + libFuzzer targets for the hardware-free
 crates every TOWER end builds on: the wire protocol, the EEPROM key-value store, the shell kernels
@@ -6,7 +6,7 @@ and the radio timing / compliance / CCM logic. Each target feeds arbitrary input
 asserts the properties the crate documents; a panic (a failed assertion, an overflow, an
 out-of-bounds index), a hang or runaway memory is a finding.
 
-This directory is a **standalone** package with its own workspace and its own `Cargo.lock`
+`fuzz/` is a **standalone** package with its own workspace and its own `Cargo.lock`
 (committed): the root host workspace lists it in `exclude`. It is the one part of the repo that
 needs **nightly** (cargo-fuzz passes nightly-only sanitizer flags to rustc), so
 `fuzz/rust-toolchain.toml` selects nightly; everything else stays on the pinned 1.99.1. The crates

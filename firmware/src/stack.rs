@@ -1,6 +1,6 @@
 //! Boot-time stack painting + a runtime high-water read: a *measured* answer to "how deep does
 //! the stack actually go?" on this 20 KB part, replacing the ~7.5 KB estimate the gateway budget
-//! carries (docs/gateway.md) with a bench number.
+//! carries (docs/firmware/gateway.md) with a bench number.
 //!
 //! The stack region is `[_stack_end, _stack_start)`, the linker symbols cortex-m-rt defines for
 //! exactly this (its own `paint-stack` feature paints the same span), so the bounds are right in
@@ -48,7 +48,7 @@ const PAINT_GUARD: usize = 128;
 /// (`sub sp, #N`, up to ~0.8 KB for the KV flip's plan + record buffer) *before* its first store
 /// faults below the RAM origin, so the words just above the bottom can keep their sentinel even
 /// though the stack went past them. A boot that legitimately got this close was itself a
-/// near-overflow (docs/gateway.md keeps ~1 KB of headroom over the measured peaks).
+/// near-overflow (docs/firmware/gateway.md keeps ~1 KB of headroom over the measured peaks).
 pub const OVERFLOW_MARGIN: usize = 1024;
 
 /// Marks [`PAINTED`] as written by a previous boot's [`paint`] (vs cold-boot RAM garbage).

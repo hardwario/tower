@@ -228,7 +228,7 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
     // gateway's period of 32) lets recorded downlinks replay into a rebooted node, and a recorded
     // `system reboot` would then reboot it again after every reboot, a loop (the remote-shell dedup
     // is RAM only). The wear is one small record per command: a relay switched a thousand times a
-    // day compacts the store about ten times a day (docs/security-model.md, docs/storage.md).
+    // day compacts the store about ten times a day (docs/security-model.md, docs/firmware/storage.md).
     net.set_lane_persist_period(1);
     if let Some(p) = provision
         && !net.add_peer(p.gw_addr, &p.key)
@@ -244,7 +244,7 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
     if listening && band == Band::Us915 {
         // A listening node would have to follow the hop schedule continuously, which is not done
         // yet (TASKS.md, T3). Anything else on US 915 is one fixed channel at full power, which FCC
-        // §15.247 does not allow outside the bench (docs/radio.md): no radio at all instead.
+        // §15.247 does not allow outside the bench (docs/firmware/radio.md): no radio at all instead.
         log::error!(target: "node", "a listening node runs on EU 868 only for now, radio off (set band eu868)");
         provision = None;
     } else if let Some(p) = provision

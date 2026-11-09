@@ -1,5 +1,5 @@
 //! net_pairing: OTA pairing by X25519 key agreement with a commitment round (pairing v3,
-//! docs/radio.md).
+//! docs/firmware/radio.md).
 //!
 //!   TOWER_FEATURES=role-gateway just flash example net_pairing   # host: opens a window
 //!   TOWER_FEATURES=role-node    just flash example net_pairing   # joiner: requests to join
@@ -16,7 +16,7 @@
 //!
 //! This example stops at the handshake. A product node treats the joined key as provisional
 //! and commits it only once the gateway acknowledges a confirmed uplink under it (the commit
-//! round of `apps/radio_button.rs`, docs/radio.md "OTA pairing").
+//! round of `apps/radio_button.rs`, docs/firmware/radio.md "OTA pairing").
 
 #![no_std]
 #![no_main]

@@ -1,9 +1,9 @@
 # tower-protocol
 
 Shared wire-format crate for the [HARDWARIO TOWER](https://www.hardwario.com/) link:
-the single source of truth that the **firmware SDK** ([`firmware/`](../../firmware)), the
-**host CLI** ([`cli/`](../../cli), the `tower` binary), and the **HIL bench harness**
-([`hil/`](../../hil)) all build, so no end can drift on the bytes they exchange. It lives in
+the single source of truth that the **firmware SDK** ([`firmware/`](../firmware)), the
+**host CLI** ([`cli/`](../cli), the `tower` binary), and the **HIL bench harness**
+([`hil/`](../hil)) all build, so no end can drift on the bytes they exchange. It lives in
 the [hardwario/tower](https://github.com/hardwario/tower) monorepo as `crates/protocol`.
 
 `no_std`, no-alloc, builds for `thumbv6m-none-eabi` (the Cortex-M0+ target) as well as the host.
@@ -23,7 +23,7 @@ the [hardwario/tower](https://github.com/hardwario/tower) monorepo as `crates/pr
   link: `Uplink` (a decrypted radio uplink forwarded verbatim), `MgmtRequest` / `MgmtResponse`
   (req_id-correlated management ops with chunked replies) and `RadioStat` (channel RSSI + TX
   outcomes). Serialized with **postcard**, which is *not* self-describing. That is the whole
-  reason this crate is shared: all ends must hold the exact same struct definitions.
+  reason `tower-protocol` is shared: all ends must hold the exact same struct definitions.
 - **Management schema** (`mgmt.rs`): the `MgmtOp` set a host sends in `MgmtRequest`
   (describe / role probing, node registry CRUD + key reveal, OTA pairing, downlink queue,
   stats cadence, cable provisioning, join) and the typed reply records streamed in
@@ -88,13 +88,9 @@ peers and no version negotiation.
 4. Tests keep the framing pinned (`tests/framing.rs`, byte goldens built with an explicit tag so
    they never move with the schema), every message, op and record round-trips, and the hasher's
    properties are pinned (`tests/fingerprint.rs`); there are no per-message byte goldens.
-
-## History
-
-The wire used to carry hand-bumped version constants (a 3-bit header version, a radio schema
-version byte, a 32-bit fingerprint in `Hello`). They were replaced by the schema tags, and the
-crate is versioned `0.0.0` (internal, never published, no tags of its own).
-
-## License
-
-MIT © 2026 HARDWARIO a.s.
+5. Size budgets: `MAX_FRAME` (256) and `MAX_PAYLOAD` (247) are what the firmware console, the
+   shell's `CompletionBudget`, the CLI and the harness size against; the capacity tests in
+   `tests/framing.rs` and `tests/radio.rs` hold the largest real payloads to them.
+6. `src/ring.rs` (`PayloadRing`) is not wire: it is the device console's TX queue, messages kept
+   as their encoded payloads (`encode_payload`) and framed later (`encode_frame_bytes`, the same
+   bytes as `encode_frame`). It lives here, hardware-free, so its wraparound logic is host-tested.

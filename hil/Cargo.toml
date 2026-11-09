@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Hardware-in-the-loop (HIL) test harness for the HARDWARIO TOWER firmware SDK: drives a bench of a TOWER Core Module (J-Link SWD + Nordic PPK2) and a TOWER Radio Dongle (USB); flashes via probe-rs / `tower flash`, decodes the framed console NATIVELY (tower-protocol, so tests assert on typed Log/Event + seq-gaps, not `strings | grep`), and asserts smoke / radio / power behaviour. The hardware tests are `#[ignore]`d so `cargo test` still COMPILES them without a bench. See firmware/docs/test-plan.md."
+description = "Hardware-in-the-loop (HIL) test harness for the HARDWARIO TOWER firmware SDK: drives a bench of a TOWER Core Module (J-Link SWD + Nordic PPK2) and a TOWER Radio Dongle (USB); flashes via probe-rs / `tower flash`, decodes the framed console NATIVELY (tower-protocol, so tests assert on typed Log/Event + seq-gaps, not `strings | grep`), and asserts smoke / radio / power behaviour. The hardware tests are `#[ignore]`d so `cargo test` still COMPILES them without a bench. See docs/firmware/test-plan.md."
 
 # HOST crate in the monorepo's host workspace, so a plain `cargo test` builds for the native
 # host, no --target juggling. It COMPILES the #[ignore]d hardware tests and runs none; the

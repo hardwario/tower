@@ -1,18 +1,18 @@
-# tower-flasher: working notes for coding agents
+# tower-flasher: rules for agents
 
 Library that drives the STM32 ROM bootloader of STM32L0 parts (the TOWER Core Module / Radio
 Dongle's STM32L083CZ): over UART (AN3155) flash / erase / verify, read-only chip info, the opt-in
 readout protection (RDP level 1) of production units, and the NRST/BOOT0 reset pulses; over USB
 DFU (AN3156, the `dfu` module, for the Core Module r1.x that has no USB-UART bridge) flash /
-erase / verify / chip info.
-`crates/flasher` in the hardwario/tower monorepo (read the root `AGENTS.md` first). Modules
-(`src/lib.rs`): `bootloader` (the AN3155 protocol engine), `chip` (`chip::info`, read-only
-`ChipInfo` incl. `readout_protected`), `error`, `firmware` (raw image load + validation), `flash`
-(connect / flash / erase orchestration), `port` (the serial port + reset pulses), `rdp`
-(`rdp::protect` / `rdp::unprotect` and the protection probe; its module docs hold the RM0367 /
-AN3155 / AN2606 facts with citations), `target` (STM32L0 constants), `dfu` (the DfuSe engine and
-its memory-layout parser; `dfu/usb.rs` the nusb transport, `dfu/fake.rs` the simulated bootloader
-of its tests; the module docs hold the AN3156 facts). User-facing docs are in `README.md`.
+erase / verify / chip info. The guide is [docs/flasher.md](../../docs/flasher.md).
+
+Modules (`src/lib.rs`): `bootloader` (the AN3155 protocol engine), `chip` (`chip::info`,
+read-only `ChipInfo` incl. `readout_protected`), `error`, `firmware` (raw image load +
+validation), `flash` (connect / flash / erase orchestration), `port` (the serial port + reset
+pulses), `rdp` (`rdp::protect` / `rdp::unprotect` and the protection probe; its module docs hold
+the RM0367 / AN3155 / AN2606 facts with citations), `target` (STM32L0 constants), `dfu` (the
+DfuSe engine and its memory-layout parser; `dfu/usb.rs` the nusb transport, `dfu/fake.rs` the
+simulated bootloader of its tests; the module docs hold the AN3156 facts).
 
 Its front end is the `tower` CLI (`tower flash` / `erase` / `reset` / `chip` / `protect` /
 `unprotect` / `devices`).
@@ -97,14 +97,3 @@ The tests need no hardware (a scripted fake port drives `flash`, `erase`, `chip:
 STM32L0 with fault injection for the wire-exact flash tests; `src/dfu/fake.rs` simulates the
 DfuSe bootloader for `dfu`). Never open a real serial port or USB device, flash a board or
 change its protection unless the user asks.
-
-## Writing style
-
-No em or en dashes. This applies everywhere: code, comments, docs, UI texts and commit messages. Use a comma, a semicolon, a colon or parentheses, or split the sentence. A plain hyphen is fine.
-
-## Git workflow
-
-- Part of the hardwario/tower monorepo, developed straight on `main`; no feature branches or PRs
-  unless the user asks.
-- Commit and push only when the user requests it.
-- MIT © 2026 HARDWARIO a.s.

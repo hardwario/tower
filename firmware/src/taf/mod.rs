@@ -19,7 +19,7 @@
 //! shell, settings over the radio, wall-clock time from the host ([`local_time`]), the watchdog.
 //! Two radio classes: a **sleeping** node wakes the radio for an uplink and hears downlinks right
 //! after it; a **listening** node (mains powered) keeps its receiver on, so a `set` takes effect at
-//! once. The guide is `docs/taf.md`.
+//! once. The guide is `docs/firmware/taf.md`.
 //!
 //! ```ignore
 //! const KIND: Kind = props::motion::KIND;

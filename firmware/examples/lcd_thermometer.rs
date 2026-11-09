@@ -3,7 +3,7 @@
 //! A big readout of the TMP112 temperature, measured every 30 s, with the minimum and maximum
 //! since start. Left click switches °C / °F, right hold resets the minimum and maximum.
 //!
-//! What keeps it frugal (see `docs/hmi.md`, "Low power"):
+//! What keeps it frugal (see `docs/firmware/hmi.md`, "Low power"):
 //! * The memory LCD holds the picture with no refresh, and a redraw sends only the rows whose
 //!   pixels changed: a new reading typically rewrites 30 to 60 rows (a few ms of DMA).
 //! * Nothing polls: between readings the MCU sleeps in STOP; a button press wakes it through

@@ -14,7 +14,7 @@ Three layers:
 | The runtime | `src/taf/` (`tower::taf`) | Radio, pairing, settings, reports, downlinks, remote shell, time sync, watchdog |
 
 The MQTT side of the same properties (topics, payloads, the kinds' tables) is
-[`docs/mqtt-api.md`](../../docs/mqtt-api.md), *Node properties*.
+[`docs/cli/mqtt-api.md`](../cli/mqtt-api.md), *Node properties*.
 
 ## The apps
 

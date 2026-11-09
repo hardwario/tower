@@ -31,9 +31,9 @@ the radio stack itself (framing, CCM, pairing handshake, FHSS, duty cycle) see
    *verbatim* to the host; it never decodes the node's app schema. What it owns is
    *coordination*: the node registry, the downlink queue, pairing, and radio diagnostics.
 3. **Host** (`tower gateway`): decodes the radio application schema, bridges to MQTT, and
-   drives the gateway via the management channel. See the [CLI README](../../cli/README.md)
+   drives the gateway via the management channel. See the [CLI manual](../cli/cli.md)
    (Gateway & MQTT) and, for the MQTT topics and payloads, the
-   [MQTT API reference](../../docs/mqtt-api.md).
+   [MQTT API reference](../cli/mqtt-api.md).
 
 The transparent-bridge split is the design's backbone: **a new node app type needs no gateway
 firmware change**, because the gateway never interprets `NodeMsg`/`NodeCmd`; only the node
@@ -86,14 +86,14 @@ Result codes: `MGMT_OK`(0), `UNSUPPORTED`(1), `BAD_ARG`(2), `NOT_FOUND`(3), `FUL
 `BUSY`(5), `STORAGE`(6), `TIMEOUT`(7). An op a device does not serve → `UNSUPPORTED`; a
 concurrent pairing window → `BUSY`. **Keys:** a cable-provisioned key is minted by the host
 (its CSPRNG) and travels host→device in `NodeAdd`/`Provision`; an OTA-paired link key is
-**derived on both ends** by the X25519 key agreement (docs/radio.md "OTA pairing") from TRNG
+**derived on both ends** by the X25519 key agreement (docs/firmware/radio.md "OTA pairing") from TRNG
 ephemerals, so `PairingOpen` carries no key. Keys never travel device→host except through the
 deliberate `NodeRevealKey`.
 
 ### Radio application schema (`radio::NodeMsg` / `NodeCmd`)
 
 The application messages are generic: an app declares **properties** (`props.rs`, the kinds'
-tables; `docs/taf.md`) and the framework carries their values.
+tables; `docs/firmware/taf.md`) and the framework carries their values.
 
 Node → host (`NodeMsg`): `Info(NodeInfo{firmware_name, firmware_version, session_id, sleeping,
 wants_time})` · `Report(Vec<(id, value)>)` (up to `MAX_REPORT` property values) · `Event{id,
@@ -123,7 +123,7 @@ with the text `(reply lost on the air: ran once, not run again)`, never an empty
 
 ## The push-button node (`radio_button`)
 
-A sleeping taf node (`docs/taf.md`, kind `button`). Every enabled button gesture is a `button`
+A sleeping taf node (`docs/firmware/taf.md`, kind `button`). Every enabled button gesture is a `button`
 event with its running count; the temperature is measured every `report-period` and sent on a
 change of `report-delta` or at the latest with the heartbeat; the accelerometer's tilt interrupt
 wakes the node for `tilt` events. Every setting is remote-settable (MQTT `set/<name>`, or
@@ -176,7 +176,7 @@ debounce) define what the physical input *means*; the LED feedback is a separate
 ### US 915 (frequency hopping)
 
 On `us915` the node follows its gateway's FCC §15.247 hop schedule (80 channels, 300 ms slots,
-docs/radio.md *Spectrum-access modes*); every send goes out in a slot whose beacon it just heard,
+docs/firmware/radio.md *Spectrum-access modes*); every send goes out in a slot whose beacon it just heard,
 on that slot's channel, and the downlink window is the rest of that slot.
 
 - **Pairing.** Set `band=us915` while unpaired (the default is `eu868`). OTA pairing runs off the
@@ -225,7 +225,7 @@ command inject clicks into the event stream, or start the re-pair gesture on eve
 ### Pairing (node side)
 
 - **OTA**: hold the button for at least `hold-time` (1 s by default) while unprovisioned: the
-  node pairs (X25519 key agreement with a commitment round, docs/radio.md "OTA pairing") with any
+  node pairs (X25519 key agreement with a commitment round, docs/firmware/radio.md "OTA pairing") with any
   gateway that has a window open.
   It logs `net: pairing: SAS 123456` at the end of the handshake; the same SAS on the gateway's
   side (its console, and `tower nodes add --ota`, which prints it) is the man-in-the-middle check
@@ -275,7 +275,7 @@ command inject clicks into the event stream, or start the re-pair gesture on eve
 - The node persists its gateway's replay lane on **every** accepted downlink (a handful per
   boot; the provisional peer of a commit round too), so a recorded downlink cannot be replayed
   after a reboot; a stored provisioning record
-  with no TX watermark beside it boots TX-locked (docs/radio.md, *Counters, replay &
+  with no TX watermark beside it boots TX-locked (docs/firmware/radio.md, *Counters, replay &
   persistence*).
 
 ---
@@ -329,7 +329,7 @@ lost") and the client sends it again. Delivery: each confirmed uplink's ACK carr
 *pending* flag; when set, the node opens a short RX window and the gateway delivers one item per
 uplink cycle. A **listening** node (its registry flag `NODE_FLAG_SLEEPING` clear; the host sets
 the flag from the node's `NodeInfo.sleeping`) keeps its receiver on, so it is not waited for: the
-main loop sends its first queued item at once (EU 868 only, see docs/radio.md, "Node classes").
+main loop sends its first queued item at once (EU 868 only, see docs/firmware/radio.md, "Node classes").
 A listening node that does not ACK is tried again after a pause of its own, 2 s doubling per miss
 up to 64 s and cleared by any uplink from it or a delivery (`tower_gateway::listen`; an attempt
 the gateway could not transmit at all, for its duty budget or a busy channel, waits 2 s without
@@ -368,7 +368,7 @@ commands nor keeps the radio out of receive. The TTL still ends the attempts.
   (`registry::add_new`; an existing address answers `BAD_ARG`).
 - **The window closes on the first commit**, and the very next loop turn serves receive slices
   again: the joined node's commit round (its first confirmed `NodeInfo` under the new key,
-  docs/radio.md) is ACKed and forwarded like any uplink. While a window is open the gateway listens
+  docs/firmware/radio.md) is ACKed and forwarded like any uplink. While a window is open the gateway listens
   only for pairing frames (registered nodes' uplinks wait for the window to end; a node retries
   them like any unacknowledged uplink), which is why a window closes as soon as it served its
   purpose. A JOIN_REQ is answered only while a whole handshake (~3.9 s) still fits before the
@@ -399,9 +399,9 @@ commands nor keeps the radio out of receive. The TTL still ends the attempts.
   and let it send nothing more under them; a key read earlier (a backup), or one exported with
   `tx_floor = 0xFFFFFFFF` (that gateway lost its watermark; `NodeAdd` answers `BAD_ARG`), cannot
   move to a gateway at the old address: re-pair those nodes. The CLI side: `tower nodes show
-  <node> --keys --json`, then the `node_add` RPC with `tx_floor` / `rx_floor` (cli/README.md).
+  <node> --keys --json`, then the `node_add` RPC with `tx_floor` / `rx_floor` (docs/cli/cli.md).
 - **Keyed join (E4)**: a node registered with `NodeAdd` may also join on air under its own
-  key (docs/radio.md "Keyed join"): the gateway answers it inside the normal receive slice, with
+  key (docs/firmware/radio.md "Keyed join"): the gateway answers it inside the normal receive slice, with
   no window and nothing to commit, and logs `node … joined (keyed)`. The node learns the
   gateway's address that way: a node provisioned by cable or in the factory finds its gateway
   without a pairing window, and a replacement gateway that imported the node keys (`NodeAdd` of
@@ -482,7 +482,7 @@ must be physical; it erases the pairing key) and `system settings set` of an add
 (re-addressing a live node over the air orphans it). `system reboot` still works remotely. Anyone
 who can reach the gateway's MQTT broker can queue remote shell lines, so this is the backstop
 that keeps a broker-level intruder from unpairing the fleet (see the access policy in the
-[CLI README](../../cli/README.md)). App commands opt in with `Entry::cmd_console_only` (for
+[CLI manual](../cli/cli.md)). App commands opt in with `Entry::cmd_console_only` (for
 example `radio_control`'s `strip limit` and `strip save`); see [console.md](console.md).
 
 ---
@@ -507,7 +507,7 @@ it flashes real hardware.
   FHSS, duty cycle) this product rides on.
 - [`console.md`](console.md): the console framing, the full MsgType table, and the settings
   framework (`Kind`, base settings, result codes).
-- The [CLI README](../../cli/README.md) (*Gateway & MQTT bridge*): the host commands (`tower gateway`, `tower nodes`,
+- The [CLI manual](../cli/cli.md) (*Gateway & MQTT bridge*): the host commands (`tower gateway`, `tower nodes`,
   `tower net`).
-- The [MQTT API reference](../../docs/mqtt-api.md): the MQTT topic tree, its payloads and the RPC ops (the gateway's
+- The [MQTT API reference](../cli/mqtt-api.md): the MQTT topic tree, its payloads and the RPC ops (the gateway's
   public API).

@@ -17,7 +17,47 @@ Task status: `open`, `in progress`, `waiting (Dn)` (blocked on a decision), `don
 
 ## In progress
 
-(None.)
+### T16. Review the repository topology; domain documentation into `docs/`
+
+Status: in progress (2026-11-09; D9, D10, D11 answered: all (a))
+
+**Why.** The repo keeps several `AGENTS.md` (each with a `CLAUDE.md` stub), `README.md` files and
+`docs/` directories from its multi-repo past. The maintainer wants the topology reviewed and the
+domain documentation moved to `docs/`.
+
+- [x] Inventory: every `AGENTS.md`, `CLAUDE.md`, `README.md` and docs directory, what each holds,
+      who reads it, what is duplicated
+- [x] Proposal: the target layout, with the choices as decisions for the maintainer (D9 to D11)
+- [x] Move: `firmware/docs/*` and the hwtest results to `docs/firmware/`, `docs/mqtt-api.md` to
+      `docs/cli/`, `hil/docs/bench.md` to `docs/hil/`; the READMEs' content to
+      `docs/firmware/sdk.md`, `docs/firmware/hwtest.md`, `docs/cli/cli.md`, `docs/hil/hil.md`,
+      `docs/protocol.md`, `docs/flasher.md`, `docs/fuzzing.md`
+- [x] Rewrite every reference (Markdown links resolved per file, plain paths in code and config),
+      and any tool that reads a moved file (the app and example list check)
+- [x] The moved docs lose their per-repo leftovers (License sections, repeated build recipes)
+- [x] Short READMEs in `cli/`, `firmware/`, `firmware/tools/hwtest/`, `hil/`, `fuzz/`,
+      `crates/protocol/`, `crates/flasher/`; `docs/README.md` as the index
+- [x] D9: trim the nested `AGENTS.md` (no repeated root sections; knowledge to `docs/`, linked)
+- [x] The root `AGENTS.md` and `README.md` describe the new layout
+- [ ] A link check over every Markdown file and every doc path in code; `just check`; commit
+
+**Inventory (2026-11-09).** The code layout is sound: `crates/`, `firmware/`, `cli/`, `hil/`,
+`fuzz/`, with separate workspaces only where they are needed (the firmware's target and profiles,
+fuzz's nightly). The leftovers are in the documentation, which lives in five kinds of places:
+- `docs/` (3 files: the MQTT API, the security model, the test strategy), `firmware/docs/` (9
+  guides), `hil/docs/` (the bench).
+- Seven READMEs that are manuals of their own: `cli/` (504 lines, the CLI manual), `firmware/`
+  (312, the SDK overview), `crates/flasher/` (230), `crates/protocol/` (100), `fuzz/` (95), `hil/`
+  (75), `firmware/tools/hwtest/` (53). Each still carries a License section and a build recipe
+  from its own repository; the protocol README a History section.
+- Six `AGENTS.md` (root, `cli/`, `crates/flasher/`, `crates/protocol/`, `firmware/`, `hil/`), each
+  with a one-line `CLAUDE.md` importing it. The five nested ones repeat the root's *Writing style*
+  and *Git workflow*, and most re-explain the path dependencies and the wire runbook. Some hold
+  knowledge rather than agent rules: `firmware/AGENTS.md`'s log style guide duplicates
+  `firmware/docs/console.md` (*Logging*).
+- Links: about 290 references to these paths, 180 of them in code comments and config
+  (`docs/radio.md` alone has 99), so every move comes with a mechanical link rewrite and a link
+  check.
 
 ## Decisions
 
@@ -25,7 +65,7 @@ Task status: `open`, `in progress`, `waiting (Dn)` (blocked on a decision), `don
 
 After a bridge restart, a `set` to a node is refused until the node's next `NodeInfo`, because the
 bridge can't check the set without the node's kind. For a sleeping node that is up to one
-heartbeat (15 min). Nothing is lost on the radio; docs/mqtt-api.md documents the gap. The embedded
+heartbeat (15 min). Nothing is lost on the radio; docs/cli/mqtt-api.md documents the gap. The embedded
 broker's retained topics die with the bridge process, so they can't seed it.
 
 - **(a) The gateway registry** (recommended): a kind byte in each registry entry, read with the
@@ -80,10 +120,10 @@ today.
 
 Status: open (D4: later)
 
-**Why.** The listening class (`radio_control`; firmware/docs/radio.md, "Node classes") runs on EU
+**Why.** The listening class (`radio_control`; docs/firmware/radio.md, "Node classes") runs on EU
 868 only. A node that keeps its receiver on would have to follow the gateway's hop schedule all the
 time, and one fixed channel at full power is not allowed on US 915 (FCC §15.247), so a listening
-kind refuses `us915` for now (no pairing, no provisioning, radio off; firmware/docs/taf.md).
+kind refuses `us915` for now (no pairing, no provisioning, radio off; docs/firmware/taf.md).
 
 **What it takes.** The network layer (`firmware/src/radio/net`, `crates/net`): a listening node
 that tracks the hop schedule between its own sends (a sleeping node acquires it with each uplink
@@ -104,7 +144,7 @@ Status: open
 sleeping app; the PPK2 power numbers of each sleeping app (idle floor, energy per report and per
 event); a long soak on batteries.
 
-**Done when.** Every sleeping app reports its battery voltage over MQTT, firmware/docs/taf.md
+**Done when.** Every sleeping app reports its battery voltage over MQTT, docs/firmware/taf.md
 lists the measured power per app, and a soak of a day or more on batteries passes.
 
 ### T5. Climate Module sensors for `radio_climate`
@@ -152,7 +192,7 @@ unknown.
 `FLASH_SR` names the error (write protection, alignment, size), then find its source.
 
 **Done when.** The cause is known and fixed, or shown harmless and documented in
-firmware/docs/storage.md.
+docs/firmware/storage.md.
 
 ### T9. Two-board verification of the 2026-10-17 batch
 
@@ -184,10 +224,10 @@ from the same commit, EEPROM wiped first):
   watchdog pet interval (~7.4 s).
 
 **Done when.** Each item passes on the bench and the results are noted in
-`firmware/docs/test-plan.md`.
+`docs/firmware/test-plan.md`.
 
 **Status 2026-10-18** (three-board bench, results in
-[firmware/tools/hwtest/RESULTS-2026-10-18.md](firmware/tools/hwtest/RESULTS-2026-10-18.md)):
+[docs/firmware/results/2026-10-18.md](docs/firmware/results/2026-10-18.md)):
 OTA pairing, lost confirm, re-pair, window end, backoff, key move and the HIL gateway group
 pass. Open: the replay item (nothing can reboot the dongle under a running `tower gateway`; D8)
 and the PPK2 look at the idle floor (no PPK2 on the bench).
@@ -199,8 +239,8 @@ Status: open (needs the PPK2 and a lab, not the code)
 **Done 2026-10-18.** `radio_gateway` and `radio_button` hop on `us915` (FCC §15.247): the gateway
 is the hop master, the node follows the schedule with every send, pairs on the rendezvous carrier
 at low power (§15.249) and re-acquires after a sleep by prediction on the crystal clock
-(`clock::now_ms`; embassy's `Instant` runs on HSI16, ±1 %). firmware/docs/radio.md
-(*Spectrum-access modes*, "In the product apps") and firmware/docs/gateway.md (*US 915*) describe
+(`clock::now_ms`; embassy's `Instant` runs on HSI16, ±1 %). docs/firmware/radio.md
+(*Spectrum-access modes*, "In the product apps") and docs/firmware/gateway.md (*US 915*) describe
 it. Bench (Radio Dongle + two Core Modules, `us915`): OTA pairing of both nodes at low power;
 clicks delivered within one slot; remote shell downlink in the uplink's slot, the reply one chunk
 per slot; both nodes booting at once (a collision, then the random retry backoff); the gateway
@@ -265,7 +305,7 @@ Status: open
 **Why.** Every Core Module carries an ATSHA204A (I2C 0x64), which the SDK today only puts to
 sleep (`board::atsha_sleep`, the `AtshaGuard` bus wrapper). Provisioned in production, it would
 give the radio network two things the MCU alone can't:
-- **Device attestation**: during the keyed join (E4, firmware/docs/radio.md), the gateway sends a
+- **Device attestation**: during the keyed join (E4, docs/firmware/radio.md), the gateway sends a
   random challenge and the node answers with the ATSHA's HMAC-SHA256 over it under a secret slot
   key that never leaves the chip, so the host knows it is talking to a genuine, provisioned
   board and not to a clone holding a copied link key.
@@ -354,10 +394,17 @@ generation still targets the same modules.
   2026-11-09.
 - **D3. The new node apps in the release firmware bundle.** Yes (af0ea69). 2026-11-09.
 - **D4. Listening nodes on US 915.** Later (T3). 2026-11-09.
+- **D9. Nested `AGENTS.md`.** (a) Keep them, trimmed to the rules for working in that component;
+  knowledge moves to `docs/`, the `CLAUDE.md` stubs stay (T16). 2026-11-09.
+- **D10. Component READMEs.** (a) Their content moves to `docs/`; a short README per component
+  stays (what it is, how to build or run it, links into `docs/`) (T16). 2026-11-09.
+- **D11. The layout of `docs/`.** (a) By component, mirroring the code: `docs/firmware/`,
+  `docs/cli/`, `docs/hil/`, `docs/protocol.md`, `docs/flasher.md`, `docs/fuzzing.md`, an index
+  (T16). 2026-11-09.
 
 ## Done
 
 (Newest first; one line each.)
 
 - **T1. Merge TODO.md and firmware/TODO.md into TASKS.md**, with the session rule in AGENTS.md.
-  2026-11-09.
+  2026-11-09, 2a5bfa1.

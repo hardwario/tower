@@ -1,4 +1,4 @@
-//! Radio-address validity rules (firmware/docs/radio.md "Reserved IDs"), shared by every path that
+//! Radio-address validity rules (docs/firmware/radio.md "Reserved IDs"), shared by every path that
 //! accepts an address from outside (OTA pairing, the gateway's cable `NodeAdd`, a node's
 //! `Provision`, and the firmware's `Net::add_peer` itself), so they cannot disagree (before this, `NodeAdd`
 //! refused `0` while OTA pairing accepted `0`, broadcast and the gateway's own address).
@@ -20,7 +20,7 @@ pub fn is_reserved_addr(addr: u32) -> bool {
 /// CCM nonce is `src ‖ counter ‖ …` and the per-link key protects *both* directions, so the
 /// directions are kept apart solely by `src`. A peer sharing our address would derive the very
 /// same nonces as our own frames under the shared key whenever the counters coincide: a CCM
-/// keystream/MAC reuse (firmware/docs/radio.md §Security model).
+/// keystream/MAC reuse (docs/firmware/radio.md §Security model).
 #[must_use]
 pub fn peer_addr_valid(peer: u32, own: u32) -> bool {
     !is_reserved_addr(peer) && peer != own

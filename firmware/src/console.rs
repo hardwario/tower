@@ -5,7 +5,7 @@
 //! 115200. A raw serial monitor therefore shows binary; use the `tower` host CLI
 //! (`tower logs`), which decodes the frames.
 //!
-//! Architecture (docs/console.md): the console is **dynamic**: [`manager`] owns USART1
+//! Architecture (docs/firmware/console.md): the console is **dynamic**: [`manager`] owns USART1
 //! (PA9 TX / PA10 RX) and, gated on USB presence (`VBUS_SENSE`/PA12), builds a **DMA-backed
 //! `Uart`** while plugged and **drops** it on unplug, releasing embassy's STOP refcount so an
 //! unplugged node idles at µA. TX runs on DMA1 channel 4, RX on a **circular DMA buffer** on
@@ -166,7 +166,7 @@ const KEY_BOOT_COUNT: u8 = 0x00;
 /// with 56-character messages), or 6 of the largest (247 B) payloads. It replaced a queue of 4
 /// owned message structs, each slot sized for the largest message (~280 B), in less RAM than
 /// that queue took: every byte here is stack the gateway / push-button products can't spare (the
-/// bench-measured gateway high-water is 7360 B of a ~9 KB stack region, see docs/gateway.md,
+/// bench-measured gateway high-water is 7360 B of a ~9 KB stack region, see docs/firmware/gateway.md,
 /// `system stack print`). A synchronous burst that still outgrows it drops-newest and is
 /// reported by the writer's [`Dropped`] marker; the async producers ([`event`], [`uplink`], ...)
 /// wait for room instead of dropping while the console is up.
@@ -624,7 +624,7 @@ pub async fn manager(
         // The writer synthesizes the session `Hello` as its own first frame (see `writer_loop`),
         // so the host resyncs its per-link `seq` on every plug-in WITHOUT the Hello ever riding
         // the shared producer queue, where a burst of logs racing the plug-in could drop it
-        // (drop-newest) and strand the host on a stale seq (docs/console.md).
+        // (drop-newest) and strand the host on a stale seq (docs/firmware/console.md).
 
         // Run the writer + RX router until USB is unplugged (debounced), then tear the
         // UART down by dropping `tx`/`rx` at the end of this scope.
@@ -682,7 +682,7 @@ impl Drop for OnCancelDrop {
 /// plugged in (verified against embassy-stm32 0.6). The guard is kept deliberately as
 /// belt-and-braces: it makes the TX path's stop-safety **self-contained**, not silently dependent
 /// on an RX-side refcount that a future RX refactor could change. Cheap (one scope object per
-/// burst); between bursts no guard is held (docs/console.md). On the rev 1.3 board the USB
+/// burst); between bursts no guard is held (docs/firmware/console.md). On the rev 1.3 board the USB
 /// session holds the same refcount for its whole life (embassy's USB driver enables the USB clock
 /// with `Stop1`), so there the guard is just as redundant.
 async fn writer_loop(tx: &mut impl LinkTx) {
@@ -691,7 +691,7 @@ async fn writer_loop(tx: &mut impl LinkTx) {
     // The writer emits the session's opening frames ITSELF, not via the shared producer queue,
     // so a burst of logs racing a plug-in can never bump the `Hello` out of a full TX ring
     // (drop-newest). The host relies on decoding a fresh Hello to reset its per-link `seq`
-    // tracking (docs/console.md); dropping it would strand the host on a stale seq and print a
+    // tracking (docs/firmware/console.md); dropping it would strand the host on a stale seq and print a
     // spurious wire-loss warning. Lead with a lone 0x00 to flush any partial frame left on the
     // host's decoder, then the Hello as seq 0.
     //
@@ -1059,13 +1059,13 @@ pub fn session_id() -> u32 {
 /// **Boot-loop backoff:** the [`bootguard`](crate::bootguard) tracks consecutive fast resets in
 /// reset-surviving RAM. Once a unit is judged to be looping, this stops writing the counter to
 /// EEPROM (reporting a RAM-derived id instead) so a wedged/brown-out-looping node can't grind the
-/// store one record per reset (see `docs/storage.md`).
+/// store one record per reset (see `docs/firmware/storage.md`).
 ///
 /// This append used to be the classic trigger of the multi-second compaction stall (the "~5 s
 /// hung boot" every Nth reboot). With the default [`storage::maintenance`](crate::storage::maintenance)
 /// task the store is compacted incrementally *before* it fills, so in steady state this write is
 /// just one ~12-byte append (a few word-programs); the synchronous flip remains only as the
-/// never-ran-maintenance fallback (docs/storage.md).
+/// never-ran-maintenance fallback (docs/firmware/storage.md).
 pub fn init_session(kv: Nv, spawner: crate::Spawner) {
     let resets = crate::bootguard::on_boot(spawner);
     let sys = kv.scope(NS_SYS);

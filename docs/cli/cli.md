@@ -3,12 +3,12 @@
 Host CLI/TUI for the **HARDWARIO TOWER** console link (`cli/` in the
 [hardwario/tower](https://github.com/hardwario/tower) monorepo). The `tower` binary connects to
 a TOWER device over the USB serial port and renders the **framed** host↔target protocol
-(COBS + CRC + postcard) emitted by the [TOWER firmware SDK](../firmware): logs, events, and an
+(COBS + CRC + postcard) emitted by the [TOWER firmware SDK](../../firmware): logs, events, and an
 interactive shell. (A plain serial monitor shows that link as raw frame bytes; `tower` decodes
 it.) It also flashes the device over its UART bootloader and bridges a Radio Dongle's network
 to MQTT.
 
-The wire format is shared with the firmware via the [`tower-protocol`](../crates/protocol)
+The wire format is shared with the firmware via the [`tower-protocol`](../../crates/protocol)
 crate, a path dependency both build from the same source, so the two cannot drift at build
 time. A `tower` binary built before a wire change still speaks the old schema: after pulling
 a protocol change, rebuild it (see *Install*); a stale binary reports a schema mismatch
@@ -262,7 +262,7 @@ Keep `ca.key` and `broker.key` private (`broker.p12` contains the key too); clie
 `ca.pem`.
 
 The MQTT topic tree (under `--prefix`) is the gateway's public API; every topic, payload and
-RPC op is documented in the [MQTT API reference](../docs/mqtt-api.md). Rules for clients
+RPC op is documented in the [MQTT API reference](mqtt-api.md). Rules for clients
 writing to it:
 commands (`gateway/cmd`, `nodes/{addr}/shell/req`) must not be retained (one published retained
 runs once, on its live delivery; the copy the broker replays later is ignored and cleared); request ids must be 1-64 characters of `[A-Za-z0-9_.-]` (a uuid), and a
@@ -367,7 +367,7 @@ checkout); rebuild both`.
 NRST/BOOT0 through the USB-UART bridge), so a separate flashing tool isn't
 needed. A Core Module r1.x has no bridge; `flash`, `erase`, `chip` and `reset` reach it through
 the STM32's USB DFU bootloader instead (see [Core Module r1](#core-module-r1-usb-dfu)). The
-bootloader engine is the [`tower-flasher`](../crates/flasher) library:
+bootloader engine is the [`tower-flasher`](../../crates/flasher) library:
 
 ```sh
 tower flash firmware.bin     # erase, write, verify, then reset into the app
@@ -498,7 +498,3 @@ sudo apt-get install -y libudev-dev pkg-config perl make gcc   # Debian/Ubuntu
 cargo build --release -p tower-cli               # at the repo root; binary at target/release/tower
 cargo test -p tower-cli                          # no hardware needed
 ```
-
-## License
-
-MIT © 2026 HARDWARIO a.s. (see the repo-root `LICENSE`).

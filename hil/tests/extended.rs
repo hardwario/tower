@@ -1,5 +1,5 @@
 //! HIL extended group: the full example-matrix sweep the two-board bench can exercise
-//! (firmware/docs/test-plan.md scope, beyond the committed smoke/radio groups).
+//! (docs/firmware/test-plan.md scope, beyond the committed smoke/radio groups).
 //!
 //! Single-board KATs (crypto, FHSS, duty governor, frame-codec edges) run on the Dongle slot;
 //! two-board RF scenarios (P2P, secure ping, OTA pairing, bulk pull, rapid-fire ordering) use
@@ -16,7 +16,7 @@ use tower_hil::{Bench, Console, Frame, Role, bench_or_fail, build_image, frame_t
 
 /// Build an example (`features` empty = none; `build_image` always sets TOWER_FEATURES explicitly)
 /// and flash it to the board in `role`, identity re-checked right before the erase. Sequential by
-/// design: concurrent FTDI flashing is unreliable (see firmware/tools/hwtest/README.md).
+/// design: concurrent FTDI flashing is unreliable (see docs/firmware/hwtest.md).
 fn build_and_flash(bench: &Bench, role: Role, example: &str, features: &str) -> Result<(), String> {
     let bin = build_image("example", example, features)?;
     bench.flash(role, &bin)
@@ -444,7 +444,7 @@ fn ext_edge_rapid_monotonic() {
 }
 
 /// TX-counter persistence: across a reset, the counter must resume AT the persisted reserve
-/// watermark (jump ahead, never reuse): the EEPROM anti-replay contract (docs/radio.md).
+/// watermark (jump ahead, never reuse): the EEPROM anti-replay contract (docs/firmware/radio.md).
 #[test]
 #[ignore = "requires the HIL bench (TOWER Radio Dongle on the fixture port)"]
 fn ext_net_persist_counter_resumes() {

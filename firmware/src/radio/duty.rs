@@ -1,4 +1,4 @@
-//! EU duty-cycle governor (docs/radio.md).
+//! EU duty-cycle governor (docs/firmware/radio.md).
 //!
 //! A token-bucket over **transmitted airtime**: the bucket holds up to `cap_ms`
 //! of airtime and refills at `permil`‰ of wall-clock (10‰ = 1 %). A TX is allowed

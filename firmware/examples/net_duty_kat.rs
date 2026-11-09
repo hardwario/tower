@@ -1,4 +1,4 @@
-//! net_duty_kat: deterministic check of the EU duty governor (docs/radio.md).
+//! net_duty_kat: deterministic check of the EU duty governor (docs/firmware/radio.md).
 //! Single board, no radio: exercises the token-bucket accounting with known
 //! values and reports a verdict per check, then `all checks PASS` (or `some checks
 //! FAIL`), so the airtime logic is verified independently of timing.
@@ -15,11 +15,11 @@ use tower::{app, board::Board};
 async fn run(_b: Board) {
     let mut pass = true;
 
-    // ToA: ⌈(4+4+1+30+2)·8·1000/19200⌉ = ⌈17.08⌉ = 18 ms (rounded up, docs/radio.md).
+    // ToA: ⌈(4+4+1+30+2)·8·1000/19200⌉ = ⌈17.08⌉ = 18 ms (rounded up, docs/firmware/radio.md).
     let toa = frame_toa_ms(30);
     verdict("time on air of 30 B", toa, 18);
     pass &= toa == 18;
-    // Max non-bulk frame (96 B): ⌈44.58⌉ = 45 ms (docs/radio.md).
+    // Max non-bulk frame (96 B): ⌈44.58⌉ = 45 ms (docs/firmware/radio.md).
     let toa_max = frame_toa_ms(96);
     verdict("time on air of 96 B", toa_max, 45);
     pass &= toa_max == 45;

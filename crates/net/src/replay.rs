@@ -1,22 +1,22 @@
-//! Per-peer replay-acceptance rule (moved from `firmware/src/radio/net/mod.rs::recv`; firmware/docs/radio.md
+//! Per-peer replay-acceptance rule (moved from `firmware/src/radio/net/mod.rs::recv`; docs/firmware/radio.md
 //! §Security model).
 //!
 //! One [`ReplayLane`] per sender: its last-seen counter plus the lazy-persist cadence. The rule
 //! is **strictly monotonic**: `counter > last_seen` is fresh, `== last_seen` is the benign
 //! retransmit of the most-recently-accepted transfer (re-ACK, don't re-deliver), `< last_seen`
 //! is a replay (drop silently, replay state untouched). There is no in-RAM acceptance window
-//! below last-seen; the "replay window ≤ P across a reboot" (firmware/docs/storage.md) is purely the
+//! below last-seen; the "replay window ≤ P across a reboot" (docs/firmware/storage.md) is purely the
 //! persistence lag: after a reset a lane restored from EEPROM can be up to [`P`] accepts
 //! behind, so up to `P` already-seen counters are re-accepted once each.
 //!
-//! **Ordering contract (firmware/docs/radio.md):** on receive, CCM-verify FIRST (this authenticates the
+//! **Ordering contract (docs/firmware/radio.md):** on receive, CCM-verify FIRST (this authenticates the
 //! header, including the counter), *then* [`classify`](ReplayLane::classify) and (only for a
 //! fresh frame) [`accept`](ReplayLane::accept). A forged high counter therefore can't poison
 //! replay state: it never reaches this kernel, because CCM rejects the frame before the network
 //! layer acts. Callers must preserve that order.
 
 /// Receiver last-seen lazy-persist period: the replay window across a reboot is
-/// ≤ `P` transfers (firmware/docs/radio.md).
+/// ≤ `P` transfers (docs/firmware/radio.md).
 pub const P: u32 = 32;
 
 // The accept cadence counter is a wrapping `u8` (RAM: it shares the lane's padding with the
@@ -63,7 +63,7 @@ pub enum ReplayVerdict {
 /// One sender's replay lane: last-seen counter + accepted-transfer count since the last
 /// persist + re-ACKs spent on the current last-seen. On key install last-seen starts at **0**
 /// (the TX counter starts at 1; `0` = "never sent"); a re-key resets both ends (a new key is a
-/// disjoint nonce space, firmware/docs/radio.md).
+/// disjoint nonce space, docs/firmware/radio.md).
 #[derive(Debug, Clone, Copy)]
 pub struct ReplayLane {
     /// Replay last-seen: the highest counter accepted from this sender.
@@ -114,7 +114,7 @@ impl ReplayLane {
 
     /// Record acceptance of `counter` (a [`Fresh`](ReplayVerdict::Fresh) frame): advance the
     /// lane's last-seen. Returns whether the caller must lazy-persist the lane now: true once
-    /// every [`P`] accepts (replay window ≤ P across a reboot, firmware/docs/radio.md).
+    /// every [`P`] accepts (replay window ≤ P across a reboot, docs/firmware/radio.md).
     #[must_use = "a true return means the lane must be persisted now"]
     pub fn accept(&mut self, counter: u32) -> bool {
         self.accept_every(counter, P as u8)
@@ -125,7 +125,7 @@ impl ReplayLane {
     /// wrapping `u8`, exact only for a divisor of 256); `1` persists on **every** accept, which
     /// leaves no replay window across a reboot at the cost of one record per accepted frame:
     /// right for a receiver that hears few frames (a sleeping node's downlinks), wrong for a
-    /// busy one (a gateway's uplinks, firmware/docs/storage.md).
+    /// busy one (a gateway's uplinks, docs/firmware/storage.md).
     #[must_use = "a true return means the lane must be persisted now"]
     pub fn accept_every(&mut self, counter: u32, period: u8) -> bool {
         self.last_seen = counter;
@@ -291,7 +291,7 @@ mod tests {
 
     /// The rule is strictly monotonic: ANY counter below last-seen is a replay; there is no
     /// in-RAM acceptance window for "slightly older" frames (out-of-order delivery below the
-    /// high-water mark is rejected by design; firmware/docs/radio.md).
+    /// high-water mark is rejected by design; docs/firmware/radio.md).
     #[test]
     fn older_counters_rejected() {
         let mut lane = ReplayLane::new(0);
@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(lane.classify(8), ReplayVerdict::Fresh); // lane unchanged by the probe
     }
 
-    /// Reboot-window semantics (firmware/docs/storage.md): the lane persisted its last-seen up to P
+    /// Reboot-window semantics (docs/firmware/storage.md): the lane persisted its last-seen up to P
     /// accepts ago, so a lane restored from that stale value re-accepts the last ≤ P counters
     /// once each, and each re-accept slides the lane so a *second* copy is rejected.
     #[test]
@@ -393,7 +393,7 @@ mod tests {
 
     /// u32 ceiling: once last-seen sits at 2³²−1 nothing can ever be fresh again: the strict
     /// `counter > last_seen` rule rejects every further frame, so the link fails **closed**
-    /// (firmware/docs/radio.md: the TX side saturates at the same ceiling; re-key well before).
+    /// (docs/firmware/radio.md: the TX side saturates at the same ceiling; re-key well before).
     #[test]
     fn u32_boundary_fails_closed() {
         let mut lane = ReplayLane::new(u32::MAX - 1);

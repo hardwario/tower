@@ -224,7 +224,3 @@ writes executed on `DFU_GETSTATUS`, the same zero-erased flash, RDP, injectable 
 `dfu::flash`, `dfu::erase` and `dfu::info` the same way, and the layout parser is tested on
 STM32L0, F0 and F4 strings.
 Linux builds need `libudev-dev` + `pkg-config` (the `serialport` dependency).
-
-## License
-
-MIT © 2026 HARDWARIO a.s. (see the repository's root `LICENSE`).

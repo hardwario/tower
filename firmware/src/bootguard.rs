@@ -3,7 +3,7 @@
 //! A unit wedged in a reset loop (a persistent hang caught by the [`watchdog`](crate::watchdog),
 //! or a brown-out cycle) would otherwise rewrite per-boot EEPROM state (the console session
 //! counter, the radio TX watermark) on *every* reset, slowly grinding the data EEPROM (see
-//! `docs/storage.md`). This counts consecutive resets that never reached a healthy uptime in a
+//! `docs/firmware/storage.md`). This counts consecutive resets that never reached a healthy uptime in a
 //! **reset-surviving `.uninit` RAM word** (retained across a warm reset but never persisted, so
 //! it costs **zero EEPROM wear**) and lets the SDK stop persisting per-boot state once a loop is
 //! detected ([`console::init_session`](crate::console::init_session) does exactly that).

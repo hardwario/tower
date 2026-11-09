@@ -1,5 +1,5 @@
 //! tower-radio (`crates/radio`): the hardware-free, `no_std` radio timing / CCM / compliance
-//! logic the TOWER firmware SDK builds on (firmware/docs/radio.md): duty-cycle token buckets,
+//! logic the TOWER firmware SDK builds on (docs/firmware/radio.md): duty-cycle token buckets,
 //! frame time-on-air, the FHSS hop permutation and the AES-CCM core ([`ccm`]). It is not the
 //! SPIRIT1 radio driver: that is the SDK's `tower::radio`, which re-exports these types.
 //!
@@ -35,7 +35,7 @@ pub const FHSS_DWELL_BURST_MS: u32 = 100;
 pub const FHSS_PERMIL: u32 = 10;
 
 /// Time-on-air (ms) of a frame whose FIFO payload is `frame_len` bytes, including
-/// the HW-generated preamble (4) + sync (4) + length (1) + CRC (2), see firmware/docs/radio.md. Rounded
+/// the HW-generated preamble (4) + sync (4) + length (1) + CRC (2), see docs/firmware/radio.md. Rounded
 /// up so the regulatory budget is never under-counted. `const` so radio timing constants can be
 /// derived from it at compile time.
 ///

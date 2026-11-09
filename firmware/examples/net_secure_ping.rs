@@ -18,7 +18,7 @@ use tower::radio::frame::{self, flags};
 use tower::radio::{RfConfig, Spirit1, config};
 use tower::{app, board::Board};
 
-// Throwaway shared test identity/key (real keys come from provisioning, docs/radio.md).
+// Throwaway shared test identity/key (real keys come from provisioning, docs/firmware/radio.md).
 #[cfg(feature = "role-node")]
 const NODE_ADDR: u32 = 0x1111_1111;
 const GW_ADDR: u32 = 0x2222_2222;
@@ -62,7 +62,7 @@ async fn run(b: Board) {
 #[cfg(feature = "role-node")]
 async fn node(radio: &mut Spirit1, ccm: &mut Ccm) -> ! {
     info!(target: "secping", "node 0x{:08x}: sending a CCM-sealed data frame every 1 s", NODE_ADDR);
-    let mut counter: u32 = 1; // counter 0 = "never sent" (docs/radio.md)
+    let mut counter: u32 = 1; // counter 0 = "never sent" (docs/firmware/radio.md)
     loop {
         let mut payload = [0u8; 12];
         payload[..5].copy_from_slice(b"ping ");

@@ -181,7 +181,7 @@ pub(crate) const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// session bump: ~5.2 s with the whole chip (ISRs included) frozen before the boot
 /// proceeds (bench-proven 2026-07-05: flip counter 1:1 with slow boots; the LSE
 /// crystal was ruled out by CSR forensics + a drive-strength sweep; see
-/// firmware/docs/storage.md). The wait is event-driven (returns the moment
+/// docs/firmware/storage.md). The wait is event-driven (returns the moment
 /// the Hello decodes), so the ceiling costs nothing on fast boots; a short ceiling
 /// silently degraded `exec --reset` into firing the command at a device that
 /// hadn't even booted yet.

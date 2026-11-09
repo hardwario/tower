@@ -1,5 +1,5 @@
 //! radio_thermostat (TOWER IoT Kit product firmware): a room thermostat with a weekly program, a
-//! sleeping taf node (`docs/taf.md`) that reports its **heating demand**; a `radio_control` relay
+//! sleeping taf node (`docs/firmware/taf.md`) that reports its **heating demand**; a `radio_control` relay
 //! (or any MQTT automation) switches the boiler on `state/demand`.
 //!
 //! Modes (`mode`): **auto** follows the weekly program; a setpoint set by hand
@@ -14,7 +14,7 @@
 //!
 //! Headless for now: the room temperature comes from the Core Module's TMP112, settings and
 //! state go over MQTT. The LCD Module's screen does not fit next to the radio yet: its driver
-//! keeps a 2.6 KB frame in RAM that this node lacks (`docs/taf.md`, "RAM"), so the screen waits
+//! keeps a 2.6 KB frame in RAM that this node lacks (`docs/firmware/taf.md`, "RAM"), so the screen waits
 //! for a frame-less (page mode) LCD driver.
 //!
 //!   just run app radio_thermostat
