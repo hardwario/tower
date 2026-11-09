@@ -170,6 +170,13 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
 
     let mut provision: Option<Provisioned> =
         kv.scope(NS_APP).get::<Provisioned>(KEY_PROVISION).ok().flatten();
+    if kind.class == Class::Listening && provision.is_some_and(|p| p.band == mgmt::BAND_US915) {
+        // A board paired on US 915 under a sleeping app, reflashed with a listening one: that
+        // pairing cannot be used (see below), so the node starts unpaired on the `band` setting,
+        // and pairing again on EU 868 replaces the record.
+        log::error!(target: "node", "pairing on US 915 unused (listening: EU 868 only), pair again");
+        provision = None;
+    }
     let (band, channel) = match provision {
         Some(p) => (
             if p.band == mgmt::BAND_US915 {
@@ -445,6 +452,8 @@ impl Node {
         }
         if self.describe_due && self.provision.is_some() {
             self.describe_due = false;
+            // Its full report stands for a pending one too (one full report per wake).
+            self.report_due = false;
             if self.send_info().await {
                 self.full_report_after_info().await;
             }
@@ -506,9 +515,18 @@ impl Node {
                 return;
             }
         }
+        if self.downlink_due {
+            // An ACK announced a downlink: the settings go after it (a full report's states went,
+            // or are no news to the policy and wait for the next heartbeat).
+            if full {
+                super::PARAMS_DUE.store(true, Ordering::Relaxed);
+            }
+            WAKE.signal(());
+            return;
+        }
         // One writer clears it (this loop): a load and a store are enough on the M0+. A setting
         // report that fails is not retried: the next heartbeat carries them all.
-        if !(full || super::PARAMS_DUE.load(Ordering::Relaxed)) || self.downlink_due {
+        if !(full || super::PARAMS_DUE.load(Ordering::Relaxed)) {
             return;
         }
         super::PARAMS_DUE.store(false, Ordering::Relaxed);
@@ -524,7 +542,13 @@ impl Node {
                     break;
                 }
             }
-            if chunk.is_empty() || !self.send_report(chunk, now_s).await || self.downlink_due {
+            if chunk.is_empty() || !self.send_report(chunk, now_s).await {
+                return;
+            }
+            if self.downlink_due {
+                // The rest after the downlink: all the settings again (a chunk or two).
+                super::PARAMS_DUE.store(true, Ordering::Relaxed);
+                WAKE.signal(());
                 return;
             }
         }
