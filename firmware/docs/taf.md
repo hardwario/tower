@@ -54,7 +54,9 @@ What every taf app does, so a user meets the same device whatever it measures:
   set is confirmed by a report.
 - **Classes**: a **sleeping** node wakes the radio only to send, and hears its downlinks in the
   second after each uplink; a **listening** node (mains powered) keeps receiving in 50 ms slices,
-  and the gateway sends it a queued command at once (EU868; US915 still waits for an uplink).
+  and the gateway sends it a queued command at once. EU868 only for now: a listening node does not
+  follow the US915 hop schedule yet, and one fixed channel at full power is not allowed there
+  (FCC §15.247), so a listening kind refuses US915 (no pairing, no provisioning, radio off).
 - **Time**: a kind with `time` asks the host for the wall clock in its `Info` (at boot and every 12
   hours); the runtime keeps it as an offset over the monotonic clock (never touching the RTC
   calendar, which the radio's hopping depends on).

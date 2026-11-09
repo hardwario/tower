@@ -970,6 +970,7 @@ fn settings_set(ctx: &mut Ctx<'_>, args: &[&str]) -> Outcome {
     };
     match ctx.kv.set_bytes(s.key, &buf[..n]) {
         Ok(()) => {
+            crate::taf::setting_changed();
             match generated {
                 Some(a) => {
                     // Name the entropy source, so a TRNG that failed to start (and fell back to

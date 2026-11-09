@@ -264,10 +264,11 @@ other like any schema change. Every property is one of:
 **When values arrive.** A node reports a state when it changes (for `temperature`, by at least
 its `report-delta`; it samples every `report-period`), and everything again with each
 `heartbeat`, settings included, so a subscriber has the whole picture within one heartbeat.
-A setting changed on the node's USB console shows here with the next heartbeat. A node that
-boots, or whose bridge restarted, publishes its states once its kind is known (the bridge asks
-an unknown node to describe itself). When a board is flashed with another app (its kind
-changes), the old app's `state` topics are cleared.
+A setting changed on the node's USB console (or by a remote `system settings set`) is reported
+at once, with the node's other settings. A node that boots, or whose bridge restarted,
+publishes its states once its kind is known (the bridge asks an unknown node to describe
+itself). When a board is flashed with another app (its kind changes), the old app's `state`
+topics are cleared.
 
 #### The kinds
 
@@ -311,8 +312,10 @@ and its own:
 **Classes.** A **sleeping** node (battery) keeps its radio off between uplinks: a `set` or a
 remote shell line waits on the gateway until its next uplink (at the latest its `heartbeat`).
 A **listening** node (mains powered) keeps receiving, and the gateway sends it a queued
-command at once: a `set` takes effect within about a second. EU868 only for now: on US915 the
-gateway does not send to a listening node at once yet, so its commands wait for its next uplink.
+command at once: a `set` takes effect within about a second. EU868 only for now: a listening
+node does not follow the US915 hop schedule yet, so it refuses that band (it stays off the air).
+A listening node that does not answer is tried again later, longer per miss (up to about a
+minute), while the commands for the other nodes go ahead.
 
 **Time.** A kind that schedules by the wall clock (`control`, `thermostat`) asks for the time in
 its `NodeInfo` (at boot and every 12 hours); the bridge answers with this host's clock and

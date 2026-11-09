@@ -229,6 +229,9 @@ static INBOX: Channel<CriticalSectionRawMutex, (u8, i32), 2> = Channel::new();
 static BUTTON: Channel<CriticalSectionRawMutex, button::Event, 4> = Channel::new();
 /// Something for the runtime to look at (a report, an event, a pairing request).
 static WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// A setting changed outside the runtime: the next report carries the settings
+/// ([`setting_changed`]).
+static PARAMS_DUE: AtomicBool = AtomicBool::new(false);
 /// Raised by every clock sync, for [`clock_synced`].
 static CLOCK_SYNCED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static PAIR_REQUEST: AtomicBool = AtomicBool::new(false);
@@ -318,6 +321,14 @@ pub fn led_on() -> bool {
 pub fn local_time() -> Option<Local> {
     let now = crate::clock::now_ms();
     critical_section::with(|cs| SHARED.borrow_ref(cs).clock.local(now))
+}
+
+/// A setting was stored (the shell's `system settings set` on the USB console or over the radio,
+/// or a `set` from the host): report the settings now, so the host sees the change before the
+/// next heartbeat. A no-op wake in an app without the taf runtime.
+pub(crate) fn setting_changed() {
+    PARAMS_DUE.store(true, Ordering::Relaxed);
+    WAKE.signal(());
 }
 
 /// Wait until the host syncs the wall clock (what [`local_time`] reads changed: an app that

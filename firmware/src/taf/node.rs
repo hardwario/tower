@@ -112,6 +112,8 @@ struct Node {
     /// A `Describe` asked for the `Info` and a full report (sent by the loop, not from inside the
     /// downlink window that received it).
     describe_due: bool,
+    /// The full report an `Info` was followed by waits for the downlinks its ACK announced.
+    report_due: bool,
     /// The last uplink's ACK said a downlink waits: the loop opens the receive window as soon as
     /// the uplink returns (the gateway sends ~20 ms after its ACK), and senders stop until then. A
     /// window served from inside the uplink stacked the remote shell's future on top of every
@@ -233,8 +235,11 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
         provision = None;
     }
     if listening && band == Band::Us915 {
-        // The hop schedule would have to be followed continuously: not done yet (TODO.md).
-        warn!(target: "node", "a listening node runs EU 868 only for now; staying on the band's fixed channel");
+        // A listening node would have to follow the hop schedule continuously, which is not done
+        // yet (TODO.md). Anything else on US 915 is one fixed channel at full power, which FCC
+        // §15.247 does not allow outside the bench (docs/radio.md): no radio at all instead.
+        log::error!(target: "node", "a listening node runs on EU 868 only for now, radio off (set band eu868)");
+        provision = None;
     } else if let Some(p) = provision
         && band == Band::Us915
     {
@@ -261,6 +266,7 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
         resync_after: Instant::MIN,
         counts: heapless::Vec::new(),
         describe_due: false,
+        report_due: false,
         downlink_due: false,
         pair_due: None,
     };
@@ -353,14 +359,10 @@ impl Node {
             if let Some(ev) = self.btn.and_then(|b| b.try_event()) {
                 self.on_button(ev).await;
             }
-            if WAKE.signaled() {
-                WAKE.reset();
-                self.on_wake().await;
-            }
-            if let Some(frame) = console::mgmt_try_next() {
-                let cable = Cable::parse(&frame);
-                self.on_cable(cable).await;
-            }
+            // The timers before the app's reports, as in the sleeping loop: at boot the `Info` goes
+            // first and the app's first values ride in its full report. A `Report` ahead of the
+            // `Info` would make a host that does not know the kind yet ask for a `Describe`, and
+            // then answer two `Info`s (two time syncs, two full reports).
             let repair_due = self
                 .pressed_at
                 .filter(|_| self.provision.is_some())
@@ -371,6 +373,14 @@ impl Node {
                 || self.cue_until.is_some_and(|t| now >= t)
             {
                 self.on_timer(repair_due).await;
+            }
+            if WAKE.signaled() {
+                WAKE.reset();
+                self.on_wake().await;
+            }
+            if let Some(frame) = console::mgmt_try_next() {
+                let cable = Cable::parse(&frame);
+                self.on_cable(cable).await;
             }
             self.run_pairing().await;
         }
@@ -439,6 +449,10 @@ impl Node {
                 self.full_report_after_info().await;
             }
         }
+        if self.report_due && !self.downlink_due && self.provision.is_some() {
+            self.report_due = false;
+            self.send_reports(true).await;
+        }
         while !self.downlink_due
             && let Ok((id, value)) = super::EVENTS.try_receive()
         {
@@ -473,9 +487,10 @@ impl Node {
         }
     }
 
-    /// Send the reported values that are due (all of them, and every setting, when `full`), one
-    /// `Report` of up to [`MAX_REPORT`] at a time: built per uplink, so no list of every value is
-    /// held across the uplink's awaits (RAM: the runtime's future is the app's largest static).
+    /// Send the reported values that are due (all of them when `full`), and every setting when
+    /// `full` or when one changed behind the runtime's back (the USB console), one `Report` of up
+    /// to [`MAX_REPORT`] at a time: built per uplink, so no list of every value is held across the
+    /// uplink's awaits (RAM: the runtime's future is the app's largest static).
     async fn send_reports(&mut self, full: bool) {
         let now_s = Instant::now().as_secs();
         let mut from = Some(0);
@@ -491,9 +506,12 @@ impl Node {
                 return;
             }
         }
-        if !full {
+        // One writer clears it (this loop): a load and a store are enough on the M0+. A setting
+        // report that fails is not retried: the next heartbeat carries them all.
+        if !(full || super::PARAMS_DUE.load(Ordering::Relaxed)) || self.downlink_due {
             return;
         }
+        super::PARAMS_DUE.store(false, Ordering::Relaxed);
         let mut props = self
             .kind
             .all()
@@ -556,7 +574,8 @@ impl Node {
     /// (then after it).
     async fn full_report_after_info(&mut self) {
         if self.downlink_due {
-            self.describe_due = true;
+            // Not the `Info` again: a second one would ask the host for the time twice.
+            self.report_due = true;
             WAKE.signal(());
         } else {
             self.send_reports(true).await;
@@ -718,8 +737,10 @@ impl Node {
             Access::Param => {
                 if super::set_param(id, value) {
                     info!(target: "node", "set {} = {}", prop.name, prop.ty.display(value));
-                    super::report(id, value);
-                    super::force_report(id);
+                    // Confirmed by the settings report (all of them, after the downlinks), not
+                    // through a report slot: a setting in a slot would be resent from there,
+                    // stale, once the console changed it, and would take a slot a state needs.
+                    super::setting_changed();
                     let _ = INBOX.try_send((id, value));
                 } else {
                     warn!(target: "node", "set {} not stored", prop.name);
@@ -738,10 +759,19 @@ impl Node {
 
     // ---- pairing ------------------------------------------------------------------------------
 
+    /// A listening node on US 915: refused until it can follow the hop schedule (see `start`).
+    fn us915_refused(&self) -> bool {
+        self.kind.class == Class::Listening && self.band == Band::Us915
+    }
+
     /// OTA pairing: the handshake for `window`, then the commit round; the credentials persist
     /// only once the gateway acknowledged an uplink under the new key. The pairing in force before
     /// stays unless the new one commits.
     async fn pair(&mut self, window: Duration) -> Option<(Provisioned, u32, bool)> {
+        if self.us915_refused() {
+            log::error!(target: "node", "pairing: a listening node runs on EU 868 only for now (set band eu868)");
+            return None;
+        }
         let current = self.provision;
         // US 915: pairing is a fixed-channel exchange on the rendezvous carrier at FCC §15.249
         // power, off the hop schedule; the gateway parks there for its window.
@@ -954,7 +984,10 @@ impl Node {
             Cable::Provision(req_id, p) => {
                 let override_addr = p.addr.filter(|&a| a != 0);
                 let effective_addr = override_addr.unwrap_or(self.addr);
+                // A listening node runs on EU 868 only for now (see `start`).
+                let us915_refused = self.kind.class == Class::Listening && p.band == mgmt::BAND_US915;
                 if p.band > mgmt::BAND_US915
+                    || us915_refused
                     || p.channel > mgmt::MAX_CHANNEL
                     || is_reserved_addr(effective_addr)
                     || !peer_addr_valid(p.gw_addr, effective_addr)
@@ -991,7 +1024,7 @@ impl Node {
                 cortex_m::peripheral::SCB::sys_reset();
             }
             Cable::JoinOpen(req_id, window) => {
-                if window == 0 {
+                if window == 0 || self.us915_refused() {
                     respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                     return;
                 }
