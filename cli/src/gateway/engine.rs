@@ -12,7 +12,7 @@
 //! `gateway/cmd` RPC surface, stream radio diagnostics, and keep `gateway/status`
 //! truthful across serial/MQTT link changes and gateway reboots (session_id).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tower_protocol::mgmt::{self, MgmtOp, NodeEntry, NodeKey, Paired, QueueEntry, QueueId};
@@ -50,6 +50,8 @@ const SHELL_REPLY_TIMEOUT_TICKS: u64 = 30;
 const STATS_EVERY_TICKS: u64 = 10;
 /// The gateway firmware's queue TTL when a `ShellReq` leaves `ttl` at 0, in seconds.
 const DEFAULT_QUEUE_TTL: u64 = 3600;
+/// The queue TTL of a `NodeCmd::Time`, in seconds (see [`Engine::queue_cmd`]).
+const TIME_TTL_S: u16 = 30;
 /// Slack past a queued (undelivered) shell command's TTL before the host gives up on it
 /// without the gateway's `TX_EXPIRED` report: the backstop for a report lost to a missed
 /// gateway reboot or a serial drop, so a pending entry can never live forever.
@@ -238,6 +240,8 @@ enum OpKind {
     QueuePush {
         node: u32,
         shell: Option<ShellOrigin>,
+        /// A `NodeCmd::Time` (at most one is kept queued per node: see [`Engine::queue_time`]).
+        time: bool,
     },
     QueueList,
     /// Engine-internal `QueueList` reconciling the pending mirror with the device queue
@@ -324,11 +328,22 @@ struct NodeMirror {
 struct PropMirror {
     /// Retained `state/{prop}` topics published for the node, cleared when it leaves.
     retained: Vec<String>,
+    /// The gateway queue items of this node's taf commands (`Set`, `Time`, `Describe`) not yet
+    /// delivered: kept by a queue resync (only an item no one queued is stale), and the one
+    /// `Time` among them replaced by a newer one.
+    queued: Vec<QueuedCmd>,
     /// Values that arrived before the node's kind was known (the bridge started after the
     /// node's last `NodeInfo`): published once its `NodeInfo` arrives.
     stash: Vec<Stashed>,
     /// A `Describe` is queued for the node (cleared by its `NodeInfo`).
     describe_asked: bool,
+}
+
+/// A taf command waiting in the gateway's queue ([`PropMirror::queued`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct QueuedCmd {
+    item: u16,
+    time: bool,
 }
 
 /// One property value held in [`PropMirror::stash`].
@@ -444,6 +459,19 @@ fn json<T: serde::Serialize>(v: &T) -> Vec<u8> {
 }
 
 /// Firmware name → device kind: `radio_button` → `button`.
+/// The names of the retained properties (states, controls, settings) of every kind that are not
+/// `keep`'s: what a node may have published under another app.
+fn foreign_states(keep: Option<&props::Kind>) -> impl Iterator<Item = &'static str> {
+    props::KINDS
+        .iter()
+        .flat_map(|k| k.all())
+        .filter(|p| p.access != props::Access::Event)
+        .map(|p| p.name)
+        .filter(move |name| keep.is_none_or(|k| k.prop_named(name).is_none()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+}
+
 fn kind_of(firmware_name: &str) -> String {
     firmware_name
         .strip_prefix("radio_")
@@ -846,10 +874,16 @@ impl Engine {
         let Some(i) = self.nodes.iter().position(|n| n.entry.addr == src) else {
             return; // unregistered node: forwarded but not ours to manage
         };
-        if !self.nodes[i].kind.is_empty() && self.nodes[i].kind != kind {
-            // The board was flashed with another app: the old app's properties are not its
-            // properties any more. Clear them; the report after this `NodeInfo` publishes the new.
-            for topic in self.nodes[i].props.retained.drain(..) {
+        if self.nodes[i].kind != kind {
+            // The first `NodeInfo` this run, or the board was flashed with another app: clear
+            // every state that is not one of this kind's (another app's, left retained by this
+            // run or by an earlier one: on an external broker retained topics outlive this
+            // process). The report after this `NodeInfo` publishes the kind's own.
+            let mut clear: BTreeSet<String> = self.nodes[i].props.retained.drain(..).collect();
+            clear.extend(
+                foreign_states(props::kind(&kind)).map(|name| topics::node_state(&self.prefix, src, name)),
+            );
+            for topic in clear {
                 out.push(Output::Publish {
                     topic,
                     payload: Vec::new(),
@@ -998,18 +1032,55 @@ impl Engine {
         let Ok(n) = radio::encode_node_cmd(cmd, &mut env) else {
             return false;
         };
+        let time = matches!(cmd, NodeCmd::Time { .. });
         let op = MgmtOp::QueuePush {
             node_addr: node,
-            ttl: 0,
+            // The node takes the time as "now" when it arrives: one that waited for the node's
+            // next uplink would set its clock back by the wait, for the 12 hours until it asks
+            // again. So it lapses soon (it rides the uplinks that follow the asking `NodeInfo`);
+            // a node that missed it asks again with its next one.
+            ttl: if time { TIME_TTL_S } else { 0 },
             data: &env[..n],
         };
-        self.issue(out, OpKind::QueuePush { node, shell: None }, op, None)
-            .is_some()
+        self.issue(
+            out,
+            OpKind::QueuePush {
+                node,
+                shell: None,
+                time,
+            },
+            op,
+            None,
+        )
+        .is_some()
     }
 
     /// Send `node` the wall-clock time (this host's clock and UTC offset), which it asked for in
     /// its `NodeInfo`.
     fn queue_time(&mut self, out: &mut Vec<Output>, node: u32) {
+        // One time sync queued at a time: an older one still waiting would arrive after this one
+        // and set the clock back.
+        if let Some(i) = self.nodes.iter().position(|n| n.entry.addr == node) {
+            let old: Vec<u16> = self.nodes[i]
+                .props
+                .queued
+                .iter()
+                .filter(|q| q.time)
+                .map(|q| q.item)
+                .collect();
+            self.nodes[i].props.queued.retain(|q| !q.time);
+            for item in old {
+                self.issue(
+                    out,
+                    OpKind::QueueDropStale,
+                    MgmtOp::QueueDrop {
+                        node_addr: node,
+                        item: Some(item),
+                    },
+                    None,
+                );
+            }
+        }
         let now = chrono::Local::now();
         let unix = u32::try_from(now.timestamp()).unwrap_or(0);
         let utc_offset_min = (now.offset().local_minus_utc() / 60) as i16;
@@ -1183,6 +1254,9 @@ impl Engine {
         let Some(i) = self.nodes.iter().position(|n| n.entry.addr == node) else {
             return;
         };
+        if matches!(outcome, mgmt::TX_DELIVERED | mgmt::TX_EXPIRED) {
+            self.nodes[i].props.queued.retain(|q| q.item != item);
+        }
         match outcome {
             mgmt::TX_DELIVERED => {
                 if let Some(p) = self.nodes[i].pending.iter_mut().find(|p| p.item == item) {
@@ -1376,10 +1450,18 @@ impl Engine {
                 }
             }
             (OpKind::PairingCancel, None) => self.rpc_ok(out, &p, serde_json::Value::Null),
-            (OpKind::QueuePush { node, shell }, None) => {
+            (OpKind::QueuePush { node, shell, time }, None) => {
                 let node = *node;
                 match postcard::from_bytes::<QueueId>(&p.data) {
                     Ok(qid) => {
+                        if shell.is_none()
+                            && let Some(i) = self.nodes.iter().position(|n| n.entry.addr == node)
+                        {
+                            self.nodes[i].props.queued.push(QueuedCmd {
+                                item: qid.item,
+                                time: *time,
+                            });
+                        }
                         if let Some(origin) = shell
                             && let Some(i) = self.nodes.iter().position(|n| n.entry.addr == node)
                         {
@@ -1454,7 +1536,7 @@ impl Engine {
                     self.rpc_err(out, &p, e);
                 }
             }
-            (OpKind::QueuePush { node, shell }, Some(e)) => {
+            (OpKind::QueuePush { node, shell, .. }, Some(e)) => {
                 let node = *node;
                 if let Some(origin) = shell {
                     // The shell's generic failure, as for every bridge-reported end: the
@@ -1669,6 +1751,7 @@ impl Engine {
             OpKind::QueuePush {
                 node,
                 shell: Some(origin),
+                time: false,
             },
             op,
             None,
@@ -2146,6 +2229,7 @@ impl Engine {
             OpKind::QueuePush {
                 node,
                 shell: Some(origin),
+                ..
             } => {
                 let rsp = payload::ShellRsp {
                     id: origin.rpc,
@@ -2300,14 +2384,20 @@ impl Engine {
                 self.publish_pending(out, i);
             }
         }
+        // A tracked taf command the gateway no longer holds was delivered or lapsed meanwhile.
+        for n in &mut self.nodes {
+            let addr = n.entry.addr;
+            n.props.queued.retain(|q| device.contains(&(addr, q.item)));
+        }
         let stale: Vec<(u32, u16)> = device
             .iter()
             .copied()
             .filter(|&(node, item)| {
-                !self
-                    .nodes
-                    .iter()
-                    .any(|n| n.entry.addr == node && n.pending.iter().any(|p| p.item == item))
+                !self.nodes.iter().any(|n| {
+                    n.entry.addr == node
+                        && (n.pending.iter().any(|p| p.item == item)
+                            || n.props.queued.iter().any(|q| q.item == item))
+                })
             })
             .collect();
         if stale.is_empty() {
@@ -2339,12 +2429,19 @@ impl Engine {
         for pd in pending {
             self.shell_error(out, id, pd, "node removed");
         }
+        // Every state any kind has, not only those this run published (an external broker keeps
+        // the retained topics of an earlier run).
+        let states: BTreeSet<String> = retained
+            .iter()
+            .cloned()
+            .chain(foreign_states(None).map(|name| topics::node_state(&self.prefix, id, name)))
+            .collect();
         for topic in [
             topics::node(&self.prefix, id),
             topics::node_shell_pending(&self.prefix, id),
         ]
         .into_iter()
-        .chain(retained.iter().cloned())
+        .chain(states)
         {
             out.push(Output::Publish {
                 topic,
@@ -2836,6 +2933,105 @@ mod tests {
         with_node(e, id, "kitchen", 0);
         let out = e.handle(info_uplink(id, 1, fw));
         drain(e, out);
+    }
+
+    /// Every request the engine issued: sent now (in `out`) or waiting for the request slot.
+    fn all_ops(e: &Engine, out: &[Output]) -> Vec<String> {
+        out.iter()
+            .filter_map(sent_op)
+            .map(|(_, op)| op)
+            .chain(queued_ops(e))
+            .collect()
+    }
+
+    #[test]
+    fn a_queue_resync_keeps_the_taf_commands_waiting_for_a_sleeping_node() {
+        let mut e = engine();
+        with_kind(&mut e, 0xAB12, "radio_thermostat");
+        let out = e.handle(mqtt_in("tower/nodes/0x0000ab12/set/setpoint", b"21.5"));
+        let (req, op) = out.iter().find_map(sent_op).expect("the set is queued");
+        assert!(op.contains("QueuePush"), "{op}");
+        let qid = postcard::to_stdvec(&QueueId { item: 7 }).unwrap();
+        let out = reply(&mut e, req, MGMT_OK, &qid);
+        drain(&mut e, out);
+        // A resync (a serial blip, a management timeout) lists it with a leftover (item 9).
+        let mut out = Vec::new();
+        e.reconcile_queue(&[(0xAB12, 7), (0xAB12, 9)], &mut out);
+        let ops = all_ops(&e, &out);
+        assert!(
+            ops.iter()
+                .any(|o| o.contains("QueueDrop") && o.contains("Some(9)")),
+            "{ops:?}"
+        );
+        assert!(
+            !ops.iter().any(|o| o.contains("Some(7)")),
+            "the set stays queued: {ops:?}"
+        );
+        // Delivered: no longer tracked, so a later listing holding item 7 means a leftover.
+        let _ = e.handle(Input::SerialFrame(SerialMsg::Stat(RadioStat::Tx {
+            dest: 0xAB12,
+            item: 7,
+            outcome: mgmt::TX_DELIVERED,
+            ack_rssi: None,
+        })));
+        assert!(e.nodes[0].props.queued.is_empty());
+    }
+
+    #[test]
+    fn a_time_sync_lapses_soon_and_replaces_one_still_queued() {
+        let mut e = engine();
+        with_kind(&mut e, 0xAB12, "radio_thermostat");
+        let mut out = Vec::new();
+        e.queue_time(&mut out, 0xAB12);
+        let (req, op) = out.iter().find_map(sent_op).expect("the time is queued");
+        assert!(
+            op.contains("QueuePush") && op.contains(&format!("ttl: {TIME_TTL_S}")),
+            "{op}"
+        );
+        let qid = postcard::to_stdvec(&QueueId { item: 11 }).unwrap();
+        let out = reply(&mut e, req, MGMT_OK, &qid);
+        drain(&mut e, out);
+        // The node asked again (another `NodeInfo`) before the first was delivered.
+        let mut out = Vec::new();
+        e.queue_time(&mut out, 0xAB12);
+        let ops = all_ops(&e, &out);
+        assert!(
+            ops.iter()
+                .any(|o| o.contains("QueueDrop") && o.contains("Some(11)")),
+            "the older time is dropped: {ops:?}"
+        );
+        assert_eq!(
+            ops.iter().filter(|o| o.contains("QueuePush")).count(),
+            1,
+            "{ops:?}"
+        );
+    }
+
+    #[test]
+    fn states_left_by_an_earlier_run_are_cleared() {
+        // A fresh bridge on a broker that still holds another app's retained states for the node:
+        // its first `NodeInfo` clears every state that is not one of its kind's.
+        let mut e = engine();
+        with_node(&mut e, 0xAB12, "kitchen", 0);
+        let out = e.handle(info_uplink(0xAB12, 1, "radio_thermostat"));
+        assert_eq!(
+            publishes(&out, "tower/nodes/0x0000ab12/state/holdoff"),
+            [&b""[..]]
+        );
+        assert_eq!(publishes(&out, "tower/nodes/0x0000ab12/state/relay"), [&b""[..]]);
+        assert!(publishes(&out, "tower/nodes/0x0000ab12/state/setpoint").is_empty());
+        drain(&mut e, out);
+        // Removed: every state of every kind is cleared, published by this run or not.
+        let removed = e.handle(mqtt_in(
+            "tower/gateway/cmd",
+            br#"{"id":"r1","op":"node_remove","params":{"addr":"0x0000ab12"}}"#,
+        ));
+        let (req_id, _) = removed.iter().find_map(sent_op).expect("NodeRemove goes out");
+        let out = reply(&mut e, req_id, MGMT_OK, &[]);
+        for leaf in ["setpoint", "holdoff", "relay", "heartbeat"] {
+            let topic = format!("tower/nodes/0x0000ab12/state/{leaf}");
+            assert_eq!(publishes(&out, &topic), [&b""[..]], "{topic}");
+        }
     }
 
     #[test]

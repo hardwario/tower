@@ -319,7 +319,9 @@ minute), while the commands for the other nodes go ahead.
 
 **Time.** A kind that schedules by the wall clock (`control`, `thermostat`) asks for the time in
 its `NodeInfo` (at boot and every 12 hours); the bridge answers with this host's clock and
-UTC offset. Keep the gateway host's clock right (NTP).
+UTC offset. Keep the gateway host's clock right (NTP). The answer lapses after 30 s on the
+gateway (a time delivered late would set the node's clock back by the delay): a node that
+missed it asks again with its next `NodeInfo`.
 
 ### `nodes/{addr}/state/{prop}`
 
