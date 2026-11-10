@@ -49,6 +49,25 @@ pub fn reacquire_slack_ms(since_beacon_ms: u64, max_ms: u64) -> Option<u64> {
     (slack <= max_ms).then_some(slack)
 }
 
+/// Where a **tracked** beacon puts its slot's boundary on the node's clock (ms): the earlier of
+/// what the beacon's receive time says (`measured_ms`) and what the clock predicted from the last
+/// anchor (`predicted_ms`), the prediction let later by the drift the clock may have collected in
+/// the `since_beacon_ms` since that anchor.
+///
+/// A receive time is taken when the node's task runs after the radio's interrupt, so it can only
+/// be late, never early: by nothing most of the time, by tens of milliseconds when another task
+/// holds the processor just then (an EEPROM write). Anchoring on such a stamp moves every later
+/// beacon window late by as much; past the window's guard the node hears no beacon any more,
+/// cannot correct itself, and rescans (24 to 48 s) after [`REACQUIRE_LIMIT`] misses. A node that
+/// tracks every beacon (a listening one) met this about once in forty downlinks on the bench.
+/// Lateness beyond the drift is therefore not believed; an earlier stamp always is, so one
+/// on-time beacon undoes whatever lateness the anchor still holds.
+#[must_use]
+pub fn tracked_boundary_ms(predicted_ms: u64, measured_ms: u64, since_beacon_ms: u64) -> u64 {
+    let drift = since_beacon_ms.saturating_mul(DRIFT_PPM).div_ceil(1_000_000);
+    measured_ms.min(predicted_ms.saturating_add(drift))
+}
+
 /// Master epoch bump rule: the next session's epoch is the stored one + 1 (starting from 1 on a
 /// virgin store), saturating, strictly newer than any previous session's, so nodes reject the
 /// older sessions' beacons as replays.
@@ -232,6 +251,35 @@ mod tests {
         // Longer, and the predicted slot may be the wrong one: rescan.
         assert_eq!(reacquire_slack_ms(1_200_001, 120), None);
         assert_eq!(reacquire_slack_ms(u64::MAX, 120), None);
+    }
+
+    /// A beacon stamped late (the task ran late) must not move the slot clock late; one stamped
+    /// earlier than predicted is believed; real drift is followed.
+    #[test]
+    fn a_late_stamp_does_not_move_the_tracked_boundary() {
+        // On time, one slot after the anchor: the measurement stands (within the drift's 1 ms).
+        assert_eq!(tracked_boundary_ms(10_300, 10_300, 300), 10_300);
+        assert_eq!(tracked_boundary_ms(10_300, 10_301, 300), 10_301);
+        // Stamped 40 ms late (an EEPROM write held the processor): the prediction is kept, let
+        // later by one slot's drift only.
+        assert_eq!(tracked_boundary_ms(10_300, 10_340, 300), 10_301);
+        // Earlier than predicted (the anchor itself was late, or the clocks drift apart the
+        // other way): taken as it is.
+        assert_eq!(tracked_boundary_ms(10_300, 10_288, 300), 10_288);
+        // After a sleep the clock may have drifted far: 15 minutes allow 90 ms either way.
+        assert_eq!(tracked_boundary_ms(900_000, 900_050, 900_000), 900_050);
+        assert_eq!(tracked_boundary_ms(900_000, 900_200, 900_000), 900_090);
+        // A run of late stamps walks the boundary by the drift only, a millisecond a slot at
+        // most, and the first on-time beacon takes it back.
+        let mut anchor = 0u64;
+        for slot in 1..=5u64 {
+            anchor = tracked_boundary_ms(anchor + 300, slot * 300 + 40, 300);
+        }
+        assert_eq!(anchor, 5 * 300 + 5);
+        assert_eq!(tracked_boundary_ms(anchor + 300, 6 * 300, 300), 6 * 300);
+        // No overflow at the ends.
+        assert_eq!(tracked_boundary_ms(u64::MAX, u64::MAX, u64::MAX), u64::MAX);
+        assert_eq!(tracked_boundary_ms(0, 0, 0), 0);
     }
 
     use super::*;

@@ -40,6 +40,7 @@ use crate::clock;
 // accept/reject/lock decision there. Zero behavioural change on target.
 use tower_net::epoch::{
     EpochGate, MissVerdict, ScanVerdict, TrackVerdict, next_master_epoch, reacquire_slack_ms,
+    tracked_boundary_ms,
 };
 // The hop-slot plan of a listening node (when in a slot the master sends it a frame of its own,
 // and how the node cuts its listening around that time) is the host-testable `tower_net::slot`
@@ -833,9 +834,20 @@ impl<const P: usize> Net<P> {
     /// subtraction only, never `slot·SLOT` (which would underflow). (The miss counter
     /// was already reset by the gate decision that admitted this beacon.)
     fn fhss_lock(&mut self, slot_abs: u32, t_rx: Lse) {
-        let boundary = t_rx
+        let mut boundary = t_rx
             .checked_sub(Duration::from_millis(beacon_toa_ms()))
             .unwrap_or(t_rx);
+        // Tracking: `t_rx` is when this task ran after the radio's interrupt, late by whatever
+        // held the processor meanwhile (an EEPROM write: tens of ms). A boundary that much later
+        // than the clock predicted is not believed (`tracked_boundary_ms`): anchored on it, every
+        // later beacon window would open after its beacon began, and the node would hear none.
+        if let Some(anchor) = self.fhss.anchor
+            && slot_abs >= anchor.0
+        {
+            let predicted = Self::fhss_slot_start(anchor, slot_abs);
+            let since = t_rx.saturating_duration_since(self.fhss.last_beacon);
+            boundary = Lse(tracked_boundary_ms(predicted.0, boundary.0, since.as_millis()));
+        }
         self.fhss.anchor = Some((slot_abs, boundary));
         self.fhss.state = FhssState::Synced;
         self.fhss.last_beacon = t_rx;
