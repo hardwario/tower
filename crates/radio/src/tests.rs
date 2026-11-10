@@ -166,6 +166,70 @@ fn hop_channel_fixed_across_cycles_bounds_occupancy() {
     }
 }
 
+/// A listening node's downlink goes out in the hop slot that is current when the host queued
+/// it, on that slot's channel (the firmware's `Net::fhss_master_slot`), never on a channel of
+/// its own. Two things follow for §15.247, and are pinned here.
+///
+/// The occupancy bound stays the schedule's: the most a master transmits in one slot (its
+/// beacon, the ACK of an uplink, one full-length downlink) fits the slot, and the channel
+/// comes round a whole cycle later, so no traffic pattern, not even every command falling on
+/// one slot of the cycle, puts more than a slot's worth on a channel in 20 s.
+///
+/// And the channels are used evenly: commands whose timing has nothing to do with the schedule
+/// spread their downlinks over the 80 channels as the slots themselves do.
+#[test]
+fn downlinks_in_the_current_slot_keep_the_dwell_bound_and_use_the_channels_evenly() {
+    /// FCC §15.247: at most 0.4 s on a channel within any 20 s.
+    const DWELL_LIMIT_MS: u64 = 400;
+    let beacon = frame_toa_ms(14 + 9 + 8) as u64; // header + beacon payload + tag
+    let ack = frame_toa_ms(14 + 6 + 8) as u64;
+    let downlink = frame_toa_ms(96) as u64; // a full-length frame
+    assert!(
+        beacon + ack + downlink <= FHSS_SLOT_MS,
+        "a slot's transmissions fit the slot"
+    );
+    // And a slot is all a channel gets per cycle, which is longer than the 20 s window.
+    const { assert!(FHSS_SLOT_MS <= DWELL_LIMIT_MS) };
+    const { assert!(FHSS_N as u64 * FHSS_SLOT_MS > FHSS_WINDOW_MS as u64) };
+
+    // A day of commands 0.5 to 60 s apart (a xorshift stream: independent of the hop schedule),
+    // each sent in the slot after the one it arrived in.
+    const SEED: u32 = 0x2468_ace1;
+    let (mut x, mut t_ms) = (0x9e37_79b9u32, 0u64);
+    let mut sent = [0u64; FHSS_N];
+    let mut commands = 0u64;
+    while t_ms < 24 * 3600 * 1000 {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        t_ms += 500 + u64::from(x % 59_500);
+        let slot = t_ms / FHSS_SLOT_MS + 1;
+        let cycle = (slot / FHSS_N as u64) as u32;
+        let ch = hop_channel::<FHSS_N>(SEED, cycle, (slot % FHSS_N as u64) as u8);
+        sent[ch as usize] += 1;
+        commands += 1;
+    }
+    let mean = commands / FHSS_N as u64;
+    let (min, max) = (*sent.iter().min().unwrap(), *sent.iter().max().unwrap());
+    assert!(mean > 30, "enough commands per channel to compare ({mean})");
+    assert!(
+        min * 2 > mean && max < mean * 2,
+        "downlinks per channel {min}..{max} around {mean}: no channel is favoured"
+    );
+    // With the beacons (one per channel and cycle) the transmitted airtime is flatter still.
+    let cycles = t_ms / (FHSS_N as u64 * FHSS_SLOT_MS);
+    let airtime = |n: u64| cycles * beacon + n * downlink;
+    let mean_airtime = cycles * beacon + commands * downlink / FHSS_N as u64;
+    assert!(
+        airtime(max) * 10 < mean_airtime * 11,
+        "busiest channel within 10 % of the mean"
+    );
+    assert!(
+        airtime(min) * 10 > mean_airtime * 9,
+        "quietest channel within 10 % of the mean"
+    );
+}
+
 // --- frame_toa_ms: never under-counts ----------------------------------------------------
 
 /// Time-on-air is rounded **up** (div_ceil), so the reported airtime is always ≥ the exact

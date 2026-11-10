@@ -11,6 +11,11 @@
 //! attempt the gateway could not transmit at all (its duty budget, a busy channel) says nothing
 //! about the node: it waits the first pause, without counting a miss ([`held`](ListenBackoff::held)).
 //!
+//! On US 915 the gateway hops (FCC §15.247) and an attempt is spread over hop slots: a slot
+//! carries one transmission, on that slot's channel, where a duty-mode attempt repeats within
+//! its send. So a transmission that went unanswered is repeated in the next slot, and only the
+//! last of [`SLOT_TRIES`] counts as the node's miss ([`slot_missed`](ListenBackoff::slot_missed)).
+//!
 //! Time is the caller's (`now_ms`): kernel style, host-testable.
 
 use crate::queue::QUEUE_CAP;
@@ -19,12 +24,17 @@ use crate::queue::QUEUE_CAP;
 pub const FIRST_BACKOFF_MS: u64 = 2_000;
 /// The longest pause between attempts (the queue's TTL ends them).
 pub const MAX_BACKOFF_MS: u64 = 64_000;
+/// Transmissions of one attempt while hopping (US 915), each in a hop slot of its own: as many as
+/// a duty-mode attempt sends (the gateway's `DOWNLINK_REPS`).
+pub const SLOT_TRIES: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Entry {
     addr: u32,
     retry_at_ms: u64,
     misses: u8,
+    /// Unanswered transmissions of the attempt under way while hopping ([`SLOT_TRIES`]).
+    tries: u8,
 }
 
 /// The retry times of the listening nodes that missed their last attempt: at most one per queue
@@ -43,41 +53,52 @@ impl ListenBackoff {
 
     /// Whether `addr` may be tried at `now_ms`.
     pub fn due(&self, addr: u32, now_ms: u64) -> bool {
-        self.entries
-            .iter()
-            .flatten()
-            .find(|e| e.addr == addr)
-            .is_none_or(|e| now_ms >= e.retry_at_ms)
+        self.find(addr).is_none_or(|e| now_ms >= e.retry_at_ms)
     }
 
     /// `addr` did not take its downlink at `now_ms`: its next attempt waits, longer per miss.
     pub fn missed(&mut self, addr: u32, now_ms: u64) {
-        let misses = self.misses(addr).saturating_add(1);
+        let misses = self.find(addr).map_or(0, |e| e.misses).saturating_add(1);
         let pause = (FIRST_BACKOFF_MS << (misses - 1).min(5)).min(MAX_BACKOFF_MS);
         self.put(Entry {
             addr,
             retry_at_ms: now_ms + pause,
             misses,
+            tries: 0,
         });
+    }
+
+    /// `addr` did not answer a transmission in a hop slot at `now_ms` (US 915). The attempt goes
+    /// on in the next slot (the node stays due) until [`SLOT_TRIES`] went unanswered: that is
+    /// the attempt's [`missed`](Self::missed).
+    pub fn slot_missed(&mut self, addr: u32, now_ms: u64) {
+        let (misses, tries) = self.find(addr).map_or((0, 0), |e| (e.misses, e.tries));
+        if tries + 1 >= SLOT_TRIES {
+            self.missed(addr, now_ms);
+        } else {
+            self.put(Entry {
+                addr,
+                retry_at_ms: now_ms,
+                misses,
+                tries: tries + 1,
+            });
+        }
     }
 
     /// The gateway could not transmit `addr`'s downlink at `now_ms` (its duty budget, a busy
     /// channel): no news about the node, so no miss counted, but not again at once either.
     pub fn held(&mut self, addr: u32, now_ms: u64) {
-        let misses = self.misses(addr);
+        let (misses, tries) = self.find(addr).map_or((0, 0), |e| (e.misses, e.tries));
         self.put(Entry {
             addr,
             retry_at_ms: now_ms + FIRST_BACKOFF_MS,
             misses,
+            tries,
         });
     }
 
-    fn misses(&self, addr: u32) -> u8 {
-        self.entries
-            .iter()
-            .flatten()
-            .find(|e| e.addr == addr)
-            .map_or(0, |e| e.misses)
+    fn find(&self, addr: u32) -> Option<&Entry> {
+        self.entries.iter().flatten().find(|e| e.addr == addr)
     }
 
     fn put(&mut self, entry: Entry) {
@@ -157,6 +178,41 @@ mod tests {
             "the misses before it still count"
         );
         assert!(b.due(1, 200_000 + 4 * FIRST_BACKOFF_MS));
+    }
+
+    #[test]
+    fn a_hop_slot_attempt_goes_on_in_the_next_slot_before_it_counts_as_a_miss() {
+        let mut b = ListenBackoff::new();
+        // The first unanswered transmission: again in the next slot, no pause.
+        b.slot_missed(1, 1_000);
+        assert!(b.due(1, 1_000), "the next slot");
+        // The second: the attempt missed, the first pause.
+        b.slot_missed(1, 1_300);
+        assert!(!b.due(1, 1_300 + FIRST_BACKOFF_MS - 1));
+        assert!(b.due(1, 1_300 + FIRST_BACKOFF_MS));
+        // The next attempt has its own two transmissions, and its miss doubles the pause.
+        b.slot_missed(1, 10_000);
+        assert!(b.due(1, 10_000));
+        b.slot_missed(1, 10_300);
+        assert!(!b.due(1, 10_300 + 2 * FIRST_BACKOFF_MS - 1), "the pause doubles");
+        assert!(b.due(1, 10_300 + 2 * FIRST_BACKOFF_MS));
+        // A slot the gateway could not send in pauses the attempt and keeps its count.
+        b.slot_missed(1, 20_000);
+        b.held(1, 20_300);
+        assert!(!b.due(1, 20_300 + FIRST_BACKOFF_MS - 1));
+        b.slot_missed(1, 30_000);
+        assert!(
+            !b.due(1, 30_000 + 4 * FIRST_BACKOFF_MS - 1),
+            "the attempt's second transmission: the node's third miss"
+        );
+        // A delivery, or an uplink from the node, starts over.
+        b.clear(1);
+        b.slot_missed(1, 50_000);
+        assert!(b.due(1, 50_000));
+        // Another node's attempts are its own.
+        b.slot_missed(2, 50_000);
+        b.slot_missed(1, 50_300);
+        assert!(!b.due(1, 50_300) && b.due(2, 50_300));
     }
 
     #[test]

@@ -10,6 +10,11 @@
 //!   (`TX_EXPIRED`), never delivered stale.
 //! * **Stable u16 ids** (monotonic from 1 per boot, 0 reserved = "not a queue item"
 //!   in `RadioStat::Tx`): the dequeue handle and the TX-report correlator.
+//! * **The node's class rides with its items** ([`Queue::set_listening`]): the gateway sends a
+//!   listening node's item at once, and asks which node that is on every turn of its loop
+//!   ([`Queue::listening_due`]). The class is a flag of the node's registry record, in EEPROM,
+//!   where reading it costs a few ms: too long for a hop master, which has about 40 ms between
+//!   two slots. So the gateway marks the items when it queues one and when the flag changes.
 //!
 //! Time is the caller's (`now_ms` in every method): kernel style, host-testable.
 
@@ -43,12 +48,19 @@ pub struct Item {
     /// Pool-insertion order: the per-node FIFO key (ids alone would break on u16 wrap).
     order: u32,
     len: u8,
+    /// The item's node keeps its receiver on ([`Queue::set_listening`]).
+    listening: bool,
     buf: [u8; MAX_ITEM],
 }
 
 impl Item {
     pub fn data(&self) -> &[u8] {
         &self.buf[..self.len as usize]
+    }
+
+    /// Whether the item is for a listening node (it goes out at once, not after an uplink).
+    pub fn listening(&self) -> bool {
+        self.listening
     }
 
     pub fn age(&self, now_ms: u64) -> u16 {
@@ -84,7 +96,9 @@ impl Queue {
         }
     }
 
-    /// Enqueue `data` for `node_addr`; returns the item id (the dequeue / TX-report handle).
+    /// Enqueue `data` for `node_addr`; returns the item id (the dequeue / TX-report handle). The
+    /// item waits for the node's uplink until [`set_listening`](Self::set_listening) says the
+    /// node listens.
     pub fn push(&mut self, node_addr: u32, ttl: u16, data: &[u8], now_ms: u64) -> Result<u16, PushError> {
         if data.is_empty() || data.len() > MAX_ITEM {
             return Err(PushError::BadPayload);
@@ -115,10 +129,30 @@ impl Queue {
             ttl,
             order: self.next_order,
             len: data.len() as u8,
+            listening: false,
             buf,
         });
         self.next_order = self.next_order.wrapping_add(1);
         Ok(id)
+    }
+
+    /// Mark every item queued for `node_addr` with the node's class: `listening` (its registry
+    /// record is not flagged sleeping) or not. Call it after a push for the node and whenever
+    /// its flag changes, with the record at hand.
+    pub fn set_listening(&mut self, node_addr: u32, listening: bool) {
+        for it in self.slots.iter_mut().flatten() {
+            if it.node_addr == node_addr {
+                it.listening = listening;
+            }
+        }
+    }
+
+    /// A listening node to send to now: the node of a queued item marked listening that `due`
+    /// admits (the pause after a miss is over, `listen::ListenBackoff::due`). No storage access.
+    pub fn listening_due(&self, due: impl Fn(u32) -> bool) -> Option<u32> {
+        self.iter()
+            .find(|it| it.listening && due(it.node_addr))
+            .map(|it| it.node_addr)
     }
 
     /// The next (oldest, non-expired) item for `node_addr`, if any: what to transmit on
@@ -205,6 +239,39 @@ mod tests {
         assert_ne!(wrapped, old, "an id still in use is skipped");
         assert_eq!(q.pop(wrapped).unwrap().node_addr, NODE_B);
         assert_eq!(q.pop(old).unwrap().node_addr, NODE_A);
+    }
+
+    /// A node's class marks all of its items, the ones queued before the mark too, and follows
+    /// the node's flag when it changes; only a marked item whose node is due is sent at once.
+    #[test]
+    fn a_listening_nodes_items_are_marked_and_found_when_due() {
+        let mut q = Queue::new();
+        q.push(NODE_A, 60, b"a1", 0).unwrap();
+        q.push(NODE_B, 60, b"b1", 0).unwrap();
+        assert_eq!(
+            q.listening_due(|_| true),
+            None,
+            "an item waits for an uplink by default"
+        );
+        q.push(NODE_B, 60, b"b2", 0).unwrap();
+        q.set_listening(NODE_B, true);
+        assert!(q.iter().filter(|it| it.node_addr == NODE_B).all(Item::listening));
+        assert!(!q.peek_for(NODE_A, 1).unwrap().listening());
+        assert_eq!(q.listening_due(|_| true), Some(NODE_B));
+        assert_eq!(
+            q.listening_due(|addr| addr != NODE_B),
+            None,
+            "pausing after a miss"
+        );
+        // The host flagged the node sleeping after all: its items wait for an uplink again.
+        q.set_listening(NODE_B, false);
+        assert_eq!(q.listening_due(|_| true), None);
+        // Several listening nodes: the first one that is due.
+        q.set_listening(NODE_A, true);
+        q.set_listening(NODE_B, true);
+        assert_eq!(q.listening_due(|addr| addr != NODE_A), Some(NODE_B));
+        // The flag costs a pool slot no room (104 B without it; the pool is RAM-resident).
+        assert!(core::mem::size_of::<Option<Item>>() <= 104);
     }
 
     #[test]

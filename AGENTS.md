@@ -39,7 +39,7 @@ prefixed packages; the Rust crate name is `tower_X`).
 |------|---------|------------|
 | `crates/protocol` | `tower-protocol` | The wire contract (`no_std`): COBS + CRC-32 framing, the postcard console / management / radio schemas, the taf apps' property tables (`props`), the schema tags derived from them; plus the device console's TX ring of encoded payloads (`ring`). |
 | `crates/kv` | `tower-kv` | Power-loss-safe EEPROM key-value codec behind the SDK's `tower::storage::Kv` (`no_std`, hardware-free). |
-| `crates/net` | `tower-net` | Decision kernels of the radio network layer's security invariants (replay, TX-counter watermark, ACK, FHSS epoch, pairing, CCM nonce). Not the network layer itself (`tower::radio::net`). |
+| `crates/net` | `tower-net` | Decision kernels of the radio network layer's security invariants (replay, TX-counter watermark, ACK, FHSS epoch, pairing, CCM nonce), and the hop-slot plan of a listening node (`slot`). Not the network layer itself (`tower::radio::net`). |
 | `crates/radio` | `tower-radio` | Radio timing / CCM / compliance logic (duty token buckets, time-on-air, FHSS hop permutation). Not the SPIRIT1 driver (`tower::radio`). |
 | `crates/gateway` | `tower-gateway` | Decision core of the Radio Dongle gateway firmware (node-registry codec, downlink queue). Not the host `tower gateway` MQTT bridge (that is in `cli`). |
 | `crates/shell` | `tower-shell` | Pure kernels behind the device shell (`addr` parser + PRNG, pagination window, TAB completion). Not the shell itself (`tower::shell`). |

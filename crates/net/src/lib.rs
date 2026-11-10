@@ -22,6 +22,9 @@
 //! (AES-128-CCM): the nonce-uniqueness argument" in its Design rationale section. In
 //! particular: a CCM nonce counter is NEVER reused, even across power loss (the counter
 //! resumes *at* the persisted watermark), and near u32 exhaustion the link fails **closed**.
+//!
+//! One kernel is about timing, not security: [`slot`], the hop-slot plan of a listening node
+//! (when the hop master sends it a frame, and how the node cuts its listening around that).
 
 #![no_std]
 
@@ -32,4 +35,5 @@ pub mod handshake;
 pub mod nonce;
 pub mod pairing;
 pub mod replay;
+pub mod slot;
 pub mod txctr;
