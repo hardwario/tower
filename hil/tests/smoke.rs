@@ -22,7 +22,7 @@ fn smoke_ccm_kat_all_pass() {
 
     // Reset into the app so the one-shot verdict is emitted while we're listening, then decode.
     // The console pulses NRST on its OWN handle (a second open of the same tty fails under
-    // serialport 4.9's exclusive flock, Console::reset_into_app) and drops pre-reset input.
+    // serialport 4.10's exclusive flock, Console::reset_into_app) and drops pre-reset input.
     let mut console = Console::open(&bench.dongle.serial).expect("open Dongle console");
     console.reset_into_app().expect("reset the Dongle into the app");
 

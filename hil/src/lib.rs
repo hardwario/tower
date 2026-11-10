@@ -504,7 +504,7 @@ pub enum Frame {
 /// checkout) fails [`next`](Self::next) fast.
 pub struct Console {
     // Option only so the host unit tests can build a port-less Console (`for_test`). The reset
-    // pulse drives the modem lines on THIS handle (Console::reset_into_app); serialport 4.9 flocks
+    // pulse drives the modem lines on THIS handle (Console::reset_into_app); serialport 4.10 flocks
     // the tty on every open, so a second open while the console is attached fails with EWOULDBLOCK.
     port: Option<Box<dyn serialport::SerialPort>>,
     decoder: FrameDecoder,
@@ -676,7 +676,7 @@ impl Console {
     }
 
     /// Pulse NRST so the board reboots into its application, WITHOUT re-opening the tty (a second
-    /// open fails on serialport 4.9, which flocks the tty on every open). The reset only toggles
+    /// open fails on serialport 4.10, which flocks the tty on every open). The reset only toggles
     /// modem lines, so the console's 115200 8N1 frame format is untouched.
     ///
     /// Line sequence + timings are tower-flasher's `Port::reset_into_app` exactly (RTS=T/DTR=F asserts

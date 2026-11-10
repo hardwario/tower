@@ -31,7 +31,7 @@ fn radio_net_confirmed_delivered_and_acked() {
 
     // Concurrent capture: open both consoles, reset both into the app, then read a window.
     // Each console pulses NRST on its own handle (Console::reset_into_app); a second open of an
-    // attached tty fails under serialport 4.9's exclusive flock.
+    // attached tty fails under serialport 4.10's exclusive flock.
     let mut node = Console::open(&bench.core.serial).expect("open node console");
     let mut gw = Console::open(&bench.dongle.serial).expect("open gateway console");
     gw.reset_into_app().expect("reset gateway");
