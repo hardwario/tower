@@ -15,7 +15,8 @@
 //!   field is unused) and cable-paired installs (`MgmtOp::NodeAdd`, host-minted key);
 //! * the **downlink queue**: opaque host-built payloads (`tower-gateway::queue`,
 //!   RAM-only; a reboot drops it and the host re-queues on the `Hello` session bump)
-//!   delivered on a sleeping node's next uplink, advertised via the ACK pending flag;
+//!   delivered on a sleeping node's next uplink, advertised via the ACK pending flag, and
+//!   at once to a listening node (on US 915 in the current hop slot);
 //! * **radio diagnostics**: ambient channel RSSI at a settable cadence plus per-TX
 //!   outcome reports (`RadioStat` frames) feeding the host's running channel graph.
 //!
@@ -658,11 +659,19 @@ async fn run(b: Board) {
             }
             // 3. One hop slot (FCC §15.247): beacon at the boundary, then listen on the slot's
             //    channel; an uplink is ACKed inside and a queued downlink follows in the slot.
-            if let Some(slot) = net.fhss_master_tick().await
-                && let Some(rx) = slot.received
-            {
-                on_uplink(&rx, &mut net, &mut stats, &mut queue, now_ms).await;
-                listen_backoff.clear(rx.src);
+            //    3b on the schedule: a listening node follows it all the time, so its queued
+            //    downlink goes out in this slot, on this slot's channel (never a fixed one: the
+            //    frames spread over the channels as their slots do). The gateway then listens
+            //    only until the slot's send time; an uplink heard first has the slot, and the
+            //    downlink the next one (`Net::fhss_master_slot`).
+            let listener = listener_due(&queue, &mut listen_backoff);
+            if let Some(slot) = net.fhss_master_slot(listener.is_some()).await {
+                if let Some(rx) = slot.received {
+                    on_uplink(&rx, &mut net, &mut stats, &mut queue, now_ms).await;
+                    listen_backoff.clear(rx.src);
+                } else if let Some(node) = listener {
+                    deliver_listening(&mut net, &mut queue, &mut listen_backoff, node, now_ms).await;
+                }
             }
         } else if let Some(rx) = net.recv(RECV_SLICE).await {
             // 3. One authenticated uplink.
@@ -670,31 +679,16 @@ async fn run(b: Board) {
             listen_backoff.clear(rx.src);
         }
         // 3b. A listening node (taf, its registry flag says not sleeping) keeps its receiver on:
-        //     its queued downlink goes out now, not after its next uplink. EU 868 only (a listening
-        //     node does not follow the US 915 hop schedule yet). A node that did not take its
-        //     downlink waits before the next attempt, longer per miss, and the next listening node
-        //     that is due goes first (`tower_gateway::listen`): an absent node can neither hold up
-        //     the others' commands nor keep the radio out of receive.
-        // Forget the pauses of nodes with nothing queued, also once the queue is empty: a new
-        // command for such a node goes out at once, not after a pause its old one earned.
-        listen_backoff.retain(|addr| queue.count_for(addr) > 0);
-        if pairing.is_none() && !hopping && !queue.is_empty() {
-            let now = Instant::now().as_millis();
-            let target = queue.iter().map(|i| i.node_addr).find(|&addr| {
-                listen_backoff.due(addr, now)
-                    && registry::find(&buckets, addr).is_some_and(|r| r.flags & mgmt::NODE_FLAG_SLEEPING == 0)
-            });
-            if let Some(node) = target {
-                let now = Instant::now().as_millis();
-                match deliver(&mut net, &mut queue, node, now_ms).await {
-                    Some(SendResult::Delivered) => listen_backoff.clear(node),
-                    Some(SendResult::NotDelivered) => listen_backoff.missed(node, now),
-                    // Not transmitted (the duty budget, a busy channel): nothing learnt about the
-                    // node, so no miss, but no attempt again at once either.
-                    Some(_) => listen_backoff.held(node, now),
-                    None => {}
-                }
-            }
+        //     its queued downlink goes out now, not after its next uplink (hopping: in the slot,
+        //     above). A node that did not take its downlink waits before the next attempt, longer
+        //     per miss, and the next listening node that is due goes first
+        //     (`tower_gateway::listen`): an absent node can neither hold up the others' commands
+        //     nor keep the radio out of receive.
+        if pairing.is_none()
+            && !hopping
+            && let Some(node) = listener_due(&queue, &mut listen_backoff)
+        {
+            deliver_listening(&mut net, &mut queue, &mut listen_backoff, node, now_ms).await;
         }
 
         // A registered node's keyed join (E4) was answered inside recv(): nothing to
@@ -811,6 +805,44 @@ async fn deliver(net: &mut Net, queue: &mut Queue, node: u32, now_ms: u64) -> Op
     net.set_pending(node, queue.count_for(node) > 0);
     STAT_QUEUED.store(queue.len() as u32, Ordering::Relaxed);
     Some(result)
+}
+
+/// The listening node whose queued downlink goes out now, if any: one whose pause after a miss
+/// is over. The class is read from the queue's items, marked when they were queued
+/// (`Queue::set_listening`), not from the registry: that is an EEPROM lookup of a few ms per item,
+/// on every turn of the loop, and a hop master has about 40 ms between two slots.
+fn listener_due(queue: &Queue, backoff: &mut ListenBackoff) -> Option<u32> {
+    // Forget the pauses of nodes with nothing queued, also once the queue is empty: a new
+    // command for such a node goes out at once, not after a pause its old one earned.
+    backoff.retain(|addr| queue.count_for(addr) > 0);
+    let now = Instant::now().as_millis();
+    queue.listening_due(|addr| backoff.due(addr, now))
+}
+
+/// Send listening node `node` its oldest queued downlink now, and note the outcome for its next
+/// attempt (`tower_gateway::listen`).
+async fn deliver_listening(
+    net: &mut Net,
+    queue: &mut Queue,
+    backoff: &mut ListenBackoff,
+    node: u32,
+    now_ms: u64,
+) {
+    let hopping = net.access() == Access::Fhss;
+    let now = Instant::now().as_millis();
+    match deliver(net, queue, node, now_ms).await {
+        Some(SendResult::Delivered) => backoff.clear(node),
+        // Hopping, a slot carries one transmission: the attempt goes on in the next slot.
+        Some(SendResult::NotDelivered) if hopping => backoff.slot_missed(node, now),
+        Some(SendResult::NotDelivered) => backoff.missed(node, now),
+        // Hopping, this is `fhss_send` finding no room left in the slot (a foreign frame kept
+        // the receiver past the send time): the next slot has it.
+        Some(SendResult::DutyLimited) if hopping => {}
+        // Not transmitted (the duty budget, a busy channel): nothing learnt about the node, so
+        // no miss, but no attempt again at once either.
+        Some(_) => backoff.held(node, now),
+        None => {}
+    }
 }
 
 /// Commit a joined node: persist it (UNNAMED: the host auto-names from the first
@@ -984,6 +1016,7 @@ async fn handle_mgmt(
                     if !net.add_peer(addr, &key) {
                         warn!(target: "gateway", "node 0x{:08x} not in the peer table, its frames will not decrypt", addr);
                     }
+                    queue.set_listening(addr, flags & mgmt::NODE_FLAG_SLEEPING == 0);
                     // A moved key's replay lane resumes where its old gateway left it, so the
                     // node's recorded frames do not replay into this one (0 = nothing to do).
                     let _ = net.raise_peer_floor(addr, rx_floor);
@@ -1019,7 +1052,14 @@ async fn handle_mgmt(
                 return;
             }
             match registry::update(buckets, addr, name, flags, kind) {
-                Ok(()) => respond_empty(req_id, mgmt::MGMT_OK).await,
+                Ok(()) => {
+                    // The node's class may have changed (the host learnt it from the node's
+                    // `NodeInfo`): what is queued for it follows.
+                    if let Some(flags) = flags {
+                        queue.set_listening(addr, flags & mgmt::NODE_FLAG_SLEEPING == 0);
+                    }
+                    respond_empty(req_id, mgmt::MGMT_OK).await
+                }
                 Err(RegistryError::NotFound) => respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await,
                 Err(RegistryError::BadName) => respond_empty(req_id, mgmt::MGMT_BAD_ARG).await,
                 Err(_) => respond_empty(req_id, mgmt::MGMT_STORAGE).await,
@@ -1077,13 +1117,17 @@ async fn handle_mgmt(
             respond_empty(req_id, mgmt::MGMT_OK).await; // …and the cancel acks
         }
         MgmtOp::QueuePush { node_addr, ttl, data } => {
-            if registry::find(buckets, node_addr).is_none() {
+            // The node's class, while its record is at hand (`listener_due`).
+            let Some(listening) =
+                registry::find(buckets, node_addr).map(|rec| rec.flags & mgmt::NODE_FLAG_SLEEPING == 0)
+            else {
                 respond_empty(req_id, mgmt::MGMT_NOT_FOUND).await;
                 return;
-            }
+            };
             let ttl = if ttl == 0 { DEFAULT_TTL_S } else { ttl };
             match queue.push(node_addr, ttl, data, now_ms) {
                 Ok(item) => {
+                    queue.set_listening(node_addr, listening);
                     // Pre-mark: the pending flag must ride the ACK of the node's NEXT
                     // uplink, which is built inside recv() before we see the frame.
                     net.set_pending(node_addr, true);

@@ -1001,7 +1001,8 @@ impl<const P: usize> Net<P> {
         Ok(())
     }
 
-    /// Wait up to `ACK_WINDOW` for an ACK from `dest` acknowledging `counter`.
+    /// Wait up to `ACK_WINDOW` for an ACK from `dest` acknowledging `counter` (hopping: to the
+    /// slot's cut at the latest, [`fhss_ack_window`](Self::fhss_ack_window)).
     ///
     /// Loops until the window deadline, **ignoring** any frame that isn't the ACK we're waiting
     /// for, rather than giving up on the first one. The SPIRIT1 runs with no address filtering,
@@ -1015,7 +1016,12 @@ impl<const P: usize> Net<P> {
     async fn await_ack(&mut self, dest: u32, counter: u32) -> bool {
         let key = self.key_for(dest);
         let mut wait = AckWait::new(self.addr, dest, counter);
-        let deadline = Instant::now() + ACK_WINDOW;
+        // Hopping, the window also ends with the slot (`fhss_ack_window`).
+        let window = match self.access {
+            Access::Fhss => self.fhss_ack_window(),
+            _ => ACK_WINDOW,
+        };
+        let deadline = Instant::now() + window;
         let mut buf = [0u8; MAX_FRAME];
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());

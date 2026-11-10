@@ -204,9 +204,9 @@ own sends, in `recv` slices of 50 ms that are awaited to their end and never can
 outside, so the gateway can send it a confirmed downlink at any time and has its ACK at once.
 Both classes use the same frames, CCM, replay lanes and counter invariants (the class changes
 when a downlink may arrive, not how it is protected), and both persist the gateway's lane on
-every accepted downlink (`set_lane_persist_period(1)`, above). EU 868 only: on US 915 a
-listening node would have to follow the hop schedule continuously, which it does not yet, so a
-listening kind refuses that band.
+every accepted downlink (`set_lane_persist_period(1)`, above). On US 915 a listening node does
+the same on the gateway's hop schedule, which it follows from slot to slot also with nothing to
+send (`Net::fhss_node_listen`; *In the product apps*, below).
 
 Every TX path (DATA, ACK, FHSS beacon, bulk announce/session/request, JOIN frames) takes its
 counter from **one allocator** (`TxCounter::alloc` in `tower-net`, driven by
@@ -555,10 +555,11 @@ confirmed delivery on hopping channels; `sync lost, rescanning` and a relock on 
 `fhss_compliance` (≥50 channels used, max per-channel airtime ≪ 0.4 s, band edges
 exercised). The hop seed is key-derived (not sent on air).
 
-**In the product apps** (`radio_gateway` + `radio_button` on `us915`, docs/firmware/gateway.md):
-the gateway is the hop master, its main loop one `fhss_master_tick` per slot; a queued downlink
-goes out in the slot of the node's uplink, right after the ACK (`fhss_send` from the master). The
-node is a sleeping sensor, which the SDK serves with:
+**In the product apps** (`radio_gateway` + the taf nodes on `us915`, docs/firmware/gateway.md):
+the gateway is the hop master, its main loop one slot per turn (`fhss_master_slot`); a sleeping
+node's queued downlink goes out in the slot of the node's uplink, right after the ACK
+(`fhss_send` from the master), a listening node's in the current slot (below). A sleeping
+sensor is served with:
 
 - **Crystal time.** embassy's `Instant` runs off HSI16 while the MCU is awake (a general-purpose
   timer; the RTC only bridges STOP), about ±1 %: two boards measured 2500 ppm apart, and a
@@ -593,6 +594,64 @@ Costs: the first uplink after pairing or a reboot scans for the schedule (two pa
 rendezvous channel, 24-48 s, receiving; the push button scans at most one cycle per send and
 finishes on the next, since the gate keeps the first beacon); afterwards an uplink waits for the
 next slot's beacon (about 0.3 s) and a remote-shell reply takes one slot per chunk.
+
+**A listening node on the schedule** (`radio_control`). It has no channel of its own: between
+its sends it receives on the schedule's current channel, and when a slot is over it hops with
+the gateway and re-aligns on the next beacon (`Net::fhss_node_listen`, one receive slice per
+call; a missed beacon is ridden through by prediction, 24 in a row send it back to the
+rendezvous scan, as for any node). The gateway sends its queued downlink in the current slot,
+on that slot's channel, so these frames spread over the 80 channels as the slots do, a slot
+still holds at most its beacon, one uplink's ACK and one downlink (under 100 ms of the 300 ms
+the channel is tuned for, once per 24 s), and the occupancy bound stays the schedule's. The
+slot's plan (`tower_net::slot`, host-tested; pinned to the slot at compile time in `fhss.rs`):
+
+| Into the slot | Gateway | Listening node |
+|---|---|---|
+| 0 ms | the beacon (18 ms) | beacon window (open 10 ms early, 100 ms long) |
+| about 20 ms | listens: a node with something to send transmits now | re-aligned; receive slices from here |
+| 125 ms (`SEND_AT_MS`) | nothing heard: sends the downlink (`fhss_master_slot(true)`, then `fhss_send`) | inside one slice, 85 to 155 ms: the slices end at 35, 85, 155 and 205 ms, none within 40 ms before the send or 30 ms after it |
+| to 250 ms | waits for the ACK, to here (`fhss_ack_window`; at least 70 ms) | ACKs 20 ms after the frame (and after its replay-lane record, about 20 ms of EEPROM) |
+| 250 ms | its loop, then the next slot's retune | listening ends (nothing is sent to it later): it hops, and waits for the next beacon |
+
+- **An uplink first.** A frame heard before the send time has the slot (it is received to its
+  end and ACKed), and the downlink goes out in the next one. When that uplink was the listening
+  node's own, its ACK carried the pending flag: the node then holds its receiver on the slot,
+  in one slice to the cut, and takes the downlink there like a sleeping node (it would
+  otherwise hop away with its next uplink).
+- **Receive slices.** The node's loop looks at the button, the timers and the cable between two
+  slices of about 50 ms, as on EU 868 (the one over the send time is 70 ms). Between two slices
+  the receiver is off: about a millisecond, and up to ten or so while another task holds the
+  executor (`radio_control` renders its LED strip there), and a preamble that falls into that
+  is lost. The slices therefore end at fixed times in the slot, wherever the node began (after
+  the beacon, after a beacon it missed, after a send of its own), and none of them near the
+  gateway's send time. The margin before the send is the larger one: the node's slot clock runs
+  a few ms behind the gateway's (it takes the beacon's arrival for the boundary) and arming is
+  late by the loop's time, and both eat the time before the frame.
+- **Coming back for the hop.** The node hops when its loop comes back after the cut, which
+  leaves the loop's own work the last 50 ms of the slot. A loop that comes back later still
+  (a long console write, an EEPROM compaction) finds the receiver tuned for a slot that is over
+  (`Fhss::tuned`): it does not listen there, it hops at once and has lost the slot it came
+  back in, which the gateway's second try covers.
+- **An attempt is two slots.** A slot carries one transmission, so a downlink that goes
+  unacknowledged is repeated in the next slot before the node counts as absent and its pause
+  starts (2 s, doubling; `tower_gateway::listen`). The sender's wait for an ACK ends at the
+  slot's cut, so a node that is not there does not cost the gateway its next beacon. A node
+  with an uplink of its own in flight (waiting for its ACK, backing off after a lost one) does
+  not hear the downlink either, and takes it after that uplink or on a later try.
+- **Finding the schedule.** The node's loop scans for it (a rendezvous window of 350 ms per
+  turn, the button and the cable served between), so its uplinks wait until it has locked and
+  then go up at once: `node: hop schedule locked`, and `node: hop schedule lost, scanning` when
+  24 beacons in a row were missed. That happens when its gateway restarts, and also while the
+  gateway is off the schedule for a pairing window and its commit grace: a listening node then
+  needs 24 to 48 s after the gateway is back, where a sleeping node (which seldom ticks) still
+  finds the schedule by prediction.
+- **Latency.** A command queued on the gateway goes out at the next slot's send time (0.1 to
+  0.4 s), and the node's report follows after the beacon of the slot after that: about 0.4 to
+  0.7 s from queued to confirmed, one slot more per repeat (not measured on the bench yet).
+- **Commands on a period** that is a multiple of the 24 s hop cycle fall on the same slot of
+  the cycle, so on one channel, for as long as the two clocks agree. The occupancy bound does
+  not depend on it (one slot per cycle whatever it carries), but the airtime histogram of such
+  traffic is not flat.
 
 > **Verify before any product claim:** the exact §15.247 channel/dwell numbers
 > (FCC KDB) and that the implementation meets them under your antenna/power, the EIRP of
@@ -694,6 +753,7 @@ separate ~20 ms deaf window.
 | Reserved IDs | `0x00000000`, `0xFFFFFFFF` (never a node/gateway/peer address; a peer at our own address is refused too) |
 | Frame format marker | 1 (`bits[7:5]` of the first byte; fixed, not a version) |
 | FHSS (US) | 80 channels · 300 ms slot · 24 s cycle |
+| FHSS (US), listening node | downlink 125 ms into the current slot (`SEND_AT_MS`) · receive slices ending 35 / 85 / 155 / 205 ms into the slot, listening to 250 ms · two slots per attempt (`SLOT_TRIES`) · ACK wait to the cut, at least 70 ms |
 | EU duty cycle | ≤ 1 % per sub-band per device (governed; all TX counted) |
 
 ## Design rationale

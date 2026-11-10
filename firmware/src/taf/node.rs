@@ -5,7 +5,7 @@
 //! uplink backoff, the US 915 hop-schedule handling. What was the button app's own (its events,
 //! its sensors) is the app's task now; everything else is here, the same for every app.
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use embassy_futures::select::{Either4, select4};
 use embassy_stm32::gpio::{Level, Output, Speed};
@@ -26,7 +26,8 @@ use crate::radio::Spirit1;
 use crate::radio::config::{self, Band};
 use crate::radio::net::{
     Access as NetAccess, COMMIT_SETTLE_MS, CommitStep, FhssConfig, FhssRole, FhssState, Net, NetConfig,
-    PAIRING_WINDOW, SendResult, commit_step, gateway_network_key, is_reserved_addr, peer_addr_valid,
+    PAIRING_WINDOW, Received, SendResult, commit_step, gateway_network_key, is_reserved_addr,
+    peer_addr_valid,
 };
 use crate::shell::{self, Setting, ShellSink};
 use crate::storage::{NS_APP, NS_SHELL, Nv};
@@ -88,9 +89,13 @@ const INFO_RETRY: Duration = Duration::from_secs(30);
 /// it (once per streak).
 const UNACKED_HINT: u8 = 8;
 static UNACKED: AtomicU8 = AtomicU8::new(0);
+/// This node's kind is a listening one: for [`radio_send`], which holds no `Node`.
+static LISTENING: AtomicBool = AtomicBool::new(false);
 /// A listening node's receive slice: the longest a local event (a button, a report, the cable)
 /// waits for the radio loop. A receive is never cancelled mid-frame (that loses the frame: the
-/// replay lane has advanced), so the loop polls everything else between slices.
+/// replay lane has advanced), so the loop polls everything else between slices. (On US 915 the
+/// slices are cut by the hop slot's plan, `tower_net::slot`: about as long, up to 80 ms for the
+/// one over the gateway's send time, and placed in the slot.)
 const LISTEN_SLICE: Duration = Duration::from_millis(50);
 /// Hop-slot ticks one send may spend scanning for the schedule (US 915): ~28 s.
 const FHSS_SCAN_TICKS: u16 = 80;
@@ -148,8 +153,11 @@ struct Node {
     /// The last uplink's ACK said a downlink waits: the loop opens the receive window as soon as
     /// the uplink returns (the gateway sends ~20 ms after its ACK), and senders stop until then. A
     /// window served from inside the uplink stacked the remote shell's future on top of every
-    /// sender's (RAM: the runtime's future is the app's largest static).
+    /// sender's (RAM: the runtime's future is the app's largest static). A listening node on US
+    /// 915 takes it the same way, in its next receive slice ([`listen_slice`](Self::listen_slice)).
     downlink_due: bool,
+    /// A listening node on US 915: its loop holds the gateway's hop schedule (as last logged).
+    locked: bool,
     /// An OTA pairing to run from the loop: its window, and the cable request (`JoinOpen`) waiting
     /// for its outcome. Run at the loop's top level, not inside whatever asked for it (RAM, as for
     /// [`downlink_due`](Self::downlink_due)).
@@ -201,13 +209,6 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
 
     let mut provision: Option<Provisioned> =
         kv.scope(NS_APP).get::<Provisioned>(KEY_PROVISION).ok().flatten();
-    if kind.class == Class::Listening && provision.is_some_and(|p| p.band == mgmt::BAND_US915) {
-        // A board paired on US 915 under a sleeping app, reflashed with a listening one: that
-        // pairing cannot be used (see below), so the node starts unpaired on the `band` setting,
-        // and pairing again on EU 868 replaces the record.
-        log::error!(target: "node", "pairing on US 915 unused (listening: EU 868 only), pair again");
-        provision = None;
-    }
     let (band, channel) = match provision {
         Some(p) => (
             if p.band == mgmt::BAND_US915 {
@@ -255,6 +256,7 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
     };
     net.set_default_lane(false);
     let listening = kind.class == Class::Listening;
+    LISTENING.store(listening, Ordering::Relaxed);
     // Persist the gateway's lane on every accepted downlink, both classes. A lane that lags (the
     // gateway's period of 32) lets recorded downlinks replay into a rebooted node, and a recorded
     // `system reboot` would then reboot it again after every reboot, a loop (the remote-shell dedup
@@ -272,13 +274,12 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
         );
         provision = None;
     }
-    if listening && band == Band::Us915 {
-        // A listening node would have to follow the hop schedule continuously, which is not done
-        // yet (TASKS.md, T3). Anything else on US 915 is one fixed channel at full power, which FCC
-        // §15.247 does not allow outside the bench (docs/firmware/radio.md): no radio at all instead.
-        log::error!(target: "node", "a listening node runs on EU 868 only for now, radio off (set band eu868)");
-        provision = None;
-    } else if let Some(p) = provision
+    // US 915, both classes: every frame after the pairing goes out on the gateway's hop schedule
+    // (FCC §15.247; one fixed channel at full power is not allowed there outside the bench,
+    // docs/firmware/radio.md). A sleeping node finds the schedule with its first send, a listening
+    // one in its loop, where it then stays on it. Unpaired, a node transmits nothing but its
+    // pairing requests (at low power on the rendezvous carrier, see `pair`).
+    if let Some(p) = provision
         && band == Band::Us915
     {
         start_hopping(&mut net, p.gw_addr).await;
@@ -312,6 +313,7 @@ async fn start(base: Base, kind: &'static Kind, settings: &'static [Setting]) ->
         describe_due: false,
         report_due: false,
         downlink_due: false,
+        locked: false,
         pair_due: None,
     };
     node.paired_changed();
@@ -396,7 +398,7 @@ impl Node {
     /// The listening node's loop: receive slices, never cancelled; everything else between them.
     async fn listen(&mut self) -> ! {
         loop {
-            if let Some(rx) = self.net.recv(LISTEN_SLICE).await
+            if let Some(rx) = self.listen_slice().await
                 && Some(rx.src) == self.gw()
             {
                 let mut data = [0u8; MAX_RADIO_PAYLOAD];
@@ -418,7 +420,8 @@ impl Node {
             {
                 self.on_timer().await;
             }
-            if WAKE.signaled() {
+            // (Not while an ACK's announced downlink is awaited: the next slice takes it first.)
+            if WAKE.signaled() && !self.downlink_due {
                 WAKE.reset();
                 self.on_wake().await;
             }
@@ -428,6 +431,55 @@ impl Node {
             }
             self.run_pairing().await;
         }
+    }
+
+    /// One receive slice of the listening loop. On EU 868 the node stays on its channel. On US
+    /// 915 it stays on its gateway's hop schedule (FCC §15.247: no fixed channel there): the
+    /// slice is on the current slot's channel, and when the slot is over the node hops with the
+    /// gateway and re-aligns on its beacon (`Net::fhss_node_listen`; the slices' ends are placed
+    /// away from the time the gateway sends at, `tower_net::slot`). When the last uplink's ACK
+    /// announced a downlink, the slice runs to the end of the slot's listening: the gateway sends
+    /// it there, once, so the node must not go on to its next uplink (which hops away) first.
+    async fn listen_slice(&mut self) -> Option<Received> {
+        // Taken on either band: the flag also holds the loop's senders back, and must not outlive
+        // the slice that serves it.
+        let hold = core::mem::take(&mut self.downlink_due);
+        if self.net.access() != NetAccess::Fhss {
+            return self.net.recv(LISTEN_SLICE).await;
+        }
+        let rx = self.net.fhss_node_listen(hold).await;
+        let locked = self.net.fhss_state() == FhssState::Synced;
+        if locked != self.locked {
+            self.locked = locked;
+            // One call for both lines (flash: this code is in every taf app).
+            let (level, state) = if locked {
+                (log::Level::Info, "locked")
+            } else {
+                (log::Level::Warn, "lost, scanning")
+            };
+            log::log!(target: "node", level, "hop schedule {}", state);
+            if locked {
+                // The gateway is on the air: what waited for the schedule goes up now
+                // (`radio_ready`), without the backoff an uplink lost on the way out earned,
+                // and an `Info` lost there with it.
+                self.note(true);
+                if self.info_lost > 0 {
+                    self.next_heartbeat = Instant::now();
+                }
+                WAKE.signal(());
+            }
+        }
+        rx
+    }
+
+    /// Whether an uplink can go out now. A listening node on US 915 holds its uplinks while it
+    /// has no hop schedule: its loop is what looks for it, a slice at a time, and a send that
+    /// scanned for it instead would keep the loop (the button, the cable) waiting for up to a
+    /// hop cycle. What is due stays due and goes up once the node locked.
+    fn radio_ready(&self) -> bool {
+        self.kind.class != Class::Listening
+            || self.net.access() != NetAccess::Fhss
+            || self.net.fhss_state() == FhssState::Synced
     }
 
     async fn on_button(&mut self, ev: button::Event) {
@@ -546,7 +598,7 @@ impl Node {
         if self.gesture_due().is_some_and(|t| now >= t) {
             self.gesture_tick();
         }
-        if now >= self.next_heartbeat {
+        if now >= self.next_heartbeat && self.radio_ready() {
             // The period, doubled per undelivered uplink in a row, capped at a day.
             let period = self.heartbeat_period().as_secs();
             let wait = tower_radio::uplink_backoff_s(period, 86_400, self.misses);
@@ -567,6 +619,10 @@ impl Node {
         if PAIR_REQUEST.load(Ordering::Relaxed) {
             PAIR_REQUEST.store(false, Ordering::Relaxed);
             self.pair_due = Some((PAIRING_WINDOW, None));
+        }
+        if !self.radio_ready() {
+            // Reports and events wait for the hop schedule; `listen_slice` wakes this again.
+            return;
         }
         if self.describe_due && self.provision.is_some() {
             self.describe_due = false;
@@ -788,12 +844,16 @@ impl Node {
                 );
             }
         }
-        if !listening {
-            if self.net.last_ack().is_some_and(|m| m.pending) {
-                self.downlink_due = true;
-            } else {
-                let _ = self.net.sleep().await;
-            }
+        // A listening node on EU 868 is back in receive between any two sends and the gateway
+        // repeats its downlink, so the ACK's flag means nothing to it. Hopping, the gateway sends
+        // the announced downlink once, in this slot, and the node waits for it like a sleeping one
+        // (`listen_slice`).
+        if self.net.last_ack().is_some_and(|m| m.pending)
+            && (!listening || self.net.access() == NetAccess::Fhss)
+        {
+            self.downlink_due = true;
+        } else if !listening {
+            let _ = self.net.sleep().await;
         }
         delivered
     }
@@ -929,19 +989,10 @@ impl Node {
 
     // ---- pairing ------------------------------------------------------------------------------
 
-    /// A listening node on US 915: refused until it can follow the hop schedule (see `start`).
-    fn us915_refused(&self) -> bool {
-        self.kind.class == Class::Listening && self.band == Band::Us915
-    }
-
     /// OTA pairing: the handshake for `window`, then the commit round; the credentials persist
     /// only once the gateway acknowledged an uplink under the new key. The pairing in force before
     /// stays unless the new one commits.
     async fn pair(&mut self, window: Duration) -> Option<(Provisioned, u32, bool)> {
-        if self.us915_refused() {
-            log::error!(target: "node", "pairing: a listening node runs on EU 868 only for now (set band eu868)");
-            return None;
-        }
         let current = self.provision;
         // US 915: pairing is a fixed-channel exchange on the rendezvous carrier at FCC §15.249
         // power, off the hop schedule; the gateway parks there for its window.
@@ -968,6 +1019,8 @@ impl Node {
             self.paired_changed();
             self.misses = 0;
             self.cue_until = None;
+            // (A new gateway's schedule is still to be found: no "lost" line for the old one.)
+            self.locked = false;
             super::forget_sent();
             // The new gateway has seen nothing: the full picture, now.
             self.next_heartbeat = Instant::now();
@@ -1160,10 +1213,7 @@ impl Node {
             Cable::Provision(req_id, p) => {
                 let override_addr = p.addr.filter(|&a| a != 0);
                 let effective_addr = override_addr.unwrap_or(self.addr);
-                // A listening node runs on EU 868 only for now (see `start`).
-                let us915_refused = self.kind.class == Class::Listening && p.band == mgmt::BAND_US915;
                 if p.band > mgmt::BAND_US915
-                    || us915_refused
                     || p.channel > mgmt::MAX_CHANNEL
                     || is_reserved_addr(effective_addr)
                     || !peer_addr_valid(p.gw_addr, effective_addr)
@@ -1200,7 +1250,7 @@ impl Node {
                 cortex_m::peripheral::SCB::sys_reset();
             }
             Cable::JoinOpen(req_id, window) => {
-                if window == 0 || self.us915_refused() {
+                if window == 0 {
                     respond_empty(req_id, mgmt::MGMT_BAD_ARG).await;
                     return;
                 }
@@ -1277,7 +1327,10 @@ async fn radio_send(net: &mut Net<NODE_PEERS>, dest: u32, data: &[u8], reps: u8)
         match slot.state {
             FhssState::Scanning => {
                 scans += 1;
-                if scans >= FHSS_SCAN_TICKS || console::mgmt_pending() {
+                // A listening node does not scan inside a send: its loop does, a slice at a time
+                // (`listen_slice`), and a send that lost the schedule on its way gives the loop
+                // back at once (the button would wait a hop cycle otherwise).
+                if scans >= FHSS_SCAN_TICKS || console::mgmt_pending() || LISTENING.load(Ordering::Relaxed) {
                     return SendResult::NotSynced;
                 }
                 continue;

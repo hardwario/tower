@@ -193,6 +193,11 @@ on that slot's channel, and the downlink window is the rest of that slot.
   its last beacon, and re-anchors (receive only) 15 min after its last beacon if it has sent
   nothing. A retry skips a random 0 to 3 slots (two nodes in the same slot collide).
 - **Remote shell** replies go up one chunk per slot.
+- **A listening node** (`radio_control`) pairs the same way and then stays on the schedule,
+  receiving on each slot's channel, so its commands reach it in the current slot
+  (docs/firmware/radio.md, "A listening node on the schedule"). Its loop finds the schedule
+  itself (`node: hop schedule locked`, 24 to 48 s after a pairing, a reboot or a gateway
+  restart) and its uplinks wait until then.
 
 ### Radio duty and backoff
 
@@ -335,12 +340,18 @@ lost") and the client sends it again. Delivery: each confirmed uplink's ACK carr
 *pending* flag; when set, the node opens a short RX window and the gateway delivers one item per
 uplink cycle. A **listening** node (its registry flag `NODE_FLAG_SLEEPING` clear; the host sets
 the flag from the node's `NodeInfo.sleeping`) keeps its receiver on, so it is not waited for: the
-main loop sends its first queued item at once (EU 868 only, see docs/firmware/radio.md, "Node classes").
+main loop sends its first queued item at once. On US 915 that is in the current hop slot, on
+that slot's channel, 125 ms into the slot when no uplink was heard before (an uplink has the
+slot, and the item the next one; docs/firmware/radio.md, "A listening node on the schedule").
 A listening node that does not ACK is tried again after a pause of its own, 2 s doubling per miss
 up to 64 s and cleared by any uplink from it or a delivery (`tower_gateway::listen`; an attempt
 the gateway could not transmit at all, for its duty budget or a busy channel, waits 2 s without
 counting as a miss), while the next listening node that is due goes first: an absent node neither holds up the others'
-commands nor keeps the radio out of receive. The TTL still ends the attempts.
+commands nor keeps the radio out of receive. The TTL still ends the attempts. An attempt is one
+send with a repeat on EU 868, and two hop slots, one transmission each, on US 915. The node's
+class is marked on its queued items when one is queued and when the host changes the flag
+(`Queue::set_listening`), so the loop asks the queue, not the registry in EEPROM, which node to
+send to.
 
 ### Settings
 
@@ -476,8 +487,11 @@ see below):
    included, out of receive for ~0.5 s each time (the node does not listen mid-reply).
 
 A **listening** node (`radio_control`) gets the line at once: step 2 does not wait for an
-uplink, and the reply is back within about one radio round trip (bench: queued to answered in
-0.77 s, a property `set` reported in 0.67 s; `hil/tests/listening.rs` holds both to 2.5 s).
+uplink, and the reply is back within about one radio round trip (bench, EU 868: queued to
+answered in 0.77 s, a property `set` reported in 0.67 s; `hil/tests/listening.rs` holds both to
+2.5 s). On US 915 the line goes out in the current hop slot and the reply comes up one chunk
+per slot, a `set`'s report in the slot after the delivery (about 0.4 to 0.7 s; the same test
+runs there when the gateway's `band` is `us915`).
 
 No tab completion over the air; completion is a per-transport feature the radio transport
 doesn't offer.

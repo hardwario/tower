@@ -348,7 +348,12 @@ registered address by design (an authenticated host action: the re-provision pat
     access policy (4.4) is the control; the queue's per-node cap (2 items) bounds what one burst
     holds. A listening node absent from the air is tried again after 2 s, the pause doubling per
     miss up to 64 s (`tower_gateway::listen`), until the item's TTL ends; meanwhile the other
-    listening nodes' commands go ahead.
+    listening nodes' commands go ahead. On US 915 there is no duty budget to drain: such a
+    downlink goes out in the current hop slot, one per slot at most and inside the slot's dwell,
+    so the per-channel occupancy stays what the hop schedule bounds (FCC §15.247), and a slot
+    that carries one listens for uplinks 125 ms instead of 250 ms (uplinks start right after the
+    beacon). A publisher can still choose when its commands go out, and so which hop channel
+    carries them (`docs/firmware/radio.md`, *A listening node on the schedule*).
 
 ## 6. Questions for the reviewer
 

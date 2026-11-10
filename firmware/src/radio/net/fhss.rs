@@ -10,6 +10,12 @@
 //! the beacon's slot index + arrival time the node reconstructs the gateway's
 //! epoch, then hops in lockstep, re-aligning on each beacon.
 //!
+//! A sleeping node does that for each of its sends. A node of the **listening** class
+//! (docs/firmware/radio.md, "Node classes") follows the schedule all the time, receiving on each
+//! slot's channel between its own sends ([`Net::fhss_node_listen`]), and the master sends it a
+//! queued downlink in the current slot, after the slot's uplinks had their turn
+//! ([`Net::fhss_master_slot`]). The plan of such a slot is the `tower_net::slot` kernel's.
+//!
 //! **Compliance (sized for margin, not the limit):** 80 channels × 300 ms slot →
 //! cycle 24 s > 20 s. The hop permutation is **fixed across cycles** (see
 //! [`hop_channel`]), so a channel recurs at the *same* slot offset every cycle and its
@@ -35,8 +41,15 @@ use crate::clock;
 use tower_net::epoch::{
     EpochGate, MissVerdict, ScanVerdict, TrackVerdict, next_master_epoch, reacquire_slack_ms,
 };
+// The hop-slot plan of a listening node (when in a slot the master sends it a frame of its own,
+// and how the node cuts its listening around that time) is the host-testable `tower_net::slot`
+// kernel's; this module keeps the clock and the radio, and pins the plan to this slot below.
+use tower_net::slot::{MIN_SLICE_MS, SEND_AT_MS, listen_slice_ms};
 
-use super::{Access, KEY_FHSS_EPOCH, NS_NET, Net, Received, SendResult, TX_TIMEOUT, read_u32};
+use super::{
+    ACK_TURNAROUND, ACK_WINDOW, Access, KEY_FHSS_EPOCH, NS_NET, Net, Received, SendResult, TX_TIMEOUT,
+    read_u32,
+};
 use crate::radio::ccm::TAG_LEN;
 use crate::radio::config::{self, Band, FHSS_N, FHSS_RENDEZVOUS_CH, fhss_freq_hz};
 use crate::radio::device::RadioError;
@@ -57,7 +70,8 @@ const GUARD: Duration = Duration::from_millis(10);
 /// the boundary skipped that slot (no beacon, no listening): a product gateway beaconed only ~85 %
 /// of its slots with a 10 ms margin, and a node scanning for two consecutive passes over the
 /// rendezvous channel lost a whole 24 s cycle per skipped pass. [`Net::fhss_send`]'s slot-straddle
-/// rule keeps the same margin, so no exchange runs into the master's cut.
+/// rule keeps the same margin, so no exchange runs into the master's cut (and a sender's wait for
+/// an ACK that does not come ends there too, [`Net::fhss_ack_window`]).
 const MASTER_LOOP_BUDGET: Duration = Duration::from_millis(40);
 /// Node RX window for the per-slot beacon: opened `GUARD` early, so it spans
 /// `[boundary − GUARD, boundary − GUARD + BEACON_RX_MS]`, generously covering the
@@ -79,6 +93,32 @@ const BROADCAST: u32 = 0xFFFF_FFFF;
 
 // The hop cycle must exceed the 20 s compliance window (strict-occupancy margin).
 const _: () = assert!(FHSS_N as u64 * FHSS_SLOT_MS > 20_000);
+
+/// Where a slot's active window ends for a node: the guard before the next boundary, in ms from
+/// the slot's boundary ([`Net::fhss_slot_left`]).
+const SLOT_LISTEN_MS: u32 = (FHSS_SLOT_MS - GUARD.as_millis()) as u32;
+/// Where a slot's exchanges end: the master's cut ([`MASTER_LOOP_BUDGET`] plus the guard before the
+/// next boundary), in ms from the slot's boundary.
+const SLOT_CUT_MS: u64 = FHSS_SLOT_MS - GUARD.as_millis() - MASTER_LOOP_BUDGET.as_millis();
+/// The least a hopping sender waits for its ACK ([`Net::fhss_ack_window`]): the receiver's
+/// turnaround (20 ms), the replay-lane record a node persists before it acknowledges a downlink
+/// (15 to 20 ms of EEPROM), sealing and keying the ACK, its preamble and sync word (4 ms; the
+/// receiver then takes the frame to its end), and a margin over the 45 ms or so that makes.
+const ACK_MIN_WAIT: Duration = Duration::from_millis(70);
+/// Room a full-length confirmed exchange needs before the cut: the frame, the receiver's
+/// turnaround, its ACK (the arithmetic of [`Net::fhss_send`]'s slot-straddle rule).
+const FULL_EXCHANGE_MS: u64 =
+    duty::frame_toa_ms(MAX_FRAME) as u64 + ACK_TURNAROUND.as_millis() + beacon_toa_ms();
+
+// The listening node's slot plan (`tower_net::slot`) against this slot. The master sends such a
+// node a frame of its own `SEND_AT_MS` into the slot, on the slot's channel, so the frame adds
+// neither a channel nor a transmission outside the slot's dwell. Two things make that time work:
+// a full-length exchange started then (20 ms allowed for the code before the transmission) ends
+// before the cut, so `fhss_send`'s slot-straddle rule always lets it out;
+const _: () = assert!(SEND_AT_MS as u64 + 20 + FULL_EXCHANGE_MS <= SLOT_CUT_MS);
+// and a tracking node that missed the slot's beacon has left its beacon window (opened a guard
+// early) and armed a slice before it, so a lost beacon does not cost the downlink too.
+const _: () = assert!(BEACON_RX_MS - GUARD.as_millis() + MIN_SLICE_MS as u64 <= SEND_AT_MS as u64);
 
 /// Which side of the FHSS link this device plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +212,11 @@ pub(crate) struct Fhss {
     anchor: Option<(u32, Lse)>,
     last_beacon: Lse,
     cur_channel: u8,
+    /// The slot a node's radio is tuned for (`cur_channel` is its channel): set wherever the node
+    /// retunes on the schedule, `u32::MAX` once anything else moved the radio (a pairing off the
+    /// schedule). A listening node checks it before each receive slice
+    /// ([`Net::fhss_node_listen`]): time alone does not say where the receiver is.
+    tuned: u32,
     /// The epoch/freshness decision machine (`tower_net::epoch`): the session epoch
     /// (master boot-id / node highest-seen), the miss counter, and the `(epoch, slot)` of the
     /// held acquisition candidate.
@@ -200,6 +245,7 @@ impl Fhss {
             anchor: None,
             last_beacon: Lse(0),
             cur_channel: FHSS_RENDEZVOUS_CH,
+            tuned: u32::MAX,
             gate: EpochGate::new(),
             acquire_t0: None,
             airtime_ms: [0; FHSS_N as usize],
@@ -248,7 +294,7 @@ pub fn hop_channel(seed: u32, cycle: u32, i: u8) -> u8 {
 }
 
 /// Beacon time-on-air (ms): a sealed beacon is HDR_LEN + payload + tag bytes.
-fn beacon_toa_ms() -> u64 {
+const fn beacon_toa_ms() -> u64 {
     duty::frame_toa_ms(HDR_LEN + BEACON_PL_LEN + TAG_LEN) as u64
 }
 
@@ -289,6 +335,7 @@ impl<const P: usize> Net<P> {
                 self.fhss.state = FhssState::Scanning;
                 self.fhss.anchor = None;
                 self.fhss.cur_channel = FHSS_RENDEZVOUS_CH;
+                self.fhss.tuned = u32::MAX;
             }
         }
         Ok(())
@@ -315,10 +362,12 @@ impl<const P: usize> Net<P> {
         self.set_band(band, 0).await
     }
 
-    /// Back to hopping after [`fhss_suspend`](Self::fhss_suspend). The next tick retunes.
+    /// Back to hopping after [`fhss_suspend`](Self::fhss_suspend). The next tick retunes (a
+    /// listening node's next slice ticks first: the radio is tuned for no slot now).
     pub fn fhss_resume(&mut self) {
         if self.fhss.enabled {
             self.access = Access::Fhss;
+            self.fhss.tuned = u32::MAX;
         }
     }
 
@@ -332,13 +381,26 @@ impl<const P: usize> Net<P> {
     /// node may listen for a downlink on the channel it just sent on. Zero without a clock.
     #[must_use]
     pub fn fhss_slot_left(&self) -> Duration {
-        let Some(anchor) = self.fhss.anchor else {
-            return Duration::from_ticks(0);
-        };
-        let now = Lse::now();
-        let end = Self::fhss_slot_start(anchor, Self::fhss_cur_slot(anchor, now) + 1);
-        end.checked_sub(GUARD)
-            .map_or(Duration::from_ticks(0), |e| e.saturating_duration_since(now))
+        self.fhss_left_to(SLOT_LISTEN_MS)
+    }
+
+    /// The current slot on this device's slot clock and the time (ms) into it; `None` without a
+    /// clock.
+    fn fhss_now(&self) -> Option<(u32, u32)> {
+        // The anchor is a slot's boundary, so the time since it divides into whole slots and the
+        // time into the current one: one division (a listening node asks between any two slices).
+        let (slot, boundary) = self.fhss.anchor?;
+        let since = Lse::now().0.saturating_sub(boundary.0);
+        Some((
+            slot.wrapping_add((since / FHSS_SLOT_MS) as u32),
+            (since % FHSS_SLOT_MS) as u32,
+        ))
+    }
+
+    /// Time left until `end_ms` into the current slot. Zero past it, and without a clock.
+    fn fhss_left_to(&self, end_ms: u32) -> Duration {
+        let left = self.fhss_now().map_or(0, |(_, into)| end_ms.saturating_sub(into));
+        Duration::from_millis(left.into())
     }
 
     /// How long ago this node last heard a beacon it re-anchored on, while it holds a clock
@@ -398,6 +460,21 @@ impl<const P: usize> Net<P> {
     /// typed refusal of [`send`](Self::send) (`WrongMode`) / [`fhss_send`](Self::fhss_send)
     /// (`NotSynced`) rather than panicking the device on API misuse.
     pub async fn fhss_master_tick(&mut self) -> Option<MasterSlot> {
+        self.fhss_master_slot(false).await
+    }
+
+    /// **Master:** one slot, as [`fhss_master_tick`](Self::fhss_master_tick), or with `to_send`
+    /// one in which the master has a frame of its own for a node that listens on the schedule all
+    /// the time (a listening node's queued downlink, docs/firmware/radio.md "Node classes"). Then
+    /// it listens only until [`SEND_AT_MS`] into the slot and returns at that time: an uplink
+    /// that followed the beacon has started by then and is received to its end and ACKed
+    /// (`received`: the master's frame waits for the next slot); with nothing received the
+    /// caller [`fhss_send`](Self::fhss_send)s now, on this slot's channel. The node is well
+    /// inside a receive slice at that time, whenever it began listening
+    /// (`tower_net::slot`), and the exchange ends inside the slot (checked at compile time
+    /// above), so the slot keeps its one channel and its dwell: per-channel occupancy stays
+    /// bounded by the schedule, and the frames spread over the channels as their slots do.
+    pub async fn fhss_master_slot(&mut self, to_send: bool) -> Option<MasterSlot> {
         if self.fhss.role != FhssRole::Master {
             return None;
         }
@@ -421,17 +498,31 @@ impl<const P: usize> Net<P> {
         // its DATA + turnaround + ACK end ≥ GUARD before the slot does, so legitimate uplinks are
         // complete well inside the window and only a foreign frame can stretch it. The existing
         // ACK path (turnaround + ACK after a late frame) already had a comparable tail.)
-        let listen_until = t_start + Duration::from_millis(FHSS_SLOT_MS) - GUARD - MASTER_LOOP_BUDGET;
+        let listen_ms = if to_send { SEND_AT_MS as u64 } else { SLOT_CUT_MS };
+        let listen_until = t_start + Duration::from_millis(listen_ms);
         let now = Lse::now();
         let received = if listen_until > now {
             self.recv(listen_until.saturating_duration_since(now)).await
         } else {
             None
         };
+        // (The uplink is handed on before the wait below, not kept across it: RAM.)
+        if let Some(rx) = received {
+            return Some(MasterSlot {
+                channel: ch,
+                slot,
+                received: Some(rx),
+            });
+        }
+        if to_send {
+            // A frame that was not an uplink (foreign, corrupt) ended the listening early: the
+            // send still waits for its time in the slot, which the node's slices are cut around.
+            wait_until(listen_until).await;
+        }
         Some(MasterSlot {
             channel: ch,
             slot,
-            received,
+            received: None,
         })
     }
 
@@ -474,6 +565,7 @@ impl<const P: usize> Net<P> {
 
             let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(ch)).await;
             self.fhss.cur_channel = ch;
+            self.fhss.tuned = slot;
             // Open RX a guard *before* the boundary so it's armed before the gateway
             // transmits (covers rx() setup latency), earlier still by the drift slack.
             let open = t_start.checked_sub(GUARD + slack).unwrap_or(t_start);
@@ -550,6 +642,8 @@ impl<const P: usize> Net<P> {
             ScanVerdict::Lock => {
                 self.fhss.acquire_t0 = None;
                 self.fhss_lock(slot_abs, t_rx);
+                // The rendezvous channel is this slot's (its beacon came in on it).
+                self.fhss.tuned = slot_abs;
                 NodeSlot {
                     state: FhssState::Synced,
                     channel: FHSS_RENDEZVOUS_CH,
@@ -583,6 +677,9 @@ impl<const P: usize> Net<P> {
     /// gates the TX; consumed airtime is recorded for the compliance histogram. One
     /// TX counter is consumed.
     pub async fn fhss_send(&mut self, dest: u32, data: &[u8], confirmed: bool) -> SendResult {
+        // As in `send`: an earlier send's ACK must not answer for this one. (A stale pending
+        // flag held a node in receive for a downlink nobody announced.)
+        self.last_ack = None;
         if self.txc.locked() {
             return SendResult::Error(RadioError::NonceLocked); // fail closed (nonce safety)
         }
@@ -647,14 +744,76 @@ impl<const P: usize> Net<P> {
 
         let _ = config::set_freq_hz(&mut self.radio, fhss_freq_hz(ch)).await;
         self.fhss.cur_channel = ch;
+        self.fhss.tuned = cur;
         self.fhss.airtime_ms[ch as usize] =
             self.fhss.airtime_ms[ch as usize].saturating_add(duty::frame_toa_ms(n) as u16);
         match self.radio.tx(&buf[..n], false, TX_TIMEOUT).await {
-            // Unconfirmed → delivered once sent; confirmed → wait for the ACK.
+            // Unconfirmed → delivered once sent; confirmed → wait for the ACK (to the slot's cut
+            // at the latest, `fhss_ack_window`).
             Ok(()) if !confirmed || self.await_ack(dest, counter).await => SendResult::Delivered,
             Ok(()) => SendResult::NotDelivered,
             Err(e) => SendResult::Error(e),
         }
+    }
+
+    /// How long a hopping sender waits for its ACK: [`ACK_WINDOW`], or to the slot's cut if that
+    /// comes first, but never less than [`ACK_MIN_WAIT`]. An ACK that does not come must not
+    /// hold the sender past the slot: a master that waited the whole window for a node that was
+    /// not there (a listening node's downlink goes out unasked) ran into the next slot and
+    /// skipped its beacon. An ACK that does come is heard: a frame sent early in the slot (an
+    /// uplink after the beacon, a listening node's downlink at its send time) leaves more than
+    /// the minimum before the cut, and one that [`fhss_send`](Self::fhss_send)'s slot-straddle
+    /// rule let out late (the rule counts the receiver's turnaround and the ACK, not the time a
+    /// node takes to persist its replay lane first) is waited for that minimum, past the cut if
+    /// it must be. Read by `await_ack` itself, not passed to it: an argument would be kept in
+    /// its future, which is part of every node app's largest await chain (docs/firmware/taf.md,
+    /// "RAM").
+    pub(super) fn fhss_ack_window(&self) -> Duration {
+        self.fhss_left_to(SLOT_CUT_MS as u32)
+            .max(ACK_MIN_WAIT)
+            .min(ACK_WINDOW)
+    }
+
+    /// **Node, listening class:** one receive slice on the schedule's current channel. Called in
+    /// a loop between the node's own sends (which keep following the schedule themselves,
+    /// [`fhss_node_tick`](Self::fhss_node_tick) then [`fhss_send`](Self::fhss_send)), it keeps
+    /// the node on its gateway's hop schedule all the time: when the slot is over it hops
+    /// (`fhss_node_tick`: the next slot's channel, re-aligned on its beacon, a missed beacon
+    /// ridden through by prediction) and listens on. So the node hears a frame the gateway sends
+    /// it in any slot, without a fixed channel (FCC §15.247: it receives, and answers, only where
+    /// the schedule is).
+    ///
+    /// The slice's length is the `tower_net::slot` plan's (at most about 80 ms, its ends placed
+    /// away from the time the gateway sends at); with `hold` it runs to the slot's cut (the
+    /// gateway's ACK announced a downlink for this slot). The node listens to the cut, after
+    /// which the master sends it nothing, and hops then: what is left of the slot is the margin
+    /// for the caller's loop to come back in. `None`: nothing for this node in the slice, or no
+    /// schedule: the node scans for it (one rendezvous window per call) and the caller reads
+    /// [`fhss_state`](Self::fhss_state).
+    pub async fn fhss_node_listen(&mut self, hold: bool) -> Option<Received> {
+        let slice = match self.fhss_listen_slice(hold) {
+            Some(ms) => ms,
+            None => {
+                if self.fhss_node_tick().await.state != FhssState::Synced {
+                    return None;
+                }
+                self.fhss_listen_slice(false)?
+            }
+        };
+        self.recv(Duration::from_millis(slice.into())).await
+    }
+
+    /// The next receive slice of [`fhss_node_listen`](Self::fhss_node_listen) in the current
+    /// slot (ms). `None`: hop first. The slot's listening is over, the node holds no clock
+    /// anchor, or the radio is not tuned for the current slot: the caller came back after the
+    /// slot's end (the receiver is still on the last slot's channel), or a pairing took the radio
+    /// off the schedule.
+    fn fhss_listen_slice(&self, hold: bool) -> Option<u32> {
+        let (slot, into) = self.fhss_now()?;
+        if slot != self.fhss.tuned {
+            return None;
+        }
+        listen_slice_ms(into, SLOT_CUT_MS as u32, hold)
     }
 
     /// **Node:** back off before retrying an unacknowledged [`fhss_send`](Self::fhss_send): let a

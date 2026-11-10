@@ -325,8 +325,8 @@ and its own:
 **Classes.** A **sleeping** node (battery) keeps its radio off between uplinks: a `set` or a
 remote shell line waits on the gateway until its next uplink (at the latest its `heartbeat`).
 A **listening** node (mains powered) keeps receiving, and the gateway sends it a queued
-command at once: a `set` takes effect within about a second. EU868 only for now: a listening
-node does not follow the US915 hop schedule yet, so it refuses that band (it stays off the air).
+command at once: a `set` takes effect within about a second, on either band (on US915 the node
+follows the gateway's hop schedule and the command goes out in the current hop slot).
 A listening node that does not answer is tried again later, longer per miss (up to about a
 minute), while the commands for the other nodes go ahead.
 
