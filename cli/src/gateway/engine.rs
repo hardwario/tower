@@ -2973,6 +2973,10 @@ mod tests {
     use tower_protocol::mgmt::{DeviceRole, MGMT_OK, MGMT_STORAGE, NODE_FLAG_SLEEPING, NODE_FLAG_UNNAMED};
     use tower_protocol::{MsgType, decode_frame};
 
+    /// The MQTT contract: docs/cli/mqtt-api.md held against this engine, with the helpers below
+    /// (`engine/tests/contract.rs`).
+    mod contract;
+
     #[test]
     fn randomize_shell_ids_moves_off_the_defaults() {
         // Cross-restart dedup fix: production stamps a random 32-bit epoch on every

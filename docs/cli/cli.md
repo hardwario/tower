@@ -503,3 +503,14 @@ sudo apt-get install -y libudev-dev pkg-config perl make gcc   # Debian/Ubuntu
 cargo build --release -p tower-cli               # at the repo root; binary at target/release/tower
 cargo test -p tower-cli                          # no hardware needed
 ```
+
+### Tests
+
+`cargo test -p tower-cli` needs no board and no broker. Besides the unit tests and the tests of
+the binary's command line (`tests/cli.rs`), it holds what an integrator relies on:
+
+- **The MQTT API.** [mqtt-api.md](mqtt-api.md) is read as data
+  (`src/gateway/engine/tests/contract.rs`): its topic table, its field tables, its JSON examples,
+  its RPC, error and property tables and the limits it states are compared with what the bridge
+  subscribes to, publishes (and retains), accepts and answers in a scripted session. The page
+  and the code change together, or a test fails and names the row.

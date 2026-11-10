@@ -23,6 +23,13 @@ nodes`, `tower net`; `src/gateway/`, `src/client/`). Its manual is
 - The embedded broker's access policy is the pure `mqtt::broker_access` (loopback anonymous,
   anything else login + TLS unless `--broker-allow-plaintext`); change it together with its test
   matrix, docs/cli/cli.md and docs/security-model.md.
+- **The MQTT API page is held against the bridge** (`src/gateway/engine/tests/contract.rs`): the
+  topic table, the field tables, the JSON examples, the RPC, error and property tables and the
+  limits stated in the prose of [docs/cli/mqtt-api.md](../docs/cli/mqtt-api.md) are read out of
+  the Markdown and compared with what the engine subscribes to, publishes, accepts and answers.
+  Change the page and the code together: a new topic, key, op, parameter or error text needs
+  its row on the page (and a new op its case in the test), or the test names what is missing. A
+  change a subscriber would notice also bumps `payload::SCHEMA`.
 
 ## The wire
 

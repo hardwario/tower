@@ -12,6 +12,7 @@ it passes. The per-test catalogue of the firmware stays in
 | Layer | Where | Runs |
 |-------|-------|------|
 | Unit and host tests of every crate, the CLI and the gateway engine | `just test` | CI, every push |
+| The MQTT API page held against the bridge: topics, retain flags, payload fields and types, the RPC ops, error texts, property tables (layer 8) | `cli/src/gateway/engine/tests/contract.rs`, in `just test` | CI, every push |
 | Fuzzing of the pure kernels (frames, radio envelopes, KV store, radio and shell kernels) | `fuzz/`, `just fuzz` | CI, weekly (nightly toolchain) |
 | Mutation testing of the security kernels (`tower-net`, `tower-kv`, `tower-protocol`): no mutant survives unexplained (layer 6) | `just mutants`, `.cargo/mutants.toml` | CI, weekly |
 | Firmware gates: MCU build, RAM budget, clippy over the role variants, rustdoc | `just fw ci` | CI, every push |
@@ -169,8 +170,21 @@ debounce and EXTI are covered, not only `button simulate`. Fail on a budget over
 
 - **TUI snapshots:** ratatui's test backend with `insta`, both TUIs at a few terminal sizes. The
   truncated `/export`, the margins and the zoom/pause contrast were all visual bugs.
-- **MQTT contract:** every topic and payload of [mqtt-api.md](cli/mqtt-api.md) checked against a
-  JSON schema; a CI job against a real mosquitto with TLS, logins and a broker restart.
+- **MQTT contract: in place** (2026-11-10). [mqtt-api.md](cli/mqtt-api.md) is read as data by
+  the CLI's tests (`cli/src/gateway/engine/tests/contract.rs`, 19 tests, no broker): its tables
+  and examples are parsed out of the Markdown and compared with a scripted session of the
+  bridge's engine. Held both ways (a row without code fails, code without a row fails): every
+  topic the bridge publishes with its retain flag and its diagnostic class, the topics it
+  subscribes to (a retained request is cleared, not run), every payload's keys and JSON types
+  against its field table, every JSON example against the typed payload, the last will, the
+  RPC ops with their parameters, defaults, limits and `data` shapes, the common error texts,
+  the terminal errors of a remote shell dialog, the name rules, the access table and the
+  property tables against `tower_protocol::props`, the forms a `set` takes, and the limits the
+  prose states (id length, payload cap, timeouts) against the constants. Plain assertions on
+  `serde_json::Value`, no schema language: the page is the schema. Not held: the prose on
+  behavior over time, and the numbers that live in the firmware (registry and queue sizes).
+  **Still to do:** a CI job against a real mosquitto with TLS, logins and a broker restart (the
+  CLI's own tests cover the embedded broker and its TLS front end, not an external one).
 - **USB plug cycling:** a power-switching hub cycling a node's and the dongle's USB while the
   gateway streams, which exercises the console teardown and rebuild (the TX ring's drain and
   wakers).
