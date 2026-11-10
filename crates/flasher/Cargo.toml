@@ -12,8 +12,8 @@ description = "The flasher of HARDWARIO TOWER boards, around the STM32 ROM bootl
 # (`flash::Progress`); the `tower` CLI renders it.
 [dependencies]
 serialport.workspace = true
-thiserror = "2.0.18"
+thiserror = "2.0.21"
 # USB DFU (`dfu`): the ROM DFU bootloader of a board whose STM32 USB pins go straight to the
 # connector (the Core Module r1.x, which has no USB-UART bridge). Pure Rust on every platform
 # (usbfs on Linux, IOKit on macOS, WinUSB on Windows), so there is no libusb to build or ship.
-nusb = "0.2.8"
+nusb = "0.2.9"

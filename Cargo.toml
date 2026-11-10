@@ -30,6 +30,6 @@ tower-flasher = { path = "crates/flasher" }
 # because the firmware workspace builds the `crates/*` that inherit these for thumbv6m; a host
 # member that wants std turns it on with its own `features = [...]`.
 serde = { version = "1.0", default-features = false, features = ["derive"] }
-postcard = { version = "1.0", default-features = false }
+postcard = { version = "1.1", default-features = false }
 heapless = { version = "0.9", default-features = false, features = ["serde"] }
-serialport = "4.9"
+serialport = "4.10"
