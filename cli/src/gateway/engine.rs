@@ -52,6 +52,13 @@ const STATS_EVERY_TICKS: u64 = 10;
 const DEFAULT_QUEUE_TTL: u64 = 3600;
 /// The queue TTL of a `NodeCmd::Time`, in seconds (see [`Engine::queue_cmd`]).
 const TIME_TTL_S: u16 = 30;
+/// Sets one node may have waiting on this host for room in the gateway's queue (see
+/// [`PropMirror::waiting`]). One per property is kept, so only a kind with more settable
+/// properties than this could fill it.
+const WAITING_SETS: usize = 24;
+/// Ticks between two tries to push a node's waiting sets when no queue report came meanwhile:
+/// the backstop for a report lost to a serial drop.
+const WAITING_RETRY_TICKS: u64 = 15;
 /// Slack past a queued (undelivered) shell command's TTL before the host gives up on it
 /// without the gateway's `TX_EXPIRED` report: the backstop for a report lost to a missed
 /// gateway reboot or a serial drop, so a pending entry can never live forever.
@@ -244,6 +251,9 @@ enum OpKind {
         shell: Option<ShellOrigin>,
         /// A `NodeCmd::Time` (at most one is kept queued per node: see [`Engine::queue_time`]).
         time: bool,
+        /// The taf command pushed (`None` for a shell line): what a refusal is logged with,
+        /// and what a `Set` the gateway had no room for waits as.
+        cmd: Option<TafCmd>,
     },
     QueueList,
     /// Engine-internal `QueueList` reconciling the pending mirror with the device queue
@@ -341,6 +351,41 @@ struct PropMirror {
     stash: Vec<Stashed>,
     /// A `Describe` is queued for the node (cleared by its `NodeInfo`).
     describe_asked: bool,
+    /// Sets the gateway had no room for (it holds two commands per node, four in all), oldest
+    /// first, one per property: pushed as the node takes what is queued. Lost with the bridge.
+    waiting: Vec<TafCmd>,
+    /// The tick a waiting set was last pushed (or held): the next blind retry is
+    /// [`WAITING_RETRY_TICKS`] later.
+    waiting_tried: u64,
+}
+
+/// A taf command of a node (a `Set`, a `Time`, a `Describe`) on its way to the gateway's queue:
+/// what its fate is logged with and, for a `Set`, what waits when the gateway has no room.
+#[derive(Debug, Clone, PartialEq)]
+struct TafCmd {
+    /// The order the commands were asked for in: waiting sets go to the gateway in that order.
+    seq: u64,
+    /// The encoded `NodeCmd` (the queue item's data).
+    data: Vec<u8>,
+    /// What the log calls it: `set relay = on`, `time sync`, `describe`.
+    label: String,
+    /// The property a `Set` sets: a newer set of it replaces one still waiting.
+    set: Option<u8>,
+    /// The log has said that it waits (said once, not with every try the gateway refuses).
+    told: bool,
+}
+
+/// What became of a taf command handed to [`Engine::queue_cmd`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Queued {
+    /// Sent to the gateway's queue (its answer follows).
+    Pushed,
+    /// A `Set` kept on this host until the gateway has room.
+    Waiting,
+    /// Not taken, and why.
+    Refused(&'static str),
+    /// The request could not be sent; its fate is logged already.
+    Logged,
 }
 
 /// A taf command waiting in the gateway's queue ([`PropMirror::queued`]).
@@ -402,6 +447,8 @@ pub(crate) struct Engine {
     seq: u16,
     next_req: u16,
     next_cmd: u16,
+    /// The order number of the next taf command ([`TafCmd::seq`]).
+    next_taf: u64,
     /// Per-process random dedup epoch stamped on every downlink shell command.
     shell_epoch: u32,
     pending_mgmt: Vec<PendingMgmt>,
@@ -515,6 +562,7 @@ impl Engine {
             mqtt_up: false,
             seq: 0,
             next_req: 1,
+            next_taf: 0,
             next_cmd: 1,
             shell_epoch: 0,
             pending_mgmt: Vec::new(),
@@ -905,6 +953,15 @@ impl Engine {
                     retain: true,
                 });
             }
+            // Sets still waiting on this host were checked against the app that is gone.
+            let dropped = std::mem::take(&mut self.nodes[i].props.waiting);
+            if !dropped.is_empty() {
+                out.push(Output::Event(Event::Log(format!(
+                    "node {}: {} waiting set(s) dropped (its app changed)",
+                    topics::node_hex(src),
+                    dropped.len()
+                ))));
+            }
         }
         self.nodes[i].kind = kind.clone();
         self.nodes[i].session_id = Some(info.session_id);
@@ -1004,7 +1061,7 @@ impl Engine {
             }
             if !m.describe_asked {
                 m.describe_asked = true;
-                self.queue_cmd(out, src, &NodeCmd::Describe);
+                self.queue_cmd(out, src, &NodeCmd::Describe, "describe".into());
             }
             return;
         };
@@ -1047,13 +1104,49 @@ impl Engine {
 
     /// Queue one command for `node` on the gateway (delivered after the node's next uplink, or at
     /// once to a listening node). Its outcome is only logged: the node's reply (a `Report`, an
-    /// `Info`) is what confirms it.
-    fn queue_cmd(&mut self, out: &mut Vec<Output>, node: u32, cmd: &NodeCmd<'_>) -> bool {
+    /// `Info`) is what confirms it. `label` is what the log calls it (`set relay = on`).
+    ///
+    /// The gateway holds two commands per node (four in all). A `Set` it has no room for waits
+    /// on this host ([`PropMirror::waiting`]) and follows as the node takes what is queued; while
+    /// sets of a node wait, a new one joins them, so they reach the node in the order asked for.
+    fn queue_cmd(&mut self, out: &mut Vec<Output>, node: u32, cmd: &NodeCmd<'_>, label: String) -> Queued {
         let mut env = [0u8; radio::MAX_RADIO_PAYLOAD];
         let Ok(n) = radio::encode_node_cmd(cmd, &mut env) else {
-            return false;
+            return Queued::Refused("it does not fit a radio frame");
         };
-        let time = matches!(cmd, NodeCmd::Time { .. });
+        if !self.serial_up {
+            return Queued::Refused("gateway serial link is down");
+        }
+        let taf = TafCmd {
+            seq: self.next_taf,
+            data: env[..n].to_vec(),
+            label,
+            set: match cmd {
+                NodeCmd::Set { id, .. } => Some(*id),
+                _ => None,
+            },
+            told: false,
+        };
+        self.next_taf += 1;
+        let behind_waiting = taf.set.is_some()
+            && self
+                .nodes
+                .iter()
+                .any(|m| m.entry.addr == node && !m.props.waiting.is_empty());
+        if behind_waiting {
+            return self.hold(node, TafCmd { told: true, ..taf });
+        }
+        if self.push_taf(out, node, taf, matches!(cmd, NodeCmd::Time { .. })) {
+            Queued::Pushed
+        } else {
+            // `fail_op` said what became of it.
+            Queued::Logged
+        }
+    }
+
+    /// Send one taf command to the gateway's queue; whether the request went out.
+    fn push_taf(&mut self, out: &mut Vec<Output>, node: u32, taf: TafCmd, time: bool) -> bool {
+        let data = taf.data.clone();
         let op = MgmtOp::QueuePush {
             node_addr: node,
             // The node takes the time as "now" when it arrives: one that waited for the node's
@@ -1061,7 +1154,7 @@ impl Engine {
             // again. So it lapses soon (it rides the uplinks that follow the asking `NodeInfo`);
             // a node that missed it asks again with its next one.
             ttl: if time { TIME_TTL_S } else { 0 },
-            data: &env[..n],
+            data: &data,
         };
         self.issue(
             out,
@@ -1069,11 +1162,56 @@ impl Engine {
                 node,
                 shell: None,
                 time,
+                cmd: Some(taf),
             },
             op,
             None,
         )
         .is_some()
+    }
+
+    /// Keep a `Set` the gateway has no room for, in the order it was asked for. A set of the same
+    /// property still waiting is replaced by the newer of the two (only the last value matters).
+    fn hold(&mut self, node: u32, taf: TafCmd) -> Queued {
+        let tick = self.tick;
+        let Some(m) = self.nodes.iter_mut().find(|m| m.entry.addr == node) else {
+            return Queued::Refused("unknown node");
+        };
+        let waiting = &mut m.props.waiting;
+        if let Some(same) = waiting.iter_mut().find(|w| w.set == taf.set) {
+            if taf.seq > same.seq {
+                // The newer value, in the older one's place.
+                *same = TafCmd { seq: same.seq, ..taf };
+            }
+            return Queued::Waiting;
+        }
+        if waiting.len() >= WAITING_SETS {
+            return Queued::Refused("too many sets already wait for the node");
+        }
+        let at = waiting.partition_point(|w| w.seq < taf.seq);
+        waiting.insert(at, taf);
+        m.props.waiting_tried = tick;
+        Queued::Waiting
+    }
+
+    /// Push the oldest waiting set of every node that has one and no push under way: called when
+    /// the gateway's queue may have room again (an item left it, a listing came, time passed).
+    fn push_waiting(&mut self, out: &mut Vec<Output>) {
+        for i in 0..self.nodes.len() {
+            let node = self.nodes[i].entry.addr;
+            if self.nodes[i].props.waiting.is_empty()
+                || self.pending_mgmt.iter().any(
+                    |p| matches!(&p.op, OpKind::QueuePush { node: n, cmd: Some(c), .. } if *n == node && c.set.is_some()),
+                )
+            {
+                continue;
+            }
+            let taf = self.nodes[i].props.waiting.remove(0);
+            self.nodes[i].props.waiting_tried = self.tick;
+            // A request that cannot go out (the link went down under it) comes back through
+            // `fail_op`, which holds the set again.
+            self.push_taf(out, node, taf, false);
+        }
     }
 
     /// Send `node` the wall-clock time (this host's clock and UTC offset), which it asked for in
@@ -1105,7 +1243,8 @@ impl Engine {
         let now = chrono::Local::now();
         let unix = u32::try_from(now.timestamp()).unwrap_or(0);
         let utc_offset_min = (now.offset().local_minus_utc() / 60) as i16;
-        if self.queue_cmd(out, node, &NodeCmd::Time { unix, utc_offset_min }) {
+        let cmd = NodeCmd::Time { unix, utc_offset_min };
+        if self.queue_cmd(out, node, &cmd, "time sync".into()) == Queued::Pushed {
             out.push(Output::Event(Event::Log(format!(
                 "time sync queued for node {} (UTC{utc_offset_min:+} min)",
                 topics::node_hex(node)
@@ -1128,7 +1267,7 @@ impl Engine {
         let Some(kind) = props::kind(&self.nodes[i].kind) else {
             if !self.nodes[i].props.describe_asked {
                 self.nodes[i].props.describe_asked = true;
-                self.queue_cmd(out, node, &NodeCmd::Describe);
+                self.queue_cmd(out, node, &NodeCmd::Describe, "describe".into());
             }
             return refuse(
                 out,
@@ -1145,13 +1284,53 @@ impl Engine {
             Ok(v) => v,
             Err(e) => return refuse(out, &e),
         };
-        if self.queue_cmd(out, node, &NodeCmd::Set { id: prop.id, value }) {
-            out.push(Output::Event(Event::Log(format!(
-                "set {name} = {} queued for node {}",
-                prop.ty.display(value),
+        let label = format!("set {name} = {}", prop.ty.display(value));
+        let cmd = NodeCmd::Set { id: prop.id, value };
+        match self.queue_cmd(out, node, &cmd, label.clone()) {
+            Queued::Pushed => out.push(Output::Event(Event::Log(format!(
+                "{label} queued for node {}",
                 topics::node_hex(node)
-            ))));
+            )))),
+            Queued::Waiting => out.push(Output::Event(Event::Log(format!(
+                "{label} waits for node {} (behind the sets its queue on the gateway had no room for)",
+                topics::node_hex(node)
+            )))),
+            Queued::Refused(why) => refuse(out, why),
+            Queued::Logged => {}
         }
+    }
+
+    /// A taf command the gateway did not take (`result`: its management code; `error`: the same
+    /// in words, or why the request never reached it). A `Set` refused for lack of room waits on
+    /// this host; everything else is logged and gone (a `Time` would arrive late, a `Describe`
+    /// is asked again with the node's next unknown value).
+    fn on_taf_refused(&mut self, out: &mut Vec<Output>, node: u32, mut taf: TafCmd, result: u8, error: &str) {
+        let label = taf.label.clone();
+        if taf.set.is_some() && result == mgmt::MGMT_FULL {
+            let told = std::mem::replace(&mut taf.told, true);
+            match self.hold(node, taf) {
+                Queued::Refused(why) => out.push(Output::Event(Event::Log(format!(
+                    "{label} for node {} dropped: {why}",
+                    topics::node_hex(node)
+                )))),
+                _ if told => {}
+                _ => out.push(Output::Event(Event::Log(format!(
+                    "{label} waits for node {}: its queue on the gateway is full ({error})",
+                    topics::node_hex(node)
+                )))),
+            }
+            return;
+        }
+        if let Some(m) = self.nodes.iter_mut().find(|m| m.entry.addr == node)
+            && taf.set.is_none()
+        {
+            // A lost `Describe` must be asked again.
+            m.props.describe_asked = false;
+        }
+        out.push(Output::Event(Event::Log(format!(
+            "{label} for node {} not queued: {error}",
+            topics::node_hex(node)
+        ))));
     }
 
     /// One remote-shell response chunk from a node → the MQTT dialog + frontend.
@@ -1277,6 +1456,9 @@ impl Engine {
         };
         if matches!(outcome, mgmt::TX_DELIVERED | mgmt::TX_EXPIRED) {
             self.nodes[i].props.queued.retain(|q| q.item != item);
+            // An item left the gateway's queue: room for a waiting set (of any node: the queue
+            // has a total too).
+            self.push_waiting(out);
         }
         match outcome {
             mgmt::TX_DELIVERED => {
@@ -1471,7 +1653,12 @@ impl Engine {
                 }
             }
             (OpKind::PairingCancel, None) => self.rpc_ok(out, &p, serde_json::Value::Null),
-            (OpKind::QueuePush { node, shell, time }, None) => {
+            (
+                OpKind::QueuePush {
+                    node, shell, time, ..
+                },
+                None,
+            ) => {
                 let node = *node;
                 match postcard::from_bytes::<QueueId>(&p.data) {
                     Ok(qid) => {
@@ -1482,6 +1669,8 @@ impl Engine {
                                 item: qid.item,
                                 time: *time,
                             });
+                            // The gateway had room: the next waiting set may fit too.
+                            self.push_waiting(out);
                         }
                         if let Some(origin) = shell
                             && let Some(i) = self.nodes.iter().position(|n| n.entry.addr == node)
@@ -1531,6 +1720,8 @@ impl Engine {
                     let entries: Vec<QueueEntry> = parse_records(&p.data);
                     let device: Vec<(u32, u16)> = entries.iter().map(|e| (e.node_addr, e.item)).collect();
                     self.reconcile_queue(&device, out);
+                    // What the gateway holds is known again: waiting sets may fit.
+                    self.push_waiting(out);
                 }
             }
             (OpKind::QueueDrop { node }, None) => {
@@ -1557,8 +1748,11 @@ impl Engine {
                     self.rpc_err(out, &p, e);
                 }
             }
-            (OpKind::QueuePush { node, shell, .. }, Some(e)) => {
+            (OpKind::QueuePush { node, shell, cmd, .. }, Some(e)) => {
                 let node = *node;
+                if let Some(taf) = cmd {
+                    self.on_taf_refused(out, node, taf.clone(), result, e);
+                }
                 if let Some(origin) = shell {
                     // The shell's generic failure, as for every bridge-reported end: the
                     // dongle's management code is another code space (`MGMT_FULL` = 4 and
@@ -1773,6 +1967,7 @@ impl Engine {
                 node,
                 shell: Some(origin),
                 time: false,
+                cmd: None,
             },
             op,
             None,
@@ -2095,6 +2290,16 @@ impl Engine {
         if resync_queue {
             self.issue(out, OpKind::QueueSync, MgmtOp::QueueList { node_addr: 0 }, None);
         }
+        // Waiting sets whose queue report may have been lost: try again now and then.
+        let tick = self.tick;
+        if self.serial_up
+            && self
+                .nodes
+                .iter()
+                .any(|n| !n.props.waiting.is_empty() && tick >= n.props.waiting_tried + WAITING_RETRY_TICKS)
+        {
+            self.push_waiting(out);
+        }
         // A timed-out request, or a `PairingOpen` past its pickup time, frees the slot.
         self.send_next_mgmt(out);
         // The startup registry sync must land eventually: uplinks are held until it does,
@@ -2282,6 +2487,11 @@ impl Engine {
                 });
                 out.push(Output::Event(Event::Shell { node, rsp }));
             }
+            // A taf command that did not reach the gateway (a timeout, the link down): a set
+            // waits for the next try, anything else is asked for again by the node.
+            OpKind::QueuePush {
+                node, cmd: Some(taf), ..
+            } => self.on_taf_refused(out, node, taf, mgmt::MGMT_FULL, error),
             // The mirror took the new name when the update was queued: restore it from the
             // device (with the link down, the reconnect's listing does).
             OpKind::NodeUpdate { .. } if self.serial_up => {
@@ -2587,7 +2797,11 @@ impl Engine {
                 last_seen: (n.entry.last_seen != mgmt::LAST_SEEN_NEVER).then_some(n.entry.last_seen),
                 rssi: (n.entry.rssi != mgmt::RSSI_NONE).then_some(n.entry.rssi),
                 uplinks: n.entry.uplinks,
-                queued: n.entry.queued.max(n.pending.len() as u8),
+                queued: n
+                    .entry
+                    .queued
+                    .max(n.pending.len() as u8)
+                    .saturating_add(n.props.waiting.len() as u8),
             })
             .collect()
     }
@@ -2632,7 +2846,11 @@ impl Engine {
                 last_seen: (n.entry.last_seen != mgmt::LAST_SEEN_NEVER).then_some(n.entry.last_seen),
                 rssi: (n.entry.rssi != mgmt::RSSI_NONE).then_some(n.entry.rssi),
                 uplinks: n.entry.uplinks,
-                queued: n.entry.queued.max(n.pending.len() as u8),
+                queued: n
+                    .entry
+                    .queued
+                    .max(n.pending.len() as u8)
+                    .saturating_add(n.props.waiting.len() as u8),
                 pending: n
                     .pending
                     .iter()
@@ -3362,6 +3580,208 @@ mod tests {
         // An unknown node.
         let out = e.handle(mqtt_in("tower/nodes/0x00000001/set/relay", b"on"));
         assert_eq!(pushes(&e, &out, &mut waiting), 0);
+    }
+
+    /// The `QueuePush` ops in `out` (sent now), as `(req_id, op)`.
+    fn sent_pushes(out: &[Output]) -> Vec<(u16, String)> {
+        out.iter()
+            .filter_map(sent_op)
+            .filter(|(_, op)| op.contains("QueuePush"))
+            .collect()
+    }
+
+    fn logged(out: &[Output], needle: &str) -> bool {
+        out.iter()
+            .any(|o| matches!(o, Output::Event(Event::Log(l)) if l.contains(needle)))
+    }
+
+    /// The gateway holds two commands per node. A third `set` used to be dropped without a word
+    /// when the gateway refused it as full (after the bridge had logged it as queued): it waits
+    /// on the host now and follows when the node takes one of the queued ones.
+    #[test]
+    fn a_set_the_gateway_has_no_room_for_waits_and_follows() {
+        let mut e = engine();
+        with_kind(&mut e, 0xAB12, "radio_control");
+        let set = |e: &mut Engine, prop: &str, body: &str| {
+            e.handle(mqtt_in(
+                &format!("tower/nodes/0x0000ab12/set/{prop}"),
+                body.as_bytes(),
+            ))
+        };
+        let qid = |item: u16| postcard::to_stdvec(&QueueId { item }).unwrap();
+
+        // Two sets fill the node's queue on the gateway.
+        let out = set(&mut e, "relay", "on");
+        let (req, _) = sent_pushes(&out)[0].clone();
+        assert!(logged(&out, "set relay = on queued"));
+        let out = reply(&mut e, req, MGMT_OK, &qid(1));
+        assert!(sent_pushes(&out).is_empty());
+        let out = set(&mut e, "strip", "on");
+        let (req, _) = sent_pushes(&out)[0].clone();
+        let _ = reply(&mut e, req, MGMT_OK, &qid(2));
+
+        // The third is refused as full: it waits, and the log says so.
+        let out = set(&mut e, "brightness", "40");
+        let (req, _) = sent_pushes(&out)[0].clone();
+        let out = reply(&mut e, req, mgmt::MGMT_FULL, &[]);
+        assert!(
+            logged(&out, "set brightness = 40 waits for node 0x0000ab12"),
+            "{out:?}"
+        );
+        assert!(sent_pushes(&out).is_empty(), "no retry before the queue has room");
+        assert_eq!(e.nodes[0].props.waiting.len(), 1);
+
+        // A fourth joins it without asking the gateway (it must not overtake the third).
+        let out = set(&mut e, "speed", "200");
+        assert!(sent_pushes(&out).is_empty());
+        assert!(logged(&out, "set speed = 200 waits for node"));
+        // The node payload counts them as queued (on top of what the gateway's last listing
+        // said it holds, nothing in this test).
+        assert_eq!(e.node_payloads()[0].queued, 2);
+
+        // The node takes the first queued item: the oldest waiting set is pushed...
+        let out = e.handle(Input::SerialFrame(SerialMsg::Stat(RadioStat::Tx {
+            dest: 0xAB12,
+            item: 1,
+            outcome: mgmt::TX_DELIVERED,
+            ack_rssi: None,
+        })));
+        let pushed = sent_pushes(&out);
+        assert_eq!(pushed.len(), 1, "one waiting set goes out: {pushed:?}");
+        assert_eq!(e.nodes[0].props.waiting.len(), 1);
+        // ... and once the gateway took it, the next one is tried: refused, it waits on.
+        let out = reply(&mut e, pushed[0].0, MGMT_OK, &qid(3));
+        let pushed = sent_pushes(&out);
+        assert_eq!(pushed.len(), 1, "the next waiting set is tried");
+        let out = reply(&mut e, pushed[0].0, mgmt::MGMT_FULL, &[]);
+        assert!(
+            !logged(&out, "waits"),
+            "said once, when it began to wait: {out:?}"
+        );
+        assert!(sent_pushes(&out).is_empty());
+        assert_eq!(e.nodes[0].props.waiting.len(), 1);
+        assert_eq!(e.nodes[0].props.waiting[0].label, "set speed = 200");
+    }
+
+    /// Only the last value of a property matters: a newer set replaces the waiting one, in its
+    /// place in the order.
+    #[test]
+    fn a_newer_set_replaces_the_waiting_one_of_its_property() {
+        let mut e = engine();
+        with_kind(&mut e, 0xAB12, "radio_control");
+        let set = |e: &mut Engine, prop: &str, body: &str| {
+            e.handle(mqtt_in(
+                &format!("tower/nodes/0x0000ab12/set/{prop}"),
+                body.as_bytes(),
+            ))
+        };
+        let out = set(&mut e, "brightness", "10");
+        let (req, _) = sent_pushes(&out)[0].clone();
+        let _ = reply(&mut e, req, mgmt::MGMT_FULL, &[]);
+        let _ = set(&mut e, "speed", "200");
+        for v in ["20", "30", "40"] {
+            let out = set(&mut e, "brightness", v);
+            assert!(sent_pushes(&out).is_empty());
+        }
+        let labels: Vec<&str> = e.nodes[0]
+            .props
+            .waiting
+            .iter()
+            .map(|w| w.label.as_str())
+            .collect();
+        assert_eq!(labels, ["set brightness = 40", "set speed = 200"]);
+    }
+
+    /// Two pushes under way when the queue fills come back refused one after the other, the
+    /// second after a later set already waits: the waiting order is still the order asked for.
+    #[test]
+    fn waiting_sets_keep_the_order_they_were_asked_for_in() {
+        let mut e = engine();
+        with_kind(&mut e, 0xAB12, "radio_control");
+        let set = |e: &mut Engine, prop: &str, body: &str| {
+            e.handle(mqtt_in(
+                &format!("tower/nodes/0x0000ab12/set/{prop}"),
+                body.as_bytes(),
+            ))
+        };
+        // Both issued before any answer: the first is sent, the second waits for the request slot.
+        let out = set(&mut e, "relay", "on");
+        let (first, _) = sent_pushes(&out)[0].clone();
+        let out = set(&mut e, "strip", "on");
+        assert!(sent_pushes(&out).is_empty(), "one request at a time");
+        // The first is refused: it waits, and the second request goes out.
+        let out = reply(&mut e, first, mgmt::MGMT_FULL, &[]);
+        let (second, _) = sent_pushes(&out)[0].clone();
+        // A third set arrives meanwhile and joins the waiting one.
+        let _ = set(&mut e, "speed", "200");
+        // The second is refused too: it goes between the two, where it was asked for.
+        let _ = reply(&mut e, second, mgmt::MGMT_FULL, &[]);
+        let labels: Vec<&str> = e.nodes[0]
+            .props
+            .waiting
+            .iter()
+            .map(|w| w.label.as_str())
+            .collect();
+        assert_eq!(labels, ["set relay = on", "set strip = on", "set speed = 200"]);
+    }
+
+    /// A waiting set whose queue report was lost is tried again after a while; a refusal of
+    /// another kind is logged and the set is gone; a time sync never waits (it would arrive late).
+    #[test]
+    fn waiting_sets_are_retried_and_other_refusals_are_logged() {
+        let mut e = engine();
+        with_kind(&mut e, 0xAB12, "radio_control");
+        let set = |e: &mut Engine, prop: &str, body: &str| {
+            e.handle(mqtt_in(
+                &format!("tower/nodes/0x0000ab12/set/{prop}"),
+                body.as_bytes(),
+            ))
+        };
+        let out = set(&mut e, "relay", "on");
+        let (req, _) = sent_pushes(&out)[0].clone();
+        let _ = reply(&mut e, req, mgmt::MGMT_FULL, &[]);
+        let mut retried = None;
+        for _ in 0..WAITING_RETRY_TICKS + 1 {
+            let out = e.handle(Input::Tick);
+            if let Some((req, _)) = sent_pushes(&out).first() {
+                retried = Some(*req);
+                break;
+            }
+        }
+        let req = retried.expect("a blind retry within WAITING_RETRY_TICKS");
+        // The node is gone from the gateway meanwhile: logged, not kept.
+        let out = reply(&mut e, req, mgmt::MGMT_NOT_FOUND, &[]);
+        assert!(
+            logged(&out, "set relay = on for node 0x0000ab12 not queued: not found"),
+            "{out:?}"
+        );
+        assert!(e.nodes[0].props.waiting.is_empty());
+
+        // A time sync refused as full is logged and dropped.
+        let mut out = Vec::new();
+        e.queue_time(&mut out, 0xAB12);
+        let (req, _) = sent_pushes(&out)[0].clone();
+        let out = reply(&mut e, req, mgmt::MGMT_FULL, &[]);
+        assert!(
+            logged(&out, "time sync for node 0x0000ab12 not queued"),
+            "{out:?}"
+        );
+        assert!(e.nodes[0].props.waiting.is_empty());
+    }
+
+    /// Sets waiting on the host were checked against the node's app: a board flashed with
+    /// another one drops them.
+    #[test]
+    fn waiting_sets_are_dropped_when_the_app_changes() {
+        let mut e = engine();
+        with_kind(&mut e, 0xAB12, "radio_control");
+        let out = e.handle(mqtt_in("tower/nodes/0x0000ab12/set/relay", b"on"));
+        let (req, _) = sent_pushes(&out)[0].clone();
+        let _ = reply(&mut e, req, mgmt::MGMT_FULL, &[]);
+        assert_eq!(e.nodes[0].props.waiting.len(), 1);
+        let out = e.handle(info_uplink(0xAB12, 9, "radio_climate"));
+        assert!(logged(&out, "1 waiting set(s) dropped"), "{out:?}");
+        assert!(e.nodes[0].props.waiting.is_empty());
     }
 
     #[test]
