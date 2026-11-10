@@ -129,7 +129,21 @@ fn property_ids_are_pinned() {
     );
     assert_eq!(APP_BASE, 16);
     let own = |name: &str| ids(kind(name).unwrap().props);
-    assert!(own("button").is_empty() && own("climate").is_empty());
+    assert!(own("button").is_empty());
+    assert_eq!(
+        own("climate"),
+        [
+            ("humidity", 16),
+            ("illuminance", 17),
+            ("pressure", 18),
+            ("co2", 19),
+            ("humidity-delta", 20),
+            ("illuminance-delta", 21),
+            ("pressure-delta", 22),
+            ("co2-delta", 23),
+            ("co2-period", 24),
+        ]
+    );
     assert_eq!(
         own("motion"),
         [("motion", 16), ("sensitivity", 17), ("holdoff", 18)]
@@ -144,6 +158,7 @@ fn property_ids_are_pinned() {
             ("brightness", 20),
             ("color", 21),
             ("speed", 22),
+            ("relay-module", 23),
         ]
     );
     assert_eq!(
@@ -165,8 +180,32 @@ fn property_ids_are_pinned() {
         (16, 17, 18, 19)
     );
     assert_eq!(
-        (control::BRIGHTNESS, control::COLOR, control::SPEED),
-        (20, 21, 22)
+        (
+            control::BRIGHTNESS,
+            control::COLOR,
+            control::SPEED,
+            control::RELAY_MODULE
+        ),
+        (20, 21, 22, 23)
+    );
+    assert_eq!(
+        (
+            climate::HUMIDITY,
+            climate::ILLUMINANCE,
+            climate::PRESSURE,
+            climate::CO2
+        ),
+        (16, 17, 18, 19)
+    );
+    assert_eq!(
+        (
+            climate::HUMIDITY_DELTA,
+            climate::ILLUMINANCE_DELTA,
+            climate::PRESSURE_DELTA,
+            climate::CO2_DELTA,
+            climate::CO2_PERIOD
+        ),
+        (20, 21, 22, 23, 24)
     );
     assert_eq!(
         (
