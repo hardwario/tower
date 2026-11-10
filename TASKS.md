@@ -29,7 +29,9 @@ are committed on `main` locally and **not pushed** (AGENTS.md: push only when as
 
 - (a) Push it as it is. Recommended once you have read this file's *Done* entries of 2026-11-10
   and [docs/firmware/results/2026-11-10.md](docs/firmware/results/2026-11-10.md): the gates are
-  green on the last commit, and what the bench could not check is listed in T31.
+  green on the last commit, and what the bench could not check is listed in T31 and T26. After
+  a push every board needs the new firmware and the CLI a reinstall (the radio tag moved), and
+  the bench's two Core Modules a new pairing with the dongle (the record's last section).
 - (b) Review first, commit by commit (`git log origin/main..main`), and push what you keep.
   T3 (three commits and the hop-clock fix after them), T12 (five) and T26 (seven) were written
   by parallel agents in worktrees and merged after their gates and the bench; each group can be
@@ -83,6 +85,26 @@ T5, T6 and T29 are done on the console, over the radio and in the HIL group
 - [ ] **The LP8's state across a reset**: it is kept in RAM, so a reboot starts the sensor's
       filter over (as the legacy SDK did). Keeping it in EEPROM would cost a 23-byte record per
       measurement; once a day, or before a planned reboot, would do.
+
+### T33. A board that was the gateway loses its node pairing
+
+Status: open (found 2026-11-10)
+
+**Why.** `radio_gateway` keeps its registry format marker at `NS_APP` local `0x00`, and a taf
+node keeps its provisioning (its gateway and key) at the same local. The gateway's boot stamps
+the marker over "another app's record" on purpose (`apps/radio_gateway.rs`), so a node board
+flashed with `radio_gateway` for an hour comes back as a node without its pairing. That cost
+the bench's r1 its pairing with the dongle on 2026-11-10 (it served as the gateway while the
+dongle was away). The registry buckets (`0x10..=0x15`) sit on the thermostat's records
+(`0x10`, `0x11`) in the same way.
+
+**What it takes.** Locals of its own for the gateway (the table of `NS_APP` locals in
+docs/firmware/taf.md gets its rows), or a namespace of its own; no migration (AGENTS.md,
+*Compatibility*): a gateway reflashed across the change reads an empty registry, and its nodes
+are added again (docs/cli/cli.md, *Moving a node key*).
+
+**Done when.** A Core Module flashed with `radio_gateway` and back with its node app is still
+paired, and the reverse (a gateway's registry survives an hour as a node).
 
 ### T32. Flash headroom of `radio_control`
 
@@ -315,7 +337,7 @@ below 100 columns); frames of the two wall-clock modals.
 
 **Remaining, needs hardware:** 1 nightly HIL (a self-hosted runner on the bench machine, the
 bench left cabled); 2 long soak (the gateway and two or more nodes for 24 to 72 h, an MQTT
-recorder; a first 3.5 h of one node are in docs/firmware/results/2026-11-10.md); 3 power loss
+recorder; a first 1.9 h of one node are in docs/firmware/results/2026-11-10.md); 3 power loss
 and brown-out (a USB hub with per-port power switching, later the PPK2 in source mode); 4
 energy per event (PPK2 and J-Link); 5 an attacker on the bench (a third board with rogue
 firmware); 7 latency budgets (bench boards, a bench GPIO on the button line); 8 USB plug cycling
@@ -449,8 +471,9 @@ reason, not skipped silently.
       compiler move less across an interrupt enable or disable). Passed on it, 2026-11-10 (an
       r2 and the r1 as a gateway): the modules HIL group, both node classes on both bands over
       the radio to MQTT, the console on both boards. Still to run: the strip's timing (underruns
-      over the effect sweep), the PIR bit-bang read, the HIL radio groups (they need the
-      Dongle), the STOP floor (a PPK2). ctutils 0.4.8 (under the pairing handshake): an OTA
+      over the effect sweep; no strip on the bench), the PIR bit-bang read (the r1's PIR did
+      not answer that night, with the firmware of the day before either: not seated, or not
+      there), the HIL radio groups (they need the Dongle), the STOP floor (a PPK2). ctutils 0.4.8 (under the pairing handshake): an OTA
       pairing passed. nusb 0.2.9: a DFU flash of the r1 passed
 - [ ] The release dry run again (it needs the commits pushed: D18)
 - [x] The docs and comments that name a version: serialport 4.10 in four HIL comments, the
