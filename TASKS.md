@@ -295,14 +295,20 @@ contract tests, radio pre-compliance, environment, production test, release qual
 - [x] `tower-modules` under the same test (`just mutants modules`): 20 survivors of 248, none
       after three more assertions (the Relay Module's red LED bit was pinned by nothing) and
       14 equivalent mutants listed with their reason.
-- [x] `tower-gateway` likewise (`just mutants gateway`): 3 survivors of 102, none after two
-      tests (queue ids after a wrap and after a pop, an oversized registry bucket). `tower-net`
-      again after T3 and the hop-clock rule: 279 mutants, none surviving.
+- [x] The other four crates of kernels likewise, so `just mutants` and the weekly job cover
+      all eight: `tower-gateway` (3 survivors: queue ids after a wrap and after a pop, an
+      oversized registry bucket), `tower-radio` (18: the hop sequence was held to be a
+      permutation, not which one, so it is pinned by value now; CCM's AAD length, for which
+      RFC 3610's vector #4 was added), `tower-shell` (13: the completion budget to the byte,
+      nine hex digits in an address, the xorshift), `tower-taf` (13: the weekly program's
+      look-back, "strictly after", three accessors without a test). None surviving; the
+      equivalent ones are listed with their reasons. `tower-net` again after T3 and the
+      hop-clock rule: 279 mutants, none surviving.
 - [x] `firmware/tools/hwtest/soak.py`: soak accounting from an MQTT recording (layer 2's first
       step).
 
 **Remaining, no hardware needed:** `cargo-llvm-cov` and Kani proofs of the counter and replay
-kernels; mutation testing of tower-radio, tower-shell and tower-taf; a CI job against a real mosquitto (TLS, logins, a broker restart); the four TUI
+kernels; mutation testing of tower-hmi, tower-strip and tower-flasher; a CI job against a real mosquitto (TLS, logins, a broker restart); the four TUI
 layout defects the snapshots record (console hints under the clock below 140 columns, the
 console prompt not scrolling, the gateway's footer chips cut at 100 columns, its node table
 below 100 columns); frames of the two wall-clock modals.

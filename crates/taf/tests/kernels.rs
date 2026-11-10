@@ -19,8 +19,10 @@ fn reporter_sends_first_on_delta_and_on_heartbeat() {
     assert!(r.due(2150, 900, 50, 900), "unchanged, at the heartbeat");
     assert!(!r.due(2150, 60, 0, 900), "a zero delta sends changes only");
     assert!(r.due(2151, 60, 0, 900));
+    assert_eq!(r.last(), Some(2150), "the value last sent");
     r.reset();
     assert!(r.due(2150, 61, 50, 900));
+    assert_eq!(r.last(), None);
     assert_eq!(Reporter::new().last(), None);
 }
 
@@ -118,9 +120,20 @@ fn day_points_set_one_at_a_time() {
         (parse_minute("6:05"), parse_minute("6:5"), parse_minute("24:00")),
         (Some(365), None, None)
     );
+    // An hour is one or two digits: three are refused even when they spell a valid hour.
+    assert_eq!((parse_minute("007:05"), parse_minute(":05")), (None, None));
     assert_eq!(
         (parse_setpoint("18.5"), parse_setpoint("4.9"), parse_setpoint("x")),
         (Some(185), None, None)
+    );
+    // The tenth must be a digit, the whole part must be there.
+    assert_eq!(
+        (
+            parse_setpoint("18.x"),
+            parse_setpoint(".5"),
+            parse_setpoint("18.")
+        ),
+        (None, None, None)
     );
 }
 
@@ -147,6 +160,15 @@ fn week_setpoints_look_back_over_days() {
         "before today's first: last week's last"
     );
     assert_eq!(sparse.setpoint(2, 11 * 60), Some(190));
+    // Back, not forward: before Monday's first point it is Sunday's last, not Tuesday's.
+    let mut around = Week {
+        days: [Day::new(); 7],
+    };
+    around.days[0] = Day::parse("10:00 20").unwrap();
+    around.days[1] = Day::parse("10:00 19").unwrap();
+    around.days[6] = Day::parse("10:00 23").unwrap();
+    assert_eq!(around.setpoint(0, 5 * 60), Some(230));
+    assert_eq!(around.setpoint(1, 5 * 60), Some(200));
     assert_eq!(
         Week {
             days: [Day::new(); 7]
@@ -162,7 +184,11 @@ fn next_switch_and_minutes_until() {
     assert_eq!(w.next_switch(0, 7 * 60), Some((0, 8 * 60)));
     assert_eq!(w.next_switch(0, 23 * 60), Some((1, 6 * 60)));
     assert_eq!(w.next_switch(6, 23 * 60), Some((0, 6 * 60)), "round the week");
+    // Strictly after: on a switch point, the next one is the one after it.
+    assert_eq!(w.next_switch(0, 6 * 60), Some((0, 8 * 60)));
     assert_eq!(minutes_until(0, 7 * 60, 0, 8 * 60), 60);
+    assert_eq!(minutes_until(0, 0, 2, 30), 2 * 1440 + 30, "two days on");
+    assert_eq!(minutes_until(5, 100, 2, 30), 4 * 1440 - 70, "round the week");
     assert_eq!(minutes_until(6, 23 * 60, 0, 6 * 60), 7 * 60);
     assert_eq!(minutes_until(0, 60, 0, 60), 7 * 1440);
     let mut one = Week {
@@ -247,6 +273,7 @@ fn demand_has_hysteresis() {
     let mut d = Demand::new();
     // Setpoint 21.0, hysteresis 0.4: on below 20.80, off above 21.20.
     assert!(d.update(2079, Some(210), 4));
+    assert!(d.is_on());
     assert!(d.update(2100, Some(210), 4), "inside the band: holds on");
     assert!(d.update(2120, Some(210), 4), "at the edge: holds");
     assert!(!d.update(2121, Some(210), 4));
@@ -255,6 +282,15 @@ fn demand_has_hysteresis() {
     assert!(d.update(2079, Some(210), 4));
     assert!(!d.update(1000, None, 4), "off releases at once");
     assert!(!d.is_on());
+}
+
+/// The `mode` property's wire value is the mode's index.
+#[test]
+fn modes_by_index() {
+    assert_eq!(Mode::from_index(0), Some(Mode::Auto));
+    assert_eq!(Mode::from_index(1), Some(Mode::Manual));
+    assert_eq!(Mode::from_index(2), Some(Mode::Off));
+    assert_eq!((Mode::from_index(3), Mode::from_index(-1)), (None, None));
 }
 
 #[test]

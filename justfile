@@ -129,7 +129,7 @@ fuzz-all seconds="60":
 # cargo-mutants (`cargo install --locked cargo-mutants`) changes the code of a crate one small
 # piece at a time (an operator, a constant returned in place of a result) and runs that crate's
 # tests on each change: a mutant no test fails on is code the tests do not hold. It is slow (a
-# build and a test run per mutant: about half an hour for the three crates at 4 jobs), so it is
+# build and a test run per mutant: about an hour for the eight crates at 4 jobs), so it is
 # not part of `check`; `.github/workflows/mutants.yml` runs it weekly. The mutants known to change
 # nothing are listed, with the reason, in `.cargo/mutants.toml`. Results land in
 # `target/mutants/<crate>/mutants.out/` (`missed.txt`, `caught.txt`, `timeout.txt`, the diffs).
@@ -138,9 +138,9 @@ fuzz-all seconds="60":
 # hangs (an offset that stops advancing loops for ever) is killed by cargo-mutants' timeout: that
 # counts as caught, though cargo-mutants' own exit status calls it out. `CARGO_MUTANTS_JOBS`
 # sets the parallel jobs (default 4). docs/test-strategy.md, layer 6, has the last results.
-# Mutation-test the security kernels: `just mutants` (net, kv, protocol) or `just mutants kv`.
+# Mutation-test the shared kernels: `just mutants` (all eight) or `just mutants kv`.
 [script("python3")]
-mutants *crates="net kv protocol":
+mutants *crates="net kv protocol gateway radio shell taf modules":
     import os, pathlib, subprocess, sys
     os.environ.setdefault("CARGO_MUTANTS_JOBS", "4")
     survived = False

@@ -1,6 +1,8 @@
-# Mutation testing of the security kernels (cargo-mutants, see docs/test-strategy.md, layer 6).
+# Mutation testing of the shared kernels (cargo-mutants, see docs/test-strategy.md, layer 6).
 #
-# Weekly and on demand, `just mutants <crate>` for tower-net, tower-kv and tower-protocol: the
+# Weekly and on demand, `just mutants <crate>` for the security kernels (tower-net, tower-kv,
+# tower-protocol) and the other hardware-free crates the firmware decides with (tower-gateway,
+# tower-radio, tower-shell, tower-taf, tower-modules): the
 # code of the crate is changed one small piece at a time and the crate's tests are run on each
 # change. A job fails when a mutant SURVIVES (no test noticed the change) and uploads cargo-mutants'
 # results (`missed.txt`, the diffs, the logs); the mutants known to change nothing are listed, with
@@ -44,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [net, kv, protocol]
+        crate: [net, kv, protocol, gateway, radio, shell, taf, modules]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

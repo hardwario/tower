@@ -310,6 +310,10 @@ mod tests {
         assert_eq!(parse_addr("0x"), None, "prefix only");
         assert_eq!(parse_addr("123456789"), None, "9 hex digits > 32-bit");
         assert_eq!(parse_addr("0x123456789"), None, "9 digits after the prefix");
+        // Nine digits are refused by their count, also when the value would fit.
+        assert_eq!(parse_addr("000000001"), None);
+        assert_eq!(parse_addr("0x000000001"), None);
+        assert_eq!(parse_addr("00000001"), Some(1));
     }
 
     #[test]
@@ -346,6 +350,10 @@ mod tests {
         // Pin the exact transform (seed|1, then <<13 / >>17 / <<5) so an accidental
         // constant tweak is caught; the firmware's rand_u32_sw depends on this word.
         assert_eq!(xorshift32_nonzero(0), 270_369);
+        // Seeds whose shifted bits overlap the word: an `|` in place of an `^` shows there.
+        assert_eq!(xorshift32_nonzero(0x1234_5678), 0x879C_7A84);
+        assert_eq!(xorshift32_nonzero(0xFFFF_FFFF), 0x0003_E01F);
+        assert_eq!(xorshift32_nonzero(0x8000_0000), 0x800C_6021);
     }
 
     // ---- Window (shell response pagination) -------------------------------------
@@ -553,5 +561,27 @@ mod tests {
         // Short names (the SDK tree) all fit: 16 × "print"-sized candidates.
         let mut b = CompletionBudget::new(PAYLOAD);
         assert!((0..16).all(|_| b.try_add(8)));
+    }
+
+    /// The accounting to the byte. An empty reply is 9 bytes (`BASE`); the first candidate of
+    /// one character costs 4 more (its length byte, the character and its kind, and the same
+    /// character again as the worst-case common prefix, whose own length byte is in `BASE`); a
+    /// further one costs 3. A reply that fits exactly is taken, one byte less is not.
+    #[test]
+    fn completion_budget_counts_to_the_byte() {
+        let mut exact = CompletionBudget::new(9 + 4);
+        assert!(exact.try_add(1), "an exact fit is a fit");
+        assert_eq!(exact.used(), 13);
+        assert!(!exact.try_add(1), "full");
+        assert!(!CompletionBudget::new(9 + 4 - 1).try_add(1), "one byte short");
+        let mut two = CompletionBudget::new(9 + 4 + 3);
+        assert!(two.try_add(1) && two.try_add(1));
+        assert_eq!(two.used(), 16);
+        assert!(!two.try_add(1));
+        // A refused candidate is not accounted: a shorter one after it may still fit.
+        let mut b = CompletionBudget::new(9 + 4 + 3);
+        assert!(b.try_add(1));
+        assert!(!b.try_add(10));
+        assert!(b.try_add(1));
     }
 }

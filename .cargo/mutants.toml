@@ -45,6 +45,21 @@ exclude_re = [
     # `read_off` then sits past `src_end`, which only this loop reads.
     'crates/kv/src/lib\.rs:\d+:23: replace < with <= in flip_step$',
 
+    # tower-shell (`just mutants shell`), `Window::feed`. `room = cap - captured` only clamps
+    # the slice's end as a second guard: the window `[skip, skip + cap)` already ends it there
+    # (what was captured lies inside the window, before this piece), so a larger `room` changes
+    # nothing. And `while hi > lo && !is_char_boundary(hi)`: `lo` is a char boundary by then, so
+    # the loop stops at `hi == lo` with `>=` too.
+    'crates/shell/src/lib\.rs:\d+:29: replace - with \+ in Window::feed$',
+    'crates/shell/src/lib\.rs:\d+:18: replace > with >= in Window::feed$',
+
+    # tower-taf (`just mutants taf`). `Day::set_point`: a point at the new point's minute was
+    # skipped two lines above (it is being replaced), so `p.minute > minute` and `>=` agree.
+    'crates/taf/src/program\.rs:\d+:36: replace > with >= in Day::set_point$',
+    # `minutes_until`: a weekday of `w + 7` is `w` again once the sum is taken modulo the week
+    # (`(w + 7) * 1440` and `(w % 7) * 1440` differ by whole weeks).
+    'crates/taf/src/program\.rs:\d+:35: replace % with \+ in minutes_until$',
+
     # tower-radio (`just mutants radio`). `frame_toa_ms`: `if ms > u32::MAX { u32::MAX } else
     # { ms }` gives `u32::MAX` for `ms == u32::MAX` either way.
     'crates/radio/src/lib\.rs:\d+:11: replace > with >= in frame_toa_ms$',

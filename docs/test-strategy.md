@@ -20,7 +20,7 @@ power-switching USB hub, the PPK2, a board for the rogue firmware).
 | The MQTT API page held against the bridge: topics, retain flags, payload fields and types, the RPC ops, error texts, property tables (layer 8) | `cli/src/gateway/engine/tests/contract.rs`, in `just test` | CI, every push |
 | Frame snapshots of both TUIs at three terminal sizes: the screen, its colours and attributes, the cursor (layer 8) | `cli/src/snapshots/`, `cli/src/gateway/snapshots/`, in `just test` | CI, every push |
 | Fuzzing of the pure kernels (frames, radio envelopes, KV store, radio and shell kernels) | `fuzz/`, `just fuzz` | CI, weekly (nightly toolchain) |
-| Mutation testing of the security kernels (`tower-net`, `tower-kv`, `tower-protocol`): no mutant survives unexplained (layer 6) | `just mutants`, `.cargo/mutants.toml` | CI, weekly |
+| Mutation testing of the shared kernels (`tower-net`, `tower-kv`, `tower-protocol`, `tower-gateway`, `tower-radio`, `tower-shell`, `tower-taf`, `tower-modules`): no mutant survives unexplained (layer 6) | `just mutants`, `.cargo/mutants.toml` | CI, weekly |
 | Firmware gates: MCU build, RAM budget, clippy over the role variants, rustdoc | `just fw ci` | CI, every push |
 | Supply chain: `cargo audit` on every lockfile, pinned actions | `.github/workflows` | CI |
 | HIL bench: smoke, KATs, two-board radio and network, gateway end to end, stack high-water, a listening node's downlinks (also on US 915), OTA pairing and a sleeping node's `set`, the Climate, CO2 and Relay Modules on the Core | `just hil bench` | by hand |
@@ -96,7 +96,8 @@ and every refusal is logged within its rate limit.
 
 ### 6. Mutation testing, coverage, proofs
 
-**Mutation testing is in place** (2026-11-10) for `tower-net`, `tower-kv` and `tower-protocol`,
+**Mutation testing is in place** (2026-11-10) for the eight hardware-free crates the firmware
+and the bridge decide with. `tower-net`, `tower-kv` and `tower-protocol` came first,
 the crates that hold the security decisions: the replay rule, the TX-counter watermark, the ACK
 and beacon-epoch rules, pairing, the EEPROM store, the framing and the schema tags.
 [cargo-mutants](https://mutants.rs) changes a crate's code one small piece at a time (an
@@ -105,7 +106,7 @@ no test fails on is a decision the tests do not hold.
 
 ```sh
 cargo install --locked cargo-mutants   # 27.1.0
-just mutants                           # the three crates: about half an hour at 4 jobs
+just mutants                           # the eight crates: about an hour at 4 jobs
 just mutants kv                        # one of them
 ```
 
@@ -123,23 +124,33 @@ it is not part of `just check`: `.github/workflows/mutants.yml` runs it weekly a
 | `tower-protocol`, first run | 392 | 276 | 0 | 72 | 44 |
 | `tower-protocol`, now | 391 | 319 | 0 | 72 | 0 |
 | `tower-net`, with the hop slot plan and the hop-clock rule (T3) | 279 | 244 | 2 | 33 | 0 |
-| `tower-gateway`, first run (`just mutants gateway`) | 102 | 89 | 1 | 9 | 3 |
+| `tower-gateway`, first run | 102 | 89 | 1 | 9 | 3 |
 | `tower-gateway`, now | 102 | 92 | 1 | 9 | 0 |
-| `tower-radio`, first run (`just mutants radio`) | 113 | 87 | 2 | 6 | 18 |
+| `tower-radio`, first run | 113 | 87 | 2 | 6 | 18 |
 | `tower-radio`, now | 108 | 100 | 2 | 6 | 0 |
-| `tower-modules`, first run (`just mutants modules`) | 248 | 221 | 0 | 7 | 20 |
+| `tower-shell`, first run | 105 | 73 | 19 | 0 | 13 |
+| `tower-shell`, now | 103 | 84 | 19 | 0 | 0 |
+| `tower-taf`, first run | 237 | 214 | 0 | 10 | 13 |
+| `tower-taf`, now | 235 | 225 | 0 | 10 | 0 |
+| `tower-modules`, first run | 248 | 221 | 0 | 7 | 20 |
 | `tower-modules`, now | 234 | 227 | 0 | 7 | 0 |
 
-`tower-gateway` (the registry codec and the downlink queue; not one of the default three) had
-three survivors: nothing held that a queue id still in use is skipped after the counter wraps
+The other five followed the same day. `tower-gateway` (the registry codec and the downlink
+queue) had three survivors: nothing held that a queue id still in use is skipped after the counter wraps
 and that a freed id is not handed out again at once (the host tracks items by id), that
 `is_empty` is false with an item queued, and that a stored bucket longer than a bucket can be
 is unreadable rather than a slice past the buffer. `tower-radio` had 18: twelve in the hop permutation, where the tests
 held that it is a permutation and the same every cycle, which any shuffle is, but not which one
 (its sequence is pinned by value now: both ends of a US 915 link compute it); one in CCM's AAD
 length, which RFC 3610's vector #1 with its 8-byte header could not tell from a longer one
-(vector #4, a 12-byte header, does); five equivalent. `tower-modules` (the module drivers'
-arithmetic and frames, written the same day) is not one of the default three either; its run found one constant nothing pinned (the Relay Module's red LED bit:
+(vector #4, a 12-byte header, does); five equivalent. `tower-shell` had 13: the completion budget's byte counts (its
+9-byte base, an exact fit, the first candidate's prefix share) were held only by "it fits one
+frame", the address parser took nine hex digits when the value still fit, and the xorshift
+was pinned for one seed that no `|` in place of `^` changes. `tower-taf` had 13: the weekly
+program looked back over the days in a test that could not tell back from forward, "strictly
+after" a switch point was never asked on one, and `Mode::from_index`, `Demand::is_on` and
+`Reporter::last` had no test at all. `tower-modules` (the module drivers'
+arithmetic and frames, written the same day): one constant nothing pinned (the Relay Module's red LED bit:
 `1 << 1` could have become 0), an untested period constant and error text, and 14 equivalent
 mutants (`|` against `^` of masks that share no bit), listed in `.cargo/mutants.toml`.
 
