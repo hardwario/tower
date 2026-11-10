@@ -69,6 +69,40 @@ fn rfc3610_packet_vector_1() {
     );
 }
 
+/// RFC 3610 §8 Packet Vector #4: a 12-byte header. With its 2-byte length it is 14 bytes of the
+/// first AAD block; vector #1's 8-byte header leaves that block mostly padding, so a length
+/// that came out too long (`2 * len` for `2 + len`) still gave the right MAC there. This one
+/// would not.
+#[test]
+fn rfc3610_packet_vector_4() {
+    let key: [u8; 16] = [
+        0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF,
+    ];
+    let nonce: [u8; NONCE_LEN] = [
+        0x00, 0x00, 0x00, 0x06, 0x05, 0x04, 0x03, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5,
+    ];
+    let aad: [u8; 12] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+    ];
+    let plain: [u8; 19] = [
+        0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C,
+        0x1D, 0x1E,
+    ];
+    let expected_ct: [u8; 19] = [
+        0xA2, 0x8C, 0x68, 0x65, 0x93, 0x9A, 0x9A, 0x79, 0xFA, 0xAA, 0x5C, 0x4C, 0x2A, 0x9D, 0x4A, 0x91, 0xCD,
+        0xAC, 0x8C,
+    ];
+    let expected_tag: [u8; TAG_LEN] = [0x96, 0xC8, 0x61, 0xB9, 0xC9, 0xE6, 0x1E, 0xF1];
+
+    let mut ccm = Ccm::new(SoftAes);
+    let mut data = plain;
+    let tag = ccm.seal(&key, &nonce, &aad, &mut data);
+    assert_eq!(data, expected_ct, "RFC 3610 #4 ciphertext mismatch");
+    assert_eq!(tag, expected_tag, "RFC 3610 #4 MIC mismatch");
+    assert!(ccm.open(&key, &nonce, &aad, &mut data, &tag));
+    assert_eq!(data, plain);
+}
+
 /// seal → open round-trips arbitrary payloads (incl. empty and non-block-multiple lengths),
 /// with and without AAD. `no_std` crate, so we work in a fixed buffer and slice it per length.
 #[test]

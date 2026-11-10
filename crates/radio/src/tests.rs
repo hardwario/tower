@@ -230,6 +230,36 @@ fn downlinks_in_the_current_slot_keep_the_dwell_bound_and_use_the_channels_evenl
     );
 }
 
+/// The hop sequence itself, pinned: both ends of a US 915 link compute it from the seed, so a
+/// gateway and a node built from different versions of this function would never meet again
+/// outside the rendezvous channel. The properties above (a perfect permutation, the same every
+/// cycle) hold for any shuffle; these values hold this one. A change here is a decision.
+#[test]
+fn hop_channel_sequence_is_pinned() {
+    let head = |seed: u32| -> [u8; 10] {
+        let mut v = [0u8; 10];
+        for i in 0..10u8 {
+            v[i as usize] = hop_channel::<FHSS_N>(seed, 0, i);
+        }
+        v
+    };
+    assert_eq!(head(1), [66, 36, 7, 52, 43, 9, 45, 55, 14, 23]);
+    assert_eq!(head(0xDEAD_BEEF), [40, 37, 63, 58, 77, 64, 47, 78, 57, 46]);
+    assert_eq!(head(0x4EBB_5A77), [28, 77, 39, 73, 42, 43, 40, 8, 20, 69]);
+    // The last slot of the cycle too (the shuffle's first swap).
+    assert_eq!(hop_channel::<FHSS_N>(1, 0, 79), 49);
+    assert_eq!(hop_channel::<FHSS_N>(0xDEAD_BEEF, 0, 79), 71);
+    // A seed of 0 would stall the xorshift: it stands for a fixed non-zero one.
+    assert_eq!(head(0), [19, 78, 7, 25, 67, 30, 41, 65, 17, 21]);
+    assert_eq!(head(0), head(0xA5A5_A5A5));
+    // And a short sequence in full.
+    let mut small = [0u8; 8];
+    for i in 0..8u8 {
+        small[i as usize] = hop_channel::<8>(7, 0, i);
+    }
+    assert_eq!(small, [5, 2, 4, 3, 6, 1, 0, 7]);
+}
+
 // --- frame_toa_ms: never under-counts ----------------------------------------------------
 
 /// Time-on-air is rounded **up** (div_ceil), so the reported airtime is always ≥ the exact

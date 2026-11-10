@@ -125,6 +125,8 @@ it is not part of `just check`: `.github/workflows/mutants.yml` runs it weekly a
 | `tower-net`, with the hop slot plan and the hop-clock rule (T3) | 279 | 244 | 2 | 33 | 0 |
 | `tower-gateway`, first run (`just mutants gateway`) | 102 | 89 | 1 | 9 | 3 |
 | `tower-gateway`, now | 102 | 92 | 1 | 9 | 0 |
+| `tower-radio`, first run (`just mutants radio`) | 113 | 87 | 2 | 6 | 18 |
+| `tower-radio`, now | 108 | 100 | 2 | 6 | 0 |
 | `tower-modules`, first run (`just mutants modules`) | 248 | 221 | 0 | 7 | 20 |
 | `tower-modules`, now | 234 | 227 | 0 | 7 | 0 |
 
@@ -132,7 +134,11 @@ it is not part of `just check`: `.github/workflows/mutants.yml` runs it weekly a
 three survivors: nothing held that a queue id still in use is skipped after the counter wraps
 and that a freed id is not handed out again at once (the host tracks items by id), that
 `is_empty` is false with an item queued, and that a stored bucket longer than a bucket can be
-is unreadable rather than a slice past the buffer. `tower-modules` (the module drivers'
+is unreadable rather than a slice past the buffer. `tower-radio` had 18: twelve in the hop permutation, where the tests
+held that it is a permutation and the same every cycle, which any shuffle is, but not which one
+(its sequence is pinned by value now: both ends of a US 915 link compute it); one in CCM's AAD
+length, which RFC 3610's vector #1 with its 8-byte header could not tell from a longer one
+(vector #4, a 12-byte header, does); five equivalent. `tower-modules` (the module drivers'
 arithmetic and frames, written the same day) is not one of the default three either; its run found one constant nothing pinned (the Relay Module's red LED bit:
 `1 << 1` could have become 0), an untested period constant and error text, and 14 equivalent
 mutants (`|` against `^` of masks that share no bit), listed in `.cargo/mutants.toml`.

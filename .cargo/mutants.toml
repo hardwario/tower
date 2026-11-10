@@ -45,6 +45,16 @@ exclude_re = [
     # `read_off` then sits past `src_end`, which only this loop reads.
     'crates/kv/src/lib\.rs:\d+:23: replace < with <= in flip_step$',
 
+    # tower-radio (`just mutants radio`). `frame_toa_ms`: `if ms > u32::MAX { u32::MAX } else
+    # { ms }` gives `u32::MAX` for `ms == u32::MAX` either way.
+    'crates/radio/src/lib\.rs:\d+:11: replace > with >= in frame_toa_ms$',
+    # CCM's B0 flags byte is three fields that share no bit (`0x40`, `M' << 3`, `L'`): `|` and
+    # `^` are the same. The AAD buffer is `2 + MAX_AAD` bytes; `2 * MAX_AAD` is only longer.
+    # `block_xor` is called once, on the all-zero MAC state, where `^=` and `|=` agree.
+    'crates/radio/src/ccm\.rs:\d+:\d+: replace \| with \^ in Ccm<A>::cbc_mac$',
+    'crates/radio/src/ccm\.rs:\d+:33: replace \+ with \* in Ccm<A>::cbc_mac$',
+    'crates/radio/src/ccm\.rs:\d+:16: replace \^= with \|= in block_xor$',
+
     # tower-modules (`just mutants modules`): `|` and `^` of masks that share no bit are the
     # same value. The LP8's status masks (`FATAL | ALGORITHM | MEMORY | SELF_DIAG`,
     # `VCAP1_LOW | VCAP2_LOW`, ...: single bits each), the MPL3115A2's oversampling field next
