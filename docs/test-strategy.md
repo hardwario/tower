@@ -23,7 +23,7 @@ power-switching USB hub, the PPK2, a board for the rogue firmware).
 | Mutation testing of the security kernels (`tower-net`, `tower-kv`, `tower-protocol`): no mutant survives unexplained (layer 6) | `just mutants`, `.cargo/mutants.toml` | CI, weekly |
 | Firmware gates: MCU build, RAM budget, clippy over the role variants, rustdoc | `just fw ci` | CI, every push |
 | Supply chain: `cargo audit` on every lockfile, pinned actions | `.github/workflows` | CI |
-| HIL bench: smoke, KATs, two-board radio and network, gateway end to end, stack high-water, a listening node's downlinks, OTA pairing and a sleeping node's `set` | `just hil bench` | by hand |
+| HIL bench: smoke, KATs, two-board radio and network, gateway end to end, stack high-water, a listening node's downlinks (also on US 915), OTA pairing and a sleeping node's `set`, the Climate, CO2 and Relay Modules on the Core | `just hil bench` | by hand |
 | HIL power group (PPK2 + J-Link) | `just hil bench-power` | by hand |
 | Manual product checks and the remaining examples | `docs/firmware/test-plan.md`, `tools/hwtest` | by hand |
 

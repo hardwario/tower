@@ -571,6 +571,16 @@ sensor is served with:
   reacquire_slack_ms`), and drops the anchor for a rescan once that exceeds what still predicts
   the right slot (about 20 min). A node with nothing to send re-anchors after 15 min
   (`FHSS_RESYNC` in the app); `fhss_since_beacon` tells it when.
+- **A beacon's receive time is not taken at its word.** It is stamped when the node's task runs
+  after the radio's interrupt, so it is late by whatever held the processor meanwhile: nothing
+  most of the time, tens of milliseconds under an EEPROM write (the replay lane after a
+  downlink, the store's maintenance). A clock anchored on such a stamp opens every later beacon
+  window after its beacon began (the guard is 10 ms): the node hears none, cannot correct
+  itself, and rescans after 24 misses. So a tracked beacon moves the slot boundary later only by
+  the drift the clock may have collected since the last one, while an earlier stamp is always
+  believed (`tower_net::epoch::tracked_boundary_ms`). A listening node, which tracks every
+  beacon, lost the schedule about once in forty downlinks before this (2026-11-10: 189 of 200
+  sets confirmed, with four stalls of 12 to 50 s; 200 of 200 after).
 - **A loop budget for the master.** `fhss_master_tick` stops listening `MASTER_LOOP_BUDGET` (40 ms)
   plus the guard before the slot ends, and `fhss_send`'s slot-straddle rule keeps the same margin.
   With only the 10 ms guard, an app loop that ran longer skipped the next slot (no beacon, no

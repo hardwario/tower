@@ -5,7 +5,8 @@
 //! concentration (`nodes/{addr}/state/humidity`, `illuminance`, `pressure`, `co2`), next to what
 //! every taf node reports (the Core Module's temperature, the accelerometer's `tilt` events).
 //! Neither module has to be fitted: the app looks for each sensor with every round, reports the
-//! ones it finds and stops reporting one that went away. The sensor tags carry the Climate
+//! ones it finds and stops reporting one that went away (a CO2 Module that failed three
+//! measurements in a row is looked for again ten minutes later). The sensor tags carry the Climate
 //! Module's parts, so a Humidity, Lux Meter or Barometer Tag works the same.
 //!
 //! **One uplink per round.** The sensors are read in the runtime's sampling round (every
@@ -59,6 +60,10 @@ const LUX_DELTA_MIN: i32 = 10;
 const CHARGE_MARGIN: Duration = Duration::from_secs(1);
 /// A failed CO2 measurement is tried again after this long (and a full charge).
 const CO2_RETRY: Duration = Duration::from_secs(60);
+/// A CO2 Module that stopped answering is looked for again after this long, not with the next
+/// round: one whose sensor is broken answers the probe, and would be charged for a minute and
+/// fail three measurements over and over.
+const CO2_LOOK_AGAIN: Duration = Duration::from_secs(600);
 
 /// What `climate print` shows: the sensors found and the last value of each.
 #[derive(Clone, Copy)]
@@ -178,6 +183,7 @@ async fn sensors(bus: I2cBus) {
     // The CO2 measurement's plan: when the next one is due, and (while the capacitor charges)
     // when it is charged. The next round is expected a `report-period` after the last one.
     let mut co2_due = Instant::now();
+    let mut co2_look_at = Instant::MIN;
     let mut charged_at: Option<Instant> = None;
     let mut round_at = Instant::now();
     let mut pressure: Option<u16> = None;
@@ -203,7 +209,7 @@ async fn sensors(bus: I2cBus) {
                 round_at = Instant::now();
                 let before = climate.parts();
                 climate.probe().await;
-                if co2.is_none() {
+                if co2.is_none() && round_at >= co2_look_at {
                     co2 = Co2Module::probe(bus).await;
                     if co2.is_some() {
                         info!(target: "climate", "CO2 Module found");
@@ -258,6 +264,7 @@ async fn sensors(bus: I2cBus) {
                 }
                 if co2.as_ref().is_some_and(Co2Module::gone) {
                     co2_gone(&mut co2, &mut charged_at);
+                    co2_look_at = Instant::now() + CO2_LOOK_AGAIN;
                 }
                 // The round's reports may go now, in one uplink.
                 drop(round);
@@ -274,6 +281,7 @@ async fn sensors(bus: I2cBus) {
                 }
                 if co2.as_ref().is_some_and(Co2Module::gone) {
                     co2_gone(&mut co2, &mut charged_at);
+                    co2_look_at = Instant::now() + CO2_LOOK_AGAIN;
                 }
             }
             // A setting changed (a delta, `co2-period`): they are read where they are used, and
@@ -283,7 +291,7 @@ async fn sensors(bus: I2cBus) {
     }
 }
 
-/// The CO2 Module stopped answering: stop reporting it and look for it again with every round.
+/// The CO2 Module stopped answering: stop reporting it; the caller says when to look for it again.
 fn co2_gone(co2: &mut Option<Co2Module>, charged_at: &mut Option<Instant>) {
     warn!(target: "climate", "CO2 Module gone");
     *co2 = None;

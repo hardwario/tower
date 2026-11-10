@@ -23,13 +23,17 @@ Task status: `open`, `in progress`, `waiting (Dn)` (blocked on a decision), `don
 
 ### D18. Push the night's work of 2026-11-10
 
-The modules work (T5, T6, T29) and the bridge fix (T30) are
-committed on `main` locally and **not pushed** (AGENTS.md: push only when asked).
+The modules work (T5, T6, T29), the bridge fix (T30), the listening node on US 915 with the
+hop-clock fix it needed (T3), the dependency sweep (T26) and the hardware-free test layers (T12)
+are committed on `main` locally and **not pushed** (AGENTS.md: push only when asked).
 
 - (a) Push it as it is. Recommended once you have read this file's *Done* entries of 2026-11-10
   and [docs/firmware/results/2026-11-10.md](docs/firmware/results/2026-11-10.md): the gates are
   green on the last commit, and what the bench could not check is listed in T31.
 - (b) Review first, commit by commit (`git log origin/main..main`), and push what you keep.
+  T3 (three commits and the hop-clock fix after them), T12 (five) and T26 (seven) were written
+  by parallel agents in worktrees and merged after their gates and the bench; each group can be
+  dropped on its own. cortex-m 0.7.10 is one commit of T26's.
 
 Three choices were made for you that night (D15, D16, D17 under *Decided*): overturn any of them
 before pushing if you see it otherwise. D16 names an MQTT property, the costliest to change later.
@@ -72,6 +76,10 @@ T5, T6 and T29 are done on the console, over the radio and in the HIL group
 - [ ] **Unplugging a module while the app runs**: the value leaves the reports (`taf::forget`),
       the module is found again when it comes back (the CO2 Module after a full charge).
 - [ ] **A baseline correction of the LP8**: asked for after 8 days of uptime.
+- [ ] **T3 with the Dongle and a strip**: `hil/tests/listening.rs` on `us915` (the harness
+      cannot take an r1 as the gateway), and `radio_control` on the hop schedule with a real
+      LED strip running an effect (the strip task rendered throughout the bench runs, with no
+      strip attached: its refill interrupt and the beacon windows were not seen together).
 - [ ] **The LP8's state across a reset**: it is kept in RAM, so a reboot starts the sensor's
       filter over (as the legacy SDK did). Keeping it in EEPROM would cost a 23-byte record per
       measurement; once a day, or before a planned reboot, would do.
@@ -80,10 +88,12 @@ T5, T6 and T29 are done on the console, over the radio and in the HIL group
 
 Status: open (found 2026-11-10)
 
-**Why.** `radio_control` on the r2 has 2.0 KB of flash left (the warning line of
-`tools/check_ram_budget.py`) and 24 B above the RAM floor. It cannot be built at "z" (its LED
-strip, D14). It had 5.4 KB before the Relay Module (2.6 KB, T6) and cortex-m 0.7.10 (0.7 KB,
-T26); what goes into the taf runtime next lands on it first.
+**Why.** `radio_control` on the r2 has 1.0 KB of flash left (under the 2 KB warning line of
+`tools/check_ram_budget.py`: `just fw ci` warns, and passes) and 24 B above the RAM floor. It
+cannot be built at "z" (its LED strip, D14). It had 5.4 KB before the night of 2026-11-10: the
+Relay Module took 2.6 KB (T6), cortex-m 0.7.10 0.7 KB (T26), the listening loop on the hop
+schedule 0.8 KB (T3), the hop-clock fix 0.2 KB. `radio_thermostat` on the r2 is at 2.0 KB (the
+last three of those). What goes into the taf runtime next lands on these two first.
 
 **Where the bytes are** (`cargo nm --size-sort`, 2026-11-10): the runtime's main task 18.6 KB,
 pairing 6.9 KB + X25519 about 6 KB, the strip task 6.3 KB, the console manager and the shell's
@@ -97,28 +107,12 @@ the module).
 - The Relay Module's driver is async for a 20 ms pulse and a 3 ms ATSHA wait; a version that
   only switches, with the caller timing the pulse, would be smaller.
 - `strip_player`'s `status` command (0.8 KB) and its 18 effects.
+- A class-specific entry point in taf, so a sleeping app does not link the listening loop and
+  the reverse (T3 put both into every app: 0.7 KB each).
 - If none is enough: leave cortex-m at 0.7.9 for this app's sake (0.7 KB), listed under T26.
 
 **Done when.** `radio_control` on the r2 leaves 4 KB of flash and 100 B above the RAM floor,
 with the strip's timing unchanged on the bench.
-
-### T3. Listening node on US 915
-
-Status: open (D4: later)
-
-**Why.** The listening class (`radio_control`; docs/firmware/radio.md, "Node classes") runs on EU
-868 only. A node that keeps its receiver on would have to follow the gateway's hop schedule all the
-time, and one fixed channel at full power is not allowed on US 915 (FCC §15.247), so a listening
-kind refuses `us915` for now (no pairing, no provisioning, radio off; docs/firmware/taf.md).
-
-**What it takes.** The network layer (`firmware/src/radio/net`, `crates/net`): a listening node
-that tracks the hop schedule between its own sends (a sleeping node acquires it with each uplink
-and re-acquires by prediction after a sleep); the gateway (`radio_gateway`) sending a listening
-node's downlink at once in the current slot, which today it does on EU 868 only.
-
-**Done when.** `radio_control` on `us915` pairs, a `set` over MQTT is confirmed within the
-listening budget (`hil/tests/listening.rs` on `us915`), and the per-channel airtime in `gateway
-status` stays even.
 
 ### T4. Battery Module: battery voltage, power numbers, a long soak
 
@@ -269,15 +263,48 @@ a two-board confirmed uplink with a downlink still pass.
 
 ### T12. Test layers to add
 
-Status: open (needs bench setup first)
+Status: open (the hardware-free part done 2026-11-10; the rest needs bench setup)
 
 [docs/test-strategy.md](docs/test-strategy.md): nightly HIL, long soak, power loss and brown-out,
 energy per event, an attacker board, mutation testing, latency budgets, host-side snapshots and
 contract tests, radio pre-compliance, environment, production test, release qualification.
-Needs bench setup first (a self-hosted runner, a power-switching USB hub, the PPK2, a board
-for the rogue firmware). Open findings to run down with it: a remote shell reply chunk lost when
-two nodes answer at once (1 in 8 on the bench before the 2026-10-18 fixes, 0 in 48 in the soak
-after them), and `radio_afa` delivering 14 of 19 confirmed sends.
+
+**Done 2026-11-10** (no hardware needed):
+- [x] Mutation testing of tower-net, tower-kv and tower-protocol (`just mutants`, a weekly
+      `mutants.yml`, never run yet): 96 survivors before, none after 43 new tests; 6 equivalent
+      mutants excluded with their reasons in `.cargo/mutants.toml`. Decisions that no test held
+      and now one does: `TxCounter::raise_to` with a floor equal to the durable watermark (a
+      `<=` there hands out a counter the next boot resumes at: a nonce reuse), re-locking to
+      the same gateway epoch after a fade, the X25519 all-zero check, a stale flip plan of the
+      KV store refused before any write, the schema tags covering every message type (a
+      constant hash passed every test before).
+- [x] The MQTT API page held against the bridge (`cli/src/gateway/engine/tests/contract.rs`,
+      19 tests): topics, retain flags, payload keys and types, the RPC and error tables, the
+      property tables, the limits in the prose. The page and the code agreed on the first run.
+- [x] Frame snapshots of both TUIs (`insta`, 38 frames at three sizes each). They found two
+      bugs, fixed: a pane's newest rows hidden when a line wraps (the shell prompt off screen,
+      the tail of an `export` clipped), and the console footer's clock leaving a letter of a
+      hint behind it. The first fix turns on ratatui's `unstable-rendered-line-info` feature.
+
+**Remaining, no hardware needed:** `cargo-llvm-cov` and Kani proofs of the counter and replay
+kernels; mutation testing of tower-radio, tower-gateway, tower-shell, tower-taf and
+tower-modules; a CI job against a real mosquitto (TLS, logins, a broker restart); the four TUI
+layout defects the snapshots record (console hints under the clock below 140 columns, the
+console prompt not scrolling, the gateway's footer chips cut at 100 columns, its node table
+below 100 columns); frames of the two wall-clock modals.
+
+**Remaining, needs hardware:** 1 nightly HIL (a self-hosted runner on the bench machine, the
+bench left cabled); 2 long soak (the gateway and two or more nodes for 24 to 72 h, an MQTT
+recorder; a first 3.5 h of one node are in docs/firmware/results/2026-11-10.md); 3 power loss
+and brown-out (a USB hub with per-port power switching, later the PPK2 in source mode); 4
+energy per event (PPK2 and J-Link); 5 an attacker on the bench (a third board with rogue
+firmware); 7 latency budgets (bench boards, a bench GPIO on the button line); 8 USB plug cycling
+(the power-switching hub); 9 radio pre-compliance and range (SDR, step attenuators, a jammer
+board); 10 environment (a temperature chamber, ESD); 11 end-of-line test (a fixture, a reference
+dongle); 12 release qualification (the bench, on release artifacts). Open findings to run down
+with it, unchanged: a remote shell reply chunk lost when two nodes answer at once (1 in 8 on
+the bench before the 2026-10-18 fixes, 0 in 48 in the soak after them), and `radio_afa`
+delivering 14 of 19 confirmed sends.
 
 ### T13. Provisioned ATSHA204A as a secure element (manufacturing)
 
@@ -399,11 +426,12 @@ reason, not skipped silently.
       tools import the standard library only
 - [x] `just check` green on the merged tree
 - [ ] The bench for cortex-m 0.7.10 (it ends every critical section with an `isb`, and lets the
-      compiler move less across an interrupt enable or disable): the modules HIL group and the
-      radio to MQTT path passed on it (2026-11-10, r2 and the r1 as a gateway); still to run:
-      the strip's timing (underruns over the effect sweep), the PIR bit-bang read, the HIL radio
-      groups (they need the Dongle), the STOP floor (a PPK2). ctutils 0.4.8 (under the pairing
-      handshake): an OTA pairing. nusb 0.2.9: a DFU flash of the r1 (done many times that night)
+      compiler move less across an interrupt enable or disable). Passed on it, 2026-11-10 (an
+      r2 and the r1 as a gateway): the modules HIL group, both node classes on both bands over
+      the radio to MQTT, the console on both boards. Still to run: the strip's timing (underruns
+      over the effect sweep), the PIR bit-bang read, the HIL radio groups (they need the
+      Dongle), the STOP floor (a PPK2). ctutils 0.4.8 (under the pairing handshake): an OTA
+      pairing passed. nusb 0.2.9: a DFU flash of the r1 passed
 - [ ] The release dry run again (it needs the commits pushed: D18)
 - [x] The docs and comments that name a version: serialport 4.10 in four HIL comments, the
       free-flash figures in docs/firmware/taf.md; the rest did not move
@@ -425,7 +453,8 @@ old), install-action v2.90.3, action-gh-release v3.0.4. To honour the cooldown i
 `cargo update` again after 2026-11-16 before the next release.
 
 **The cost of cortex-m 0.7.10**: 440 to 720 B of flash per image (an `isb` at each of the
-100 to 180 critical-section exits). `radio_control` on the r2 is left with 2.0 KB (T32).
+100 to 180 critical-section exits), one of the reasons `radio_control` on the r2 is down to
+1.0 KB (T32).
 
 **Done when.** Every pin is at its newest stable release or listed here with the reason it is
 not, the gates and the bench pass, and the release dry run is green on that commit.
@@ -484,6 +513,22 @@ not, the gates and the bench pass, and the release dry run is green on that comm
 ## Done
 
 (Newest first; one line each.)
+
+- **T3. Listening node on US 915**: `radio_control` follows the gateway's hop schedule all the
+  time (`Net::fhss_node_listen`: receive slices on the current slot's channel, placed around the
+  time the gateway sends at, `tower_net::slot`; a hop with every slot; the rendezvous scan when
+  the schedule is lost), and the gateway sends a listening node's downlink in the current slot,
+  125 ms in, unless an uplink took the slot. The class of a node is marked on its queue items
+  (no registry lookup per loop turn). The refusal of `us915` for a listening kind is gone. The
+  bench then showed the node losing the schedule about once in forty downlinks: a beacon's
+  receive time, stamped late under an EEPROM write, moved the slot clock late for good. Fixed
+  in the tracking of every hopping node (`tower_net::epoch::tracked_boundary_ms`). Bench (the
+  r1 as the gateway, no Dongle): OTA pairing on `us915` with one SAS on the node, the gateway
+  and the CLI, the schedule locked 57 s later (40 s after a boot); 200 of 200 sets from MQTT
+  confirmed, median 0.63 s, the slowest 1.4 s (budget 2.5 s); all 80 channels used, the busiest
+  7 % above the mean airtime; EU 868 and the sleeping class on both bands checked again
+  (docs/firmware/results/2026-11-10.md). Not run: `hil/tests/listening.rs` on `us915` (it
+  needs the Dongle), a real LED strip on the node (T31). 2026-11-10.
 
 - **T6. Relay Module for `radio_control`** (D16): `tower::rela- **T30. Sets beyond the gateway's queue were dropped without a word**: the gateway holds two
   commands per node (four in all); the bridge logged every `set` as queued and said nothing when
