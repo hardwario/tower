@@ -88,7 +88,7 @@ embedded-hal = "1.0"
 # Async primitives for inter-task messaging: the LED dispatcher's command queue
 # (embassy-sync Channel) and select! over a timer vs. an incoming command.
 embassy-sync = "0.8.0"
-embassy-futures = "0.1.1"
+embassy-futures = "0.1.2"
 
 # Logging facade. The console module provides the backend (level + uptime
 # timestamp over the UART); modules just use `info!`/`warn!`/`error!`/etc.
