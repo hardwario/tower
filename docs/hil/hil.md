@@ -66,7 +66,7 @@ node app; no bridge, the tests speak the management channel on both consoles):
 | Group | Node | What it holds |
 |-------|------|---------------|
 | `tests/gateway.rs` | `radio_button` | Cable provisioning, a click bridged as a typed uplink, a remote shell line through the downlink queue, the stats stream; the gateway's stack peak with a full registry |
-| `tests/listening.rs` | `radio_control` | A listening node takes a `set` and a remote shell line at once: queued to answered within 2.5 s |
+| `tests/listening.rs` | `radio_control` | A listening node takes a `set` and a remote shell line at once: queued to answered within 2.5 s. On `us915` also: the node's first uplink within 100 s of its boot (it found the hop schedule), then 24 sets in a row, every hop channel used and the busiest within 150 ms of the mean airtime (`gateway status`) |
 | `tests/sleeping.rs` | `radio_button` | OTA pairing without hands (`PairingOpen` on the gateway, `JoinOpen` on the node: one SAS on both ends, the node registered as a sleeping one, its `Info` under the new key); a `set` queued while the node sleeps waits for the node's own next uplink, goes out in its window and is confirmed by the settings report, within the node's longest silence (`heartbeat` 60 s + `report-period` 5 s for the run, put back afterwards) |
 
 One more group needs the Core alone, no Dongle (`bench_or_fail_core`): `tests/modules.rs`, the
@@ -77,6 +77,9 @@ state and switch it back and forth with simulated clicks. `just bench` runs it w
 a bench without the modules fails it: run the other groups by name there.
 
 One group alone: `cargo test --test sleeping -- --ignored --test-threads=1 --nocapture` in `hil/`.
+The band of these groups is the Dongle's: its `band` setting, which survives the flashing
+(`tower -d <dongle port> exec "system settings set band us915"`, or `eu868`), read with
+`Describe` and handed to the node with its credentials.
 The Dongle of a bench that also serves a bridge is flashed and its registry entry of the Core
 replaced by these groups: stop the bridge first, and name the node again afterwards.
 
