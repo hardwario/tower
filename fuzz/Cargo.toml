@@ -30,7 +30,7 @@ tower-radio = { path = "../crates/radio" }
 
 # Re-encoding decoded values for the round-trip checks needs the same serializer and collection
 # types the protocol crate uses (same major versions, no_std-safe features, as in the root).
-postcard = { version = "1.0", default-features = false }
+postcard = { version = "1.1", default-features = false }
 serde = { version = "1.0", default-features = false }
 heapless = { version = "0.9", default-features = false, features = ["serde"] }
 # Pure-Rust AES-128 as the `AesBlock` behind the CCM checks in `radio_kernels` (the same crate
