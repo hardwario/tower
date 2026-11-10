@@ -1156,10 +1156,19 @@ fn log_line_spans((prefix, rest, c): &(String, String, Color)) -> Line<'static> 
     ])
 }
 
-/// How many terminal rows a line of display width `w` occupies once wrapped to `width`
-/// columns (matching `Wrap { trim: false }`): `ceil(w / width)`, at least one row.
-fn wrapped_rows(w: usize, width: usize) -> usize {
-    if width == 0 { 1 } else { w.div_ceil(width).max(1) }
+/// How many terminal rows `line` occupies in a pane `width` columns wide, wrapped the way the
+/// panes wrap it (`Wrap { trim: false }`): at least one. A line that fits takes one; for one
+/// that does not, this is ratatui's own count. It wraps at words, so such a line takes more rows
+/// than its width divided by the pane's (the estimate this used to be), and every row the
+/// estimate missed put the newest row of the pane below its bottom edge.
+fn wrapped_rows(line: &Line, width: u16) -> usize {
+    if line.width() <= usize::from(width) {
+        return 1;
+    }
+    Paragraph::new(line.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .max(1)
 }
 
 /// Render a bottom-anchored scrollback pane.
@@ -1188,7 +1197,6 @@ fn render_text_pane<T>(
     // Wrap width and height = the content area (borders and padding removed when framed).
     let inner = block.inner(area);
     let inner_h = inner.height as usize;
-    let inner_w = inner.width as usize;
     if inner_h == 0 {
         f.render_widget(Paragraph::new(Vec::<Line>::new()).block(block), area);
         return;
@@ -1203,7 +1211,7 @@ fn render_text_pane<T>(
     let mut total_rows = 0usize;
     for item in items.iter().rev() {
         let line = to_line(item);
-        let rows = wrapped_rows(line.width(), inner_w);
+        let rows = wrapped_rows(&line, inner.width);
         total_rows += rows;
         rows_by_line.push(rows);
         collected.push(line);

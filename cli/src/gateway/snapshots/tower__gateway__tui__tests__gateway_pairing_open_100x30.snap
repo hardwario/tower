@@ -15,15 +15,15 @@ expression: "shot(&mut app, size)"
 │                                                        ││   -5s               -3s            now │
 └────────────────────────────────────────────────────────┘└────────────────────────────────────────┘
 ┌ Shell: kitchen ‹┌ OTA pairing ─────────────────────────────────────────────────┐─────────────────┐
-│ wire = console 0│ window open, 45 s left                                       │                 │
-│ ✓               │                                                              │ay":"0x00000001" │
-│ > system eeprom │ power the node up, hold its button 10 s,                     │_up":true}       │
-│ ✖ result 5      │ release when the LED goes off;                               │                 │
-│ > led blink     │ the window closes itself on the first join                   │r":1234,"ts":170 │
-│ ✖ queue TTL expi│                                                              │                 │
-│ delivery        │ Esc = cancel now                                             │                 │
-│ ⌛ system settin└──────────────────────────────────────────────────────────────┘:{"addr":"0x0000 │
-│ (ref 9; p→Del dequeues)                   ││ cd34","key":"<redacted>"}}                          │
+│ > system eeprom │ window open, 45 s left                                       │                 │
+│ ✖ result 5      │                                                              │                 │
+│ > led blink     │ power the node up, hold its button 10 s,                     │em settings set  │
+│ ✖ queue TTL expi│ release when the LED goes off;                               │tui-5","line":"l │
+│ delivery        │ the window closes itself on the first join                   │                 │
+│ ⌛ system settin│                                                              │                 │
+│ (ref 9; p→Del de│ Esc = cancel now                                             │                 │
+│ ⌛ led on (ref 1└──────────────────────────────────────────────────────────────┘ome":"not-delive │
+│ > system settings set heartbeat=600       ││ red","ack_rssi":null,"ts":1700000004}               │
 └───────────────────────────────────────────┘└─────────────────────────────────────────────────────┘
 ┌ Gateway Log ─────────────────────────────────────────────────────────────────────────────────────┐
 │ gateway 0x00000001 on /dev/ttyTEST (16 node slots)                                               │
@@ -46,22 +46,22 @@ aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbddddddddddd
 ..............................................................fff...............fff............fff
 
 oooooooooooooooooogggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
-o.ppppfffqqqqqqqqqg..............rrrr............................................g
-o.q...............g..............................................................gsssfqqqqqqqqqqqq
-o.ffssssss.ssssss.g..............................................................gssssfggggf
-o.tttttttttt......g..............................................................g
-o.ffsss.ggggg.....g..............................................................gssfppppfssssfppp
+o.ffpppppp.pppppp.g..............qqqq............................................g
+o.rrrrrrrrrr......g..............................................................g
+o.ffppp.ggggg.....g..............................................................gsssssssssssssss
+o.rrrrrrrrrrrrrrrrg..............................................................gssssssfppppppfss
+o.rrrrrrrr........g..............................................................g
+o.t.ttttttttttttttg..............................................................g
 o.ttttttttttttttttg..............................................................g
-o.tttttttt........g..............................................................g
-o.u.uuuuuuuuuuuuuuggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggffssssssfqqqqqqq
-o.uuuuuuuuuuuuuuuuuuuuuuu...................o..qqqqqfsssssfqqqqqqqqqqqqff
+o.t.ttttttttttttttggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggppppfsssssssssss
+o.pp.................................u......o..ssssfppppppppppfggggfppppfvvvvvvvvvvf
 ooooooooooooooooooooooooooooooooooooooooooooo
 
 
 
 ..ggggggggggggggggggggggggggggggg
 
-..ttttttttttttttttttttttttttttttttttt
+..rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
 
 
 bbbbbbbbbbbbbbbbbbdddddddddbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -81,9 +81,10 @@ l: Blue on Blue
 m: Cyan on Cyan
 n: Green on Blue
 o: LightRed BOLD
-p: Magenta
-q: Green
-r: Yellow BOLD
-s: Cyan
-t: Red
-u: Yellow DIM
+p: Cyan
+q: Yellow BOLD
+r: Red
+s: Green
+t: Yellow DIM
+u: REVERSED
+v: Magenta

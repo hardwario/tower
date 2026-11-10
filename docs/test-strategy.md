@@ -184,24 +184,25 @@ debounce and EXTI are covered, not only `button simulate`. Fail on a budget over
   severity tints), and the cursor. A frame that changes fails its test and leaves a `.snap.new`
   to compare; `INSTA_UPDATE=always cargo test -p tower-cli` accepts, and the `git diff` of the
   `.snap` files is the review. The margins, the wrapped `export` and the chip contrast are held
-  this way. The frames hold the screens as they are, so what the first ones showed to be wrong
-  is still in them, and each fix will show as a reviewed change of a `.snap` file:
+  this way. The first frames showed defects nobody had reported. Two are fixed, each fix a
+  reviewed change of the `.snap` files: the console footer's clock was drawn over the key hints
+  without a gap and left a letter of one after it at 80 columns; and a pane lost its newest
+  rows below its bottom edge when a line wrapped (in the gateway TUI's shell pane the prompt
+  itself, in its MQTT and log panes the newest messages, in the console TUI the tail of a
+  wrapped response), because the panes counted lines, or estimated rows from the text's width,
+  where ratatui wraps at words. The frames hold the screens as they are, so the rest is still
+  in them:
   - console: the footer's key hints run under the clock on any terminal narrower than about 140
-    columns, `<F10>/<^C> Quit` first (the clock drawn over them without a gap, and a letter of
-    a hint left after it at 80 columns, is fixed: the first change a frame recorded);
-  - console: the shell pane anchors its scrollback by an estimate of the wrapped rows
-    (characters over width) where ratatui wraps at words, so at 80x24 the last rows of the
-    newest response are below the pane; the prompt does not scroll, so a command longer than the
-    pane is cut at its right edge with the cursor pinned there;
-  - gateway: the shell, MQTT and log panes show their last lines by count, so when a line wraps
-    the newest rows (in the shell pane the prompt) are below the pane;
+    columns, `<F10>/<^C> Quit` first;
+  - console: the prompt does not scroll, so a command longer than the shell pane is cut at its
+    right edge with the cursor pinned there (22 characters at 80 columns);
   - gateway: the footer's twelve chips need 129 columns, so at 100 (the width the node table is
     laid out for) `F8 Clear`, `F9 Mouse` and `F10 Quit` are cut off;
   - gateway: below 100 columns the node table does not fit, the address loses its last digits,
     and ratatui resolves the squeeze differently from run to run (which is why no gateway frame
     narrower than 100 columns is held).
 
-  **Still to do:** fix those; frames of the two modals that count down on the wall clock (the
+  **Still to do:** those four; frames of the two modals that count down on the wall clock (the
   key view, the cable catch), which need the clock passed in.
 - **MQTT contract: in place** (2026-11-10). [mqtt-api.md](cli/mqtt-api.md) is read as data by
   the CLI's tests (`cli/src/gateway/engine/tests/contract.rs`, 19 tests, no broker): its tables

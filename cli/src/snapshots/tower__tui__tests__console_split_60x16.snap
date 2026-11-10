@@ -6,8 +6,8 @@ expression: "shot(&mut app, size)"
 --- screen ---
  HARDWARIO TOWER Console v0.0.0 (/dev/ttyUSB0) ●
 ┌ Device Events ────┐┌ Device Logs ────────────────────────┐
-│ button            ││ radio_button v1.2.0                 │
-│ event=hold        ││ 12:00:01.120 [    0.120] DEBUG net: │
+│ event=hold        ││ radio_button v1.2.0                 │
+│ count=4           ││ 12:00:01.120 [    0.120] DEBUG net: │
 └───────────────────┘│ tx counter resumed at 2049          │
 ┌ Interactive Shell ┐│ 12:00:02.250 [    1.250] WARN       │
 │ click-timeout=500 ││ radio: duty budget at 80 %, the     │

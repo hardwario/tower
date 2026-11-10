@@ -12,16 +12,16 @@ expression: "shot(&mut app, size)"
 │ event=hold count=4       ││ resumed at 2049                                  │
 └──────────────────────────┘│ 12:00:02.250 [    1.250] WARN  radio: duty       │
 ┌ Interactive Shell ───────┐│ budget at 80 %, the heartbeat waits until the    │
-│ [result 1: not found]    ││ window has moved on                              │
-│ > export                 ││ 12:00:03.500 [    2.500] ERROR kv: store full,   │
-│ system settings set      ││ compacting                                       │
-│ heartbeat=900            ││ 12:00:03.750 [    2.750] TRACE button: edge 1    │
-│ report-period=60         ││ printed by the app                               │
-│ report-delta=0.50 led=on ││                                                  │
+│ > export                 ││ window has moved on                              │
+│ system settings set      ││ 12:00:03.500 [    2.500] ERROR kv: store full,   │
+│ heartbeat=900            ││ compacting                                       │
+│ report-period=60         ││ 12:00:03.750 [    2.750] TRACE button: edge 1    │
+│ report-delta=0.50 led=on ││ printed by the app                               │
 │ hold-time=1000           ││                                                  │
 │ accel=medium             ││                                                  │
 │ click-timeout=500        ││                                                  │
 │ radio settings set       ││                                                  │
+│ band=eu868 channel=0     ││                                                  │
 │ > system settings set re ││                                                  │
 │ heartbeat  report-period ││                                                  │
 │  report-delta  led  band ││                                                  │
@@ -37,20 +37,20 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 ..............................eeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 ffffffffffffffffffffffffffff
-f.ggggggggghhcccccccccc....f
-f.hheeeeee.................f..iiiiiiiiiiiiiiiiiiiiiiiiiiiiii
-f.dddddd.dddddddd.eee......f
-f.ggggggggghccc............f..hhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
-f.ggggggggggggghcc.........f
-f.gggggggggggghcccc.ggghcc.f
-f.ggggggggghcccc...........f
-f.ggggghcccccc.............f
-f.ggggggggggggghccc........f
+f.ggeeeeee.................f
+f.dddddd.dddddddd.eee......f..hhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+f.iiiiiiiiigccc............f
+f.iiiiiiiiiiiiigcc.........f..gggggggggggggggggggggggggggggg
+f.iiiiiiiiiiiigcccc.iiigcc.f
+f.iiiiiiiiigcccc...........f
+f.iiiiigcccccc.............f
+f.iiiiiiiiiiiiigccc........f
 f.ddddd.dddddddd.eee.......f
-f.jjdddddd.dddddddd.eee.gg.f
-f.hhhhhhhhhhhhhhhhhhhhhhhh.f
-f.hhhhhhhhhhhhhhhhhhhhhhhh.f
-f.hhhhhhhhhhhhhhhhhhhhhhhh.f
+f.iiiigccccc.iiiiiiigc.....f
+f.jjdddddd.dddddddd.eee.ii.f
+f.gggggggggggggggggggggggg.f
+f.gggggggggggggggggggggggg.f
+f.gggggggggggggggggggggggg.f
 ffffffffffffffffffffffffffff
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 --- legend ---
@@ -60,7 +60,7 @@ c: Green
 d: Cyan
 e: Yellow
 f: LightRed BOLD
-g: Magenta
-h: DarkGray
-i: Red
+g: DarkGray
+h: Red
+i: Magenta
 j: Green BOLD

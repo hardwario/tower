@@ -1522,11 +1522,26 @@ fn render_shell(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
     let inner_h = area.height.saturating_sub(if zoomed { 0 } else { 2 }) as usize;
     let skip = lines.len().saturating_sub(inner_h);
     let visible: Vec<Line> = lines.into_iter().skip(skip).collect();
-    let mut p = Paragraph::new(visible).wrap(Wrap { trim: false });
-    if !zoomed {
-        p = p.block(pane_block(title, app.focus == Pane::Shell));
+    let block = (!zoomed).then(|| pane_block(title, app.focus == Pane::Shell));
+    render_tail(f, area, block, visible);
+}
+
+/// Draw `lines` wrapped in `area` (inside `block`, where the pane is framed) with the last line
+/// on the last row. The callers cut their list to one line per row of the pane, which shows the
+/// newest only while no line wraps: a wrapped line took its extra rows from the bottom, and the
+/// newest lines (in the shell pane the prompt) were below the pane. So the paragraph is scrolled
+/// by the rows it has too many, and they come off the oldest lines at the top.
+fn render_tail(f: &mut Frame, area: Rect, block: Option<Block<'static>>, lines: Vec<Line<'_>>) {
+    let inner = block.as_ref().map_or(area, |b| b.inner(area));
+    let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let surplus = p
+        .line_count(inner.width)
+        .saturating_sub(usize::from(inner.height));
+    let p = p.scroll((u16::try_from(surplus).unwrap_or(u16::MAX), 0));
+    match block {
+        Some(block) => f.render_widget(p.block(block), area),
+        None => f.render_widget(p, area),
     }
-    f.render_widget(p, area);
 }
 
 /// One feed entry: direction arrow ‖ retained mark ‖ prefix-stripped topic ‖ payload.
@@ -1672,11 +1687,8 @@ fn render_mqtt(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
             if app.paused { " (paused)" } else { "" },
         ),
     };
-    let mut p = Paragraph::new(lines).wrap(Wrap { trim: false });
-    if !zoomed {
-        p = p.block(pane_block(title, app.focus == Pane::Mqtt));
-    }
-    f.render_widget(p, area);
+    let block = (!zoomed).then(|| pane_block(title, app.focus == Pane::Mqtt));
+    render_tail(f, area, block, lines);
 }
 
 fn render_log(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
@@ -1704,11 +1716,8 @@ fn render_log(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
     } else {
         " Gateway Log "
     };
-    let mut p = Paragraph::new(lines).wrap(Wrap { trim: false });
-    if !zoomed {
-        p = p.block(pane_block(title.into(), app.focus == Pane::Log));
-    }
-    f.render_widget(p, area);
+    let block = (!zoomed).then(|| pane_block(title.into(), app.focus == Pane::Log));
+    render_tail(f, area, block, lines);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {

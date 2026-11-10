@@ -15,15 +15,15 @@ expression: "shot(&mut app, size)"
 │                                                        ││   -5s               -3s            now │
 └────────────────────────────────────────────────────────┘└────────────────────────────────────────┘
 ┌ Shell: kitchen ‹1/4› ─────────────────────┐┌ MQTT · 9 msgs · F7 = filter node ───────────────────┐
-│ wire = console 0x1234 radio 0xabcd        ││ ▲ gateway/status ®                                  │
-│ ✓                                         ││ {"state":"online","schema":4,"gateway":"0x00000001" │
-│ > system eeprom wipe                      ││ ,"firmware":"radio_gateway","serial_up":true}       │
-│ ✖ result 5                                ││ ▲ nodes/0x0000ab12/event/button                     │
-│ > led blink                               ││ {"value":"click","count":42,"counter":1234,"ts":170 │
-│ ✖ queue TTL expired without a confirmed   ││ 0000000}                                            │
-│ delivery                                  ││ ▼ gateway/cmd                                       │
-│ ⌛ system settings set report-period=30   ││ {"id":"u1","op":"node_add","params":{"addr":"0x0000 │
-│ (ref 9; p→Del dequeues)                   ││ cd34","key":"<redacted>"}}                          │
+│ > system eeprom wipe                      ││ {"id":"tui-5","line":"led on"}                      │
+│ ✖ result 5                                ││ ▲ nodes/0x0000ab12/shell/pending ®                  │
+│ > led blink                               ││ [{"ref":9,"id":"tui-4","line":"system settings set  │
+│ ✖ queue TTL expired without a confirmed   ││ report-period=30"},{"ref":10,"id":"tui-5","line":"l │
+│ delivery                                  ││ ed on"}]                                            │
+│ ⌛ system settings set report-period=30   ││ ▲ nodes/0x00000077 ® (cleared)                      │
+│ (ref 9; p→Del dequeues)                   ││ ▲ radio/tx                                          │
+│ ⌛ led on (ref 10; p→Del dequeues)        ││ {"dest":"0x0000ab12","item":9,"outcome":"not-delive │
+│ > system settings set heartbeat=600       ││ red","ack_rssi":null,"ts":1700000004}               │
 └───────────────────────────────────────────┘└─────────────────────────────────────────────────────┘
 ┌ Gateway Log ─────────────────────────────────────────────────────────────────────────────────────┐
 │ gateway 0x00000001 on /dev/ttyTEST (16 node slots)                                               │
@@ -46,22 +46,22 @@ aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 ..............................................................eee...............eee............eee
 
 nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
-n.ooooeeeppppppppppppppppppppppppppp........n..qqddddddddddddddee
-n.p.........................................n..eqqqqqqqeppppppppeqqqqqqqqeoeqqqqqqqqqepppppppppppp
-n.eeqqqqqq.qqqqqq.ffff......................n..eqqqqqqqqqqepppppppppppppppeqqqqqqqqqqqeffffe
-n.rrrrrrrrrr................................n..qqddddddddddddddddddddddddddddd
-n.eeqqq.fffff...............................n..eqqqqqqqepppppppeqqqqqqqeooeqqqqqqqqqeooooeqqqqeooo
-n.rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr...n..oooooooe
-n.rrrrrrrr..................................n..ssddddddddddd
-n.t.ttttttttttttttttttttttttttttttttttttt...n..eqqqqeppppeqqqqeppppppppppeqqqqqqqqeeqqqqqqeppppppp
-n.ttttttttttttttttttttttt...................n..pppppeqqqqqeppppppppppppee
+n.eeoooooo.oooooo.ffff......................n..eooooepppppppeooooooeppppppppe
+n.qqqqqqqqqq................................n..ooddddddddddddddddddddddddddddddee
+n.eeooo.fffff...............................n..eeoooooereooooepppppppeooooooepppppppppppppppppppp
+n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq...n..pppppppppppppppppeeeoooooerreooooepppppppeooooooepp
+n.qqqqqqqq..................................n..ppppppee
+n.s.sssssssssssssssssssssssssssssssssssss...n..ooddddddddddddddddee.ttttttttt
+n.sssssssssssssssssssssss...................n..oodddddddd
+n.s.ssssssssssssssssssssssssssssssss........n..eooooooeppppppppppppeooooooereoooooooooeppppppppppp
+n.oo.................................u......n..ppppeooooooooooeffffeooooerrrrrrrrrre
 nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
 
 
 
 ..fffffffffffffffffffffffffffffff
 
-..rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
+..qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
 
 
 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -80,9 +80,10 @@ k: Blue on Blue
 l: Cyan on Cyan
 m: Green on Blue
 n: LightRed BOLD
-o: Magenta
+o: Cyan
 p: Green
-q: Cyan
-r: Red
-s: Magenta BOLD
-t: Yellow DIM
+q: Red
+r: Magenta
+s: Yellow DIM
+t: DarkGray ITALIC
+u: REVERSED
