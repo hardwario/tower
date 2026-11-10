@@ -43,7 +43,7 @@ expression: "shot(&mut app, size)"
 │                                        ││                                                                            │
 │ > Enter a command here… (<TAB> complet ││                                                                            │
 └────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────────────┘
- <[Shift-]F1> Focus   <F3> Zoom    <F5> Pause   <F8> Clear  <Shift-F8> Clear All  <PgUp/PgDn> Scroll2026-01-02 03:04:05
+ <[Shift-]F1> Focus   <F3> Zoom    <F5> Pause   <F8> Clear  <Shift-F8> Clear All  <PgUp/PgDn> Scrol 2026-01-02 03:04:05
 --- styles ---
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbccccccccccccccccccccccccc
 dddddddddddddddddddddddddddddddddddddddddd

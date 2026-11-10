@@ -1103,11 +1103,13 @@ fn draw(f: &mut ratatui::Frame, app: &mut App, version: &str, clock: &str) {
     ]);
     let footer_area = rows[2];
     f.render_widget(Paragraph::new(footer).style(bar), footer_area);
-    // Clock, right-aligned.
-    let cw = clock.len() as u16;
-    if footer_area.width > cw + 1 {
-        let clock_rect = Rect::new(footer_area.x + footer_area.width - cw - 1, footer_area.y, cw, 1);
-        f.render_widget(Paragraph::new(clock).style(bar), clock_rect);
+    // Clock, right-aligned, drawn with a blank column on each side of it. The hints run under it
+    // on any terminal narrower than they are: drawn bare, it sat glued to the hint before it,
+    // and the column after it kept a letter of the hint it covers.
+    let cw = clock.len() as u16 + 2;
+    if footer_area.width >= cw {
+        let clock_rect = Rect::new(footer_area.x + footer_area.width - cw, footer_area.y, cw, 1);
+        f.render_widget(Paragraph::new(format!(" {clock} ")).style(bar), clock_rect);
     }
 }
 

@@ -186,9 +186,9 @@ debounce and EXTI are covered, not only `button simulate`. Fail on a budget over
   `.snap` files is the review. The margins, the wrapped `export` and the chip contrast are held
   this way. The frames hold the screens as they are, so what the first ones showed to be wrong
   is still in them, and each fix will show as a reviewed change of a `.snap` file:
-  - console: the footer's clock is drawn over the key hints, glued to the one before it, and at
-    80 columns a letter of a hint shows after it; `<F10>/<^C> Quit` is under the clock below
-    about 140 columns;
+  - console: the footer's key hints run under the clock on any terminal narrower than about 140
+    columns, `<F10>/<^C> Quit` first (the clock drawn over them without a gap, and a letter of
+    a hint left after it at 80 columns, is fixed: the first change a frame recorded);
   - console: the shell pane anchors its scrollback by an estimate of the wrapped rows
     (characters over width) where ratatui wraps at words, so at 80x24 the last rows of the
     newest response are below the pane; the prompt does not scroll, so a command longer than the
