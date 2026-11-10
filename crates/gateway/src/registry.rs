@@ -359,6 +359,27 @@ mod tests {
         assert!(find(&io, 7).is_some());
     }
 
+    /// A stored value longer than a bucket can be (a record of another format, a damaged length)
+    /// is unreadable, not a slice past the buffer: it reads as empty and is never written over.
+    #[test]
+    fn an_oversized_bucket_is_unreadable_not_a_panic() {
+        struct Oversized(bool);
+        impl BucketIo for Oversized {
+            fn load(&self, _index: usize, _out: &mut [u8]) -> Result<Option<usize>, IoError> {
+                Ok(Some(MAX_BUCKET_BYTES + 1))
+            }
+            fn store(&mut self, _index: usize, _bytes: &[u8]) -> Result<(), IoError> {
+                self.0 = true;
+                Ok(())
+            }
+        }
+        let mut io = Oversized(false);
+        assert!(load(&io, 0).is_empty());
+        assert_eq!(count(&io), 0);
+        assert_eq!(add(&mut io, &rec(7, "x")), Err(RegistryError::Storage));
+        assert!(!io.0, "nothing is stored over an unreadable bucket");
+    }
+
     /// Adding an existing addr overwrites in place (re-provision), never duplicates.
     #[test]
     fn re_add_overwrites() {

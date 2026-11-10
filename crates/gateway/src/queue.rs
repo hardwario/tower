@@ -383,6 +383,35 @@ mod tests {
         assert_eq!(it.age(100_000_000), u16::MAX, "age clamps, not wraps");
     }
 
+    /// After the u16 id wraps, the next id may still be held by an item queued long ago: the
+    /// push skips the ids in use, so two items never share one (a delivery or a `QueueDrop` by
+    /// id would otherwise pop another node's command).
+    #[test]
+    fn an_id_still_in_use_is_skipped() {
+        let mut q = Queue::new();
+        assert!(q.is_empty());
+        let a = q.push(NODE_A, 60, b"a", 0).unwrap();
+        assert!(!q.is_empty());
+        let b = q.push(NODE_A, 60, b"b", 0).unwrap();
+        // The counter comes round to the first item's id (both are still queued).
+        q.next_id = a;
+        let c = q.push(NODE_B, 60, b"c", 0).unwrap();
+        assert!(c != a && c != b, "ids {a}, {b}, then {c}");
+        assert_eq!(c, b + 1, "the first free id after the ones in use");
+        // An id that left the queue is not handed out again at once: the host tracks items by
+        // id, and a late report of the old item must not name the new one. Ids go on counting.
+        assert!(q.pop(a).is_some());
+        let d = q.push(NODE_A, 60, b"d", 0).unwrap();
+        assert_eq!(d, c + 1, "not {a} again");
+        // And past the top of the range it starts again at 1, never 0 (0 is no item).
+        let mut q = Queue::new();
+        q.next_id = u16::MAX;
+        assert_eq!(q.push(NODE_A, 60, b"a", 0).unwrap(), u16::MAX);
+        assert_eq!(q.push(NODE_A, 60, b"b", 0).unwrap(), 1);
+        q.next_id = u16::MAX;
+        assert_eq!(q.push(NODE_B, 60, b"c", 0).unwrap(), 2, "65535 and 1 are held");
+    }
+
     /// A `ttl == 0` item is expired the instant it is queued (`0 >= 0`): peek skips it and
     /// expire() reports it. Degenerate, but a reachable host input.
     #[test]

@@ -122,11 +122,18 @@ it is not part of `just check`: `.github/workflows/mutants.yml` runs it weekly a
 | `tower-kv`, now | 381 | 276 | 73 | 32 | 0 |
 | `tower-protocol`, first run | 392 | 276 | 0 | 72 | 44 |
 | `tower-protocol`, now | 391 | 319 | 0 | 72 | 0 |
+| `tower-net`, with the hop slot plan and the hop-clock rule (T3) | 279 | 244 | 2 | 33 | 0 |
+| `tower-gateway`, first run (`just mutants gateway`) | 102 | 89 | 1 | 9 | 3 |
+| `tower-gateway`, now | 102 | 92 | 1 | 9 | 0 |
 | `tower-modules`, first run (`just mutants modules`) | 248 | 221 | 0 | 7 | 20 |
 | `tower-modules`, now | 234 | 227 | 0 | 7 | 0 |
 
-`tower-modules` (the module drivers' arithmetic and frames, written the same day) is not one of
-the default three; its run found one constant nothing pinned (the Relay Module's red LED bit:
+`tower-gateway` (the registry codec and the downlink queue; not one of the default three) had
+three survivors: nothing held that a queue id still in use is skipped after the counter wraps
+and that a freed id is not handed out again at once (the host tracks items by id), that
+`is_empty` is false with an item queued, and that a stored bucket longer than a bucket can be
+is unreadable rather than a slice past the buffer. `tower-modules` (the module drivers'
+arithmetic and frames, written the same day) is not one of the default three either; its run found one constant nothing pinned (the Relay Module's red LED bit:
 `1 << 1` could have become 0), an untested period constant and error text, and 14 equivalent
 mutants (`|` against `^` of masks that share no bit), listed in `.cargo/mutants.toml`.
 
