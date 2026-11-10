@@ -2449,4 +2449,310 @@ mod tests {
         handle_key(&mut app, KeyCode::F(3), KeyModifiers::NONE);
         assert!(!app.zoom, "F3 toggles back");
     }
+
+    // ---- frame snapshots (`crate::snapshot`: the screen and its styles) ----
+    //
+    // Whole frames of canned gateway states at three terminal sizes, compared with the `.snap`
+    // files in `snapshots/`: the five panes with something in each, the zoomed panes, the lit
+    // footer chips, the modals. A frame that changes fails its test and leaves a `.snap.new`
+    // beside the old one to compare (`crate::snapshot` says how to accept it).
+
+    /// The design size (the node table's columns fill their pane exactly at 100 columns) and two
+    /// roomier windows. Nothing narrower: below 100 columns the table's columns do not fit, and
+    /// ratatui's constraint solver resolves that differently from one run to the next (the same
+    /// screen came out with `TYPE` four or five columns wide), so such a frame cannot be held.
+    const SIZES: [(u16, u16); 3] = [(100, 30), (120, 36), (140, 45)];
+
+    const KITCHEN: u32 = 0x0000_AB12;
+
+    fn shot(app: &mut App, (w, h): (u16, u16)) -> String {
+        // No terminal cursor here: the shell prompt draws its own (a reversed cell).
+        crate::snapshot::shoot(w, h, false, |f| ui(f, app))
+    }
+
+    fn snap_name(scene: &str, (w, h): (u16, u16)) -> String {
+        format!("gateway_{scene}_{w}x{h}")
+    }
+
+    fn kitchen() -> NodeView {
+        NodeView {
+            pending: vec![
+                super::super::payload::PendingEntry {
+                    r#ref: 9,
+                    id: "tui-4".into(),
+                    line: "system settings set report-period=30".into(),
+                },
+                super::super::payload::PendingEntry {
+                    r#ref: 10,
+                    id: "tui-5".into(),
+                    line: "led on".into(),
+                },
+            ],
+            queued: 2,
+            ..node(KITCHEN, "kitchen", 0)
+        }
+    }
+
+    /// A gateway at work: four nodes (a button with two commands queued, a node with the longest
+    /// name and a kind wider than its column, one not heard and not named yet, a listening one),
+    /// radio readings with receive and transmit marks, a shell dialog with every kind of line
+    /// and a command being typed, broker traffic both ways (a node key redacted, a cleared
+    /// retained topic), log lines of each severity. The focus is on the shell.
+    fn busy() -> App {
+        let (mut app, _etx, _irx) = test_app();
+        app.on_event(Event::Registry(vec![
+            kitchen(),
+            NodeView {
+                kind: "greenhouse-monitor".into(),
+                last_seen: Some(412),
+                rssi: Some(-101),
+                uplinks: 3051,
+                ..node(0x0000_CD34, "greenhouse-mon:0", 0)
+            },
+            NodeView {
+                kind: String::new(),
+                unnamed: true,
+                last_seen: None,
+                rssi: None,
+                uplinks: 0,
+                ..node(0x0001_0203, "", 0)
+            },
+            NodeView {
+                kind: "control".into(),
+                sleeping: false,
+                last_seen: Some(0),
+                rssi: Some(-48),
+                ..node(0x00F0_0D01, "lights", 0)
+            },
+        ]));
+        app.focus = Pane::Shell;
+
+        let answer = |id: &str, text: &str, result: u8, error: Option<&str>| Event::Shell {
+            node: KITCHEN,
+            rsp: super::super::payload::ShellRsp {
+                id: id.into(),
+                chunk: 0,
+                text: text.into(),
+                done: true,
+                result,
+                truncated: false,
+                error: error.map(Into::into),
+            },
+        };
+        app.dialog_push(KITCHEN, DialogLine::Sent("system resource print".into()));
+        app.on_event(answer(
+            "tui-1",
+            "uptime = 3600 s\nstack = 1840 of 2048 bytes\nwire = console 0x1234 radio 0xabcd\n",
+            0,
+            None,
+        ));
+        app.dialog_push(KITCHEN, DialogLine::Sent("system eeprom wipe".into()));
+        app.on_event(answer("tui-2", "", 5, None));
+        app.dialog_push(KITCHEN, DialogLine::Sent("led blink".into()));
+        app.on_event(answer(
+            "tui-3",
+            "",
+            1,
+            Some("queue TTL expired without a confirmed delivery"),
+        ));
+        app.line = "system settings set heartbeat=600".into();
+        app.cursor = app.line.len();
+
+        let key = br#"{"id":"u1","op":"node_add","params":{"addr":"0x0000cd34","key":"0123456789abcdef0001020304050607"}}"#;
+        let redacted = super::super::payload::redact_secrets(key).into_owned();
+        let feed: [(MqttDir, &str, &[u8], bool); 9] = [
+            (
+                MqttDir::Out,
+                "gateway/status",
+                br#"{"state":"online","schema":4,"gateway":"0x00000001","firmware":"radio_gateway","serial_up":true}"#,
+                true,
+            ),
+            (
+                MqttDir::Out,
+                "nodes/0x0000ab12/event/button",
+                br#"{"value":"click","count":42,"counter":1234,"ts":1700000000}"#,
+                false,
+            ),
+            (MqttDir::In, "gateway/cmd", &redacted, false),
+            (MqttDir::Out, "gateway/rsp/u1", br#"{"id":"u1","ok":true}"#, false),
+            (
+                MqttDir::Out,
+                "nodes/0x0000cd34/state/temperature",
+                br#"{"value":21.5,"ts":1700000003}"#,
+                true,
+            ),
+            (
+                MqttDir::In,
+                "nodes/0x0000ab12/shell/req",
+                br#"{"id":"tui-5","line":"led on"}"#,
+                false,
+            ),
+            (
+                MqttDir::Out,
+                "nodes/0x0000ab12/shell/pending",
+                br#"[{"ref":9,"id":"tui-4","line":"system settings set report-period=30"},{"ref":10,"id":"tui-5","line":"led on"}]"#,
+                true,
+            ),
+            (MqttDir::Out, "nodes/0x00000077", b"", true),
+            (
+                MqttDir::Out,
+                "radio/tx",
+                br#"{"dest":"0x0000ab12","item":9,"outcome":"not-delivered","ack_rssi":null,"ts":1700000004}"#,
+                false,
+            ),
+        ];
+        for (dir, topic, payload, retain) in feed {
+            app.on_event(Event::Mqtt(MqttMsg {
+                dir,
+                topic: format!("tower/{topic}"),
+                payload: payload.to_vec(),
+                retain,
+            }));
+        }
+
+        for line in [
+            "gateway 0x00000001 on /dev/ttyTEST (16 node slots)",
+            "auto-naming node 0x0000cd34 \"greenhouse-mon:0\"",
+            "WARN radio: duty budget at 80 %",
+            "set setpoint = 21.5 queued for node 0x0000cd34",
+            "ERROR net: replay lane write failed",
+            "refusing set relay on 0x0000ab12: a `button` has no property `relay`",
+        ] {
+            app.on_event(Event::Log(line.into()));
+        }
+
+        // Radio readings: a noise floor with a busy stretch and two hot spikes, set directly
+        // (the event path measures their cadence on the wall clock).
+        for i in 0..60i32 {
+            let spike = match i % 17 {
+                0 => 38,
+                1 | 2 => 14,
+                _ => 0,
+            };
+            app.ambient.push_back(f64::from(-104 + (i * 11) % 9 + spike));
+        }
+        app.ambient_seq = 60;
+        app.last_ambient = Some((-97, 3));
+        app.rx_marks.extend([(52, -67.0), (57, -101.0)]);
+        app.tx_marks.extend([(53, -35.0), (59, -35.0)]);
+        app
+    }
+
+    /// Nothing paired yet: the empty table, the hint in the shell pane, an empty chart.
+    #[test]
+    fn snapshot_empty() {
+        for size in SIZES {
+            let (mut app, _etx, _irx) = test_app();
+            insta::assert_snapshot!(snap_name("empty", size), shot(&mut app, size));
+        }
+    }
+
+    /// The five panes with content in each: the selected row, the focus border, the chart's
+    /// bars and marks, the highlighted dialog and JSON, the pending lines above the prompt.
+    #[test]
+    fn snapshot_busy() {
+        for size in SIZES {
+            let mut app = busy();
+            insta::assert_snapshot!(snap_name("busy", size), shot(&mut app, size));
+        }
+    }
+
+    /// An open pairing window: the countdown in the header, the lit F2 chip, the OTA popup over
+    /// the panes.
+    #[test]
+    fn snapshot_pairing_open() {
+        for size in SIZES {
+            let mut app = busy();
+            app.pairing = Some(Pairing {
+                state: "open".into(),
+                remaining: Some(45),
+                joined: None,
+                sas: None,
+            });
+            app.modal = Some(Modal::PairOta {
+                opened_at: Instant::now(),
+                seen_open: true,
+            });
+            insta::assert_snapshot!(snap_name("pairing_open", size), shot(&mut app, size));
+        }
+    }
+
+    /// The zoomed MQTT feed, paused and filtered to one node: borderless, three chips lit, only
+    /// that node's topics.
+    #[test]
+    fn snapshot_zoomed_mqtt_paused_filtered() {
+        for size in SIZES {
+            let mut app = busy();
+            app.focus = Pane::Mqtt;
+            app.zoom = true;
+            app.paused = true;
+            app.mqtt_filter = Some(KITCHEN);
+            insta::assert_snapshot!(
+                snap_name("zoomed_mqtt_paused_filtered", size),
+                shot(&mut app, size)
+            );
+        }
+    }
+
+    /// The other zoomed panes at the design size: the radio chart with its axes, the node table
+    /// at full width, the shell dialog, the log.
+    #[test]
+    fn snapshot_zoomed_panes() {
+        for (name, pane) in [
+            ("radio", Pane::Radio),
+            ("nodes", Pane::Nodes),
+            ("shell", Pane::Shell),
+            ("log", Pane::Log),
+        ] {
+            let mut app = busy();
+            app.focus = pane;
+            app.zoom = true;
+            let scene = format!("zoomed_{name}");
+            insta::assert_snapshot!(snap_name(&scene, SIZES[0]), shot(&mut app, SIZES[0]));
+        }
+    }
+
+    /// The modals, centred over one node's screen at the two smaller sizes: the pairing menu, the
+    /// rename field with its cursor, the removal prompt, the queue of pending commands, a failed
+    /// cable pairing. (The key view and the cable-catch window count down on the wall clock, so
+    /// they are left out.)
+    #[test]
+    fn snapshot_modals() {
+        let modal = |name: &str| match name {
+            "pair_menu" => Modal::PairMenu { selected: 1 },
+            "rename" => Modal::Rename {
+                node: KITCHEN,
+                buf: "pantry".into(),
+            },
+            "confirm_remove" => Modal::ConfirmRemove(KITCHEN),
+            "pending" => Modal::Pending {
+                node: KITCHEN,
+                selected: 1,
+            },
+            _ => Modal::PairRun {
+                port: "/dev/ttyUSB1".into(),
+                lines: vec![
+                    "reading the node's identity".into(),
+                    "minting a key".into(),
+                    "provisioning the node".into(),
+                ],
+                failed: Some("the node did not answer (is it a TOWER radio app?)".into()),
+            },
+        };
+        for name in [
+            "pair_menu",
+            "rename",
+            "confirm_remove",
+            "pending",
+            "pair_run_failed",
+        ] {
+            for size in &SIZES[..2] {
+                let (mut app, _etx, _irx) = test_app();
+                app.on_event(Event::Registry(vec![kitchen()]));
+                app.modal = Some(modal(name));
+                let scene = format!("modal_{name}");
+                insta::assert_snapshot!(snap_name(&scene, *size), shot(&mut app, *size));
+            }
+        }
+    }
 }

@@ -1,0 +1,94 @@
+---
+source: cli/src/tui.rs
+expression: "shot(&mut app, size)"
+---
+120x40
+--- screen ---
+ HARDWARIO TOWER Console v0.0.0 (/dev/ttyUSB0) ○ reconnecting…  /dev/ttyUSB0: Permission denied  ✖ 37 bad frames · 1 seq
+┌ Device Events ─────────────────────────┐┌ Device Logs ───────────────────────────────────────────────────────────────┐
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+└────────────────────────────────────────┘│                                                                            │
+┌ Interactive Shell ─────────────────────┐│                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│                                        ││                                                                            │
+│ > Enter a command here… (<TAB> complet ││                                                                            │
+└────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────────────┘
+ <[Shift-]F1> Focus   <F3> Zoom    <F5> Pause   <F8> Clear  <Shift-F8> Clear All  <PgUp/PgDn> Scroll2026-01-02 03:04:05
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbccccccccccccccccccccccccc
+dddddddddddddddddddddddddddddddddddddddddd
+d........................................d
+d........................................d
+d........................................d
+d........................................d
+d........................................d
+d........................................d
+d........................................d
+d........................................d
+dddddddddddddddddddddddddddddddddddddddddd
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+..eeffffffffffffffffffffffffffffffffffff
+
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+--- legend ---
+a: Black on Gray
+b: Red on Gray
+c: Red on Gray BOLD
+d: LightRed BOLD
+e: Green BOLD
+f: DarkGray

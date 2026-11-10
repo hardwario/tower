@@ -38,6 +38,17 @@ it (`just install-cli`), or it reports a schema mismatch (a banner naming the de
 exit 125) against freshly flashed firmware. A stream in which every frame fails its CRC (a
 framing difference the tags can't see) is reported once as such.
 
+## The TUIs
+
+A change to what a TUI draws changes its snapshots (`src/snapshot.rs`; the frames are in
+`src/snapshots/` and `src/gateway/snapshots/`): the test of every frame that differs fails and
+leaves a `.snap.new` beside its `.snap`. Accept them with `INSTA_UPDATE=always cargo test -p
+tower-cli`, then read the `git diff` of the `.snap` files like code: it is the review of the
+screen (the text, and the style map under it for colours and attributes). A new pane, modal or
+state gets a frame of its own. Keep a frame reproducible: no wall clock in it, and no gateway
+frame narrower than 100 columns (its node table does not fit there, and ratatui resolves that
+differently from run to run).
+
 ## Checks
 
 From the repo root (`just check` runs every gate):

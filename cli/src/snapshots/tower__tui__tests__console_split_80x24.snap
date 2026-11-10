@@ -1,0 +1,66 @@
+---
+source: cli/src/tui.rs
+expression: "shot(&mut app, size)"
+---
+80x24, cursor at column 25 row 18
+--- screen ---
+ HARDWARIO TOWER Console v0.0.0 (/dev/ttyUSB0) ●
+┌ Device Events ───────────┐┌ Device Logs ─────────────────────────────────────┐
+│ 12:00:09.870 temperature ││ 12:00:01.004 [    0.004] INFO  app: radio_button │
+│  value=21.50             ││ v1.2.0                                           │
+│ 12:00:15.004 button      ││ 12:00:01.120 [    0.120] DEBUG net: tx counter   │
+│ event=hold count=4       ││ resumed at 2049                                  │
+└──────────────────────────┘│ 12:00:02.250 [    1.250] WARN  radio: duty       │
+┌ Interactive Shell ───────┐│ budget at 80 %, the heartbeat waits until the    │
+│ [result 1: not found]    ││ window has moved on                              │
+│ > export                 ││ 12:00:03.500 [    2.500] ERROR kv: store full,   │
+│ system settings set      ││ compacting                                       │
+│ heartbeat=900            ││ 12:00:03.750 [    2.750] TRACE button: edge 1    │
+│ report-period=60         ││ printed by the app                               │
+│ report-delta=0.50 led=on ││                                                  │
+│ hold-time=1000           ││                                                  │
+│ accel=medium             ││                                                  │
+│ click-timeout=500        ││                                                  │
+│ radio settings set       ││                                                  │
+│ > system settings set re ││                                                  │
+│ heartbeat  report-period ││                                                  │
+│  report-delta  led  band ││                                                  │
+│  hold-time               ││                                                  │
+└──────────────────────────┘└──────────────────────────────────────────────────┘
+ <[Shift-]F1> Focus   <F3> Zoom    <F5> Pause   <F8> Clear  2026-01-02 03:04:05l
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+..............................cccccccccccccccccccccccccccccc
+
+..............................dddddddddddddddddddddddddddddd
+
+..............................eeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+ffffffffffffffffffffffffffff
+f.ggggggggghhcccccccccc....f
+f.hheeeeee.................f..iiiiiiiiiiiiiiiiiiiiiiiiiiiiii
+f.dddddd.dddddddd.eee......f
+f.ggggggggghccc............f..hhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+f.ggggggggggggghcc.........f
+f.gggggggggggghcccc.ggghcc.f
+f.ggggggggghcccc...........f
+f.ggggghcccccc.............f
+f.ggggggggggggghccc........f
+f.ddddd.dddddddd.eee.......f
+f.jjdddddd.dddddddd.eee.gg.f
+f.hhhhhhhhhhhhhhhhhhhhhhhh.f
+f.hhhhhhhhhhhhhhhhhhhhhhhh.f
+f.hhhhhhhhhhhhhhhhhhhhhhhh.f
+ffffffffffffffffffffffffffff
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+--- legend ---
+a: Black on Gray
+b: Green on Gray
+c: Green
+d: Cyan
+e: Yellow
+f: LightRed BOLD
+g: Magenta
+h: DarkGray
+i: Red
+j: Green BOLD

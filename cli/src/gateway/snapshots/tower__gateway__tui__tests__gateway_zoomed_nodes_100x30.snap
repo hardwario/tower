@@ -1,0 +1,74 @@
+---
+source: cli/src/gateway/tui.rs
+expression: "shot(&mut app, SIZES[0])"
+---
+100x30
+--- screen ---
+ HARDWARIO TOWER Gateway /dev/ttyTEST ● serial  ● mqtt  prefix tower/
+ADDR       NAME                                                   TYPE        SEEN   RSSI  PEND  SLP
+0x0000ab12 kitchen                                                button      3s     -67   ⌛2   ●
+0x0000cd34 greenhouse-mon:0                                       greenhouse- 412s   -101  -     ●
+0x00010203 -                                                      ?           never  -     -     ●
+0x00f00d01 lights                                                 control     0s     -48   -     ○
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ [Shift-]F1 Focus  F2 Pair  F3 Zoom  F4 Key  F5 Pause  F6 Rename  Del Remove  p Pending  F7 Filter
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.eeeeeee
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+bbbbbbbbbbbbbbbbbbbbbbbbbbbfffffffffbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+--- legend ---
+a: Black on Gray BOLD
+b: Black on Gray
+c: Green on Gray
+d: BOLD
+e: on DarkGray BOLD
+f: Black on Yellow BOLD

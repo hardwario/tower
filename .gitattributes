@@ -1,0 +1,3 @@
+# The TUI frame snapshots (insta, cli/src/**/snapshots/) are compared as text on every platform
+# CI tests the CLI on, Windows included: keep their line ends as committed.
+*.snap text eol=lf

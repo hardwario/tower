@@ -1,0 +1,61 @@
+---
+source: cli/src/tui.rs
+expression: "shot(&mut app, size)"
+---
+80x24
+--- screen ---
+ HARDWARIO TOWER Console v0.0.0 (/dev/ttyUSB0) ○ reconnecting…  /dev/ttyUSB0: Pe
+┌ Device Events ───────────┐┌ Device Logs ─────────────────────────────────────┐
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+└──────────────────────────┘│                                                  │
+┌ Interactive Shell ───────┐│                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│                          ││                                                  │
+│ > Enter a command here…  ││                                                  │
+└──────────────────────────┘└──────────────────────────────────────────────────┘
+ <[Shift-]F1> Focus   <F3> Zoom    <F5> Pause   <F8> Clear  2026-01-02 03:04:05l
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbb
+cccccccccccccccccccccccccccc
+c..........................c
+c..........................c
+c..........................c
+c..........................c
+cccccccccccccccccccccccccccc
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+..ddeeeeeeeeeeeeeeeeeeeeee
+
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+--- legend ---
+a: Black on Gray
+b: Red on Gray
+c: LightRed BOLD
+d: Green BOLD
+e: DarkGray

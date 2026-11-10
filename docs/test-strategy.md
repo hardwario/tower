@@ -7,12 +7,18 @@ it passes. The per-test catalogue of the firmware stays in
 [docs/firmware/test-plan.md](firmware/test-plan.md); bench results go to
 `firmware/tools/hwtest/RESULTS-<date>.md`.
 
+Updated 2026-11-10: the layers that need no hardware are in place, mutation testing (6) and
+the host side's MQTT contract and TUI snapshots (8). Each of those sections now says what
+exists and what is still to do; the others wait for the bench (a self-hosted runner, a
+power-switching USB hub, the PPK2, a board for the rogue firmware).
+
 ## What exists
 
 | Layer | Where | Runs |
 |-------|-------|------|
 | Unit and host tests of every crate, the CLI and the gateway engine | `just test` | CI, every push |
 | The MQTT API page held against the bridge: topics, retain flags, payload fields and types, the RPC ops, error texts, property tables (layer 8) | `cli/src/gateway/engine/tests/contract.rs`, in `just test` | CI, every push |
+| Frame snapshots of both TUIs at three terminal sizes: the screen, its colours and attributes, the cursor (layer 8) | `cli/src/snapshots/`, `cli/src/gateway/snapshots/`, in `just test` | CI, every push |
 | Fuzzing of the pure kernels (frames, radio envelopes, KV store, radio and shell kernels) | `fuzz/`, `just fuzz` | CI, weekly (nightly toolchain) |
 | Mutation testing of the security kernels (`tower-net`, `tower-kv`, `tower-protocol`): no mutant survives unexplained (layer 6) | `just mutants`, `.cargo/mutants.toml` | CI, weekly |
 | Firmware gates: MCU build, RAM budget, clippy over the role variants, rustdoc | `just fw ci` | CI, every push |
@@ -168,8 +174,35 @@ debounce and EXTI are covered, not only `button simulate`. Fail on a budget over
 
 ### 8. Host side
 
-- **TUI snapshots:** ratatui's test backend with `insta`, both TUIs at a few terminal sizes. The
-  truncated `/export`, the margins and the zoom/pause contrast were all visual bugs.
+- **TUI snapshots: in place** (2026-11-10). Both TUIs are drawn into ratatui's test backend from
+  canned states (no device, no broker) and compared with committed `insta` snapshots
+  (`cli/src/snapshot.rs`): 12 frames of the console TUI at 80x24, 120x40 and 60x16 (the split
+  layout, the zoomed shell with a long `export`, the zoomed log paused, the reconnect header),
+  26 of the gateway TUI at 100x30, 120x36 and 140x45 (empty, busy, a pairing window, the zoomed
+  panes, the modals). A snapshot is the screen as text, a map of every cell's colours and
+  attributes with its legend (the lit zoom, pause and filter chips, the focus border, the
+  severity tints), and the cursor. A frame that changes fails its test and leaves a `.snap.new`
+  to compare; `INSTA_UPDATE=always cargo test -p tower-cli` accepts, and the `git diff` of the
+  `.snap` files is the review. The margins, the wrapped `export` and the chip contrast are held
+  this way. The frames hold the screens as they are, so what the first ones showed to be wrong
+  is still in them, and each fix will show as a reviewed change of a `.snap` file:
+  - console: the footer's clock is drawn over the key hints, glued to the one before it, and at
+    80 columns a letter of a hint shows after it; `<F10>/<^C> Quit` is under the clock below
+    about 140 columns;
+  - console: the shell pane anchors its scrollback by an estimate of the wrapped rows
+    (characters over width) where ratatui wraps at words, so at 80x24 the last rows of the
+    newest response are below the pane; the prompt does not scroll, so a command longer than the
+    pane is cut at its right edge with the cursor pinned there;
+  - gateway: the shell, MQTT and log panes show their last lines by count, so when a line wraps
+    the newest rows (in the shell pane the prompt) are below the pane;
+  - gateway: the footer's twelve chips need 129 columns, so at 100 (the width the node table is
+    laid out for) `F8 Clear`, `F9 Mouse` and `F10 Quit` are cut off;
+  - gateway: below 100 columns the node table does not fit, the address loses its last digits,
+    and ratatui resolves the squeeze differently from run to run (which is why no gateway frame
+    narrower than 100 columns is held).
+
+  **Still to do:** fix those; frames of the two modals that count down on the wall clock (the
+  key view, the cable catch), which need the clock passed in.
 - **MQTT contract: in place** (2026-11-10). [mqtt-api.md](cli/mqtt-api.md) is read as data by
   the CLI's tests (`cli/src/gateway/engine/tests/contract.rs`, 19 tests, no broker): its tables
   and examples are parsed out of the Markdown and compared with a scripted session of the

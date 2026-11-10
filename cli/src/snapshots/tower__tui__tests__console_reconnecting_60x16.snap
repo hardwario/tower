@@ -1,0 +1,44 @@
+---
+source: cli/src/tui.rs
+expression: "shot(&mut app, size)"
+---
+60x16
+--- screen ---
+ HARDWARIO TOWER Console v0.0.0 (/dev/ttyUSB0) ○ reconnectin
+┌ Device Events ────┐┌ Device Logs ────────────────────────┐
+│                   ││                                     │
+│                   ││                                     │
+└───────────────────┘│                                     │
+┌ Interactive Shell ┐│                                     │
+│                   ││                                     │
+│                   ││                                     │
+│                   ││                                     │
+│                   ││                                     │
+│                   ││                                     │
+│                   ││                                     │
+│                   ││                                     │
+│ > Enter a command ││                                     │
+└───────────────────┘└─────────────────────────────────────┘
+ <[Shift-]F1> Focus   <F3> Zoom    <F5> 2026-01-02 03:04:05
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+bbbbbbbbbbbbbbbbbbbbb
+b...................b
+b...................b
+bbbbbbbbbbbbbbbbbbbbb
+
+
+
+
+
+
+
+
+..ccddddddddddddddd
+
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+--- legend ---
+a: Black on Gray
+b: LightRed BOLD
+c: Green BOLD
+d: DarkGray

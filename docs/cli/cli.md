@@ -514,3 +514,12 @@ the binary's command line (`tests/cli.rs`), it holds what an integrator relies o
   its RPC, error and property tables and the limits it states are compared with what the bridge
   subscribes to, publishes (and retains), accepts and answers in a scripted session. The page
   and the code change together, or a test fails and names the row.
+- **The TUI frames.** Both TUIs are drawn into ratatui's test backend at three terminal sizes and
+  compared with the committed snapshots (`src/snapshots/`, `src/gateway/snapshots/`): the screen
+  as text, a map of every cell's colours and attributes with its legend, and the cursor. A
+  frame that changed fails its test and leaves a `.snap.new` next to its snapshot:
+
+  ```sh
+  INSTA_UPDATE=always cargo test -p tower-cli   # accept the changed frames
+  git diff -- '*.snap'                          # and review them like code
+  ```

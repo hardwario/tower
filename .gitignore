@@ -8,6 +8,10 @@
 # cargo-mutants run without `--output` (`just mutants` writes to target/mutants/<crate>/).
 /mutants.out*/
 
+# insta: a changed TUI frame waiting for review (cli/src/snapshot.rs); the accepted `.snap`
+# files are committed.
+*.snap.new
+
 # Python tooling (RAM-budget guard, hwtest scripts, the PPK2 sidecar).
 __pycache__/
 *.pyc

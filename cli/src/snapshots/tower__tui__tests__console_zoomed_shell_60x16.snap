@@ -1,0 +1,50 @@
+---
+source: cli/src/tui.rs
+expression: "shot(&mut app, size)"
+---
+60x16, cursor at column 40 row 11
+--- screen ---
+ HARDWARIO TOWER Console v0.0.0 (/dev/ttyUSB0) ●
+┌ Interactive Shell ───────────────────────────────────────┐
+│ report-period=60                                         │
+│ band=eu868                                               │
+│ > nonsense                                               │
+│ [result 1: not found]                                    │
+│ > export                                                 │
+│ system settings set heartbeat=900 report-period=60       │
+│ report-delta=0.50 led=on hold-time=1000 accel=medium     │
+│ click-timeout=500                                        │
+│ radio settings set band=eu868 channel=0                  │
+│ > system settings set report-period=30                   │
+│ heartbeat  report-period  report-delta  led  band        │
+│ hold-time                                                │
+└──────────────────────────────────────────────────────────┘
+ <[Shift-]F1> Focus   <F3> Zoom    <F5> 2026-01-02 03:04:05
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabaaaaaaaaaaaa
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+c..........................................................c
+c..........................................................c
+c.ddeeeeeeee...............................................c
+c.fffffffffddgggggggggg....................................c
+c.ddeeeeee.................................................c
+c.hhhhhh.hhhhhhhh.eee.fffffffffdggg.fffffffffffffdgg.......c
+c.ffffffffffffdgggg.fffdgg.fffffffffdgggg.fffffdgggggg.....c
+c.fffffffffffffdggg........................................c
+c.hhhhh.hhhhhhhh.eee.ffffdggggg.fffffffdg..................c
+c.iihhhhhh.hhhhhhhh.eee.fffffffffffffdgg...................c
+c.dddddddddddddddddddddddddddddddddddddddddddddddddddddddd.c
+c.dddddddddddddddddddddddddddddddddddddddddddddddddddddddd.c
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+aaaaaaaaaaaaaaaaaaaaajjjjjjjjjjjaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+--- legend ---
+a: Black on Gray
+b: Green on Gray
+c: LightRed BOLD
+d: DarkGray
+e: Yellow
+f: Magenta
+g: Green
+h: Cyan
+i: Green BOLD
+j: Black on Yellow BOLD

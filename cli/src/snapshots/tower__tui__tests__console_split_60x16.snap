@@ -1,0 +1,50 @@
+---
+source: cli/src/tui.rs
+expression: "shot(&mut app, size)"
+---
+60x16, cursor at column 18 row 10
+--- screen ---
+ HARDWARIO TOWER Console v0.0.0 (/dev/ttyUSB0) ●
+┌ Device Events ────┐┌ Device Logs ────────────────────────┐
+│ button            ││ radio_button v1.2.0                 │
+│ event=hold        ││ 12:00:01.120 [    0.120] DEBUG net: │
+└───────────────────┘│ tx counter resumed at 2049          │
+┌ Interactive Shell ┐│ 12:00:02.250 [    1.250] WARN       │
+│ click-timeout=500 ││ radio: duty budget at 80 %, the     │
+│ radio settings    ││ heartbeat waits until the window    │
+│ set band=eu868    ││ has moved on                        │
+│ channel=0         ││ 12:00:03.500 [    2.500] ERROR kv:  │
+│ > system settings ││ store full, compacting              │
+│ heartbeat         ││ 12:00:03.750 [    2.750] TRACE      │
+│ report-period     ││ button: edge 1                      │
+│ report-delta  led ││ printed by the app                  │
+└───────────────────┘└─────────────────────────────────────┘
+ <[Shift-]F1> Focus   <F3> Zoom    <F5> 2026-01-02 03:04:05
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabaaaaaaaaaaaa
+
+
+.......................cccccccccccccccccccccccccccccc
+
+ddddddddddddddddddddd..eeeeeeeeeeeeeeeeeeeeeeeeeeeee
+d.fffffffffffffghhh.d
+d.ccccc.cccccccc....d
+d.eee.ffffghhhhh....d
+d.fffffffgh.........d..iiiiiiiiiiiiiiiiiiiiiiiiiiiiii
+d.jjcccccc.cccccccc.d
+d.ggggggggggggggggg.d..gggggggggggggggggggggggggggggg
+d.ggggggggggggggggg.d
+d.ggggggggggggggggg.d
+ddddddddddddddddddddd
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+--- legend ---
+a: Black on Gray
+b: Green on Gray
+c: Cyan
+d: LightRed BOLD
+e: Yellow
+f: Magenta
+g: DarkGray
+h: Green
+i: Red
+j: Green BOLD

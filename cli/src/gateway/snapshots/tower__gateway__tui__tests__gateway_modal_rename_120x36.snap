@@ -1,0 +1,95 @@
+---
+source: cli/src/gateway/tui.rs
+expression: "shot(&mut app, *size)"
+---
+120x36
+--- screen ---
+ HARDWARIO TOWER Gateway /dev/ttyTEST ● serial  ● mqtt  prefix tower/
+┌ Nodes (1) ─────────────────────────────────────────────────────────┐┌ Radio ─────────────────────────────────────────┐
+│ ADDR       NAME                 TYPE        SEEN   RSSI  PEND  SLP ││ -30 │dBm                                       │
+│ 0x0000ab12 kitchen              button      3s     -67   ⌛2   ●   ││     │                                          │
+│                                                                    ││     │                                          │
+│                                                                    ││     │                                          │
+│                                                                    ││ -70 │                                          │
+│                                                                    ││     │                                          │
+│                                                                    ││     │                                          │
+│                                                                    ││ -110│                                          │
+│                                                                    ││     └───────────────────────────────────────── │
+│                                                                    ││   -7s                  -3s                 now │
+└────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
+┌ Shell: kitchen ‹1/1› ──────────────────────────────┐┌ MQTT · 0 msgs · F7 = filter node ──────────────────────────────┐
+│ ⌛ system settings set rep┌ Rename node ─────────────────────────────────────────────────┐                           │
+│ p→Del dequeues)           │ New name for 0x0000ab12:                                     │                           │
+│ ⌛ led on (ref 10; p→Del d│                                                              │                           │
+│ >                         │    pantry                                                    │                           │
+│                           │                                                              │                           │
+│                           │ ≤16 bytes; Enter = save, Esc = cancel                        │                           │
+│                           └──────────────────────────────────────────────────────────────┘                           │
+│                                                    ││                                                                │
+│                                                    ││                                                                │
+│                                                    ││                                                                │
+│                                                    ││                                                                │
+│                                                    ││                                                                │
+└────────────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
+┌ Gateway Log ─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ [Shift-]F1 Focus  F2 Pair  F3 Zoom  F4 Key  F5 Pause  F6 Rename  Del Remove  p Pending  F7 Filter  F8 Clear  F9 Mouse
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+d.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.d..fff
+d.gggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.ggggggg.d
+d....................................................................d
+d....................................................................d
+d....................................................................d..fff
+d....................................................................d
+d....................................................................d
+d....................................................................d..ffff
+d....................................................................d
+d....................................................................d....fff..................fff.................fff
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+
+..h.hhhhhhhhhhhhhhhhhhhhhhhhiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii
+..hhhhhhhhhhhhhhh...........i..............................................................i
+..h.hhhhhhhhhhhhhhhhhhhhhhhhi..............................................................i
+..jjk.......................i...lmmmmmmnlllllllllll........................................i
+............................i..............................................................i
+............................i..............................................................i
+............................iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbboooooooooob
+--- legend ---
+a: Black on Gray BOLD
+b: Black on Gray
+c: Green on Gray
+d: LightRed BOLD
+e: BOLD
+f: DarkGray
+g: on DarkGray BOLD
+h: Yellow DIM
+i: Yellow
+j: Cyan
+k: REVERSED
+l: White on DarkGray
+m: White on DarkGray BOLD
+n: White on DarkGray REVERSED
+o: Black on Yellow BOLD

@@ -1,0 +1,83 @@
+---
+source: cli/src/gateway/tui.rs
+expression: "shot(&mut app, SIZES[0])"
+---
+100x30
+--- screen ---
+ HARDWARIO TOWER Gateway /dev/ttyTEST ● serial  ● mqtt  prefix tower/
+-30 │dBm
+    │┌──┐                                                                    ▄▄                ▄▄
+    ││rx│
+    ││tx│
+    │└──┘
+    │
+    │
+    │
+    │
+    │
+    │                  ██                                                 ▄▄
+    │                  ██                                                 ██
+    │                  ██                                                 ▀▀
+-70 │                  ██                                                 ██
+    │                  ██                                                 ██
+    │                  ██                                                 ██
+    │                  ██                                                 ██
+    │                  ██ ██                                              ██ ▄▄ ██
+    │                  ██ ██                                              ██ ██ ██
+    │                  ██ ██ ██                                           ██ ██ ██
+    │                  ██ ██ ██                                           ██ ██ ██
+    │      ▄▄ ██       ██ ██ ██       ▄▄ ██          ▄▄          ▄▄ ██    ██ ██ ██          ▄▄ ██
+    │   ▄▄ ██ ██    ▄▄ ██ ██ ██    ▄▄ ██ ██    ▄▄ ██ ██       ▄▄ ██ ██    ██ ██ ██       ▄▄ ██ ██
+    │██ ██ ██ ██ ▄▄ ██ ██ ██ ██ ██ ██ ██ ██ ▄▄ ██ ██ ██ ▄▄ ██ ██ ██ ██ ▄▄ ██ ██ ██ ▄▄ ██ ██ ██ ██ ▄▄
+    │██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██
+-110│██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██
+    └───────────────────────────────────────────────────────────────────────────────────────────────
+ -16s                                             -8s                                            now
+ [Shift-]F1 Focus  F2 Pair  F3 Zoom  F4 Key  F5 Pause  F6 Rename  Del Remove  p Pending  F7 Filter
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ddd
+.............................................................................ee................ee
+......ff
+......gg
+
+
+
+
+
+
+.......................hh.................................................ii
+.......................hh.................................................hh
+.......................hh.................................................jj
+ddd....................hh.................................................hh
+.......................hh.................................................hh
+.......................hh.................................................hh
+.......................hh.................................................hh
+.......................hh.kk..............................................hh.ll.kk
+.......................hh.kk..............................................hh.mm.kk
+.......................hh.kk.mm...........................................hh.mm.kk
+.......................hh.kk.mm...........................................hh.mm.kk
+...........ll.mm.......hh.kk.mm.......ll.mm..........ll..........ll.mm....hh.mm.kk..........ll.mm
+........ll.mm.mm....ll.hh.kk.mm....ll.mm.mm....ll.mm.mm.......ll.mm.mm....hh.mm.kk.......nn.mm.mm
+.....mm.mm.mm.mm.ll.mm.hh.kk.mm.mm.mm.mm.mm.ll.mm.mm.mm.ll.mm.mm.mm.mm.ll.hh.mm.kk.ll.mm.mm.mm.mm.ll
+.....mm.mm.mm.mm.mm.mm.hh.kk.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.hh.mm.kk.mm.mm.mm.mm.mm.mm
+dddd.mm.mm.mm.mm.mm.mm.hh.kk.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.mm.hh.mm.kk.mm.mm.mm.mm.mm.mm
+
+.dddd.............................................ddd............................................ddd
+bbbbbbbbbbbbbbbbbbbbbbbbbbbooooooooobbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+--- legend ---
+a: Black on Gray BOLD
+b: Black on Gray
+c: Green on Gray
+d: DarkGray
+e: Yellow
+f: Green BOLD
+g: Yellow BOLD
+h: LightRed on LightRed
+i: LightRed
+j: Green on LightRed
+k: Cyan on Cyan
+l: Blue
+m: Blue on Blue
+n: Green
+o: Black on Yellow BOLD

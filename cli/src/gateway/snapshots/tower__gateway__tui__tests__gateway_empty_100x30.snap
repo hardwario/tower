@@ -1,0 +1,74 @@
+---
+source: cli/src/gateway/tui.rs
+expression: "shot(&mut app, size)"
+---
+100x30
+--- screen ---
+ HARDWARIO TOWER Gateway /dev/ttyTEST ● serial  ● mqtt  prefix tower/
+┌ Nodes (0) ─────────────────────────────────────────────┐┌ Radio ─────────────────────────────────┐
+│ ADDR       NAME     TYPE        SEEN   RSSI  PEND  SLP ││ -30 │dBm                               │
+│                                                        ││     │                                  │
+│                                                        ││ -70 │                                  │
+│                                                        ││     │                                  │
+│                                                        ││ -110│                                  │
+│                                                        ││     └───────────────────────────────── │
+│                                                        ││   -5s               -3s            now │
+└────────────────────────────────────────────────────────┘└────────────────────────────────────────┘
+┌ Shell (no nodes) ─────────────────────────┐┌ MQTT · 0 msgs · F7 = filter node ───────────────────┐
+│ pair a node first: F2 opens the pairing   ││                                                     │
+│ window                                    ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+└───────────────────────────────────────────┘└─────────────────────────────────────────────────────┘
+┌ Gateway Log ─────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ [Shift-]F1 Focus  F2 Pair  F3 Zoom  F4 Key  F5 Pause  F6 Rename  Del Remove  p Pending  F7 Filter
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+d.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.d..fff
+d........................................................d
+d........................................................d..fff
+d........................................................d
+d........................................................d..ffff
+d........................................................d
+d........................................................d....fff...............fff............fff
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+--- legend ---
+a: Black on Gray BOLD
+b: Black on Gray
+c: Green on Gray
+d: LightRed BOLD
+e: BOLD
+f: DarkGray

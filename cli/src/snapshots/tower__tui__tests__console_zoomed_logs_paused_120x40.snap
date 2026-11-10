@@ -1,0 +1,96 @@
+---
+source: cli/src/tui.rs
+expression: "shot(&mut app, size)"
+---
+120x40
+--- screen ---
+ HARDWARIO TOWER Console v0.0.0 (/dev/ttyUSB0) ●
+12:00:01.004 [    0.004] INFO  app: radio_button v1.2.0
+12:00:01.120 [    0.120] DEBUG net: tx counter resumed at 2049
+12:00:02.250 [    1.250] WARN  radio: duty budget at 80 %, the heartbeat waits until the window has moved on
+12:00:03.500 [    2.500] ERROR kv: store full, compacting
+12:00:03.750 [    2.750] TRACE button: edge 1
+printed by the app
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ <[Shift-]F1> Focus   <F3> Zoom    <F5> Pause   <F8> Clear  <Shift-F8> Clear All  <PgUp/PgDn> Scroll2026-01-02 03:04:05
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+cccccccccccccccccccccccccccccc
+dddddddddddddddddddddddddddddd
+eeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+ffffffffffffffffffffffffffffff
+gggggggggggggggggggggggggggggg
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+aaaaaaaaaaaaaaaaaaaaahhhhhhhhhhhaahhhhhhhhhhhhaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+--- legend ---
+a: Black on Gray
+b: Green on Gray
+c: Green
+d: Cyan
+e: Yellow
+f: Red
+g: DarkGray
+h: Black on Yellow BOLD

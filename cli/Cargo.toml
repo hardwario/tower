@@ -74,6 +74,11 @@ tower-flasher.workspace = true
 heapless.workspace = true
 assert_cmd = "2"
 predicates = "3"
+# Snapshots of both TUIs, rendered into ratatui's `TestBackend` (`src/snapshot.rs`, the `.snap`
+# files next to the TUI sources). No default features: `colors` only tints insta's own diff
+# output, and the snapshots are plain text. Reviewing a changed snapshot needs nothing else
+# (docs/cli/cli.md, *Tests*); `cargo insta` is optional.
+insta = { version = "1.49", default-features = false }
 # The TLS tests mint a throwaway CA + server/client identities at test time (short validity, so
 # nothing can expire in the tree, and within the 825-day limit macOS applies to every TLS
 # server certificate): rcgen for the certificates (ring backend), p12-keystore to wrap them as

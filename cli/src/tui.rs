@@ -1007,6 +1007,12 @@ fn header_diagnostics(app: &App) -> Option<String> {
 }
 
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
+    draw(f, app, env!("CARGO_PKG_VERSION"), &now_date());
+}
+
+/// [`ui`] with the two things on screen that change by themselves passed in (the version in the
+/// header, the clock in the footer), so the snapshot tests can hold them still.
+fn draw(f: &mut ratatui::Frame, app: &mut App, version: &str, clock: &str) {
     let area = f.area();
     let bar = Style::new().bg(Color::Gray).fg(Color::Black);
 
@@ -1017,11 +1023,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     // diagnostics can each carry their own color over the gray bar.
     let on_bar = |fg: Color| Style::new().bg(Color::Gray).fg(fg);
     let mut spans = vec![Span::styled(
-        format!(
-            " HARDWARIO TOWER Console v{} ({}) ",
-            env!("CARGO_PKG_VERSION"),
-            app.port_name
-        ),
+        format!(" HARDWARIO TOWER Console v{version} ({}) ", app.port_name),
         bar,
     )];
     if app.connected() {
@@ -1102,7 +1104,6 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let footer_area = rows[2];
     f.render_widget(Paragraph::new(footer).style(bar), footer_area);
     // Clock, right-aligned.
-    let clock = now_date();
     let cw = clock.len() as u16;
     if footer_area.width > cw + 1 {
         let clock_rect = Rect::new(footer_area.x + footer_area.width - cw - 1, footer_area.y, cw, 1);
@@ -2103,5 +2104,244 @@ mod tests {
         assert_eq!(app.input, "system resource print", "taken into the line");
         assert_eq!(app.cursor, app.input.len() - 1, "and the Left applied");
         assert!(app.search.is_none());
+    }
+
+    // ---- frame snapshots (`crate::snapshot`: the screen, its styles, the cursor) ----
+    //
+    // Whole frames of canned sessions at three terminal sizes, compared with the `.snap` files
+    // in `snapshots/`. They hold the layouts that broke before without a test noticing: a long
+    // `export` response cut off instead of wrapped, pane text flush against the borders, the
+    // zoom and pause chips unreadable when lit. A frame that changes fails its test and leaves a
+    // `.snap.new` beside the old one to compare (`crate::snapshot` says how to accept it).
+
+    /// A serial port that is merely there: `App::connected` asks only whether one is held, and
+    /// the snapshots show the connected screen. It never yields a byte.
+    struct IdlePort;
+
+    impl std::io::Read for IdlePort {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::TimedOut.into())
+        }
+    }
+
+    impl Write for IdlePort {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl serialport::SerialPort for IdlePort {
+        fn name(&self) -> Option<String> {
+            None
+        }
+        fn baud_rate(&self) -> serialport::Result<u32> {
+            Ok(115_200)
+        }
+        fn data_bits(&self) -> serialport::Result<serialport::DataBits> {
+            Ok(serialport::DataBits::Eight)
+        }
+        fn flow_control(&self) -> serialport::Result<serialport::FlowControl> {
+            Ok(serialport::FlowControl::None)
+        }
+        fn parity(&self) -> serialport::Result<serialport::Parity> {
+            Ok(serialport::Parity::None)
+        }
+        fn stop_bits(&self) -> serialport::Result<serialport::StopBits> {
+            Ok(serialport::StopBits::One)
+        }
+        fn timeout(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn set_baud_rate(&mut self, _: u32) -> serialport::Result<()> {
+            Ok(())
+        }
+        fn set_data_bits(&mut self, _: serialport::DataBits) -> serialport::Result<()> {
+            Ok(())
+        }
+        fn set_flow_control(&mut self, _: serialport::FlowControl) -> serialport::Result<()> {
+            Ok(())
+        }
+        fn set_parity(&mut self, _: serialport::Parity) -> serialport::Result<()> {
+            Ok(())
+        }
+        fn set_stop_bits(&mut self, _: serialport::StopBits) -> serialport::Result<()> {
+            Ok(())
+        }
+        fn set_timeout(&mut self, _: Duration) -> serialport::Result<()> {
+            Ok(())
+        }
+        fn write_request_to_send(&mut self, _: bool) -> serialport::Result<()> {
+            Ok(())
+        }
+        fn write_data_terminal_ready(&mut self, _: bool) -> serialport::Result<()> {
+            Ok(())
+        }
+        fn read_clear_to_send(&mut self) -> serialport::Result<bool> {
+            Ok(false)
+        }
+        fn read_data_set_ready(&mut self) -> serialport::Result<bool> {
+            Ok(false)
+        }
+        fn read_ring_indicator(&mut self) -> serialport::Result<bool> {
+            Ok(false)
+        }
+        fn read_carrier_detect(&mut self) -> serialport::Result<bool> {
+            Ok(false)
+        }
+        fn bytes_to_read(&self) -> serialport::Result<u32> {
+            Ok(0)
+        }
+        fn bytes_to_write(&self) -> serialport::Result<u32> {
+            Ok(0)
+        }
+        fn clear(&self, _: serialport::ClearBuffer) -> serialport::Result<()> {
+            Ok(())
+        }
+        fn try_clone(&self) -> serialport::Result<Box<dyn serialport::SerialPort>> {
+            Ok(Box::new(IdlePort))
+        }
+        fn set_break(&self) -> serialport::Result<()> {
+            Ok(())
+        }
+        fn clear_break(&self) -> serialport::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The three terminal sizes of the snapshots: the classic 80x24, a roomy window, a cramped
+    /// split.
+    const SIZES: [(u16, u16); 3] = [(80, 24), (120, 40), (60, 16)];
+
+    /// One frame of `app` as snapshot text, with the version and the clock held still.
+    fn shot(app: &mut App, (w, h): (u16, u16)) -> String {
+        // The shell pane places the cursor in its prompt when it has the focus and is drawn.
+        let cursor = app.focus == Pane::Shell;
+        crate::snapshot::shoot(w, h, cursor, |f| draw(f, app, "0.0.0", "2026-01-02 03:04:05"))
+    }
+
+    /// A connected session with something in every pane: events, a log line of every severity
+    /// (one of them long), free text, and a shell dialog that ends with an `export` whose lines
+    /// are wider than any pane, a command being typed and a completion hint under it.
+    fn session() -> App {
+        let mut app = App::new("/dev/ttyUSB0".to_string(), History::in_memory(Vec::new()));
+        app.sp = Some(Box::new(IdlePort));
+        for (clock, event) in [
+            ("12:00:01.300", "boot  reason=power-on session=7"),
+            ("12:00:04.120", "button  event=click count=3"),
+            ("12:00:09.870", "temperature  value=21.50"),
+            ("12:00:15.004", "button  event=hold count=4"),
+        ] {
+            push_event(&mut app, format!("{clock} {event}"));
+        }
+        for (prefix, rest, level) in [
+            (
+                "12:00:01.004 [    0.004] INFO ",
+                " app: radio_button v1.2.0",
+                Level::Info,
+            ),
+            (
+                "12:00:01.120 [    0.120] DEBUG",
+                " net: tx counter resumed at 2049",
+                Level::Debug,
+            ),
+            (
+                "12:00:02.250 [    1.250] WARN ",
+                " radio: duty budget at 80 %, the heartbeat waits until the window has moved on",
+                Level::Warn,
+            ),
+            (
+                "12:00:03.500 [    2.500] ERROR",
+                " kv: store full, compacting",
+                Level::Error,
+            ),
+            ("12:00:03.750 [    2.750] TRACE", " button: edge 1", Level::Trace),
+        ] {
+            push_log(&mut app, (prefix.into(), rest.into(), level_color(level)));
+        }
+        push_log(
+            &mut app,
+            (String::new(), "printed by the app".into(), Color::Reset),
+        );
+        for line in [
+            "> system settings print",
+            "heartbeat=900",
+            "report-period=60",
+            "band=eu868",
+            "> nonsense",
+            "[result 1: not found]",
+            "> export",
+            "system settings set heartbeat=900 report-period=60 report-delta=0.50 led=on \
+             hold-time=1000 accel=medium click-timeout=500",
+            "radio settings set band=eu868 channel=0",
+        ] {
+            push_cap(&mut app.responses, line.to_string());
+        }
+        app.input = "system settings set report-period=30".to_string();
+        app.cursor = app.input.len();
+        app.hint = "heartbeat  report-period  report-delta  led  band  hold-time".to_string();
+        app
+    }
+
+    /// The split layout with the focus on the shell: every pane, the prompt and its cursor, the
+    /// hint rows, the wrapped `export` line with the prompt still on the last row.
+    #[test]
+    fn snapshot_split() {
+        for size in SIZES {
+            let mut app = session();
+            insta::assert_snapshot!(
+                format!("console_split_{}x{}", size.0, size.1),
+                shot(&mut app, size)
+            );
+        }
+    }
+
+    /// The zoomed shell: borderless, the long `export` line wrapped over the full width.
+    #[test]
+    fn snapshot_zoomed_shell() {
+        for size in SIZES {
+            let mut app = session();
+            app.zoom = true;
+            insta::assert_snapshot!(
+                format!("console_zoomed_shell_{}x{}", size.0, size.1),
+                shot(&mut app, size)
+            );
+        }
+    }
+
+    /// The zoomed log pane while paused: both footer chips lit (black on yellow, bold), the
+    /// focus elsewhere than the prompt (no cursor), the severity tints on the prefixes only.
+    #[test]
+    fn snapshot_zoomed_logs_paused() {
+        for size in SIZES {
+            let mut app = session();
+            app.focus = Pane::Logs;
+            app.zoom = true;
+            app.paused = true;
+            insta::assert_snapshot!(
+                format!("console_zoomed_logs_paused_{}x{}", size.0, size.1),
+                shot(&mut app, size)
+            );
+        }
+    }
+
+    /// No device: the reconnect indicator with its error and the decode tally in the header, an
+    /// empty prompt showing its placeholder, the focus border on the event pane.
+    #[test]
+    fn snapshot_reconnecting() {
+        for size in SIZES {
+            let mut app = App::new("/dev/ttyUSB0".to_string(), History::in_memory(Vec::new()));
+            app.focus = Pane::Events;
+            app.last_open_error = Some("Permission denied".to_string());
+            app.decode_failures = 37;
+            app.seq_gaps = 1;
+            app.payload_errors = 2;
+            insta::assert_snapshot!(
+                format!("console_reconnecting_{}x{}", size.0, size.1),
+                shot(&mut app, size)
+            );
+        }
     }
 }

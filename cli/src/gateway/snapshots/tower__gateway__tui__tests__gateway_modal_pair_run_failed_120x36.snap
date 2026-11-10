@@ -1,0 +1,93 @@
+---
+source: cli/src/gateway/tui.rs
+expression: "shot(&mut app, *size)"
+---
+120x36
+--- screen ---
+ HARDWARIO TOWER Gateway /dev/ttyTEST ● serial  ● mqtt  prefix tower/
+┌ Nodes (1) ─────────────────────────────────────────────────────────┐┌ Radio ─────────────────────────────────────────┐
+│ ADDR       NAME                 TYPE        SEEN   RSSI  PEND  SLP ││ -30 │dBm                                       │
+│ 0x0000ab12 kitchen              button      3s     -67   ⌛2   ●   ││     │                                          │
+│                                                                    ││     │                                          │
+│                                                                    ││     │                                          │
+│                                                                    ││ -70 │                                          │
+│                                                                    ││     │                                          │
+│                                                                    ││     │                                          │
+│                                                                    ││ -110│                                          │
+│                                                                    ││     └───────────────────────────────────────── │
+│                                                                    ││   -7s                  -3s                 now │
+└────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
+┌ Shell: kitchen ‹1/1› ─────┌ Cable pairing ───────────────────────────────────────────────┐───────────────────────────┐
+│ ⌛ system settings set rep│ pairing over /dev/ttyUSB1…                                   │                           │
+│ p→Del dequeues)           │                                                              │                           │
+│ ⌛ led on (ref 10; p→Del d│   reading the node's identity                                │                           │
+│ >                         │   minting a key                                              │                           │
+│                           │   provisioning the node                                      │                           │
+│                           │                                                              │                           │
+│                           │ ✖ the node did not answer (is it a TOWER radio app?)         │                           │
+│                           │ any key closes                                               │                           │
+│                           └──────────────────────────────────────────────────────────────┘                           │
+│                                                    ││                                                                │
+│                                                    ││                                                                │
+│                                                    ││                                                                │
+└────────────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
+┌ Gateway Log ─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ [Shift-]F1 Focus  F2 Pair  F3 Zoom  F4 Key  F5 Pause  F6 Rename  Del Remove  p Pending  F7 Filter  F8 Clear  F9 Mouse
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+d.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.d..fff
+d.gggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.ggggggg.d
+d....................................................................d
+d....................................................................d
+d....................................................................d..fff
+d....................................................................d
+d....................................................................d
+d....................................................................d..ffff
+d....................................................................d
+d....................................................................d....fff..................fff.................fff
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+............................hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+..i.iiiiiiiiiiiiiiiiiiiiiiiih..............................................................h
+..iiiiiiiiiiiiiii...........h..............................................................h
+..i.iiiiiiiiiiiiiiiiiiiiiiiih..............................................................h
+..jjk.......................h..............................................................h
+............................h..............................................................h
+............................h..............................................................h
+............................h.llllllllllllllllllllllllllllllllllllllllllllllllllll.........h
+............................h..............................................................h
+............................hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+
+
+
+
+
+
+
+
+
+
+
+
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbmmmmmmmmmmb
+--- legend ---
+a: Black on Gray BOLD
+b: Black on Gray
+c: Green on Gray
+d: LightRed BOLD
+e: BOLD
+f: DarkGray
+g: on DarkGray BOLD
+h: Yellow
+i: Yellow DIM
+j: Cyan
+k: REVERSED
+l: Red
+m: Black on Yellow BOLD

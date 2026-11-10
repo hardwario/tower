@@ -1,0 +1,74 @@
+---
+source: cli/src/gateway/tui.rs
+expression: "shot(&mut app, SIZES[0])"
+---
+100x30
+--- screen ---
+ HARDWARIO TOWER Gateway /dev/ttyTEST ● serial  ● mqtt  prefix tower/
+gateway 0x00000001 on /dev/ttyTEST (16 node slots)
+auto-naming node 0x0000cd34 "greenhouse-mon:0"
+WARN radio: duty budget at 80 %
+set setpoint = 21.5 queued for node 0x0000cd34
+ERROR net: replay lane write failed
+refusing set relay on 0x0000ab12: a `button` has no property `relay`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ [Shift-]F1 Focus  F2 Pair  F3 Zoom  F4 Key  F5 Pause  F6 Rename  Del Remove  p Pending  F7 Filter
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+
+ddddddddddddddddddddddddddddddd
+
+eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+bbbbbbbbbbbbbbbbbbbbbbbbbbbfffffffffbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+--- legend ---
+a: Black on Gray BOLD
+b: Black on Gray
+c: Green on Gray
+d: Yellow
+e: Red
+f: Black on Yellow BOLD

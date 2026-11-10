@@ -31,6 +31,8 @@ mod mgmt;
 mod port;
 mod render;
 mod session;
+#[cfg(test)]
+mod snapshot;
 mod target;
 mod term;
 mod tui;

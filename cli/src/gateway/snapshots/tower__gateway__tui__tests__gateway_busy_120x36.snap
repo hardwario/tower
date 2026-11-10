@@ -1,0 +1,100 @@
+---
+source: cli/src/gateway/tui.rs
+expression: "shot(&mut app, size)"
+---
+120x36
+--- screen ---
+ HARDWARIO TOWER Gateway /dev/ttyTEST ● serial  ● mqtt  prefix tower/
+┌ Nodes (4) ─────────────────────────────────────────────────────────┐┌ Radio · -97 dBm · ch 3 ────────────────────────┐
+│ ADDR       NAME                 TYPE        SEEN   RSSI  PEND  SLP ││ -30 │dBm               ▄▄                ▄▄    │
+│ 0x0000ab12 kitchen              button      3s     -67   ⌛2   ●   ││     │                                          │
+│ 0x0000cd34 greenhouse-mon:0     greenhouse- 412s   -101  -     ●   ││     │                                          │
+│ 0x00010203 -                    ?           never  -     -     ●   ││     │               ▄▄                         │
+│ 0x00f00d01 lights               control     0s     -48   -     ○   ││ -70 │               ██                         │
+│                                                                    ││     │               ██ ██ ██                   │
+│                                                                    ││     │   ▄▄ ▄▄ ██    ██ ██ ██       ▄▄ ▄▄ ██    │
+│                                                                    ││ -110│██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ │
+│                                                                    ││     └───────────────────────────────────────── │
+│                                                                    ││   -7s                  -3s                 now │
+└────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
+┌ Shell: kitchen ‹1/4› ──────────────────────────────┐┌ MQTT · 9 msgs · F7 = filter node ──────────────────────────────┐
+│ > system resource print                            ││ ▲ gateway/status ®                                             │
+│ uptime = 3600 s                                    ││ {"state":"online","schema":4,"gateway":"0x00000001","firmware" │
+│ stack = 1840 of 2048 bytes                         ││ :"radio_gateway","serial_up":true}                             │
+│ wire = console 0x1234 radio 0xabcd                 ││ ▲ nodes/0x0000ab12/event/button                                │
+│ ✓                                                  ││ {"value":"click","count":42,"counter":1234,"ts":1700000000}    │
+│ > system eeprom wipe                               ││ ▼ gateway/cmd                                                  │
+│ ✖ result 5                                         ││ {"id":"u1","op":"node_add","params":{"addr":"0x0000cd34","key" │
+│ > led blink                                        ││ :"<redacted>"}}                                                │
+│ ✖ queue TTL expired without a confirmed delivery   ││ ▲ gateway/rsp/u1 {"id":"u1","ok":true}                         │
+│ ⌛ system settings set report-period=30 (ref 9;    ││ ▲ nodes/0x0000cd34/state/temperature ®                         │
+│ p→Del dequeues)                                    ││ {"value":21.5,"ts":1700000003}                                 │
+│ ⌛ led on (ref 10; p→Del dequeues)                 ││ ▼ nodes/0x0000ab12/shell/req {"id":"tui-5","line":"led on"}    │
+└────────────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
+┌ Gateway Log ─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ gateway 0x00000001 on /dev/ttyTEST (16 node slots)                                                                   │
+│ auto-naming node 0x0000cd34 "greenhouse-mon:0"                                                                       │
+│ WARN radio: duty budget at 80 %                                                                                      │
+│ set setpoint = 21.5 queued for node 0x0000cd34                                                                       │
+│ ERROR net: replay lane write failed                                                                                  │
+│ refusing set relay on 0x0000ab12: a `button` has no property `relay`                                                 │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ [Shift-]F1 Focus  F2 Pair  F3 Zoom  F4 Key  F5 Pause  F6 Rename  Del Remove  p Pending  F7 Filter  F8 Clear  F9 Mouse
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+..dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd....eee....................ff................ff
+..gggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.ggggggg
+
+............................................................................................hh
+........................................................................eee.................ii
+............................................................................................ii.jj.kk
+................................................................................ll.ll.jj....ii.jj.kk.......mm.ll.jj
+........................................................................eeee.jj.jj.jj.jj.jj.ii.jj.kk.jj.jj.jj.jj.jj.jj
+
+..........................................................................eee..................eee.................eee
+
+nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+n.eeoooooo.oooooooo.fffff............................n..ooddddddddddddddee
+n.ppppppeeemmmmmm....................................n..eoooooooemmmmmmmmeooooooooepeoooooooooemmmmmmmmmmmmeoooooooooo
+n.pppppeeemmmmmmmmmmmmmmmmmm.........................n..emmmmmmmmmmmmmmmeoooooooooooeffffe
+n.ppppeeemmmmmmmmmmmmmmmmmmmmmmmmmmm.................n..ooddddddddddddddddddddddddddddd
+n.m..................................................n..eoooooooemmmmmmmeoooooooeppeoooooooooeppppeooooeppppppppppe
+n.eeoooooo.oooooo.ffff...............................n..qqddddddddddd
+n.rrrrrrrrrr.........................................n..eooooemmmmeooooemmmmmmmmmmeooooooooeeooooooemmmmmmmmmmmmeooooo
+n.eeooo.fffff........................................n..emmmmmmmmmmmmee
+n.rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr...n..oodddddddddddddd.eooooemmmmeooooeffffe
+n.s.sssssssssssssssssssssssssssssssssssssssssssss....n..ooddddddddddddddddddddddddddddddddddee
+n.sssssssssssssss....................................n..eoooooooeppppeooooeppppppppppe
+n.s.ssssssssssssssssssssssssssssssss.................n..qqdddddddddddddddddddddddddd.eooooemmmmmmmeooooooemmmmmmmme
+nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+
+
+
+..fffffffffffffffffffffffffffffff
+
+..rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
+
+
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbttttttttttb
+--- legend ---
+a: Black on Gray BOLD
+b: Black on Gray
+c: Green on Gray
+d: BOLD
+e: DarkGray
+f: Yellow
+g: on DarkGray BOLD
+h: Green on LightRed
+i: LightRed on LightRed
+j: Blue on Blue
+k: Cyan on Cyan
+l: Blue
+m: Green
+n: LightRed BOLD
+o: Cyan
+p: Magenta
+q: Magenta BOLD
+r: Red
+s: Yellow DIM
+t: Black on Yellow BOLD

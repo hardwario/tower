@@ -1,0 +1,80 @@
+---
+source: cli/src/gateway/tui.rs
+expression: "shot(&mut app, SIZES[0])"
+---
+100x30
+--- screen ---
+ HARDWARIO TOWER Gateway /dev/ttyTEST ● serial  ● mqtt  prefix tower/
+> system resource print
+uptime = 3600 s
+stack = 1840 of 2048 bytes
+wire = console 0x1234 radio 0xabcd
+✓
+> system eeprom wipe
+✖ result 5
+> led blink
+✖ queue TTL expired without a confirmed delivery
+⌛ system settings set report-period=30 (ref 9; p→Del dequeues)
+⌛ led on (ref 10; p→Del dequeues)
+> system settings set heartbeat=600
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ [Shift-]F1 Focus  F2 Pair  F3 Zoom  F4 Key  F5 Pause  F6 Rename  Del Remove  p Pending  F7 Filter
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ddeeeeee.eeeeeeee.fffff
+ggggggdddhhhhhh
+gggggdddhhhhhhhhhhhhhhhhhh
+ggggdddhhhhhhhhhhhhhhhhhhhhhhhhhhh
+h
+ddeeeeee.eeeeee.ffff
+iiiiiiiiii
+ddeee.fffff
+iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii
+j.jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
+j.jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
+ee.................................k
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+bbbbbbbbbbbbbbbbbbbbbbbbbbblllllllllbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+--- legend ---
+a: Black on Gray BOLD
+b: Black on Gray
+c: Green on Gray
+d: DarkGray
+e: Cyan
+f: Yellow
+g: Magenta
+h: Green
+i: Red
+j: Yellow DIM
+k: REVERSED
+l: Black on Yellow BOLD

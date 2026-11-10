@@ -1,0 +1,90 @@
+---
+source: cli/src/gateway/tui.rs
+expression: "shot(&mut app, size)"
+---
+120x36
+--- screen ---
+ HARDWARIO TOWER Gateway /dev/ttyTEST ● serial  ● mqtt  prefix tower/
+▲ nodes/0x0000ab12/event/button {"value":"click","count":42,"counter":1234,"ts":1700000000}
+▼ nodes/0x0000ab12/shell/req {"id":"tui-5","line":"led on"}
+▲ nodes/0x0000ab12/shell/pending ® [{"ref":9,"id":"tui-4","line":"system settings set
+report-period=30"},{"ref":10,"id":"tui-5","line":"led on"}]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ [Shift-]F1 Focus  F2 Pair  F3 Zoom  F4 Key  F5 Pause  F6 Rename  Del Remove  p Pending  F7 Filter  F8 Clear  F9 Mouse
+--- styles ---
+aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ddeeeeeeeeeeeeeeeeeeeeeeeeeeeee.fdddddddfgggggggfdddddddfhhfdddddddddfhhhhfddddfhhhhhhhhhhf
+iieeeeeeeeeeeeeeeeeeeeeeeeee.fddddfgggggggfddddddfggggggggf
+ddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeff.ffdddddfhfddddfgggggggfddddddfgggggggggggggggggggg
+gggggggggggggggggfffdddddfhhfddddfgggggggfddddddfggggggggff
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+bbbbbbbbbbbbbbbbbbbbbbbbbbbjjjjjjjjjbbbbbbbbjjjjjjjjjjbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbjjjjjjjjjjjbbbbbbbbbbjjjjjjjjjjb
+--- legend ---
+a: Black on Gray BOLD
+b: Black on Gray
+c: Green on Gray
+d: Cyan
+e: BOLD
+f: DarkGray
+g: Green
+h: Magenta
+i: Magenta BOLD
+j: Black on Yellow BOLD
