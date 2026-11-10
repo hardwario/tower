@@ -259,17 +259,99 @@ pub mod button {
     };
 }
 
-/// `radio_climate`: a climate sensor (the Core Module's thermometer; the Climate Module's
-/// sensors are to come).
+/// `radio_climate`: a climate sensor: the Climate Module's humidity, illuminance and pressure and
+/// the CO2 Module's concentration, each reported only while its sensor is fitted.
 pub mod climate {
     use super::*;
+
+    pub const HUMIDITY: u8 = APP_BASE;
+    pub const ILLUMINANCE: u8 = APP_BASE + 1;
+    pub const PRESSURE: u8 = APP_BASE + 2;
+    pub const CO2: u8 = APP_BASE + 3;
+    pub const HUMIDITY_DELTA: u8 = APP_BASE + 4;
+    pub const ILLUMINANCE_DELTA: u8 = APP_BASE + 5;
+    pub const PRESSURE_DELTA: u8 = APP_BASE + 6;
+    pub const CO2_DELTA: u8 = APP_BASE + 7;
+    pub const CO2_PERIOD: u8 = APP_BASE + 8;
 
     pub const KIND: Kind = Kind {
         id: 2,
         name: "climate",
         class: Class::Sleeping,
         time: false,
-        props: &[],
+        props: &[
+            // Relative humidity.
+            Prop {
+                id: HUMIDITY,
+                name: "humidity",
+                ty: number(0, 1000, 1, "%"),
+                access: Access::State,
+                default: "",
+            },
+            // The OPT3001's range: 0.01 to 83865.6 lux.
+            Prop {
+                id: ILLUMINANCE,
+                name: "illuminance",
+                ty: number(0, 838_656, 1, "lx"),
+                access: Access::State,
+                default: "",
+            },
+            // The MPL3115A2's range: 200 to 1100 hPa (not reduced to sea level).
+            Prop {
+                id: PRESSURE,
+                name: "pressure",
+                ty: number(2000, 11000, 1, "hPa"),
+                access: Access::State,
+                default: "",
+            },
+            // The LP8's range.
+            Prop {
+                id: CO2,
+                name: "co2",
+                ty: number(0, 10000, 0, "ppm"),
+                access: Access::State,
+                default: "",
+            },
+            // The change that is news, per value (the temperature's is `report-delta`). The
+            // illuminance spans five decades, so its delta is a share of the reading.
+            Prop {
+                id: HUMIDITY_DELTA,
+                name: "humidity-delta",
+                ty: number(1, 500, 1, "%"),
+                access: Access::Param,
+                default: "2.0",
+            },
+            Prop {
+                id: ILLUMINANCE_DELTA,
+                name: "illuminance-delta",
+                ty: number(1, 100, 0, "%"),
+                access: Access::Param,
+                default: "20",
+            },
+            Prop {
+                id: PRESSURE_DELTA,
+                name: "pressure-delta",
+                ty: number(1, 1000, 1, "hPa"),
+                access: Access::Param,
+                default: "1.0",
+            },
+            Prop {
+                id: CO2_DELTA,
+                name: "co2-delta",
+                ty: number(1, 2000, 0, "ppm"),
+                access: Access::Param,
+                default: "50",
+            },
+            // The least time between two CO2 measurements (each costs the sensor's lamp pulse);
+            // 16 s is the LP8's own minimum.
+            Prop {
+                id: CO2_PERIOD,
+                name: "co2-period",
+                ty: number(16, 86400, 0, "s"),
+                access: Access::Param,
+                default: "300",
+            },
+        ],
     };
 }
 
@@ -317,7 +399,8 @@ pub mod motion {
     };
 }
 
-/// `radio_control`: the Power Module's relay and LED strip, a listening node.
+/// `radio_control`: the Power Module's relay and LED strip and the Relay Module's relay, a
+/// listening node.
 pub mod control {
     use super::*;
 
@@ -328,8 +411,9 @@ pub mod control {
     pub const BRIGHTNESS: u8 = APP_BASE + 4;
     pub const COLOR: u8 = APP_BASE + 5;
     pub const SPEED: u8 = APP_BASE + 6;
+    pub const RELAY_MODULE: u8 = APP_BASE + 7;
 
-    /// [`RELAY_BOOT`] values: the relay after a power-up.
+    /// [`RELAY_BOOT`] values: the relays after a power-up.
     pub const RELAY_BOOT_STATES: &[&str] = &["off", "on", "last"];
 
     /// [`EFFECT`] values (the `led_strip` effect engine's order).
@@ -382,6 +466,8 @@ pub mod control {
                 access: Access::Control,
                 default: "",
             },
+            // The Relay Module's latching relay; reported only while the module is fitted.
+            bool_prop(RELAY_MODULE, "relay-module", Access::Control, ""),
         ],
     };
 }

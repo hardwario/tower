@@ -1,20 +1,28 @@
-//! radio_control (TOWER IoT Kit product firmware): the Power Module's relay and LED strip on the
-//! radio, a **listening** taf node (`docs/firmware/taf.md`): it keeps its receiver on, so a command from
-//! MQTT takes effect within about one radio round trip.
+//! radio_control (TOWER IoT Kit product firmware): the Power Module's relay and LED strip and the
+//! Relay Module's relay on the radio, a **listening** taf node (`docs/firmware/taf.md`): it keeps
+//! its receiver on, so a command from MQTT takes effect within about one radio round trip.
 //!
-//! Properties (`nodes/{addr}/state/...`, set with `nodes/{addr}/set/...`): `relay` (on/off),
-//! `strip` (on/off), `effect` (one of the [`strip_player`] effects), `brightness` (%), `color`
-//! (`0xRRGGBB` as a number), `speed` (%); the setting `relay-boot` says what the relay does after a
-//! power-up (off, on, or its last state). The `strip ...` shell commands work as in `led_strip`,
-//! locally and over the radio's remote shell, and what they change is reported too. Changes are
-//! kept in EEPROM 10 s after the last one, so a power cut restores the strip (and the relay, with
-//! `relay-boot last`). The button: a click switches the relay, a hold the strip (on top of the
-//! `button` events every taf app reports). The strip's clock effect shows the wall-clock time the
-//! gateway host syncs. The temperature and the accelerometer's `tilt` events are the taf
-//! runtime's, as in every taf app.
+//! Properties (`nodes/{addr}/state/...`, set with `nodes/{addr}/set/...`): `relay` (on/off, the
+//! Power Module's), `relay-module` (on/off, the Relay Module's latching relay), `strip` (on/off),
+//! `effect` (one of the [`strip_player`] effects), `brightness` (%), `color` (`0xRRGGBB` as a
+//! number), `speed` (%); the setting `relay-boot` says what both relays do after a power-up (off,
+//! on, or their last state). The `strip ...` shell commands work as in `led_strip`, locally and
+//! over the radio's remote shell, and what they change is reported too. Changes are kept in
+//! EEPROM 10 s after the last one, so a power cut restores the strip (and the relays, with
+//! `relay-boot last`). The button: a click switches the relays (the Relay Module's follows the
+//! Power Module's), a hold the strip (on top of the `button` events every taf app reports). The
+//! strip's clock effect shows the wall-clock time the gateway host syncs. The temperature and
+//! the accelerometer's `tilt` events are the taf runtime's, as in every taf app.
 //!
-//! Hardware: Core Module + Power Module (relay on P0) + the 144-pixel RGBW strip on PA1. The
-//! Power Module is mains powered, which is what a listening node needs.
+//! **The Relay Module does not have to be fitted.** The app looks for it at start and every 10 s
+//! while it is missing; `relay-module` is reported only while the module answers. Its relay is
+//! latching: it is pulsed to its `relay-boot` state when the module is found (a latching relay
+//! cannot be read back, and it keeps whatever position it had through a power cut), and its LED
+//! shows the position while the `led` setting is on.
+//!
+//! Hardware: Core Module + Power Module (relay on P0) + the 144-pixel RGBW strip on PA1, and/or
+//! the Relay Module (I2C). The Power Module is mains powered, which is what a listening node
+//! needs.
 //!
 //!   just run app radio_control
 
@@ -31,11 +39,13 @@ mod control {
     use embassy_stm32::{Peri, bind_interrupts};
     use embassy_time::{Duration, Instant, Timer};
     use log::{info, warn};
+    use tower::i2c::I2cBus;
     use tower::power_module::Relay;
+    use tower::relay_module::{self, RelayModule};
     use tower::storage::{NS_APP, Nv};
     use tower::strip::{LedKind, Strip};
     use tower::{board::Board, button, shell, strip_player, taf, ws2812};
-    use tower_protocol::props::{self, control};
+    use tower_protocol::props::{self, common, control};
 
     // The strip driver's refill interrupt (see `tower::ws2812::Refill`).
     bind_interrupts!(struct Irqs {
@@ -56,6 +66,11 @@ mod control {
     /// `NS_APP` local of the relay's last state (for `relay-boot last`), next to the strip record
     /// (0x40) and clear of the taf runtime's (0x00).
     const KEY_RELAY: u8 = 0x41;
+    /// `NS_APP` local of the Relay Module's last state, likewise.
+    const KEY_RELAY_MODULE: u8 = 0x42;
+    /// A missing Relay Module is looked for every this many turns of the loop (10 s of `POLL`):
+    /// four addresses that do not answer.
+    const PROBE_POLLS: u8 = 40;
     /// Changes are stored this long after the last one (EEPROM wear: a dimmer dragged over MQTT is one
     /// write, not fifty).
     const SAVE_AFTER: Duration = Duration::from_secs(10);
@@ -71,18 +86,27 @@ mod control {
         strip_player::play(&mut strip).await
     }
 
-    /// The relay's state after a power-up, from `relay-boot`.
-    fn relay_at_boot(kv: Nv) -> bool {
+    /// A relay's state after a power-up, from `relay-boot`; `key` is where its last state is kept.
+    fn relay_at_boot(kv: Nv, key: u8) -> bool {
         match taf::param(control::RELAY_BOOT) {
             1 => true,
-            2 => kv
-                .scope(NS_APP)
-                .get::<bool>(KEY_RELAY)
-                .ok()
-                .flatten()
-                .unwrap_or(false),
+            2 => kv.scope(NS_APP).get::<bool>(key).ok().flatten().unwrap_or(false),
             _ => false,
         }
+    }
+
+    fn on_off(on: bool) -> &'static str {
+        if on { "on" } else { "off" }
+    }
+
+    /// What the loop does with the Relay Module this turn.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Module {
+        Nothing,
+        /// Pulse the relay to its wanted position.
+        Switch,
+        /// Only the LEDs (the `led` setting changed).
+        Show,
     }
 
     /// The values reported, in property order.
@@ -98,33 +122,88 @@ mod control {
     }
 
     #[embassy_executor::task]
-    async fn control_task(mut relay: Relay, kv: Nv) {
+    async fn control_task(mut relay: Relay, kv: Nv, bus: I2cBus) {
         // Settings read from here on: the task runs once the runtime has started.
-        relay.set(relay_at_boot(kv));
+        relay.set(relay_at_boot(kv, KEY_RELAY));
         let mut last = snapshot(&relay);
         for (id, value) in last {
             taf::report(id, value);
         }
+        // The Relay Module, once found, and the position its relay should have. A missing module
+        // is looked for every `PROBE_POLLS` turns of the loop.
+        let mut module: Option<RelayModule> = None;
+        let mut module_on = relay_at_boot(kv, KEY_RELAY_MODULE);
+        let mut probe_in: u8 = 0;
         let mut save_at: Option<Instant> = None;
         loop {
+            let was_on = module_on;
+            let mut act = Module::Nothing;
             match select3(taf::next_set(), taf::next_button(), Timer::after(POLL)).await {
                 Either3::First((id, value)) => match id {
                     control::RELAY => relay.set(value != 0),
+                    control::RELAY_MODULE => {
+                        module_on = value != 0;
+                        act = Module::Switch;
+                        if module.is_none() {
+                            warn!(target: "control", "relay-module set, but no Relay Module");
+                        }
+                    }
                     control::STRIP => strip_player::set_on(value != 0),
                     control::EFFECT => strip_player::set_effect(value.max(0) as usize),
                     control::BRIGHTNESS => strip_player::set_brightness(value.clamp(0, 100) as u8),
                     control::COLOR => strip_player::set_color(value as u32),
                     control::SPEED => strip_player::set_speed(value.clamp(10, 1000) as u16),
-                    _ => {} // a setting (relay-boot): read when used
+                    common::LED => act = Module::Show,
+                    _ => {} // another setting (relay-boot): read when used
                 },
-                Either3::Second(button::Event::Click) => relay.set(!relay.is_on()),
+                Either3::Second(button::Event::Click) => {
+                    relay.set(!relay.is_on());
+                    module_on = relay.is_on();
+                    act = Module::Switch;
+                }
                 Either3::Second(button::Event::Hold) => strip_player::set_on(!strip_player::is_on()),
                 Either3::Second(_) | Either3::Third(()) => {}
+            }
+            if module.is_none() {
+                if probe_in == 0 {
+                    probe_in = PROBE_POLLS;
+                    module = RelayModule::probe(bus).await;
+                    if module.is_some() {
+                        info!(target: "control", "Relay Module found");
+                        // Its relay's position is not known until it is pulsed.
+                        act = Module::Switch;
+                    }
+                } else {
+                    probe_in -= 1;
+                }
+            }
+            // The one place the module is driven from (each await site is code and RAM in this
+            // task's future). A module that does not answer is dropped, and looked for again.
+            if act != Module::Nothing
+                && let Some(m) = &mut module
+            {
+                let led = if taf::led_on() {
+                    relay_module::Led::State
+                } else {
+                    relay_module::Led::Off
+                };
+                match m.apply(module_on, led, act == Module::Switch).await {
+                    Ok(()) if act == Module::Switch => {
+                        info!(target: "control", "relay-module {}", on_off(module_on));
+                        taf::report(control::RELAY_MODULE, i32::from(module_on));
+                    }
+                    Ok(()) => {}
+                    Err(_) => {
+                        warn!(target: "control", "Relay Module gone");
+                        module = None;
+                        taf::forget(control::RELAY_MODULE);
+                    }
+                }
             }
             let now = snapshot(&relay);
             if now != last {
                 if now[0] != last[0] {
-                    info!(target: "control", "relay {}", if relay.is_on() { "on" } else { "off" });
+                    info!(target: "control", "relay {}", on_off(relay.is_on()));
                 }
                 for (id, value) in now {
                     taf::report(id, value);
@@ -132,10 +211,15 @@ mod control {
                 last = now;
                 save_at = Some(Instant::now() + SAVE_AFTER);
             }
+            if module_on != was_on {
+                save_at = Some(Instant::now() + SAVE_AFTER);
+            }
             if save_at.is_some_and(|t| Instant::now() >= t) {
                 save_at = None;
-                let relay_ok = kv.scope(NS_APP).set(KEY_RELAY, &relay.is_on()).is_ok();
-                if strip_player::save(kv).is_err() || !relay_ok {
+                let app = kv.scope(NS_APP);
+                let relays_ok = app.set(KEY_RELAY, &relay.is_on()).is_ok()
+                    && app.set(KEY_RELAY_MODULE, &module_on).is_ok();
+                if strip_player::save(kv).is_err() || !relays_ok {
                     warn!(target: "control", "state not saved");
                 }
             }
@@ -148,8 +232,10 @@ mod control {
             .spawn(strip_task(b.strip_tim, b.strip_data, b.strip_dma).unwrap());
         // Off until the task applies `relay-boot` (settings read 0 before the runtime starts).
         let relay = Relay::new(b.header_p0, false);
-        b.spawner.spawn(control_task(relay, b.kv).unwrap());
-        taf::run(tower::taf_base!(b), &KIND, &SETTINGS).await
+        let base = tower::taf_base!(b);
+        base.spawner
+            .spawn(control_task(relay, base.kv, base.i2c).unwrap());
+        taf::run(base, &KIND, &SETTINGS).await
     }
 }
 

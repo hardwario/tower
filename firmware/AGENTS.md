@@ -24,10 +24,11 @@ with [sdk.md](../docs/firmware/sdk.md); [docs/README.md](../docs/README.md) is t
   repo root), never `cargo build --manifest-path firmware/Cargo.toml` from elsewhere (that
   silently builds for the host or links without flip-link).
 - **Two build profiles.** Every app is built at `opt-level = "s"` (`--release`) except the
-  justfile's `z_apps` (`radio_thermostat`), built at "z" (`--profile release-z`, ELFs in
-  `target/thumbv6m-none-eabi/release-z/`): it needs the flash, and "z" breaks the LED strip's
-  timing, so a strip app never goes there (TASKS.md, D14). `just build` / `ram-budget` / `check`
-  pick the profile; a bare `cargo build --release --bins` fails (the thermostat overflows at "s").
+  justfile's `z_apps` (`radio_thermostat`, `radio_climate`), built at "z" (`--profile release-z`,
+  ELFs in `target/thumbv6m-none-eabi/release-z/`): they need the flash, and "z" breaks the LED
+  strip's timing, so a strip app never goes there (TASKS.md, D14, D15). `just build` /
+  `ram-budget` / `check` pick the profile; a bare `cargo build --release --bins` fails (the
+  thermostat overflows at "s").
   A new app goes into `s_apps` or `z_apps` (`just lists` checks).
 - `just ci` (= CI's `firmware` job) runs every hardware-free firmware gate: fmt, the MCU build
   of lib + apps + examples, the RAM budget, clippy + the five role-feature variants, role

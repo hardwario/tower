@@ -1,0 +1,9 @@
+[package]
+name = "tower-modules"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "no_std, hardware-free cores of the TOWER module drivers: the Climate Module's sensor conversions (SHT20, SHT30, OPT3001, MPL3115A2), the CO2 Module's LP8 frames, the Relay Module's H-bridge patterns. Not the drivers (those are the SDK's `tower::sht20`, `tower::co2_module`, `tower::relay_module`, ...); split out so the arithmetic and the frames are unit-tested on the host."

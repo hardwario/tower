@@ -129,7 +129,11 @@ pub(super) async fn task(mut int: ExtiInput<'static, Async>, bus: I2cBus) {
             Either3::First(()) => {
                 let now = Instant::now();
                 if now >= next_temp {
-                    match thermometer.oneshot().await {
+                    let sample = thermometer.oneshot().await;
+                    // The round starts with the sample in hand, read or not: an app measuring
+                    // with the runtime (`taf::round`) goes on without the thermometer.
+                    super::begin_round();
+                    match sample {
                         Ok(raw) => super::sampled(tmp112::raw_to_millicelsius(raw) / 10),
                         Err(_) => warn!(target: "node", "thermometer not read (I2C)"),
                     }

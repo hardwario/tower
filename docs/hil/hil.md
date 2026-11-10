@@ -32,8 +32,8 @@ just check        # no hardware: compiles EVERY bench group incl. the feature-ga
 cargo test        # no hardware: runs only host unit tests; compiles the #[ignore]d smoke/radio/
                   # extended/gateway groups, but NOT power (that needs `--features power`);
                   # from the repo root: cargo test -p tower-hil
-just bench        # bench: smoke + radio + extended + gateway, listening and sleeping groups
-                  # (Dongle + Core over UART bootloader)
+just bench        # bench: smoke + radio + extended + gateway, listening, sleeping and modules
+                  # groups (Dongle + Core over UART bootloader)
 just bench-power  # bench: STOP-floor current measurement (J-Link + PPK2, no USB power; see below)
 just bench-full   # bench: everything, on the fully-cabled bench
 ```
@@ -68,6 +68,13 @@ node app; no bridge, the tests speak the management channel on both consoles):
 | `tests/gateway.rs` | `radio_button` | Cable provisioning, a click bridged as a typed uplink, a remote shell line through the downlink queue, the stats stream; the gateway's stack peak with a full registry |
 | `tests/listening.rs` | `radio_control` | A listening node takes a `set` and a remote shell line at once: queued to answered within 2.5 s |
 | `tests/sleeping.rs` | `radio_button` | OTA pairing without hands (`PairingOpen` on the gateway, `JoinOpen` on the node: one SAS on both ends, the node registered as a sleeping one, its `Info` under the new key); a `set` queued while the node sleeps waits for the node's own next uplink, goes out in its window and is confirmed by the settings report, within the node's longest silence (`heartbeat` 60 s + `report-period` 5 s for the run, put back afterwards) |
+
+One more group needs the Core alone, no Dongle (`bench_or_fail_core`): `tests/modules.rs`, the
+Core Module carrying a Climate, a CO2 and a Relay Module. `radio_climate` must find every sensor
+and read plausible values from each, a CO2 reading from the LP8 included (after the capacitor's
+first charge, a minute); `radio_control` must find the Relay Module, pulse its relay to the boot
+state and switch it back and forth with simulated clicks. `just bench` runs it with the rest, so
+a bench without the modules fails it: run the other groups by name there.
 
 One group alone: `cargo test --test sleeping -- --ignored --test-threads=1 --nocapture` in `hil/`.
 The Dongle of a bench that also serves a bridge is flashed and its registry entry of the Core

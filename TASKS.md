@@ -21,7 +21,18 @@ Task status: `open`, `in progress`, `waiting (Dn)` (blocked on a decision), `don
 
 ## Decisions
 
-(None.)
+### D18. Push the night's work of 2026-11-10
+
+The modules work (T5, T6, T29) and the bridge fix (T30) are
+committed on `main` locally and **not pushed** (AGENTS.md: push only when asked).
+
+- (a) Push it as it is. Recommended once you have read this file's *Done* entries of 2026-11-10
+  and [docs/firmware/results/2026-11-10.md](docs/firmware/results/2026-11-10.md): the gates are
+  green on the last commit, and what the bench could not check is listed in T31.
+- (b) Review first, commit by commit (`git log origin/main..main`), and push what you keep.
+
+Three choices were made for you that night (D15, D16, D17 under *Decided*): overturn any of them
+before pushing if you see it otherwise. D16 names an MQTT property, the costliest to change later.
 
 ## Tasks
 
@@ -42,6 +53,28 @@ Status: waiting (a PPK2): the SAS on the screen done 2026-11-09
   without the Core button, and the command refuses there (result 1) and names `lcd press core`.
   Bench: refused on the thermostat with the module, `lcd press core` works there; on
   `radio_control` a simulated click still reaches MQTT. 2026-11-09.
+
+### T31. The Climate, CO2 and Relay Modules: what the bench left open
+
+Status: open (needs a PPK2, a second-revision Climate Module, a person at the bench)
+
+T5, T6 and T29 are done on the console, over the radio and in the HIL group
+(docs/firmware/results/2026-11-10.md). Not checked:
+
+- [ ] **Currents** (a PPK2; with T4): the idle floor with each module fitted (datasheet sum:
+      about 2.5 µA for the Climate Module's parts, 30 µA at most for the CO2 Module's sleeping
+      UART bridge, 1 µA for each expander), the charge of a sampling round and of a CO2
+      measurement with its 5 s top-up, and whether the top-up can be shorter.
+- [ ] **The SHT30** of a second-revision Climate Module (`tower::sht30`: from the datasheet,
+      host-tested, never on hardware).
+- [ ] **The relay's contacts**: which one closes for `on` (the driver follows the legacy SDK's
+      `true`), and that every pulse moves them, with a meter; the pulse on a battery supply.
+- [ ] **Unplugging a module while the app runs**: the value leaves the reports (`taf::forget`),
+      the module is found again when it comes back (the CO2 Module after a full charge).
+- [ ] **A baseline correction of the LP8**: asked for after 8 days of uptime.
+- [ ] **The LP8's state across a reset**: it is kept in RAM, so a reboot starts the sensor's
+      filter over (as the legacy SDK did). Keeping it in EEPROM would cost a 23-byte record per
+      measurement; once a day, or before a planned reboot, would do.
 
 ### T3. Listening node on US 915
 
@@ -73,28 +106,6 @@ event); a long soak on batteries.
 
 **Done when.** Every sleeping app reports its battery voltage over MQTT, docs/firmware/taf.md
 lists the measured power per app, and a soak of a day or more on batteries passes.
-
-### T5. Climate Module sensors for `radio_climate`
-
-Status: open
-
-**Why.** `radio_climate` reports only the Core Module's TMP112.
-
-**What it takes.** Drivers for the Climate Module's sensors (humidity, illuminance, pressure,
-temperature) and their properties in the `climate` kind.
-
-**Done when.** `radio_climate` with a Climate Module reports them over MQTT, with a measured stack
-peak under the RAM floor.
-
-### T6. Relay Module for `radio_control`
-
-Status: open (not scheduled)
-
-**Why.** `radio_control` switches the Power Module's relay. The Relay Module is the other relay
-of the kit.
-
-**Done when.** `radio_control` drives the Relay Module, its relay state reported and settable over
-MQTT like the Power Module's.
 
 ### T8. Root cause of the first failed EEPROM program
 
@@ -393,6 +404,20 @@ not, the gates and the bench pass, and the release dry run is green on that comm
   `release-z`, the justfile's `z_apps`), every other app at "s" as before (T2). The options
   passed over were "z" for every app despite the strip, and parking the screen. 2026-11-09.
 
+- **D15. `radio_climate` at opt-level "z".** Decided by Claude (the maintainer away, "decide
+  things yourself"): the module drivers and the app cost 14 KB at "s", which left the r1 build
+  2.4 KB of flash; at "z" 28 KB (r2) and 14 KB (r1). The app drives no LED strip, so D14's
+  objection does not apply. In `z_apps` with the thermostat. The option passed over was to keep
+  "s" and slim the sensors task (9.2 KB of it is one poll function). 2026-11-10.
+- **D16. The Relay Module in `radio_control`: a control of its own.** Decided by Claude, as
+  above: `relay-module`, next to the Power Module's `relay`, so a node with both switches two
+  loads. Both follow `relay-boot`; a click of the Core button switches both (the Relay Module's
+  follows the Power Module's). The option passed over was one `relay` property driving both
+  relays (no new property, no independent control). 2026-11-10.
+- **D17. One temperature per node.** Decided by Claude, as above: the Climate Module's own
+  TMP112 is shut down and not reported; `temperature` stays the Core Module's, a centimetre
+  away. A second value would be the same number for more airtime. 2026-11-10.
+
 - **D6. Report the embassy-stm32 EEPROM error-flag bug upstream.** Check first that upstream
   still has it; if so, an issue with the fix (T24). 2026-11-09.
 - **D7. The next CLI release.** `cli-v1.2.0`, now, before T26 (which changes the build and its
@@ -402,6 +427,43 @@ not, the gates and the bench pass, and the release dry run is green on that comm
 ## Done
 
 (Newest first; one line each.)
+
+- **T6. Relay Module for `radio_control`** (D16): `tower::rela- **T30. Sets beyond the gateway's queue were dropped without a word**: the gateway holds two
+  commands per node (four in all); the bridge logged every `set` as queued and said nothing when
+  the gateway refused the third as full. Found setting the climate node's seven settings at
+  once: two arrived. A refused `set` now waits in the bridge (one per property, the newest
+  value, in the order asked for; counted in the node's `queued`) and follows as the node takes
+  the queued ones; a refusal of another kind, and a refused time sync or `Describe`, is logged.
+  Bench: seven sets at once, two queued and five waiting, all seven delivered within 8 s of the
+  sleeping node's next uplink. 2026-11-10.
+
+y_module` (the latching relay's
+  H-bridge on a TCA9534A: a 20 ms coil pulse per switch, the coil released whatever the bus
+  does, the LEDs dark unless asked for, nothing drawn between switches), `relay-module` in the
+  `control` kind. The app finds the module at start and every 10 s while it is missing, pulses
+  it to `relay-boot`, switches it with the click and from MQTT. Bench: found and set at boot,
+  four clicks (42 ms from the click to the switch), `set/relay-module` confirmed within a
+  second, stack peak 5.3 KB of 8.2 KB; 2.8 KB of flash left on the r2 (was 5.4 KB) and 24 B
+  above the RAM floor, after the first version failed both. Left open: T31. 2026-11-10.
+
+- **T29. CO2 Module for `radio_climate`**: `tower::sc16is740`, the LP8's frames in
+  `tower-modules`, `tower::co2_module` (the capacitor charged for a minute at first and 5 s
+  before each further measurement, the sensor powered for the 0.6 s of one, the UART bridge
+  asleep in between; the sensor state carried in RAM, a baseline correction every 8 days),
+  `co2`, `co2-delta` and `co2-period` in the `climate` kind. Bench: 695 to 721 ppm in a closed
+  room, the first value 67 s after boot, no failed measurement. Left open: T31. 2026-11-10.
+
+- **T5. Climate Module sensors for `radio_climate`** (D15, D17): the new crate `crates/modules`
+  (`tower-modules`: conversions, checksums, frames, pin patterns; 25 host tests), the part
+  drivers `tower::sht20`, `sht30`, `opt3001`, `mpl3115a2` and `tower::climate_module` over them
+  (every part one-shot and asleep between rounds, the module's TMP112 shut down), `humidity`,
+  `illuminance`, `pressure` and a delta setting for each in the `climate` kind. The runtime got
+  `taf::report_delta`, `taf::forget` and `taf::round` (the app's sensors in the runtime's
+  sampling round: one uplink per round). `i2cscan` finds every part now and names it; the HIL
+  group `hil/tests/modules.rs` needs the Core alone (`bench_or_fail_core`). Bench: every value
+  on the console and on MQTT, one uplink per round, `sensors: none` on a board without the
+  module, stack peak 5.3 KB of 10.0 KB (docs/firmware/results/2026-11-10.md,
+  docs/firmware/modules.md). Left open: T31. 2026-11-10.
 
 - **T28. `tower` 1.2.0** (D7): `cli/Cargo.toml`, `Cargo.lock` and AGENTS.md at 1.2.0; the tag
   `cli-v1.2.0` goes on this commit once its CI run finished green, and `release-cli.yml`

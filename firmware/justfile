@@ -145,10 +145,11 @@ examples:
 
 # The apps built at `opt-level = "z"` (cargo profile `release-z`, firmware/Cargo.toml) instead of
 # "s": those short of flash that drive no LED strip ("z" slows the strip's effects and lets its DMA
-# refill run late; TASKS.md, D14). Every other app is in `s_apps`; `just lists` checks that the two
+# refill run late; TASKS.md, D14): the thermostat with its screen, the climate node with its
+# module drivers (2.4 KB free on the r1 at "s", 14 KB at "z"). Every other app is in `s_apps`; `just lists` checks that the two
 # lists hold exactly the apps. The recipes pick the profile per app.
-z_apps := "radio_thermostat"
-s_apps := "lcd_games led_strip radio_button radio_climate radio_control radio_gateway radio_motion"
+z_apps := "radio_climate radio_thermostat"
+s_apps := "lcd_games led_strip radio_button radio_control radio_gateway radio_motion"
 _bins_s := replace_regex(s_apps, '(\S+)', '--bin $1')
 _bins_z := replace_regex(z_apps, '(\S+)', '--bin $1')
 _z_name := "^(" + replace(z_apps, " ", "|") + ")$"
@@ -223,13 +224,14 @@ check-r1:
 # EU/US/FHSS duty token-bucket math + the fixed FHSS hop permutation, i.e. the regulatory
 # arithmetic), `tower-gateway` (the gateway node-registry bucket codec + downlink-queue policy) and
 # `tower-shell` (the `addr` setting value parser + its xorshift), `tower-hmi` (the HMI core:
-# framebuffer, drawing, fonts, menus, button gestures, swipe decoding) and `tower-strip` (the LED
-# strip effects, colours, palettes and render pipeline). The explicit host --target undoes
+# framebuffer, drawing, fonts, menus, button gestures, swipe decoding), `tower-strip` (the LED
+# strip effects, colours, palettes and render pipeline), `tower-taf` (the taf kernels) and
+# `tower-modules` (the module drivers' conversions, the LP8's frames, the relay's bridge patterns). The explicit host --target undoes
 # this directory's thumbv6m default (see `host` above). `just test` at the repo root runs the
 # whole host workspace instead.
 # Run the host-side unit tests of the shared crates the firmware builds on.
 test *args:
-    cargo test --locked --manifest-path ../Cargo.toml --target {{host}} -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi -p tower-strip -p tower-taf {{args}}
+    cargo test --locked --manifest-path ../Cargo.toml --target {{host}} -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi -p tower-strip -p tower-taf -p tower-modules {{args}}
 
 
 # flip-link puts the stack BELOW the statics on the 20 KB part, so each product bin must

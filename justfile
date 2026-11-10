@@ -46,7 +46,7 @@ check-host: doc test-sha2-compact
     cargo test --workspace --locked
     cargo test -p tower-hil --features power --no-run --locked
     CARGO_TARGET_DIR=target/fuzz-check cargo check --locked --manifest-path fuzz/Cargo.toml --bins
-    cargo build --locked --target thumbv6m-none-eabi -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi -p tower-strip -p tower-taf
+    cargo build --locked --target thumbv6m-none-eabi -p tower-protocol -p tower-kv -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi -p tower-strip -p tower-taf -p tower-modules
 
 # Firmware gates: `ci` is exactly CI's firmware job; the blinky build also exercises the
 # `cargo objcopy` path `just fw flash` uses.

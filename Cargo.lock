@@ -3843,6 +3843,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "121c2a6cda46980bb0fcd1647ffaf6cd3fc79a013de288782836f6df9c48780e"
 
 [[package]]
+name = "tower-modules"
+version = "0.0.0"
+
+[[package]]
 name = "tower-net"
 version = "0.0.0"
 dependencies = [

@@ -377,6 +377,22 @@ pub fn bench_or_fail() -> Bench {
     bench
 }
 
+/// Roster load for a group that needs the **Core Module alone** (its modules, no radio peer):
+/// resolves and identity-checks the Core's port like [`bench_or_fail`], and leaves the Dongle's
+/// slot alone, so the group runs on a bench without one.
+pub fn bench_or_fail_core() -> Bench {
+    let mut bench = Bench::load_default().unwrap_or_else(|e| panic!("{e}"));
+    let live = live_ports();
+    match resolve_board(Role::Core, &bench.core, &live) {
+        Ok(path) => bench.core.serial = path,
+        Err(e) => panic!(
+            "HIL bench roster mismatch:\n  {e}\nports present now:\n{}\nFix hil.toml or the cabling, then re-run.",
+            roster_listing(&live)
+        ),
+    }
+    bench
+}
+
 /// Roster load for the **power** group: deliberately does NOT resolve or require any FTDI console
 /// port. The power test flashes the Core over SWD (J-Link, found by probe-rs `--chip`) and
 /// measures via the PPK2 (found by USB VID), so it needs no FTDI. The supported power topology is a

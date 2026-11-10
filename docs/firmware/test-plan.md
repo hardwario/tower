@@ -337,7 +337,8 @@ tweak or fault injection (note them as separate experiments, don't leave the tre
 
 Record one row per test, per run, in `docs/firmware/results/<date>.md` (the recorded runs:
 [2026-06-29](results/2026-06-29.md), [2026-10-18](results/2026-10-18.md),
-[2026-10-19](results/2026-10-19.md), [2026-11-09](results/2026-11-09.md)). Template:
+[2026-10-19](results/2026-10-19.md), [2026-11-09](results/2026-11-09.md),
+[2026-11-10](results/2026-11-10.md)). Template:
 
 ```
 | ID | Example | Features | Port(s) | Verdict | Evidence (grep'd line) | Notes |

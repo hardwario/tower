@@ -19,7 +19,7 @@ more statics, raise STACK_FLOOR *consciously* and re-measure the high-water mark
 It also reports each bin's free flash and warns (without failing) when an image comes within
 `FLASH_WARN` of the 192 KB: code added to the SDK or the taf runtime lands in every app, and the
 largest ones (radio_thermostat on the r2 even at opt-level "z", with its LCD screen; radio_control
-on the r2) are the first to overflow (TASKS.md, T18 and D14; docs/firmware/taf.md, "RAM").
+on the r2, at "s" for its LED strip) are the first to overflow (TASKS.md, T18 and D14; docs/firmware/taf.md, "RAM").
 
 Usage: check_ram_budget.py <bin-name>[@<profile>] [...]
        (ELFs are read from target/thumbv6m-none-eabi/<profile>/<bin-name>, profile `release`

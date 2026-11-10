@@ -619,8 +619,10 @@ impl Node {
     /// to [`MAX_REPORT`] at a time: built per uplink, so no list of every value is held across the
     /// uplink's awaits (RAM: the runtime's future is the app's largest static).
     async fn send_reports(&mut self, full: bool) {
-        if !full && Instant::now() < self.reports_after {
-            // Backing off after a miss: what is due waits (a heartbeat's full report still goes).
+        if !full && (Instant::now() < self.reports_after || super::round_held()) {
+            // Backing off after a miss, or the app is still measuring its part of a sampling
+            // round (`taf::round`; its `Round` wakes this loop again): what is due waits (a
+            // heartbeat's full report still goes).
             return;
         }
         let now_s = Instant::now().as_secs();

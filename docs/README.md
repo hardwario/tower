@@ -17,6 +17,7 @@ decisions.
 | [HMI](firmware/hmi.md) | The LCD Module driver and the HMI framework: drawing, fonts, menus, input |
 | [LED strip](firmware/strip.md) | The WS2812/SK6812 driver, the render pipeline, effects, the `led_strip` app |
 | [PIR](firmware/pir.md) | The PIR Module (PYQ 1648 DigiPyro): its interfaces, timing, tuning |
+| [Modules](firmware/modules.md) | The Climate, CO2 and Relay Modules: their parts, drivers, timing and power |
 | [Test plan](firmware/test-plan.md) | The hardware validation suite: every subsystem's pass signals and edge cases |
 | [Hardware test scripts](firmware/hwtest.md) | `firmware/tools/hwtest/`; recorded runs in [`results/`](firmware/results/) |
 

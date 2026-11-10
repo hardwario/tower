@@ -35,6 +35,10 @@
 //!   (pairing, uplinks, downlinks, settings, time), driven by the property tables.
 //! - [`i2c`]: the board's I²C2 bus as a `Copy` handle shared by several drivers.
 //! - [`tca9534a`]: TCA9534A I/O expander driver; [`apds9960`]: APDS-9960 gesture sensor driver.
+//! - [`climate_module`]: the TOWER Climate Module (humidity, illuminance, pressure), over the
+//!   part drivers [`sht20`], [`sht30`], [`opt3001`] and [`mpl3115a2`].
+//! - [`co2_module`]: the TOWER CO2 Module (a Senseair LP8 behind the [`sc16is740`] UART bridge).
+//! - [`relay_module`]: the TOWER Relay Module (a latching relay on an I/O expander).
 
 #![no_std]
 
@@ -42,18 +46,26 @@ pub mod apds9960;
 pub mod board;
 pub mod bootguard;
 pub mod button;
+pub mod climate_module;
 pub mod clock;
+pub mod co2_module;
 pub mod console;
 pub mod crashlog;
 pub mod i2c;
 pub mod lcd;
 pub mod led;
 pub mod lis2dh12;
+pub mod mpl3115a2;
+pub mod opt3001;
 pub mod pir;
 pub mod power;
 pub mod power_module;
 pub mod radio;
+pub mod relay_module;
+pub mod sc16is740;
 pub mod shell;
+pub mod sht20;
+pub mod sht30;
 pub mod stack;
 pub mod storage;
 pub mod strip;

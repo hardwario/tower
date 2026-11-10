@@ -1187,6 +1187,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tower-modules"
+version = "0.0.0"
+
+[[package]]
 name = "tower-net"
 version = "0.0.0"
 dependencies = [
@@ -1234,6 +1238,7 @@ dependencies = [
  "tower-gateway",
  "tower-hmi",
  "tower-kv",
+ "tower-modules",
  "tower-net",
  "tower-protocol",
  "tower-radio",

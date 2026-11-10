@@ -262,8 +262,10 @@ other like any schema change. Every property is one of:
 `21.5`, `0.3`), or an enumeration's name (`"auto"`; a value outside the names stays a number).
 
 **When values arrive.** A node reports a state when it changes (for `temperature`, by at least
-its `report-delta`; it samples every `report-period`), and everything again with each
+its `report-delta`; it samples every `report-period`; the `climate` kind's measured values each
+have a delta setting of their own), and everything again with each
 `heartbeat`, settings included, so a subscriber has the whole picture within one heartbeat.
+A value whose sensor was unplugged is no longer sent; its retained topic keeps the last value.
 A setting changed on the node's USB console (or by a remote `system settings set`) is reported
 at once, with the node's other settings. A node whose kind the bridge
 does not know yet (its first `NodeInfo` not heard yet) publishes its states once its kind is
@@ -295,17 +297,26 @@ and its own:
 | Kind (firmware) | Class | Property | Type | Access | Default | Meaning |
 |-----------------|-------|----------|------|--------|---------|---------|
 | `button` (`radio_button`) | sleeping | (the common ones) | | | | |
-| `climate` (`radio_climate`) | sleeping | (the common ones) | | | | |
+| `climate` (`radio_climate`) | sleeping | `humidity` | number %, 0..100, 1 decimal | state | | Relative humidity (Climate Module); like every state of this kind, published only while its sensor is fitted |
+| | | `illuminance` | number lx, 0..83865.6, 1 decimal | state | | Illuminance (Climate Module) |
+| | | `pressure` | number hPa, 200..1100, 1 decimal | state | | Air pressure at the node, not reduced to sea level (Climate Module) |
+| | | `co2` | number ppm, 0..10000 | state | | CO2 concentration, filtered and pressure compensated (CO2 Module) |
+| | | `humidity-delta` | number %, 0.1..50, 1 decimal | setting | `2.0` | The humidity change that is news |
+| | | `illuminance-delta` | number %, 1..100 | setting | `20` | The illuminance change that is news, as a share of the reading (1 lx at the least) |
+| | | `pressure-delta` | number hPa, 0.1..100, 1 decimal | setting | `1.0` | The pressure change that is news |
+| | | `co2-delta` | number ppm, 1..2000 | setting | `50` | The CO2 change that is news |
+| | | `co2-period` | number s, 16..86400 | setting | `300` | The least time between two CO2 measurements (each costs the sensor's lamp pulse); one runs in the first sampling round after it, so `report-period` is the finer limit |
 | `motion` (`radio_motion`) | sleeping | `motion` | number 1..65535 | event | | Motion: `1` when it starts; at the end of a `holdoff` that saw more, their number |
 | | | `sensitivity` | `low`, `medium`, `high`, `very-high` | setting | `high` | The PIR detection threshold |
 | | | `holdoff` | number s, 1..3600 | setting | `10` | The least time between two events |
 | `control` (`radio_control`) | listening | `relay` | bool | control | | The Power Module's relay |
-| | | `relay-boot` | `off`, `on`, `last` | setting | `off` | The relay after a power-up |
+| | | `relay-boot` | `off`, `on`, `last` | setting | `off` | Both relays after a power-up |
 | | | `strip` | bool | control | | The LED strip on or off |
 | | | `effect` | `rainbow`, `palette`, `fire`, `twinkle`, `candle`, `plasma`, `scanner`, `balls`, `meteor`, `sparkle`, `running`, `chase`, `wipe`, `curtain`, `breathe`, `solid`, `sunrise`, `clock` | control | | The strip's effect |
 | | | `brightness` | number %, 0..100 | control | | Strip brightness |
 | | | `color` | number 0..16777215 (`0xRRGGBB`) | control | | The colour of the effects that take one |
 | | | `speed` | number %, 10..1000 | control | | Effect speed |
+| | | `relay-module` | bool | control | | The Relay Module's latching relay; published only while the module is fitted (a `set` without it is not confirmed) |
 | `thermostat` (`radio_thermostat`) | sleeping | `setpoint` | number °C, 5..30, 1 decimal | control | | The setpoint in force; a set holds until the program's next switch point (`auto`) or for good (`manual`) |
 | | | `mode` | `auto`, `manual`, `off` | control | | `auto` follows the weekly program |
 | | | `demand` | bool | state | | The thermostat calls for heat |
@@ -361,7 +372,11 @@ reconnect). Sets a control or a setting of the node; the payload is the value as
 `21.5`, `"auto"`), an object `{"value": ...}`, or plain text (`on`, `21.5`, `auto`; a whole
 number may be written in hex, `0xff8000`). The bridge checks it against the node's kind (the
 property exists, is settable, the value is in range) and queues it on the gateway; a refused set
-is logged by the bridge and goes no further. There is no response topic: the node's report on
+is logged by the bridge and goes no further. The gateway holds two commands per node (four in
+all), which a sleeping node takes after its next uplink: further sets wait in the bridge (one per
+property, the newest value; logged as waiting, and counted in the node's `queued`) and follow in
+the order they were sent as the node takes the queued ones. A bridge restart loses the ones still
+waiting there. There is no response topic: the node's report on
 `state/{prop}` confirms it (also when the value did not change), when the node takes it (see
 *Classes*). Until the bridge knows the node's kind, it cannot check a set and refuses it. A bridge
 restart does not lose it (the kind is kept in the gateway's registry); a node the bridge has never

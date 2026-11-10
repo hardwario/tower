@@ -91,6 +91,7 @@ jobs:
         run: >-
           cargo build --locked --target thumbv6m-none-eabi -p tower-protocol -p tower-kv
           -p tower-net -p tower-radio -p tower-gateway -p tower-shell -p tower-hmi -p tower-strip
+          -p tower-taf -p tower-modules
       # The libraries' public docs (and their links to each other) must resolve.
       - name: rustdoc (libraries, -D warnings)
         run: cargo doc --locked --no-deps --workspace --exclude tower-cli --exclude tower-hil

@@ -208,13 +208,18 @@ pub const fn settings<const N: usize>(kind: &Kind) -> [Setting; N] {
 #[derive(Clone, Copy)]
 struct Slot {
     id: u8,
+    /// How far the value must be from the one last sent to be news (0: any change), in the
+    /// property's wire units. The temperature's is the `report-delta` setting instead. 16 bits:
+    /// it sits in the padding after `id`, so the table is no bigger for it.
+    delta: u16,
     value: i32,
     sent: tower_taf::report::Reporter,
 }
 
 /// Reported properties the runtime keeps (an app reports a handful: the most, `radio_control`,
-/// seven).
-const SLOTS: usize = 10;
+/// eight with the temperature). A slot is 20 B of RAM in every app, and `radio_control` sits at
+/// the stack floor, so there is one to spare, not more.
+const SLOTS: usize = 9;
 
 struct Shared {
     kind: Option<&'static Kind>,
@@ -250,6 +255,12 @@ static PARAMS_DUE: AtomicBool = AtomicBool::new(false);
 /// Raised by every clock sync, for [`clock_synced`].
 static CLOCK_SYNCED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static PAIR_REQUEST: AtomicBool = AtomicBool::new(false);
+/// The runtime started a sampling round, for [`round`].
+static ROUND: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// The app waits for the rounds ([`round`] was called): each one is held for it.
+static ROUND_JOINED: AtomicBool = AtomicBool::new(false);
+/// The current round's news reports wait for the app's [`Round`] to drop.
+static ROUND_HELD: AtomicBool = AtomicBool::new(false);
 /// The newest step of an OTA pairing, for [`pairing`].
 static PAIRING: Signal<CriticalSectionRawMutex, Pairing> = Signal::new();
 /// The gateway this node is paired with (0 = none), for [`paired`] and `node status`.
@@ -258,22 +269,76 @@ static GATEWAY: AtomicU32 = AtomicU32::new(0);
 static ADDR: AtomicU32 = AtomicU32::new(0);
 
 /// Report the current value of property `id` (a state, a control, or the temperature). Cheap
-/// and non-blocking: the runtime sends it when its policy says so.
+/// and non-blocking: the runtime sends it when its policy says so (any change is news).
 pub fn report(id: u8, value: i32) {
+    report_delta(id, value, 0);
+}
+
+/// Report the current value of a measured property that moves all the time (humidity, pressure):
+/// it is news only once it is `delta` (in the property's wire units) away from the value last
+/// sent, so its noise costs no airtime. The heartbeat sends it whatever it is, like every value.
+pub fn report_delta(id: u8, value: i32, delta: u16) {
     critical_section::with(|cs| {
         let mut table = SLOT_TABLE.borrow_ref_mut(cs);
         match table.iter_mut().find(|s| s.id == id) {
-            Some(s) => s.value = value,
+            Some(s) => {
+                s.value = value;
+                s.delta = delta;
+            }
             None => {
                 let _ = table.push(Slot {
                     id,
                     value,
+                    delta,
                     sent: tower_taf::report::Reporter::new(),
                 });
             }
         }
     });
     WAKE.signal(());
+}
+
+/// Stop reporting property `id` (its sensor is gone): it leaves the heartbeat's full report too,
+/// until it is reported again. The value the host last saw stays there (MQTT retains it).
+pub fn forget(id: u8) {
+    critical_section::with(|cs| SLOT_TABLE.borrow_ref_mut(cs).retain(|s| s.id != id));
+}
+
+/// The app measures with the runtime: wait for the runtime's next sampling round (it samples the
+/// temperature every `report-period`), measure, [`report`] and drop the returned [`Round`]. The
+/// runtime keeps the round's news back until then, so the app's values and the temperature travel
+/// in one uplink instead of two. From the first call on every round is held, so keep waiting for
+/// the next one in the app's loop (a held round is released only by its `Round`; a heartbeat's
+/// full report is never held). One waiter: the app.
+pub async fn round() -> Round {
+    ROUND_JOINED.store(true, Ordering::Relaxed);
+    ROUND.wait().await;
+    Round(())
+}
+
+/// A sampling round the app takes part in; see [`round`]. Dropping it lets the round's reports
+/// go.
+pub struct Round(());
+
+impl Drop for Round {
+    fn drop(&mut self) {
+        ROUND_HELD.store(false, Ordering::Relaxed);
+        WAKE.signal(());
+    }
+}
+
+/// The runtime's sensor task starts a sampling round: before it reports the temperature, so the
+/// hold is in place when the report wakes the runtime's loop.
+fn begin_round() {
+    if ROUND_JOINED.load(Ordering::Relaxed) {
+        ROUND_HELD.store(true, Ordering::Relaxed);
+    }
+    ROUND.signal(());
+}
+
+/// Whether the news reports wait for the app to finish its part of the round.
+fn round_held() -> bool {
+    ROUND_HELD.load(Ordering::Relaxed)
 }
 
 /// Report event `id` with its detail `value`; it goes up as soon as the radio allows. Up to 4 wait
@@ -572,12 +637,13 @@ fn due_reports(
     critical_section::with(|cs| {
         let table = SLOT_TABLE.borrow_ref(cs);
         for (i, s) in table.iter().enumerate().skip(from) {
-            // The temperature moves continuously: only a change past `report-delta` is news.
-            // Everything else is discrete: any change is.
+            // The temperature moves continuously: only a change past `report-delta` is news. A
+            // value the app measures carries its own delta; a discrete one has none (any change
+            // is news).
             let d = if s.id == props::common::TEMPERATURE {
                 delta
             } else {
-                0
+                i32::from(s.delta)
             };
             if (all || s.sent.due(s.value, now_s, d, heartbeat)) && out.push((s.id, s.value)).is_err() {
                 return Some(i);

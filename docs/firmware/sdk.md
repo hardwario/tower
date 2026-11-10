@@ -67,6 +67,8 @@ The library (`src/lib.rs`) exposes these reusable blocks:
 | `src/pir.rs` | The TOWER PIR Module (Excelitas DigiPyro PYQ 1648 / 1548): writes the detection criteria over SERIN and reads them back over DIRECT LINK (bit-banged within the detector's timing), motion events that wake the MCU from STOP, or the raw band-pass / low-pass / temperature signal; see [`docs/firmware/pir.md`](pir.md) |
 | `src/taf/` | **taf**, the TOWER Application Framework's runtime: radio, pairing, settings from the property tables, reports and heartbeat, downlinks (sets, time, remote shell), the two node classes; see [`docs/firmware/taf.md`](taf.md) |
 | `src/power_module.rs` | The Power Module's relay (P0) |
+| `src/climate_module.rs`, `src/co2_module.rs`, `src/relay_module.rs` | The Climate Module (humidity, illuminance, pressure), the CO2 Module (a Senseair LP8, powered per measurement) and the Relay Module (a latching relay pulsed through an I/O expander): everything off or asleep between uses, none of them has to be fitted; see [`docs/firmware/modules.md`](modules.md) |
+| `src/sht20.rs`, `src/sht30.rs`, `src/opt3001.rs`, `src/mpl3115a2.rs`, `src/sc16is740.rs` | The parts under those modules, each HAL-independent over `embedded_hal::i2c::I2c`: humidity sensors, the light sensor, the barometer, the I2C UART bridge; their arithmetic and frames are host-tested in [`tower-modules`](../../crates/modules) |
 | `src/strip_player.rs` | The LED strip player shared by `led_strip` and `radio_control`: the effects, their settings, the `strip` shell commands |
 | `src/power.rs` | Notes on the SDK's low-power (STOP) policy; the USB-presence gating itself lives in `console::manager` (see [`docs/firmware/console.md`](console.md)) |
 | `src/storage.rs` | Non-volatile storage in the data EEPROM: a raw byte area (`read`/`write` at offset) and a key-value store (`Kv`); values are raw scalars or postcard structs, CRC-framed, updated in place |
@@ -82,8 +84,9 @@ COBS + CRC + postcard), [`tower-kv`](../../crates/kv) (the EEPROM key-value code
 `storage::Kv`), [`tower-net`](../../crates/net) (the network layer's security decision kernels),
 [`tower-radio`](../../crates/radio) (hardware-free radio timing / CCM / compliance arithmetic; the
 SPIRIT1 driver itself is `src/radio/`), [`tower-gateway`](../../crates/gateway) (the gateway app's
-node registry + downlink queue core) and [`tower-shell`](../../crates/shell) (the shell's parser,
-PRNG, pagination and completion kernels). Their host tests run with `just test` (here) or from
+node registry + downlink queue core), [`tower-shell`](../../crates/shell) (the shell's parser,
+PRNG, pagination and completion kernels) and [`tower-modules`](../../crates/modules) (the module
+drivers' conversions, the LP8's frames, the relay's bridge patterns). Their host tests run with `just test` (here) or from
 the repo root. Because the [`tower`](../../cli) CLI and the [HIL harness](../../hil) build the very
 same `crates/protocol` source, the two ends of the console link cannot drift at build time
 (postcard is not self-describing, so that matters); after a wire change, reflash the board and
@@ -166,9 +169,9 @@ Flashable programs come in two kinds:
 - **Applications**: TOWER IoT Kit **products** in [`apps/`](../../firmware/apps). The radio nodes are
   built on **taf**, the TOWER Application Framework ([`docs/firmware/taf.md`](taf.md)), and behave
   alike (pairing, settings, reports, MQTT properties, and the temperature and tilt events every
-  one of them has): `radio_button` (button gestures), `radio_climate` (the common sensors for
-  now), `radio_motion` (PIR Module), `radio_control` (Power Module
-  relay and LED strip, a listening node) and `radio_thermostat` (setpoint, weekly program,
+  one of them has): `radio_button` (button gestures), `radio_climate` (the Climate Module's
+  humidity, illuminance and pressure, the CO2 Module's CO2), `radio_motion` (PIR Module),
+  `radio_control` (Power Module relay and LED strip, the Relay Module's relay; a listening node) and `radio_thermostat` (setpoint, weekly program,
   heating demand). `radio_gateway` is the radio↔serial bridge and node coordinator
   they talk to. `lcd_games` is five
   small games on the LCD Module (buttons, swipes and tilt as controls; see
@@ -190,7 +193,7 @@ Flashable programs come in two kinds:
 | `pir` | `pir`: motion events from the PIR Module, logged and flashed on the LED; a click steps the sensitivity |
 | `pir_signal` | `pir`: the detector's raw signal (band-pass peaks every 0.5 s, or low pass, temperature) for choosing a threshold |
 | `storage` | `storage`: a key-value store in EEPROM (a raw boot counter + a postcard settings struct), surviving reset |
-| `i2cscan` | Probe the I2C2 bus and log responding addresses (diagnostic) |
+| `i2cscan` | Probe the I2C2 bus and log responding addresses, with the TOWER part each one usually is (diagnostic) |
 | `lowpower` | Measure the SDK's STOP-mode idle floor: VBUS-gated STOP, parked forever; flash over SWD + measure VDD (probe detached) |
 | `watchdog` | The independent watchdog (IWDG): periodic pet, and a deliberate stall to show the reset |
 

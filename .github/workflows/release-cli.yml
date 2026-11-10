@@ -277,8 +277,8 @@ jobs:
         run: |
           # Each app at its profile, as `just fw build` does: `z_apps` (firmware/justfile) at
           # opt-level "z" (profile release-z), the rest at "s" (TASKS.md, D14).
-          apps=(radio_button radio_climate radio_motion radio_control radio_gateway)
-          z_apps=(radio_thermostat)
+          apps=(radio_button radio_motion radio_control radio_gateway)
+          z_apps=(radio_climate radio_thermostat)
           examples=(blinky)
           args=()
           for a in "${apps[@]}"; do args+=(--bin "$a"); done
@@ -300,9 +300,9 @@ jobs:
           Raw images for \`tower flash <image>.bin\` (the \`tower\` binary of the same release):
 
           - \`radio_button.bin\`: the push-button node (Core Module)
-          - \`radio_climate.bin\`: the climate node (Core Module)
+          - \`radio_climate.bin\`: the climate node (Core Module; Climate Module, CO2 Module)
           - \`radio_motion.bin\`: the motion node (Core Module, PIR Module)
-          - \`radio_control.bin\`: the relay and LED strip node (Core Module, Power Module)
+          - \`radio_control.bin\`: the relay and LED strip node (Core Module; Power Module, Relay Module)
           - \`radio_thermostat.bin\`: the thermostat node (Core Module)
           - \`radio_gateway.bin\`: the gateway (Radio Dongle)
           - \`blinky.bin\`: the LED blink example

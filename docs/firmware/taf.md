@@ -21,9 +21,9 @@ The MQTT side of the same properties (topics, payloads, the kinds' tables) is
 | App | Kind | Class | Hardware | What it does |
 |-----|------|-------|----------|--------------|
 | `radio_button` | `button` | sleeping | Core Module | The common properties only: the Core button's gestures, the temperature, tilt |
-| `radio_climate` | `climate` | sleeping | Core Module | The common sensors only for now (the Climate Module's are still to come) |
+| `radio_climate` | `climate` | sleeping | Core Module, with or without a Climate Module and a CO2 Module | Humidity, illuminance and pressure with every round, CO2 every `co2-period`; each only while its sensor is fitted ([modules.md](modules.md)) |
 | `radio_motion` | `motion` | sleeping | Core Module r2 + PIR Module | Motion events with a holdoff, PIR sensitivity |
-| `radio_control` | `control` | listening | Core Module r2 + Power Module + LED strip | The relay (P0) and the strip (every `led_strip` effect) |
+| `radio_control` | `control` | listening | Core Module r2 + Power Module + LED strip, and/or a Relay Module | The relay (P0), the strip (every `led_strip` effect) and the Relay Module's latching relay (while it is fitted) |
 | `radio_thermostat` | `thermostat` | sleeping | Core Module (r2: + LCD Module) | Setpoint, mode, weekly program, heating demand; a screen with the LCD Module (r2), headless without it and on the r1 (see *RAM*) |
 
 Every one of them also has the common sensors (*Sensors* in the contract below). `radio_control` does not fit a
@@ -140,7 +140,10 @@ What every taf app does, so a user meets the same device whatever it measures:
 | Call | What |
 |------|------|
 | `taf::run(base, &KIND, &SETTINGS)` | The runtime; never returns. `tower::taf_base!(b)` moves what it needs out of the `Board` (the radio, the LED, the Core button, the TMP112's I²C bus, shared as `base.i2c` for app drivers on it, and the accelerometer's interrupt); `taf_base!(b, no_button)` leaves the Core button to the app (an LCD Module shares its line; pair with `request_pairing` then) |
-| `taf::report(id, value)` | A state's or control's current value; cheap, the runtime decides when it goes up |
+| `taf::report(id, value)` | A state's or control's current value; cheap, the runtime decides when it goes up (any change is news) |
+| `taf::report_delta(id, value, delta)` | The same for a measured value that moves all the time (humidity, pressure): news only once it is `delta` away from the value last sent |
+| `taf::forget(id)` | Stop reporting a value whose sensor went away (it leaves the heartbeat's full report too) |
+| `taf::round().await` | The runtime's next sampling round (every `report-period`, with the temperature), for an app with sensors of its own: measure, report, drop the returned `Round`. The runtime holds the round's news until then, so the app's values and the temperature travel in one uplink |
 | `taf::event(id, value)` | Something happened; up to four wait for the radio, more are dropped |
 | `taf::next_set().await` | The next `set` of a control (apply it, then report it), or the notice that a setting changed. Wait on it in the app's loop: the runtime confirms a set when the app comes back for the next one |
 | `taf::next_button().await` | Core button events the runtime did not spend on pairing |
@@ -166,7 +169,7 @@ collide). An app's own records go in `NS_APP`, whose locals are allocated here:
 | `0x00` | The taf runtime (the node's provisioning: its gateway and key) |
 | `0x10`, `0x11` | `radio_thermostat` (the weekly program; the mode and the manual setpoint) |
 | `0x40` | `tower::strip_player` (the strip's state, `led_strip` and `radio_control`) |
-| `0x41` | `radio_control` (the relay's last state, for `relay-boot last`) |
+| `0x41`, `0x42` | `radio_control` (the last state of the Power Module's relay and of the Relay Module's, for `relay-boot last`) |
 
 ## RAM
 
@@ -187,6 +190,13 @@ menu, 2026-11-09). So the floor is real margin, not slack. What keeps an app sma
   received it.
 - **Fewer tasks**: a task's future is resident for good. `console::event_now` sends an event
   without a waiting future. The runtime's sensor task is 200 B.
+- **Fewer await sites**: each one is code in the task's poll function and can be RAM in its
+  future. `radio_control` drives the Relay Module from one place in its loop (the three places
+  that wanted to switch it set a flag): about 0.6 KB of flash less than three calls, and a
+  smaller future.
+- **Buffers decoded where they are filled**: `tower::co2_module` reads the LP8's 49-byte reply
+  and decodes it inside one bus access, so the reply is never held across an await; the sensors
+  task of `radio_climate` is 344 B with both modules' drivers in it.
 
 **Flash is the other limit.** The runtime is in every app, so code added to it lands in all of
 them; the tightest are `radio_thermostat` on the r2 (3.4 KB of its 192 KB free at opt-level "z",
@@ -203,7 +213,8 @@ bin's free flash and warns under 2 KB (`tools/check_ram_budget.py`). Lessons fro
   crate can't be kept at "s" by a per-package override (measured: the effects stay slow, and the
   dependencies alone at "z" make the image bigger). So the apps short of flash that drive no
   strip are built with the `release-z` profile, the rest at "s": the justfile's `z_apps`
-  (`radio_thermostat`) and `s_apps`, picked by `just fw build`, the budget check and the release
+  (`radio_thermostat`, and `radio_climate` for its module drivers: 2.4 KB free on the r1 at "s",
+  14 KB at "z") and `s_apps`, picked by `just fw build`, the budget check and the release
   bundle.
 - **No serde for a fixed record**: postcard's code for the thermostat's weekly program (arrays of
   options) cost 2.2 KB; `Week::encode` / `decode` by hand cost a few hundred bytes.
