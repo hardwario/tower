@@ -19,6 +19,7 @@ from `firmware/`.
 | `build.sh <example> <outbin> [features]` | `cargo objcopy` an example to a raw `.bin` (run from `firmware/`) |
 | `fc.sh PORT BIN SECS OUT` | flash BIN to PORT, then mode-B capture (`tower logs --reset`) for SECS |
 | `tb.sh NODE_BIN NP GW_BIN GP SECS NOUT GOUT` | two-board: flash node then gw (sequential), capture both |
+| `soak.py RECORDING` | soak accounting from an MQTT recording of a running `tower gateway` (`mosquitto_sub -h 127.0.0.1 -t 'tower/#' -v -F '%I %t %p' > soak.log`): per node the uplinks heard and the longest silence, the events seen and lost (by their running count), every state's reports and range, the downlinks' outcomes; the gateway's status changes. Exit 1 on a lost event, a silence past 1.5 heartbeats or a gateway that left `online` |
 
 ## Quick recipes
 ```sh

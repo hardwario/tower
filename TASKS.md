@@ -101,14 +101,20 @@ receive task 6.1 KB each, the downlink handler 6.0 KB, the control task 3.6 KB (
 the module).
 
 **Ideas, cheapest first.**
-- `compiler_builtins`' `memmove` is 1.3 KB (and `memcpy`, `memset` are of the same make: built
-  for speed). Small ones of our own would give about 2 KB back in every app; they must stay
-  fast enough for the strip's refill and be tested hard (a wrong `memcpy` is a bug everywhere).
+- `compiler_builtins`' `memmove` is 1.3 KB and its `memcpy` 0.5 KB (built for speed). Small
+  ones of our own would give about 1.5 KB back in every app; they must stay fast enough for
+  the strip's refill (check on a strip: none was on the bench that night) and be tested hard
+  (a wrong `memcpy` is a bug everywhere; written in Rust they need `#![no_builtins]`, or the
+  compiler turns their loop into a call to themselves).
+- Soft-float: `__divsf3`, `__addsf3` and `__mulsf3` are 1.4 KB together in `radio_control`
+  (the strip's effects compute in `f32`); fixed-point there would drop them.
 - The Relay Module's driver is async for a 20 ms pulse and a 3 ms ATSHA wait; a version that
   only switches, with the caller timing the pulse, would be smaller.
 - `strip_player`'s `status` command (0.8 KB) and its 18 effects.
-- A class-specific entry point in taf, so a sleeping app does not link the listening loop and
-  the reverse (T3 put both into every app: 0.7 KB each).
+- Tried 2026-11-10, not worth it: the runtime loop of the app's class picked at compile time
+  (a `taf_run!` macro over `run_sleeping` / `run_listening`). The two loops share nearly all
+  their code: 160 B back in `radio_control`, 256 B lost in the thermostat (it starts the
+  runtime from two places).
 - If none is enough: leave cortex-m at 0.7.9 for this app's sake (0.7 KB), listed under T26.
 
 **Done when.** `radio_control` on the r2 leaves 4 KB of flash and 100 B above the RAM floor,

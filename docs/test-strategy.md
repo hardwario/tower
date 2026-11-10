@@ -53,6 +53,12 @@ counter, the crash record), the stack high-water mark, EEPROM flips per day proj
 wear-out date, the host process's memory.
 **Passes when.** No unexplained loss or reset, wear-out projected past the product lifetime.
 
+**A first step (2026-11-10).** `firmware/tools/hwtest/soak.py` does the accounting an MQTT
+recording allows: uplinks and the longest silence per node, events lost (by their running
+count), every state's reports and range, the downlinks' outcomes, the gateway's status changes.
+Still missing: the script that drives clicks and remote shell commands, resets and the crash
+record, the stack high-water mark, the EEPROM flips, the host process's memory.
+
 ### 3. Power loss and brown-out
 
 **Why.** The KV store's torn-write handling is tested on the host only. A TX counter that goes
