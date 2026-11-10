@@ -215,8 +215,9 @@ is [results/2026-11-10.md](results/2026-11-10.md).
 - **Over the radio**: every value on its MQTT `state` topic; with each delta at its minimum one
   uplink per round, carrying what moved.
 - **Budget**: `radio_climate` peaks at 5.3 KB of its 10.0 KB of stack (r2, "z") and leaves
-  28 KB of flash (14 KB on the r1); `radio_control` peaks at 5.3 KB of 8.2 KB and leaves 2.8 KB
-  of flash (its RAM floor is 8.2 KB: 24 B to spare).
+  28 KB of flash (14 KB on the r1); `radio_control` peaks at 5.3 KB of 8.2 KB (the RAM floor
+  leaves it 24 B to spare) and has 2.0 KB of flash left, 2.8 KB before cortex-m 0.7.10 (TASKS.md,
+  T32).
 - **HIL**: `hil/tests/modules.rs` repeats the first three on the bench (`just hil bench
   modules_`).
 

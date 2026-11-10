@@ -76,6 +76,32 @@ T5, T6 and T29 are done on the console, over the radio and in the HIL group
       filter over (as the legacy SDK did). Keeping it in EEPROM would cost a 23-byte record per
       measurement; once a day, or before a planned reboot, would do.
 
+### T32. Flash headroom of `radio_control`
+
+Status: open (found 2026-11-10)
+
+**Why.** `radio_control` on the r2 has 2.0 KB of flash left (the warning line of
+`tools/check_ram_budget.py`) and 24 B above the RAM floor. It cannot be built at "z" (its LED
+strip, D14). It had 5.4 KB before the Relay Module (2.6 KB, T6) and cortex-m 0.7.10 (0.7 KB,
+T26); what goes into the taf runtime next lands on it first.
+
+**Where the bytes are** (`cargo nm --size-sort`, 2026-11-10): the runtime's main task 18.6 KB,
+pairing 6.9 KB + X25519 about 6 KB, the strip task 6.3 KB, the console manager and the shell's
+receive task 6.1 KB each, the downlink handler 6.0 KB, the control task 3.6 KB (1.5 KB before
+the module).
+
+**Ideas, cheapest first.**
+- `compiler_builtins`' `memmove` is 1.3 KB (and `memcpy`, `memset` are of the same make: built
+  for speed). Small ones of our own would give about 2 KB back in every app; they must stay
+  fast enough for the strip's refill and be tested hard (a wrong `memcpy` is a bug everywhere).
+- The Relay Module's driver is async for a 20 ms pulse and a 3 ms ATSHA wait; a version that
+  only switches, with the caller timing the pulse, would be smaller.
+- `strip_player`'s `status` command (0.8 KB) and its 18 effects.
+- If none is enough: leave cortex-m at 0.7.9 for this app's sake (0.7 KB), listed under T26.
+
+**Done when.** `radio_control` on the r2 leaves 4 KB of flash and 100 B above the RAM floor,
+with the strip's timing unchanged on the bench.
+
 ### T3. Listening node on US 915
 
 Status: open (D4: later)
@@ -202,6 +228,13 @@ beaconing every slot (all 80 channels, even per-channel airtime in `gateway stat
   with the product antenna.
 - The §15.247 numbers (channel count, dwell, bandwidth) against the current FCC KDB, with an
   accredited lab, before any product claim. Until then: no US deployment claims.
+
+**2026-11-10: asked for, not done.** Each of the three needs an instrument the bench does not
+have: the first a PPK2 (a current, and the STOP floor), the second a calibrated receiver or a
+spectrum analyser with the product antenna, the third an accredited lab. Nothing in the code is
+open. The first item's *times* (how long the receiver is on for a predicted catch, a resync, a
+rescan) can be read from the log without a PPK2 and would turn into charge with the SPIRIT1's
+datasheet current; that is an estimate, not the verification this task asks for.
 
 ### T11. STOP-mode regulator bits after every wake (power)
 
@@ -337,7 +370,7 @@ generation still targets the same modules.
 
 ### T26. Every component at its latest production version
 
-Status: open (asked for 2026-11-09)
+Status: waiting (the bench and the release dry run): everything else done 2026-11-10
 
 **Why.** What the repository pins should be the newest stable release of each thing. Dependabot
 proposes the weekly minor and patch bumps of the three lockfiles and the Actions, but a major
@@ -349,26 +382,50 @@ unified flash driver (T24), with API changes and our EEPROM workaround to drop.
 cannot be taken (it breaks the bench, it needs a newer MSRV than the pin) is listed here with the
 reason, not skipped silently.
 
-- [ ] The inventory: every pin, its version, the newest stable one, how far apart. Known from
-      `cargo audit` (2026-11-09, warnings only): `clipboard-win` 5.4.1 in the root lockfile is
-      yanked, `bare-metal` 0.2.5 in the firmware's is unmaintained (RUSTSEC-2026-0110)
-- [ ] The Rust toolchain: `rust-toolchain.toml` and `RUST_TOOLCHAIN` in the three workflows
-      together (`audit` fails while they differ), `rust-version` in `[workspace.package]` and
-      the firmware's own
-- [ ] The host workspace: `[workspace.dependencies]`, the members' own dependencies, the root
-      `Cargo.lock`, majors included; the vendored OpenSSL comes with `openssl-src`
-- [ ] The firmware workspace: the embassy crates and the rest, `firmware/Cargo.lock`; with a new
-      embassy-stm32, the flash API (`Flash::new_blocking` takes a `Config`, the `Error` variants)
-      and the clearing in `storage.rs` goes (T24); look again at T11 (the `PWR_CR` write)
-- [ ] The fuzz harness: `fuzz/Cargo.toml`, `fuzz/Cargo.lock`, `CARGO_FUZZ_VERSION`
-- [ ] CI: every GitHub Action (full SHA, its `# vX.Y.Z` comment), the cross images of the
-      release build, the tools the workflows install by version (flip-link, cargo-fuzz and the
-      ones `taiki-e/install-action` fetches)
-- [ ] The Python side: what `hil/ppk2d.py` and the tools under `firmware/tools` and `tools`
-      import
-- [ ] `just check` green; the bench for what the firmware bumps can reach (the HIL groups, the
-      strip's timing, a STOP floor when a PPK2 is there); the release dry run again
-- [ ] The docs and comments that name a version (`embassy-stm32 0.6` in several) follow
+- [x] The inventory: every pin, its version, the newest stable one (2026-11-10). Nothing was a
+      major behind; `clipboard-win` is 5.4.3 (no longer yanked); `bare-metal` 0.2.5 stays (below)
+- [x] The Rust toolchain: 1.99.1 is the newest stable in all the places; nothing to change
+      (1.100.0 is in beta, due about 2026-11-12)
+- [x] The host workspace: `cargo update` (42 packages moved, 3 added), manifest floors raised to
+      what the lockfile holds; no caller changes; the schema tags did not move
+- [x] The firmware workspace: no embassy release after 0.6.0 exists, so the flash API and the
+      clearing in `storage.rs` stay (T24); T11 unchanged in 0.6.0 and on upstream main
+      (`rcc/l.rs` still writes the whole `PWR_CR`); lockfile and floors, cortex-m 0.7.10 in a
+      commit of its own, the embassy-futures floor 0.1.2 (images byte-identical)
+- [x] The fuzz harness: aes 0.9.4 and transitive; cargo-fuzz 0.13.2 is the newest
+- [x] CI: rust-cache v2.9.3, install-action v2.90.3, action-gh-release v3.0.4; the other six
+      actions, cross 0.2.5 and its images, flip-link, cargo-audit, just are the newest
+- [x] The Python side: ppk2-api 0.9.2 and pyserial 3.5 are the newest (unpinned); the other
+      tools import the standard library only
+- [x] `just check` green on the merged tree
+- [ ] The bench for cortex-m 0.7.10 (it ends every critical section with an `isb`, and lets the
+      compiler move less across an interrupt enable or disable): the modules HIL group and the
+      radio to MQTT path passed on it (2026-11-10, r2 and the r1 as a gateway); still to run:
+      the strip's timing (underruns over the effect sweep), the PIR bit-bang read, the HIL radio
+      groups (they need the Dongle), the STOP floor (a PPK2). ctutils 0.4.8 (under the pairing
+      handshake): an OTA pairing. nusb 0.2.9: a DFU flash of the r1 (done many times that night)
+- [ ] The release dry run again (it needs the commits pushed: D18)
+- [x] The docs and comments that name a version: serialport 4.10 in four HIL comments, the
+      free-flash figures in docs/firmware/taf.md; the rest did not move
+
+**Not taken, and why.**
+- openssl-src 400.0.2 (OpenSSL 4.0.3): openssl-sys 0.9.118, the newest, requires `^300.2.0`;
+  300.6.1 (OpenSSL 3.6.3) is the newest of that line.
+- bare-metal 1.0.0: cortex-m 0.7.10, the newest, requires `^0.2.4` (0.2.5, unmaintained,
+  RUSTSEC-2026-0110).
+- cms and pkcs12 at a stable release: every p12-keystore since 0.3.0 requires the 0.3.0 / 0.2.0
+  pre-releases (now rc.2 / rc.0); test-only, not in the `tower` binary.
+- generic-array 0.14.9: crypto-common 0.1.7 pins `=0.14.7`.
+- embassy-usb-synopsys-otg 0.4.0: embassy-stm32 0.6.0 requires 0.3.
+
+**Taken, but younger than Dependabot's 7-day cooldown** (the rule says newest; the cooldown is
+there against a release that turns out bad or hostile): 16 host, 5 firmware and 3 fuzz lock
+entries (syn 3.0.10, uuid 1.29.2, itoa 1.0.19, cc 1.11.1, toml 1.2.1, ...; the youngest a day
+old), install-action v2.90.3, action-gh-release v3.0.4. To honour the cooldown instead, run
+`cargo update` again after 2026-11-16 before the next release.
+
+**The cost of cortex-m 0.7.10**: 440 to 720 B of flash per image (an `isb` at each of the
+100 to 180 critical-section exits). `radio_control` on the r2 is left with 2.0 KB (T32).
 
 **Done when.** Every pin is at its newest stable release or listed here with the reason it is
 not, the gates and the bench pass, and the release dry run is green on that commit.
