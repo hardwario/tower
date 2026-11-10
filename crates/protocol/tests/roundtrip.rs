@@ -428,6 +428,58 @@ fn decoder_drops_oversize_then_resyncs() {
     assert_eq!(decode_frame(&inner).unwrap().0, MsgType::Hello);
 }
 
+/// An oversize frame is dropped even when the part of it the decoder kept is itself well-formed
+/// COBS: a full 254-byte block and a short one, `MAX_WIRE` bytes in all, then more. Decoding the
+/// kept part would hand the consumer the head of a frame as if it were a whole one.
+#[test]
+fn decoder_drops_an_oversize_frame_with_a_decodable_head() {
+    let mut head = vec![0xFFu8];
+    head.extend(std::iter::repeat_n(0x11u8, 254)); // one full block: 255 bytes
+    head.push((MAX_WIRE - 255) as u8); // a block that ends exactly at MAX_WIRE
+    head.extend(std::iter::repeat_n(0x22u8, MAX_WIRE - 256));
+    assert_eq!(head.len(), MAX_WIRE);
+
+    // The head alone, delimited, is a frame: the fixture is what it claims to be.
+    let mut dec = FrameDecoder::new();
+    assert!(head.iter().all(|&b| dec.push(b).is_none()));
+    assert_eq!(dec.push(0x00).map(<[u8]>::len), Some(MAX_WIRE - 2));
+
+    // With one more byte before the delimiter it is an oversize frame: dropped whole.
+    assert!(head.iter().all(|&b| dec.push(b).is_none()));
+    assert!(dec.push(0x33).is_none());
+    assert!(
+        dec.push(0x00).is_none(),
+        "the kept head of an oversize frame is not a frame"
+    );
+    // And the decoder is clean again.
+    assert!(head.iter().all(|&b| dec.push(b).is_none()));
+    assert_eq!(dec.push(0x00).map(<[u8]>::len), Some(MAX_WIRE - 2));
+}
+
+/// Delimiters with nothing between them (an idle line, the delimiter a sender puts ahead of a
+/// frame to flush line noise) are not frames: no empty frame is surfaced for the consumer to
+/// count as a decode failure.
+#[test]
+fn decoder_ignores_empty_frames() {
+    let mut dec = FrameDecoder::new();
+    for _ in 0..4 {
+        assert!(dec.push(0x00).is_none());
+    }
+    let mut out = [0u8; MAX_WIRE];
+    let n = encode_frame(MsgType::Print, 9, &Print { text: "x" }, &mut out).unwrap();
+    let mut frames = 0;
+    for &b in out[..n].iter().chain(&[0x00, 0x00]).chain(&out[..n]) {
+        if let Some(inner) = dec.push(b) {
+            assert_eq!(decode_frame(inner).unwrap().1, 9);
+            frames += 1;
+        }
+    }
+    assert_eq!(
+        frames, 2,
+        "the two frames, and nothing for the delimiters between them"
+    );
+}
+
 /// `reset()` discards a partial frame so a reconnect can't splice old + new bytes.
 #[test]
 fn decoder_reset_discards_partial() {

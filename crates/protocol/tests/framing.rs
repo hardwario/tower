@@ -138,6 +138,80 @@ fn decode_rejects_frame_over_max_frame() {
     assert_eq!(decode_frame(&minimal), Err(Error::BadCrc));
 }
 
+/// Both frame bounds are inclusive: a frame of exactly `MAX_FRAME` bytes is encoded, deframed
+/// and decoded with its whole `MAX_PAYLOAD` payload.
+#[test]
+fn a_frame_of_exactly_max_frame_decodes() {
+    let payload: Vec<u8> = (0..MAX_PAYLOAD).map(|i| (i % 251) as u8).collect();
+    let mut out = [0u8; MAX_WIRE];
+    let n = encode_frame_bytes(MsgType::Print, 7, &payload, &mut out).unwrap();
+    let inner = deframe(&out[..n]);
+    assert_eq!(inner.len(), MAX_FRAME);
+    assert_eq!(decode_frame(&inner), Ok((MsgType::Print, 7, &payload[..])));
+    // One byte more is refused at the encoder.
+    let over = vec![0x55u8; MAX_PAYLOAD + 1];
+    assert_eq!(
+        encode_frame_bytes(MsgType::Print, 7, &over, &mut out),
+        Err(Error::Encode)
+    );
+}
+
+/// The output buffer a frame needs is its COBS worst case (the inner length plus one code byte
+/// per 254) and the delimiter, to the byte: exactly that much is enough, one byte less is
+/// `Overflow`, never a write past the buffer. Both frame builders, a short frame and the longest.
+#[test]
+fn the_output_buffer_bound_is_exact() {
+    let needed = |inner: usize| inner + inner.div_ceil(254) + 1;
+    // The golden frame: 12 inner bytes (header 5, "ok" 3, CRC 4).
+    let mut exact = vec![0u8; needed(12)];
+    assert_eq!(
+        encode_frame_with_tag(0x1234, MsgType::Print, 1, &"ok", &mut exact),
+        Ok(14)
+    );
+    assert_eq!(exact, wire(0x1234, MsgType::Print, 1, &"ok"));
+    let mut short = vec![0u8; needed(12) - 1];
+    assert_eq!(
+        encode_frame_with_tag(0x1234, MsgType::Print, 1, &"ok", &mut short),
+        Err(Error::Overflow)
+    );
+    assert!(short.iter().all(|&b| b == 0), "nothing is written on an overflow");
+
+    // The longest frame: MAX_FRAME inner bytes, two COBS code bytes and the delimiter.
+    let payload = [0xA5u8; MAX_PAYLOAD];
+    let mut exact = vec![0u8; needed(MAX_FRAME)];
+    assert_eq!(exact.len(), 259);
+    let n = encode_frame_bytes(MsgType::Uplink, 0xFFFF, &payload, &mut exact).unwrap();
+    assert_eq!(deframe(&exact[..n]).len(), MAX_FRAME);
+    let mut short = vec![0u8; needed(MAX_FRAME) - 1];
+    assert_eq!(
+        encode_frame_bytes(MsgType::Uplink, 0xFFFF, &payload, &mut short),
+        Err(Error::Overflow)
+    );
+    assert!(needed(MAX_FRAME) <= MAX_WIRE, "MAX_WIRE holds the longest frame");
+}
+
+/// Every error says what went wrong, and a schema mismatch names the tag the peer sent.
+#[test]
+fn errors_say_what_went_wrong() {
+    let errors = [
+        Error::Encode,
+        Error::Overflow,
+        Error::TooShort,
+        Error::TooLong,
+        Error::SchemaMismatch { got: 0x00AB },
+        Error::BadType,
+        Error::BadCrc,
+        Error::Malformed,
+    ];
+    let texts: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+    for (i, text) in texts.iter().enumerate() {
+        assert!(text.len() > 8, "{:?}: {text:?}", errors[i]);
+        assert!(!texts[..i].contains(text), "{text:?} twice");
+    }
+    assert!(texts[4].contains("0x00ab"), "{}", texts[4]);
+    assert_eq!(texts[6], "CRC mismatch (wire corruption)");
+}
+
 // --- the frame budget holds for the largest real payloads --------------------------------
 
 /// A `QueuePush` carrying a full radio-MTU downlink (74 bytes), the largest request, must fit a

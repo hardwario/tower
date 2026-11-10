@@ -26,6 +26,12 @@ fn fold16_is_the_documented_xor_fold() {
     assert_eq!(fold16(0xFFFF_0000_0000_0000), 0xFFFF);
     assert_eq!(fold16(0x1234_1234_0000_0000), 0);
     assert_eq!(fold16(0x0001_0002_0004_0008), 0x000F);
+    // A bit set in two of the four words cancels, whichever two they are (an OR would keep it).
+    assert_eq!(fold16(0x0000_0000_0001_0001), 0);
+    assert_eq!(fold16(0x0000_0001_0001_0000), 0);
+    assert_eq!(fold16(0x0001_0001_0000_0000), 0);
+    assert_eq!(fold16(0x0001_0000_0000_0001), 0);
+    assert_eq!(fold16(0x8001_8001_8001_0001), 0x8000);
 }
 
 /// `MsgType::ALL` is what the console hash iterates: it must hold every type `from_u8` knows,
@@ -197,6 +203,78 @@ mod shapes {
         pub v: [u8; 5],
     }
 
+    // Tuples: the elements are positional children, like fields.
+    #[derive(Schema)]
+    pub struct Pair16(pub u8, pub u16);
+    #[derive(Schema)]
+    pub struct Pair32(pub u8, pub u32);
+    #[derive(Schema)]
+    pub struct Riap16(pub u16, pub u8);
+    #[derive(Schema)]
+    pub struct InTuple16 {
+        pub v: (u8, u16),
+    }
+    #[derive(Schema)]
+    pub struct InTuple32 {
+        pub v: (u8, u32),
+    }
+    #[derive(Schema)]
+    pub enum TupleVariant16 {
+        A(u8, u16),
+    }
+    #[derive(Schema)]
+    pub enum TupleVariant32 {
+        A(u8, u32),
+    }
+
+    // What comes BEFORE a nested struct, tuple or enum: the hash is one running state, so a
+    // sibling ahead of a composite counts as much as one behind it.
+    #[derive(Schema)]
+    pub struct Inner {
+        pub x: u8,
+    }
+    #[derive(Schema)]
+    pub struct Lead8 {
+        pub a: u8,
+        pub inner: Inner,
+    }
+    #[derive(Schema)]
+    pub struct Lead16 {
+        pub a: u16,
+        pub inner: Inner,
+    }
+    #[derive(Schema)]
+    pub struct LeadTuple8 {
+        pub a: u8,
+        pub t: (u8, u8),
+    }
+    #[derive(Schema)]
+    pub struct LeadTuple16 {
+        pub a: u16,
+        pub t: (u8, u8),
+    }
+    #[derive(Schema)]
+    pub struct LeadEnum8 {
+        pub a: u8,
+        pub e: OneVariant,
+    }
+    #[derive(Schema)]
+    pub struct LeadEnum16 {
+        pub a: u16,
+        pub e: OneVariant,
+    }
+
+    // The same leaves, grouped differently: only the element counts tell these apart.
+    #[derive(Schema)]
+    pub struct Split {
+        pub x: (u8,),
+        pub y: u8,
+    }
+    #[derive(Schema)]
+    pub struct Joined {
+        pub x: (u8, u8),
+    }
+
     #[derive(Schema)]
     pub struct Cap4 {
         pub v: heapless::Vec<u8, 4>,
@@ -244,6 +322,32 @@ fn string_vs_bytes_and_nesting_change_the_hash() {
     assert_ne!(schema_hash::<Plain>(), schema_hash::<Optional>());
     // A fixed array is a tuple on the wire (no length prefix), so its length is structure.
     assert_ne!(schema_hash::<Array>(), schema_hash::<LongerArray>());
+}
+
+/// The elements of a tuple struct, of a tuple field and of a tuple variant are hashed like
+/// fields: their types and their order.
+#[test]
+fn tuple_elements_change_the_hash() {
+    assert_ne!(schema_hash::<Pair16>(), schema_hash::<Pair32>());
+    assert_ne!(schema_hash::<Pair16>(), schema_hash::<Riap16>());
+    assert_ne!(schema_hash::<InTuple16>(), schema_hash::<InTuple32>());
+    assert_ne!(schema_hash::<TupleVariant16>(), schema_hash::<TupleVariant32>());
+}
+
+/// A field ahead of a nested struct, tuple or enum counts: entering a composite does not start
+/// the hash over.
+#[test]
+fn a_field_before_a_nested_composite_changes_the_hash() {
+    assert_ne!(schema_hash::<Lead8>(), schema_hash::<Lead16>());
+    assert_ne!(schema_hash::<LeadTuple8>(), schema_hash::<LeadTuple16>());
+    assert_ne!(schema_hash::<LeadEnum8>(), schema_hash::<LeadEnum16>());
+}
+
+/// The encoding is prefix-free: the same leaf types grouped differently (`((u8,), u8)` against
+/// `((u8, u8),)`) differ by the element counts alone.
+#[test]
+fn grouping_changes_the_hash() {
+    assert_ne!(schema_hash::<Split>(), schema_hash::<Joined>());
 }
 
 /// Documented NON-coverage: a `heapless::Vec` capacity never reaches the wire (sequences are

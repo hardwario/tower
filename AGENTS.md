@@ -103,6 +103,7 @@ just hil <recipe...>           # a hil/justfile recipe, run inside hil/
 just install-cli               # cargo install --locked --path cli
 just fmt                       # rustfmt both workspaces
 just fuzz <target> [secs]      # cargo-fuzz one target (nightly + cargo-fuzz; docs/fuzzing.md), `just fuzz-all` = all
+just mutants [crate...]        # cargo-mutants on tower-net / kv / protocol (slow, not in check; docs/test-strategy.md)
 ```
 
 `just check` = `check-host` (fmt, clippy `-D warnings`, tests, tower-net's tests on the

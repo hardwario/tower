@@ -442,7 +442,9 @@ mod tests {
     fn reack_allowance_resets_on_fresh_accept() {
         let mut lane = ReplayLane::new(0);
         let _ = lane.accept(1);
-        while lane.reack() {}
+        // Bounded, so a lane that never runs out fails here instead of spinning.
+        let spent = (0..=MAX_REACKS).take_while(|_| lane.reack()).count();
+        assert_eq!(spent, MAX_REACKS as usize, "the allowance runs out");
         let _ = lane.accept(2);
         assert!(lane.reack(), "a new counter gets a fresh re-ACK allowance");
     }
@@ -620,6 +622,9 @@ mod tests {
     fn assign_lane_duplicates_restore_highest_acceptable() {
         let records = [rec(0xA, 10, K1), rec(0xA, 9999, K2), rec(0xA, 50, K1), None];
         assert_eq!(assign_lane(0xA, K1, &records, 0), bind(2, 50, false));
+        // Equal last-seen: the lowest local, so the same peer binds the same local on every boot.
+        let records = [None, rec(0xA, 50, K1), rec(0xA, 50, K1)];
+        assert_eq!(assign_lane(0xA, K1, &records, 0), bind(1, 50, false));
     }
 
     /// No free local (every local bound to a live peer) → None.

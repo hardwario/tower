@@ -100,11 +100,107 @@ fn kind_ids_are_pinned() {
     );
 }
 
+/// The property ids are pinned: an id is what both ends put on the air for a value (a report, an
+/// event, a set), and `0x20 + id` is the key a node stores the setting under in its EEPROM, so
+/// a renumbered property reads another one's stored value. A new property takes the next free
+/// id of its table.
+#[test]
+fn property_ids_are_pinned() {
+    let ids = |props: &[Prop]| -> Vec<(&'static str, u8)> { props.iter().map(|p| (p.name, p.id)).collect() };
+    assert_eq!(
+        ids(COMMON),
+        [
+            ("temperature", 0),
+            ("heartbeat", 1),
+            ("report-period", 2),
+            ("report-delta", 3),
+            ("led", 4),
+            ("band", 5),
+            ("hold-time", 6),
+            ("tilt", 7),
+            ("accel", 8),
+            ("button", 9),
+            ("press", 10),
+            ("release", 11),
+            ("click", 12),
+            ("hold", 13),
+            ("click-timeout", 14),
+        ]
+    );
+    assert_eq!(APP_BASE, 16);
+    let own = |name: &str| ids(kind(name).unwrap().props);
+    assert!(own("button").is_empty() && own("climate").is_empty());
+    assert_eq!(
+        own("motion"),
+        [("motion", 16), ("sensitivity", 17), ("holdoff", 18)]
+    );
+    assert_eq!(
+        own("control"),
+        [
+            ("relay", 16),
+            ("relay-boot", 17),
+            ("strip", 18),
+            ("effect", 19),
+            ("brightness", 20),
+            ("color", 21),
+            ("speed", 22),
+        ]
+    );
+    assert_eq!(
+        own("thermostat"),
+        [("setpoint", 16), ("mode", 17), ("demand", 18), ("hysteresis", 19)]
+    );
+    // The id constants the firmware and the bridge use are those ids.
+    assert_eq!(
+        (motion::MOTION, motion::SENSITIVITY, motion::HOLDOFF),
+        (16, 17, 18)
+    );
+    assert_eq!(
+        (
+            control::RELAY,
+            control::RELAY_BOOT,
+            control::STRIP,
+            control::EFFECT
+        ),
+        (16, 17, 18, 19)
+    );
+    assert_eq!(
+        (control::BRIGHTNESS, control::COLOR, control::SPEED),
+        (20, 21, 22)
+    );
+    assert_eq!(
+        (
+            thermostat::SETPOINT,
+            thermostat::MODE,
+            thermostat::DEMAND,
+            thermostat::HYSTERESIS
+        ),
+        (16, 17, 18, 19)
+    );
+    assert_eq!(
+        (common::TEMPERATURE, common::BUTTON, common::CLICK_TIMEOUT),
+        (0, 9, 14)
+    );
+}
+
 /// The settings keys: `0x20 + id`, above the SDK's reserved range.
 #[test]
 fn setting_keys_are_derived_from_ids() {
     assert_eq!(setting_key(0), 0x20);
     assert_eq!(setting_key(APP_BASE), 0x30);
+}
+
+/// The Core Module's thermometer reads below zero: the temperature every kind reports spans the
+/// sensor's range, -40 to 125 °C in hundredths.
+#[test]
+fn the_temperature_spans_the_sensors_range() {
+    let temperature = COMMON[common::TEMPERATURE as usize];
+    assert_eq!(temperature.name, "temperature");
+    let ty = temperature.ty;
+    assert!(ty.accepts(-4000) && ty.accepts(-1) && ty.accepts(0) && ty.accepts(12500));
+    assert!(!ty.accepts(-4001) && !ty.accepts(12501));
+    assert_eq!(ty.parse("-12.5"), Some(-1250));
+    assert_eq!(ty.display(-1250).to_string(), "-12.50");
 }
 
 #[test]
@@ -129,6 +225,12 @@ fn fixed_point_parses_and_prints() {
     assert_eq!(show(-5, 1), "-0.5");
     assert_eq!(show(7, 0), "7");
     assert_eq!(show(2150, 2), "21.50");
+    // Zero has no sign, with or without decimals; the smallest negative step has one.
+    assert_eq!(show(0, 0), "0");
+    assert_eq!(show(0, 1), "0.0");
+    assert_eq!(show(0, 2), "0.00");
+    assert_eq!(show(-1, 2), "-0.01");
+    assert_eq!(show(i32::MIN, 1), "-214748364.8");
 }
 
 #[test]

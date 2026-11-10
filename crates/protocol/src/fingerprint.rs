@@ -296,3 +296,67 @@ pub const RADIO_HASH: u64 = feed(
     hash_types(FNV_BASIS, S_RADIO, &RADIO_TYPES),
     &crate::props::PROPS_HASH.to_le_bytes(),
 );
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use std::vec::Vec;
+
+    use super::*;
+
+    /// The hasher is FNV-1a 64 (the reference vectors of the algorithm), and an element count
+    /// is fed as four little-endian bytes.
+    #[test]
+    fn feed_is_fnv1a_64() {
+        assert_eq!(feed(FNV_BASIS, b""), FNV_BASIS);
+        assert_eq!(feed(FNV_BASIS, b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(feed(FNV_BASIS, b"foobar"), 0x8594_4171_f739_67e8);
+        assert_eq!(feed_u8(FNV_BASIS, b'a'), feed(FNV_BASIS, b"a"));
+        assert_eq!(
+            feed_count(FNV_BASIS, 0x0102),
+            feed(FNV_BASIS, &[0x02, 0x01, 0, 0])
+        );
+    }
+
+    /// The console hash, written out step by step: every message type in `MsgType::ALL` (its
+    /// type byte, then its payload schema), then the management types. Each step moves the
+    /// running hash, so no message and no management record is outside the console tag.
+    #[test]
+    fn the_console_hash_covers_every_message_type_and_the_management_surface() {
+        let mut state = FNV_BASIS;
+        let mut seen: Vec<u64> = Vec::from([state]);
+        for msg_type in MsgType::ALL {
+            state = feed(state, &[S_MSG, msg_type as u8]);
+            state = hash_type(state, payload_schema(msg_type));
+            assert!(!seen.contains(&state), "{msg_type:?} left the hash unchanged");
+            seen.push(state);
+        }
+        let messages = state;
+        state = feed_count(feed_u8(state, S_MGMT), MGMT_TYPES.len());
+        for ty in MGMT_TYPES {
+            state = hash_type(state, ty);
+            assert!(!seen.contains(&state), "{} left the hash unchanged", ty.name);
+            seen.push(state);
+        }
+        assert_eq!(CONSOLE_HASH, state);
+        assert_ne!(CONSOLE_HASH, messages, "the management surface is part of it");
+        assert_eq!(seen.len(), 1 + MsgType::ALL.len() + MGMT_TYPES.len());
+    }
+
+    /// The radio hash, written out the same way: both radio types, then the property tables.
+    #[test]
+    fn the_radio_hash_covers_both_directions_and_the_property_tables() {
+        let mut state = feed_count(feed_u8(FNV_BASIS, S_RADIO), RADIO_TYPES.len());
+        let mut seen: Vec<u64> = Vec::from([state]);
+        for ty in RADIO_TYPES {
+            state = hash_type(state, ty);
+            assert!(!seen.contains(&state), "{} left the hash unchanged", ty.name);
+            seen.push(state);
+        }
+        let types = state;
+        state = feed(state, &crate::props::PROPS_HASH.to_le_bytes());
+        assert_eq!(RADIO_HASH, state);
+        assert_ne!(RADIO_HASH, types, "the property tables are part of it");
+    }
+}

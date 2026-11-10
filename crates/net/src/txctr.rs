@@ -631,6 +631,38 @@ mod tests {
         assert!(!txc.locked());
     }
 
+    /// The boundary of "covered": a floor exactly AT the durable watermark is not covered by it.
+    /// The next boot resumes at the watermark, so a counter equal to it, handed out now without a
+    /// write, would ride a second frame after a reboot (a CCM nonce reuse under the imported
+    /// key). The raise persists a higher watermark first, and a failed write locks.
+    #[test]
+    fn raise_to_the_watermark_itself_persists_a_higher_one() {
+        let (mut txc, _) = TxCounter::resume(Some(5000), true);
+        let limit = txc.reserve_limit();
+        let mut stored = None;
+        assert!(txc.raise_to(limit, |w| {
+            stored = Some(w);
+            true
+        }));
+        assert_eq!(stored, Some(limit + RESERVE));
+        assert_eq!(txc.counter(), limit);
+        assert!(
+            txc.counter() < txc.reserve_limit(),
+            "every counter handed out is below the durable watermark"
+        );
+        // The first frame under the imported key rides the floor, and a reboot from the stored
+        // watermark starts above it.
+        let (first, _) = txc.alloc().unwrap();
+        assert_eq!(first, limit);
+        let (next_boot, _) = TxCounter::resume(stored, true);
+        assert!(next_boot.counter() > first);
+
+        let (mut txc, _) = TxCounter::resume(Some(5000), true);
+        assert!(!txc.raise_to(limit, |_| false));
+        assert!(txc.locked());
+        assert_eq!(txc.alloc(), None);
+    }
+
     /// A failed persist of the raised watermark locks TX and reports the floor as NOT durable
     /// (the caller must not install the key: a reboot would resume below it).
     #[test]

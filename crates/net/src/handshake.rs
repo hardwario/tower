@@ -897,6 +897,67 @@ mod tests {
         }
     }
 
+    /// The refusal is of the all-zero secret only (every byte OR-ed together), not of a secret
+    /// whose bytes merely cancel: one valid secret in 256 XORs to zero, and refusing those would
+    /// fail one honest pairing in 256. The vector is RFC 7748's Alice with bytes 1..5 of her
+    /// secret set to 58 (little-endian), found by counting up from 0, against Bob's public key.
+    #[test]
+    fn a_secret_whose_bytes_cancel_is_not_low_order() {
+        let mut sk = h32(ALICE_SK);
+        sk[1..5].copy_from_slice(&58u32.to_le_bytes());
+        let k = shared_secret(&sk, &h32(BOB_PK)).expect("a valid shared secret");
+        assert_eq!(
+            k,
+            h32("0c048752ffa1c26af357669fcd9f704f50621b04bcc8fef198ba317661a7fb15")
+        );
+        assert_eq!(k.iter().fold(0u8, |acc, &b| acc ^ b), 0, "the vector's point");
+        let e = Ephemeral::from_parts(&sk, &N_NODE);
+        assert!(e.session(&h32(BOB_PK), &N_GW, Role::Node, NODE, GW).is_some());
+    }
+
+    /// `zeroize` wipes the secret and the nonce (what `Option<Ephemeral>::zeroize` runs on the
+    /// bytes a `take` leaves behind); the public key is public and stays.
+    #[test]
+    fn ephemeral_zeroize_wipes_the_secret_and_the_nonce() {
+        let mut e = node();
+        assert_ne!(e.secret, [0; 32]);
+        assert_ne!(e.nonce, [0; NONCE_LEN]);
+        e.zeroize();
+        assert_eq!(e.secret, [0; 32]);
+        assert_eq!(e.nonce, [0; NONCE_LEN]);
+        assert_eq!(e.public, h32(ALICE_PK));
+    }
+
+    /// Dropping an ephemeral or a session wipes its key material: the secret and the nonce, the
+    /// link key, the SAS and both tags do not stay behind in freed memory (a stack frame or a
+    /// static slot the next handshake has not overwritten yet).
+    #[test]
+    fn secrets_are_wiped_on_drop() {
+        use core::mem::ManuallyDrop;
+
+        let mut e = ManuallyDrop::new(node());
+        assert_ne!(e.secret, [0; 32]);
+        // SAFETY: dropped once and never used as an `Ephemeral` again. The type holds byte
+        // arrays only, so its storage stays valid, initialized memory after the destructor ran
+        // and reading it back is sound.
+        unsafe { ManuallyDrop::drop(&mut e) };
+        assert_eq!(e.secret, [0; 32]);
+        assert_eq!(e.nonce, [0; NONCE_LEN]);
+
+        let (e_node, e_gw) = (h32(ALICE_PK), h32(BOB_PK));
+        let mut s = ManuallyDrop::new(key_schedule(&h32(SHARED), &golden_transcript(&e_node, &e_gw)));
+        assert_ne!(s.link_key, [0; LINK_KEY_LEN]);
+        assert_ne!(s.sas, 0);
+        assert_ne!(s.tag_gw, [0; TAG_LEN]);
+        assert_ne!(s.tag_node, [0; TAG_LEN]);
+        // SAFETY: as above; a `Session` is byte arrays and a `u32`.
+        unsafe { ManuallyDrop::drop(&mut s) };
+        assert_eq!(s.link_key, [0; LINK_KEY_LEN]);
+        assert_eq!(s.sas, 0);
+        assert_eq!(s.tag_gw, [0; TAG_LEN]);
+        assert_eq!(s.tag_node, [0; TAG_LEN]);
+    }
+
     /// The ephemeral derivation (pinned against the Python reference): the secret is the hash of
     /// its label and the first 64 entropy bytes, the nonce the hash of its label and the last 32;
     /// each depends only on its own part of the entropy.

@@ -723,3 +723,156 @@ const fn tables_hash() -> u64 {
 /// [`Kind::id`]s: no node sends or reads one (they are between the host and the gateway's
 /// registry), so a new number must not make every node stale.
 pub const PROPS_HASH: u64 = tables_hash();
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use std::vec::Vec;
+
+    use super::*;
+
+    const BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+
+    /// The fingerprint hasher is FNV-1a 64: the reference vectors of the algorithm.
+    #[test]
+    fn feed_is_fnv1a_64() {
+        assert_eq!(feed(BASIS, b""), BASIS);
+        assert_eq!(feed(BASIS, b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(feed(BASIS, b"foobar"), 0x8594_4171_f739_67e8);
+    }
+
+    /// A string is fed with its length first, so two strings in a row cannot be regrouped into
+    /// the same bytes (`"ab" "c"` against `"a" "bc"`); an `i32` is fed as its four bytes.
+    #[test]
+    fn strings_and_numbers_are_fed_delimited() {
+        assert_eq!(feed_str(BASIS, "ab"), feed(feed(BASIS, &[2, 0, 0, 0]), b"ab"));
+        assert_ne!(
+            feed_str(feed_str(BASIS, "ab"), "c"),
+            feed_str(feed_str(BASIS, "a"), "bc")
+        );
+        assert_ne!(feed_str(BASIS, ""), BASIS, "an empty string still counts");
+        assert_eq!(feed_i32(BASIS, -2), feed(BASIS, &[0xFE, 0xFF, 0xFF, 0xFF]));
+        assert_ne!(feed_i32(BASIS, 1), feed_i32(BASIS, 256));
+    }
+
+    const NUMBER: Prop = Prop {
+        id: 20,
+        name: "setpoint",
+        ty: number(50, 300, 1, "°C"),
+        access: Access::Control,
+        default: "",
+    };
+    const ENUM: Prop = Prop {
+        id: 21,
+        name: "mode",
+        ty: Type::Enum(&["auto", "manual", "off"]),
+        access: Access::Param,
+        default: "auto",
+    };
+
+    /// Everything a property declares moves its hash: the id, the name, the access, the default,
+    /// the kind of type, a number's range, decimals and unit, an enumeration's names, their order
+    /// and their count. Any of them changed on one end only would make the two ends read the same
+    /// `i32` differently, so each must reach the radio tag.
+    #[test]
+    fn every_part_of_a_property_moves_its_hash() {
+        let hash = |p: &Prop| hash_prop(BASIS, p);
+        let variants = [
+            Prop { id: 22, ..NUMBER },
+            Prop {
+                name: "set-point",
+                ..NUMBER
+            },
+            Prop {
+                access: Access::State,
+                ..NUMBER
+            },
+            Prop {
+                default: "21.0",
+                ..NUMBER
+            },
+            Prop {
+                ty: number(51, 300, 1, "°C"),
+                ..NUMBER
+            },
+            Prop {
+                ty: number(50, 301, 1, "°C"),
+                ..NUMBER
+            },
+            Prop {
+                ty: number(50, 300, 2, "°C"),
+                ..NUMBER
+            },
+            Prop {
+                ty: number(50, 300, 1, "K"),
+                ..NUMBER
+            },
+            Prop {
+                ty: Type::Bool,
+                ..NUMBER
+            },
+        ];
+        for (i, v) in variants.iter().enumerate() {
+            assert_ne!(hash(v), hash(&NUMBER), "variant {i}");
+            for w in &variants[..i] {
+                assert_ne!(hash(v), hash(w), "variant {i} collides with an earlier one");
+            }
+        }
+        let names = |names: &'static [&'static str]| {
+            hash(&Prop {
+                ty: Type::Enum(names),
+                ..ENUM
+            })
+        };
+        let base = names(&["auto", "manual", "off"]);
+        assert_eq!(base, hash(&ENUM));
+        assert_ne!(base, names(&["auto", "manual", "eco"]), "a renamed value");
+        assert_ne!(base, names(&["auto", "off", "manual"]), "a reordered value");
+        assert_ne!(base, names(&["auto", "manual"]), "a removed value");
+        assert_ne!(base, names(&["auto", "manual", "off", "eco"]), "an added value");
+        assert_ne!(
+            base,
+            names(&["automanual", "off", ""]),
+            "the same letters, regrouped"
+        );
+        // The running state is carried through: the same property after another one differs.
+        assert_ne!(hash_prop(hash(&NUMBER), &ENUM), hash(&ENUM));
+    }
+
+    /// A table's hash covers every property in it, in order, and how many there are.
+    #[test]
+    fn a_table_hashes_every_property_in_order() {
+        let both = hash_props(BASIS, &[NUMBER, ENUM]);
+        assert_ne!(both, hash_props(BASIS, &[ENUM, NUMBER]), "order");
+        assert_ne!(both, hash_props(BASIS, &[NUMBER]), "a removed property");
+        assert_ne!(
+            both,
+            hash_props(BASIS, &[NUMBER, ENUM, ENUM]),
+            "an added property"
+        );
+        assert_ne!(hash_props(BASIS, &[]), BASIS, "an empty table still counts");
+        let changed = Prop { id: 23, ..ENUM };
+        assert_ne!(both, hash_props(BASIS, &[NUMBER, changed]), "the last property");
+        // The count comes first, then each property in turn.
+        assert_eq!(both, hash_prop(hash_prop(feed(BASIS, &[2]), &NUMBER), &ENUM));
+    }
+
+    /// `PROPS_HASH` is the common table followed by every kind (its name, class, time flag and
+    /// own table), written out here step by step: the fingerprint the radio tag carries covers
+    /// all of them, not the common table alone.
+    #[test]
+    fn the_fingerprint_covers_the_common_table_and_every_kind() {
+        let mut state = hash_props(BASIS, COMMON);
+        let mut seen: Vec<u64> = Vec::from([state]);
+        for k in KINDS {
+            state = feed_str(state, k.name);
+            state = feed(state, &[k.class as u8, k.time as u8]);
+            state = hash_props(state, k.props);
+            assert!(!seen.contains(&state), "{} left the hash unchanged", k.name);
+            seen.push(state);
+        }
+        assert_eq!(PROPS_HASH, state);
+        assert_eq!(seen.len(), KINDS.len() + 1);
+    }
+}

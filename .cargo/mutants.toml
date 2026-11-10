@@ -1,0 +1,47 @@
+# cargo-mutants (https://mutants.rs): mutation testing of the security kernels, `just mutants`
+# (tower-net, tower-kv, tower-protocol). How it is run, what it found and the results are in
+# docs/test-strategy.md (layer 6).
+#
+# This file is read by every `cargo mutants` run from the repo root; nothing else reads it (cargo
+# itself ignores it).
+
+# Every cargo call in this repository is `--locked` (AGENTS.md): the mutants are built and tested
+# against the committed Cargo.lock, in the copy of the tree cargo-mutants works in.
+additional_cargo_args = ["--locked"]
+
+# Mutants that no test can tell from the original: the change does not alter what the code does.
+# Each is listed with the reason, so `just mutants` reports only survivors nobody has looked at.
+# A regex matches the mutant's name as `cargo mutants --list` prints it,
+# `<file>:<line>:<column>: <change> in <function>`. Where a function holds the same change more
+# than once, the pattern names the column (and any line): a column survives edits elsewhere in
+# the file, a line number does not. A pattern that stops matching just brings its mutant back as a
+# survivor to look at again.
+exclude_re = [
+    # `1 << 0` and `1 >> 0` are both 1: bit 0 of a flags byte (`ack_flags::PENDING`,
+    # `NODE_FLAG_SLEEPING`). The other bits are pinned by value (`NODE_FLAG_UNNAMED` in
+    # crates/protocol/tests/constants.rs).
+    'crates/net/src/ack\.rs:\d+:\d+: replace << with >>$',
+    'crates/protocol/src/mgmt\.rs:\d+:38: replace << with >>$',
+
+    # tower-kv, `blank_step_span`: `(n - w).min(4)` is the length of the word at `w` in a chunk
+    # of `n` bytes. Every span the codec blanks is whole words (a half, a superblock; const
+    # asserts at the top of the file), so `n` and `w` are multiples of 4 with `w < n`, and
+    # `n - w` and `n + w` are both at least 4: the `min` is 4 either way.
+    'crates/kv/src/lib\.rs:\d+:25: replace - with \+ in blank_step_span$',
+
+    # tower-kv, `flip`: `while o < src_free` copies the latest records below the source log's end.
+    # With `<=` the loop also reads the header AT the log end (a blank word, a torn record, or
+    # the first bytes past a full half, all inside the region): no plan entry names that offset
+    # (pass 1 recorded offsets below `src_free` only), so nothing is copied and the loop ends.
+    'crates/kv/src/lib\.rs:\d+:13: replace < with <= in flip$',
+
+    # tower-kv, `flip_step`, phase A: `if st.blank_off < half { blank some more }`. With `<=` a
+    # finished blank (`blank_off == half`) calls `blank_step_span` once more from the end of the
+    # span, which reads nothing, writes nothing and returns `half` again.
+    'crates/kv/src/lib\.rs:\d+:21: replace < with <= in flip_step$',
+
+    # tower-kv, `flip_step`, phase B: `while st.read_off < st.src_end`, the same as `flip` above:
+    # with `<=` the header at the planned log end is read, is in no plan entry, and is skipped.
+    # `read_off` then sits past `src_end`, which only this loop reads.
+    'crates/kv/src/lib\.rs:\d+:23: replace < with <= in flip_step$',
+]

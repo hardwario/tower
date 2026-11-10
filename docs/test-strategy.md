@@ -13,6 +13,7 @@ it passes. The per-test catalogue of the firmware stays in
 |-------|-------|------|
 | Unit and host tests of every crate, the CLI and the gateway engine | `just test` | CI, every push |
 | Fuzzing of the pure kernels (frames, radio envelopes, KV store, radio and shell kernels) | `fuzz/`, `just fuzz` | CI, weekly (nightly toolchain) |
+| Mutation testing of the security kernels (`tower-net`, `tower-kv`, `tower-protocol`): no mutant survives unexplained (layer 6) | `just mutants`, `.cargo/mutants.toml` | CI, weekly |
 | Firmware gates: MCU build, RAM budget, clippy over the role variants, rustdoc | `just fw ci` | CI, every push |
 | Supply chain: `cargo audit` on every lockfile, pinned actions | `.github/workflows` | CI |
 | HIL bench: smoke, KATs, two-board radio and network, gateway end to end, stack high-water, a listening node's downlinks, OTA pairing and a sleeping node's `set` | `just hil bench` | by hand |
@@ -82,10 +83,79 @@ and every refusal is logged within its rate limit.
 
 ### 6. Mutation testing, coverage, proofs
 
-`cargo-mutants` on `tower-net`, `tower-kv` and `tower-protocol` finds assertions that pass
-whatever the code does; `cargo-llvm-cov` shows untested branches. The counter and replay kernels
-are small and pure: good candidates for Kani proofs ("the TX counter never repeats", "a replay
-is never fresh"). Passes when surviving mutants in those crates are explained or killed.
+**Mutation testing is in place** (2026-11-10) for `tower-net`, `tower-kv` and `tower-protocol`,
+the crates that hold the security decisions: the replay rule, the TX-counter watermark, the ACK
+and beacon-epoch rules, pairing, the EEPROM store, the framing and the schema tags.
+[cargo-mutants](https://mutants.rs) changes a crate's code one small piece at a time (an
+operator, a constant in place of a result) and runs the crate's tests on each change. A mutant
+no test fails on is a decision the tests do not hold.
+
+```sh
+cargo install --locked cargo-mutants   # 27.1.0
+just mutants                           # the three crates: about half an hour at 4 jobs
+just mutants kv                        # one of them
+```
+
+`just mutants` fails when a mutant survives and names it; cargo-mutants' own report is in
+`target/mutants/<crate>/mutants.out/` (`missed.txt`, each mutant's change in `diff/`).
+`CARGO_MUTANTS_JOBS` sets the parallel jobs (4 by default). It builds and tests every mutant, so
+it is not part of `just check`: `.github/workflows/mutants.yml` runs it weekly and on demand.
+
+| Crate | Mutants | Caught | Caught by the timeout | Unviable | Survived |
+|-------|--------:|-------:|----------------------:|---------:|---------:|
+| `tower-net`, first run | 246 | 203 | 2 | 33 | 8 |
+| `tower-net`, now | 245 | 212 | 0 | 33 | 0 |
+| `tower-kv`, first run | 395 | 246 | 73 | 32 | 44 |
+| `tower-kv`, now | 381 | 276 | 73 | 32 | 0 |
+| `tower-protocol`, first run | 392 | 276 | 0 | 72 | 44 |
+| `tower-protocol`, now | 391 | 319 | 0 | 72 | 0 |
+
+*Unviable*: the mutant does not compile (a const assertion fails, a type does not fit). *Caught
+by the timeout*: the mutant makes the code itself loop for ever (a scan offset that stops
+advancing), so cargo-mutants kills its test run; no test can fail faster. The timeout is five
+times the unmutated test time.
+
+None of the 96 survivors of the first run was a bug: the code was right and nothing held it.
+43 tests were added, and what they hold now was open before:
+
+- **`tower-net`.** `TxCounter::raise_to` with a floor exactly at the durable watermark: it must
+  persist a higher watermark first, or the counter handed out next equals the one the next boot
+  resumes at (a CCM nonce used twice). A node that lost sync re-locks to the *same* gateway
+  session (only an older epoch is a replay). The all-zero check of the X25519 secret is an OR
+  over its bytes, not an XOR (which refuses one honest pairing in 256). The ephemeral secret,
+  the link key, the SAS and the confirmation tags are wiped on drop.
+- **`tower-kv`.** A stale incremental-flip plan is refused before a single write (its destination
+  is the active half by then). An append that fills its half writes no terminator into the
+  other half or into superblock 0. The tail walk of a flip's commit reaches the last word of
+  the source (a tombstone there keeps its key deleted). A record of exactly `MAX_VALUE` bytes
+  reads back and survives both kinds of flip; a header claiming more ends the log without
+  reading it. The exact-fit bounds after a flip, `compact_with`, the proactive threshold's
+  boundary. The stored format is pinned byte for byte (the record, the superblock, CRC-32/IEEE).
+- **`tower-protocol`.** That the schema tags cover what they claim: the console hash every
+  message type and the management records, the radio hash both directions and the property
+  tables, the hasher every tuple element, every field ahead of a nested type and every part of
+  a property (replacing any of these by a constant passed every test before). The wire values
+  the tags cannot see, pinned by number: the management and transmit codes, the registry
+  flags, the message type bytes, the property ids (they are also the keys a node stores its
+  settings under). The bounds of the framing to the byte: a frame of exactly `MAX_FRAME`, an
+  output buffer of exactly the needed size, an envelope of exactly the radio MTU, an oversize
+  or empty frame dropped by the deframer. `0` printed without a sign.
+
+Of the 96, 84 are killed by those tests. Six change nothing and are excluded in
+`.cargo/mutants.toml`, each with its reason: `1 << 0` against `1 >> 0` for bit 0 of a flags byte
+(twice); in `tower-kv` the length of the last word of a span that is always whole words, a
+blank pass entered once more when it has already finished, and two loops over the record log
+whose bound may include the log end (no plan entry names that offset, so nothing more is
+copied). The last six are gone at the source: `tower-kv` sized six record buffers
+`KV_HEADER + MAX_VALUE` in place, where a larger buffer changes nothing a host test can see (and
+costs stack the firmware does not have); the size is one named constant now, held by a const
+assertion.
+
+**Passes when** `just mutants` reports no survivor; a new one is killed by a test or added to
+the exclusions with its reason. **Still to do:** `cargo-llvm-cov` for the untested branches;
+Kani proofs of the counter and replay kernels, small and pure ("the TX counter never repeats",
+"a replay is never fresh"); mutation testing of the other kernels (`tower-radio`,
+`tower-gateway`, `tower-shell`, `tower-taf`).
 
 ### 7. Response-time budgets under load
 

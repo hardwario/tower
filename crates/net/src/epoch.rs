@@ -357,6 +357,27 @@ mod tests {
         );
     }
 
+    /// The everyday loss of sync: a fade, not a gateway restart. The node rescans and hears the
+    /// SAME session (the epoch it is locked to) again: only an epoch *below* the locked one is a
+    /// replay, so the equal one is held and its consistent successor locks. Rejecting it would
+    /// keep a node off the air until its gateway next rebooted.
+    #[test]
+    fn same_session_relocks_after_a_rescan() {
+        let mut g = locked_gate(5, 1000);
+        for _ in 0..REACQUIRE_LIMIT {
+            let _ = g.beacon_missed();
+        }
+        assert_eq!(
+            g.offer_scanning(5, 9000, None),
+            ScanVerdict::Hold { replaced: true }
+        );
+        assert_eq!(
+            g.offer_scanning(5, 9000 + FHSS_N, Some(FHSS_N)),
+            ScanVerdict::Lock
+        );
+        assert_eq!(g.epoch(), 5);
+    }
+
     /// Equal-epoch beacons must advance the slot in step with elapsed time, within
     /// ACQUIRE_SLOT_SLACK (the exact boundary: |slot_adv − time_adv| == SLACK locks,
     /// SLACK + 1 holds).

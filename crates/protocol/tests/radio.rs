@@ -207,6 +207,86 @@ fn over_mtu_encode_is_rejected() {
     assert_eq!(encode_node_msg(&m, &mut big), Err(Error::Encode));
 }
 
+/// The MTU is inclusive: an envelope of exactly `MAX_RADIO_PAYLOAD` bytes is encoded (and
+/// decodes back), one byte more is refused, both ways and whatever the buffer's size.
+#[test]
+fn an_envelope_of_exactly_the_mtu_is_accepted() {
+    let chunk = |len: usize| "m".repeat(len);
+    let mut big = [0u8; 256];
+    // The longest shell chunk text that still encodes: its envelope is the MTU to the byte.
+    let mut longest = 0;
+    for len in 0..=MAX_RADIO_PAYLOAD {
+        let text = chunk(len);
+        let m = NodeMsg::Shell(NodeShellChunk {
+            cmd_id: 1,
+            result: 0,
+            chunk: 0,
+            last: true,
+            text: &text,
+        });
+        match encode_node_msg(&m, &mut big) {
+            Ok(n) => {
+                assert!(n <= MAX_RADIO_PAYLOAD);
+                assert_eq!(decode_node_msg(&big[..n]).unwrap(), m);
+                longest = n;
+            }
+            Err(e) => {
+                assert_eq!(e, Error::Encode);
+                break;
+            }
+        }
+    }
+    assert_eq!(longest, MAX_RADIO_PAYLOAD, "the bound is inclusive");
+
+    let mut longest = 0;
+    for len in 0..=MAX_RADIO_PAYLOAD {
+        let line = chunk(len);
+        let c = NodeCmd::Shell {
+            epoch: 1,
+            cmd_id: 1,
+            line: &line,
+        };
+        match encode_node_cmd(&c, &mut big) {
+            Ok(n) => {
+                assert_eq!(decode_node_cmd(&big[..n]).unwrap(), c);
+                longest = n;
+            }
+            Err(e) => {
+                assert_eq!(e, Error::Encode);
+                break;
+            }
+        }
+    }
+    assert_eq!(longest, MAX_RADIO_PAYLOAD);
+}
+
+/// The two-byte tag is the whole header. A buffer with room for the tag alone is not too small
+/// for it (the body then fails to encode); an envelope that is the tag alone is long enough to
+/// have its tag checked: a foreign one is a schema mismatch, ours is a body that is missing.
+#[test]
+fn a_tag_only_envelope_is_checked_like_any_other() {
+    let mut room_for_the_tag = [0u8; ENVELOPE_HDR];
+    assert_eq!(
+        encode_node_msg(&NodeMsg::Report(heapless::Vec::new()), &mut room_for_the_tag),
+        Err(Error::Encode)
+    );
+    assert_eq!(
+        encode_node_cmd(&NodeCmd::Describe, &mut room_for_the_tag),
+        Err(Error::Encode)
+    );
+    let forged = RADIO_TAG ^ 0x0001;
+    assert_eq!(
+        decode_node_msg(&forged.to_le_bytes()),
+        Err(Error::SchemaMismatch { got: forged })
+    );
+    assert_eq!(
+        decode_node_cmd(&forged.to_le_bytes()),
+        Err(Error::SchemaMismatch { got: forged })
+    );
+    assert_eq!(decode_node_msg(&RADIO_TAG.to_le_bytes()), Err(Error::Malformed));
+    assert_eq!(decode_node_cmd(&RADIO_TAG.to_le_bytes()), Err(Error::Malformed));
+}
+
 /// Every variant round-trips through encode → decode.
 #[test]
 fn every_variant_roundtrips() {

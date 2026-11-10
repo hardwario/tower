@@ -107,13 +107,21 @@ const SUPER_MAGIC: [u8; 4] = *b"TKV2";
 /// Superblock size: magic(4) + generation(4 LE) + crc(4 LE, over magic‖generation).
 const SUPER_LEN: u32 = 12;
 
+/// A maximal record: the header and a [`MAX_VALUE`]-byte value. The size of every record buffer
+/// the codec puts on the stack, the flip's among them (the deepest stack path of a radio app, see
+/// [`flip`]), so it is pinned below: a buffer that grew would cost stack the firmware does not
+/// have.
+const RECORD_MAX: usize = KV_HEADER + MAX_VALUE;
+
 // Everything the codec writes is whole words: the header, every padded record (MAX_VALUE is
-// whole words, so a maximal record needs no padding and fits `KV_HEADER + MAX_VALUE` buffers),
+// whole words, so a maximal record needs no padding and fits a `RECORD_MAX` buffer),
 // the superblock, and the halves of the firmware's 6 KiB region.
+const _: () = assert!(RECORD_MAX == 264);
 const _: () = assert!((KV_HEADER as u32).is_multiple_of(WORD));
 const _: () = assert!((MAX_VALUE as u32).is_multiple_of(WORD));
 const _: () = assert!(SUPER_LEN.is_multiple_of(WORD));
 const _: () = assert!(half_len(6144) == 3060 && half_len(6144).is_multiple_of(WORD));
+const _: () = assert!(record_size(MAX_VALUE) == RECORD_MAX as u32);
 
 /// Bytes a record with a `len`-byte value occupies in a half: the header plus the value rounded
 /// up to whole words. The pad (0 to 3 zero bytes) is outside the CRC; `len` stays the true length.
@@ -302,7 +310,7 @@ fn scan_half<S: Eeprom>(store: &S, base: u32, area: u32, target: u16) -> Result<
 /// layout's first record, under the first append after a format) read back.
 fn append<S: Eeprom>(store: &mut S, at: u32, key: u16, value: &[u8]) -> Result<(), KvError<S::Error>> {
     let len = value.len() as u16;
-    let mut buf = [0u8; KV_HEADER + MAX_VALUE];
+    let mut buf = [0u8; RECORD_MAX];
     buf[0..2].copy_from_slice(&key.to_le_bytes());
     buf[2..4].copy_from_slice(&len.to_le_bytes());
     let crc = entry_crc(&buf[0..4], value);
@@ -696,7 +704,7 @@ fn flip<S: Eeprom>(store: &mut S, capacity: u32, src_h: u8, src_gen: u32) -> Res
     // headroom is tight (see docs/firmware/radio.md: no stack guard on this target).
     let mut latest: [(u16, u32); MAX_KEYS] = [(0, 0); MAX_KEYS];
     let mut nkeys = 0usize;
-    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
+    let mut tmp = [0u8; RECORD_MAX];
     let src_free = walk_latest(store, src_base, half, &mut latest, &mut nkeys, &mut tmp)?;
 
     // Blank the destination half so its scan will terminate cleanly (it may hold stale records
@@ -842,7 +850,7 @@ pub fn live_bytes<S: Eeprom>(store: &S, capacity: u32) -> Result<u32, KvError<S:
     };
     let mut latest: [(u16, u32); MAX_KEYS] = [(0, 0); MAX_KEYS];
     let mut nkeys = 0usize;
-    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
+    let mut tmp = [0u8; RECORD_MAX];
     let base = half_base(capacity, h);
     walk_latest(store, base, half_len(capacity), &mut latest, &mut nkeys, &mut tmp)?;
     let mut total = 0u32;
@@ -959,7 +967,7 @@ pub fn flip_start<S: Eeprom>(store: &S, capacity: u32) -> Result<Option<FlipStat
     };
     let mut latest: [(u16, u32); MAX_KEYS] = [(0, 0); MAX_KEYS];
     let mut nkeys = 0usize;
-    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
+    let mut tmp = [0u8; RECORD_MAX];
     let src_end = walk_latest(
         store,
         half_base(capacity, h),
@@ -1017,7 +1025,7 @@ pub fn flip_step<S: Eeprom>(
     // never programs more than the budget even for a MAX_VALUE record. A partially-copied
     // record is harmless: the destination is uncommitted until `flip_commit`. Records (padded)
     // and chunks (`budget * 4`) are whole words, so every slice is aligned word programs.
-    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
+    let mut tmp = [0u8; RECORD_MAX];
     while st.read_off < st.src_end {
         let mut hdr = [0u8; KV_HEADER];
         store
@@ -1083,7 +1091,7 @@ pub fn flip_commit<S: Eeprom>(
     // Tail catch-up: same validated walk as `scan_half`, copying every intact record whole.
     // Total destination usage = packed live set (≤ src_end) + tail (= src_now − src_end)
     // ≤ src_now ≤ half, so this always fits; the check stays as a defensive invariant.
-    let mut tmp = [0u8; KV_HEADER + MAX_VALUE];
+    let mut tmp = [0u8; RECORD_MAX];
     let mut o = st.src_end;
     loop {
         if o + KV_HEADER as u32 > half {
@@ -1391,6 +1399,66 @@ mod tests {
         );
     }
 
+    /// Every error says what went wrong, and a backend error carries the backend's own text (the
+    /// firmware prints these on the console).
+    #[test]
+    fn errors_say_what_went_wrong() {
+        let texts = [
+            KvError::Backend("flash busy").to_string(),
+            KvError::<&str>::ValueTooLarge.to_string(),
+            KvError::<&str>::Full.to_string(),
+            KvError::<&str>::InvalidKey.to_string(),
+            KvError::<&str>::TooManyKeys.to_string(),
+            KvError::<&str>::Stale.to_string(),
+        ];
+        assert_eq!(texts[0], "backend error: flash busy");
+        for (i, text) in texts.iter().enumerate() {
+            assert!(text.len() > 8, "{text:?}");
+            assert!(!texts[..i].contains(text), "{text:?} twice");
+        }
+    }
+
+    /// The CRC of a record and of a superblock is CRC-32/IEEE, final inversion included (the
+    /// check value of "123456789"). It is part of the stored format: a store written with one CRC
+    /// holds no valid superblock for another, and `init` would format it empty.
+    #[test]
+    fn crc_is_crc32_ieee() {
+        assert_eq!(entry_crc(b"1234", b"56789"), 0xCBF4_3926);
+        assert_eq!(super_crc(b"123456789"), 0xCBF4_3926);
+    }
+
+    /// The bytes on the EEPROM, pinned against an independent reference (Python `zlib.crc32`): a
+    /// record is `tag | len | crc | value | pad`, a superblock `TKV2 | generation | crc`, all
+    /// little-endian, at the offsets the layout gives. A store written by one firmware build must
+    /// mount under the next: a change here is a change of the stored format (it formats every
+    /// fielded store empty, the TX-counter watermark included), never a refactoring.
+    #[test]
+    fn golden_region_image() {
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 0x5201, &[0xAA, 0xBB, 0xCC]).unwrap();
+        assert_eq!(
+            ram.buf[..16],
+            [
+                0x01, 0x52, 0x03, 0x00, 0xb8, 0x26, 0xf1, 0x7c, 0xAA, 0xBB, 0xCC, 0x00, 0, 0, 0, 0
+            ],
+            "the record, its pad and the blank log end"
+        );
+        assert_eq!(
+            (half_len(CAP), super_off(CAP, 0), super_off(CAP, 1)),
+            (244, 488, 500)
+        );
+        assert_eq!(
+            ram.buf[488..500],
+            [b'T', b'K', b'V', b'2', 1, 0, 0, 0, 0xbf, 0x64, 0xc8, 0x4b],
+            "half 0's superblock, generation 1"
+        );
+        assert!(ram.buf[16..488].iter().all(|&b| b == 0));
+        assert!(
+            ram.buf[500..].iter().all(|&b| b == 0),
+            "no superblock for half 1 yet"
+        );
+    }
+
     #[test]
     fn append_only_latest_wins() {
         let mut ram = Ram::new(CAP as usize);
@@ -1434,6 +1502,37 @@ mod tests {
         let half = half_len(CAP) as usize;
         // A value larger than a half (minus header) can never fit, even after a flip.
         assert_eq!(set(&mut ram, 1, &vec![7u8; half]), Err(KvError::Full));
+    }
+
+    /// An append whose record ends exactly at the end of its half has no terminator to write:
+    /// the word past it belongs to the other half (the first record of a flip in progress) or,
+    /// past half 1, to superblock 0. Nothing outside the active half is touched.
+    #[test]
+    fn an_append_that_fills_its_half_writes_nothing_past_it() {
+        for flips in [0, 1] {
+            let mut ram = Ram::new(CAP as usize);
+            init(&mut ram, CAP).unwrap();
+            for _ in 0..flips {
+                compact(&mut ram, CAP).unwrap();
+            }
+            let (h, _) = active(&ram, CAP).unwrap().unwrap();
+            assert_eq!(h, flips, "half {flips} is the active one");
+            let base = half_base(CAP, h) as usize;
+            let end = base + half_len(CAP) as usize;
+            set(&mut ram, 1, &[0x11; 224]).unwrap(); // 232 of 244 B
+            if h == 0 {
+                // Half 1 is blank after a format: what a flip in progress would have put there.
+                ram.buf[end..end + 8].fill(0xEE);
+            }
+            let outside = |ram: &Ram| (ram.buf[..base].to_vec(), ram.buf[end..].to_vec());
+            let before = outside(&ram);
+            set(&mut ram, 2, &[0x22; 4]).unwrap(); // 12 B: the half is full to the last word
+            assert_eq!(active(&ram, CAP).unwrap().unwrap().0, h, "it fits: no flip");
+            assert_eq!(free_bytes(&ram, CAP).unwrap(), 0);
+            assert!(outside(&ram) == before, "a write landed outside half {h}");
+            assert_eq!(get_vec(&ram, 1).unwrap(), [0x11; 224]);
+            assert_eq!(get_vec(&ram, 2).unwrap(), [0x22; 4]);
+        }
     }
 
     #[test]
@@ -1752,6 +1851,221 @@ mod tests {
         assert_eq!(get_vec(&ram, 2).as_deref(), Some(&b"post"[..]));
     }
 
+    /// A plan made before another flip committed is refused by `flip_step` and by `flip_commit`
+    /// before a single write. Its destination is by now the ACTIVE half: blanking it would erase
+    /// the store, and committing the plan would bring back the values it was made from.
+    #[test]
+    fn a_stale_flip_plan_is_refused_before_any_write() {
+        let mut ram = flip_fixture();
+        let mut st = flip_start(&ram, CAP).unwrap().unwrap();
+        assert!(flip_step(&mut ram, CAP, &mut st, 1).unwrap());
+        set(&mut ram, 1, b"newer").unwrap();
+        compact(&mut ram, CAP).unwrap(); // a synchronous flip commits underneath the plan
+        let image = ram.buf.clone();
+        let programs = ram.programs;
+        assert_eq!(flip_step(&mut ram, CAP, &mut st, 4), Err(KvError::Stale));
+        assert_eq!(flip_commit(&mut ram, CAP, &mut st), Err(KvError::Stale));
+        assert_eq!(ram.programs, programs, "a stale plan must not program a word");
+        assert!(ram.buf == image);
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"newer"[..]));
+        assert_eq!(get_vec(&ram, 3).as_deref(), Some(&[7u8; 40][..]));
+    }
+
+    /// `compact_with` is the requested compaction whatever the pending slot holds: with nothing
+    /// pending or a stale plan, a synchronous flip; with a fresh plan, that flip, finished. One
+    /// flip each time, the superseded records reclaimed, the slot left empty.
+    #[test]
+    fn compact_with_finishes_a_fresh_flip_and_replaces_a_stale_one() {
+        let half = half_len(CAP);
+        let packed = |ram: &Ram| {
+            assert_fixture_live(ram);
+            assert_eq!(
+                free_bytes(ram, CAP).unwrap(),
+                half - live_bytes(ram, CAP).unwrap(),
+                "only the live set is left"
+            );
+        };
+        // Nothing pending.
+        let mut ram = flip_fixture();
+        assert!(free_bytes(&ram, CAP).unwrap() < half - live_bytes(&ram, CAP).unwrap());
+        let g = generation(&ram, CAP).unwrap();
+        let mut pending = None;
+        compact_with(&mut ram, CAP, &mut pending).unwrap();
+        assert_eq!(generation(&ram, CAP).unwrap(), g + 1);
+        packed(&ram);
+
+        // A fresh plan, barely begun: finished.
+        let mut ram = flip_fixture();
+        let mut pending = flip_start(&ram, CAP).unwrap();
+        assert!(flip_step(&mut ram, CAP, pending.as_mut().unwrap(), 1).unwrap());
+        compact_with(&mut ram, CAP, &mut pending).unwrap();
+        assert!(pending.is_none());
+        assert_eq!(generation(&ram, CAP).unwrap(), g + 1);
+        packed(&ram);
+
+        // A stale plan: dropped, and the compaction still happens.
+        let mut ram = flip_fixture();
+        let mut pending = flip_start(&ram, CAP).unwrap();
+        compact(&mut ram, CAP).unwrap();
+        set(&mut ram, 1, b"one-v1").unwrap();
+        set(&mut ram, 1, b"one-v2").unwrap(); // superseded records to reclaim again
+        compact_with(&mut ram, CAP, &mut pending).unwrap();
+        assert!(pending.is_none());
+        assert_eq!(generation(&ram, CAP).unwrap(), g + 2);
+        packed(&ram);
+    }
+
+    /// One step spends its budget across both phases: with room for the blank and the copy it
+    /// does both, and reports the flip ready to commit.
+    #[test]
+    fn one_flip_step_runs_the_blank_into_the_copy() {
+        let mut ram = flip_fixture();
+        assert!(
+            !dead_half_blank(&ram, CAP).unwrap(),
+            "there is something to blank"
+        );
+        let live = live_bytes(&ram, CAP).unwrap();
+        let mut st = flip_start(&ram, CAP).unwrap().unwrap();
+        assert!(
+            !flip_step(&mut ram, CAP, &mut st, u32::MAX).unwrap(),
+            "blank and copy in one step"
+        );
+        assert_eq!(st.write_off, live, "the destination holds the packed live set");
+        flip_commit(&mut ram, CAP, &mut st).unwrap();
+        assert_fixture_live(&ram);
+    }
+
+    /// The blank comes first even when there is nothing to copy: a step that ran out of budget
+    /// in it says that work remains. Reporting the flip ready would leave the rest of the blank
+    /// to the commit, in one slice of any length.
+    #[test]
+    fn flip_step_reports_an_unfinished_blank_when_nothing_is_live() {
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 1, &[7u8; 40]).unwrap();
+        compact(&mut ram, CAP).unwrap(); // the old half: dead, 12 dirty words
+        delete(&mut ram, CAP, 1).unwrap();
+        assert_eq!(live_bytes(&ram, CAP).unwrap(), 0);
+        let mut st = flip_start(&ram, CAP).unwrap().unwrap();
+        let mut steps = 0;
+        loop {
+            let before = ram.words_written;
+            let more = flip_step(&mut ram, CAP, &mut st, 1).unwrap();
+            assert!(ram.words_written - before <= 1, "a step of one word");
+            if !more {
+                break;
+            }
+            steps += 1;
+            assert!(steps <= 12, "the blank never finished");
+        }
+        assert_eq!(steps, 11, "every step but the last reports more work");
+        let before = ram.words_written;
+        flip_commit(&mut ram, CAP, &mut st).unwrap();
+        assert_eq!(
+            ram.words_written - before,
+            3,
+            "the commit writes the superblock alone"
+        );
+        assert_eq!(get_vec(&ram, 1), None);
+        assert_eq!(free_bytes(&ram, CAP).unwrap(), half_len(CAP));
+    }
+
+    /// A live set that fills the half to the last word still flips, synchronously and in steps
+    /// (the bound on the destination is inclusive).
+    #[test]
+    fn a_live_set_that_fills_the_half_still_flips() {
+        for incremental in [false, true] {
+            let mut ram = Ram::new(CAP as usize);
+            set(&mut ram, 1, &[0x11; 224]).unwrap(); // 232 B
+            set(&mut ram, 2, &[0x22; 4]).unwrap(); // 12 B: 244, all of it live
+            assert_eq!(live_bytes(&ram, CAP).unwrap(), half_len(CAP));
+            let g = generation(&ram, CAP).unwrap();
+            if incremental {
+                let mut st = flip_start(&ram, CAP).unwrap().unwrap();
+                flip_commit(&mut ram, CAP, &mut st).unwrap();
+            } else {
+                compact(&mut ram, CAP).unwrap();
+            }
+            assert_eq!(generation(&ram, CAP).unwrap(), g + 1);
+            assert_eq!(free_bytes(&ram, CAP).unwrap(), 0);
+            assert_eq!(get_vec(&ram, 1).unwrap(), [0x11; 224]);
+            assert_eq!(get_vec(&ram, 2).unwrap(), [0x22; 4]);
+        }
+    }
+
+    /// The tail walk of a commit reaches the last word of the source: a tombstone appended into
+    /// its last 8 bytes while the flip was pending is carried over (the key stays deleted), into
+    /// a destination it fills exactly.
+    #[test]
+    fn a_tombstone_in_the_last_word_of_the_source_is_carried_over() {
+        let mut ram = Ram::new(CAP as usize);
+        set(&mut ram, 1, &[0x11; 4]).unwrap(); // 12 B
+        set(&mut ram, 2, &[0x22; 216]).unwrap(); // 224 B: 236 used, 8 left
+        let mut st = flip_start(&ram, CAP).unwrap().unwrap();
+        delete(&mut ram, CAP, 1).unwrap(); // the tombstone: the last 8 bytes of the half
+        assert_eq!(free_bytes(&ram, CAP).unwrap(), 0);
+        flip_commit(&mut ram, CAP, &mut st).unwrap();
+        assert_eq!(generation(&ram, CAP).unwrap(), 2);
+        assert_eq!(get_vec(&ram, 1), None, "the delete was lost at the commit");
+        assert_eq!(get_vec(&ram, 2).unwrap(), [0x22; 216]);
+        assert_eq!(
+            free_bytes(&ram, CAP).unwrap(),
+            0,
+            "plan and tail fill the destination"
+        );
+    }
+
+    /// A flip planned on an empty store has an empty plan: its tail walk starts at offset 0 and
+    /// carries over whatever was appended since; with nothing appended it commits an empty store.
+    #[test]
+    fn a_flip_planned_on_an_empty_store_carries_the_appends_over() {
+        let mut ram = Ram::new(CAP as usize);
+        init(&mut ram, CAP).unwrap();
+        let mut st = flip_start(&ram, CAP).unwrap().unwrap();
+        set(&mut ram, 1, b"first").unwrap();
+        set(&mut ram, 2, b"second").unwrap();
+        flip_commit(&mut ram, CAP, &mut st).unwrap();
+        assert_eq!(active(&ram, CAP).unwrap(), Some((1, 2)));
+        assert_eq!(get_vec(&ram, 1).as_deref(), Some(&b"first"[..]));
+        assert_eq!(get_vec(&ram, 2).as_deref(), Some(&b"second"[..]));
+
+        let mut ram = Ram::new(CAP as usize);
+        init(&mut ram, CAP).unwrap();
+        let mut st = flip_start(&ram, CAP).unwrap().unwrap();
+        flip_commit(&mut ram, CAP, &mut st).unwrap();
+        assert_eq!(active(&ram, CAP).unwrap(), Some((1, 2)));
+        assert_eq!(free_bytes(&ram, CAP).unwrap(), half_len(CAP));
+    }
+
+    /// The proactive threshold is two maximal records (the append that crossed it and one more
+    /// while the flip drains), and it is exclusive: free space equal to it starts nothing, one
+    /// word less does.
+    #[test]
+    fn maintain_starts_a_flip_only_strictly_below_the_threshold() {
+        assert_eq!(FLIP_THRESHOLD, 2 * record_size(MAX_VALUE));
+        assert_eq!(FLIP_THRESHOLD, 528);
+
+        let mut ram = Ram::new(CAP as usize);
+        let mut m = MaintState::new();
+        for _ in 0..4 {
+            set(&mut ram, 1, &[1u8; 20]).unwrap(); // 4 × 28 B
+        }
+        let free = free_bytes(&ram, CAP).unwrap();
+        assert_eq!(free, half_len(CAP) - 112);
+        let g = generation(&ram, CAP).unwrap();
+        let quiesce = |ram: &mut Ram, m: &mut MaintState, threshold: u32| {
+            let slices = (0..1000)
+                .take_while(|_| maintain(ram, CAP, m, 4, threshold).unwrap())
+                .count();
+            assert!(slices < 1000, "maintenance never quiesced");
+        };
+        quiesce(&mut ram, &mut m, free);
+        assert_eq!(generation(&ram, CAP).unwrap(), g, "free == threshold: no flip");
+        assert!(m.pending().is_none());
+        quiesce(&mut ram, &mut m, free + 4);
+        assert_eq!(generation(&ram, CAP).unwrap(), g + 1, "one word below: one flip");
+        assert_eq!(get_vec(&ram, 1).unwrap(), [1u8; 20]);
+    }
+
     #[test]
     fn maintain_flips_below_threshold_only() {
         const T: u32 = 64; // test threshold (FLIP_THRESHOLD exceeds a whole test half)
@@ -1825,6 +2139,58 @@ mod tests {
         assert_eq!(g1, g0 + 1, "exactly one flip");
         assert_eq!(get_vec(&ram, 1).unwrap(), [4u8; 40]);
         assert_eq!(get_vec(&ram, 2).unwrap(), [5u8; 100]);
+    }
+
+    /// A pending flip made stale by a synchronous one is dropped by the write that finds the
+    /// half full: not committed, and not an error. The write goes through one fresh flip.
+    #[test]
+    fn set_drops_a_stale_pending_flip() {
+        let mut ram = Ram::new(CAP as usize);
+        for i in 0..5u8 {
+            set(&mut ram, 1, &[i; 40]).unwrap(); // 240 of 244 B
+        }
+        let mut pending = flip_start(&ram, CAP).unwrap();
+        compact(&mut ram, CAP).unwrap(); // gets there first: the plan is stale
+        for i in 0..4u8 {
+            set(&mut ram, 1, &[0x10 + i; 40]).unwrap(); // full again
+        }
+        let g = generation(&ram, CAP).unwrap();
+        set_bytes_with(&mut ram, CAP, 2, &[5u8; 100], &mut pending).unwrap();
+        assert!(pending.is_none(), "the stale plan must be consumed");
+        assert_eq!(generation(&ram, CAP).unwrap(), g + 1, "exactly one flip");
+        assert_eq!(get_vec(&ram, 1).unwrap(), [0x13; 40]);
+        assert_eq!(get_vec(&ram, 2).unwrap(), [5u8; 100]);
+    }
+
+    /// A record that exactly fills what a flip leaves free is written (the bound is inclusive),
+    /// after a synchronous flip and after finishing a pending one, with exactly one flip each.
+    #[test]
+    fn a_record_that_exactly_fits_after_a_flip_is_written() {
+        for incremental in [false, true] {
+            let mut ram = Ram::new(CAP as usize);
+            set(&mut ram, 2, &[0x21; 4]).unwrap(); // 12 B, superseded below
+            set(&mut ram, 1, &[0x11; 212]).unwrap(); // 220 B
+            set(&mut ram, 2, &[0x22; 4]).unwrap(); // 12 B: the half is full, 232 B of it live
+            assert_eq!(free_bytes(&ram, CAP).unwrap(), 0);
+            assert_eq!(live_bytes(&ram, CAP).unwrap(), 232);
+            let g = generation(&ram, CAP).unwrap();
+            let mut pending = if incremental {
+                flip_start(&ram, CAP).unwrap()
+            } else {
+                None
+            };
+            set_bytes_with(&mut ram, CAP, 3, &[0x33; 4], &mut pending).unwrap(); // 232 + 12
+            assert!(pending.is_none());
+            assert_eq!(
+                generation(&ram, CAP).unwrap(),
+                g + 1,
+                "exactly one flip (incremental: {incremental})"
+            );
+            assert_eq!(free_bytes(&ram, CAP).unwrap(), 0);
+            assert_eq!(get_vec(&ram, 1).unwrap(), [0x11; 212]);
+            assert_eq!(get_vec(&ram, 2).unwrap(), [0x22; 4]);
+            assert_eq!(get_vec(&ram, 3).unwrap(), [0x33; 4]);
+        }
     }
 
     /// Regression (found while building the `kv_store` fuzz target): with a pending incremental
@@ -2264,6 +2630,64 @@ mod tests {
         get_bytes(ram, cap, key, &mut out)
             .unwrap()
             .map(|n| out[..n].to_vec())
+    }
+
+    /// A value of exactly `MAX_VALUE` bytes is a record like any other: it reads back, survives a
+    /// synchronous flip, and one appended while an incremental flip is pending is carried over.
+    #[test]
+    fn a_maximal_value_reads_back_and_survives_flips() {
+        let big: Vec<u8> = (0..MAX_VALUE).map(|i| i as u8 | 1).collect();
+        let mut ram = Ram::new(CAP6K as usize);
+        set_bytes(&mut ram, CAP6K, 1, &big).unwrap();
+        assert_eq!(get_at(&ram, CAP6K, 1).as_deref(), Some(&big[..]));
+        assert_eq!(live_bytes(&ram, CAP6K).unwrap(), record_size(MAX_VALUE));
+        compact(&mut ram, CAP6K).unwrap();
+        assert_eq!(
+            get_at(&ram, CAP6K, 1).as_deref(),
+            Some(&big[..]),
+            "lost by the flip"
+        );
+
+        let mut st = flip_start(&ram, CAP6K).unwrap().unwrap();
+        let other: Vec<u8> = big.iter().rev().copied().collect();
+        set_bytes(&mut ram, CAP6K, 2, &other).unwrap(); // in the tail of the pending flip
+        flip_commit(&mut ram, CAP6K, &mut st).unwrap();
+        assert_eq!(get_at(&ram, CAP6K, 1).as_deref(), Some(&big[..]));
+        assert_eq!(
+            get_at(&ram, CAP6K, 2).as_deref(),
+            Some(&other[..]),
+            "lost at the commit"
+        );
+    }
+
+    /// A header whose length is past `MAX_VALUE` is not a record (a torn or corrupted word, with
+    /// room in the half for the value it claims): every walk of the log ends at it, without
+    /// reading a value that long into a `MAX_VALUE` buffer.
+    #[test]
+    fn an_oversized_length_ends_the_log() {
+        let mut ram = Ram::new(CAP6K as usize);
+        set_bytes(&mut ram, CAP6K, 1, b"kept").unwrap();
+        let (h, _) = active(&ram, CAP6K).unwrap().unwrap();
+        let half = half_len(CAP6K);
+        let end = half - free_bytes(&ram, CAP6K).unwrap();
+        let mut st = flip_start(&ram, CAP6K).unwrap().unwrap();
+        // Tag 2, length 300, and bytes behind them, at the log end.
+        let at = (half_base(CAP6K, h) + end) as usize;
+        ram.buf[at..at + 4].copy_from_slice(&[0x02, 0x00, 0x2C, 0x01]);
+        ram.buf[at + 4..at + 320].fill(0x5A);
+
+        assert_eq!(get_at(&ram, CAP6K, 1).as_deref(), Some(&b"kept"[..])); // the record scan
+        assert_eq!(get_at(&ram, CAP6K, 2), None);
+        assert_eq!(free_bytes(&ram, CAP6K).unwrap(), half - end);
+        assert_eq!(live_bytes(&ram, CAP6K).unwrap(), end); // the flip's pass 1
+        flip_commit(&mut ram, CAP6K, &mut st).unwrap(); // the tail walk of a commit
+        assert_eq!(get_at(&ram, CAP6K, 1).as_deref(), Some(&b"kept"[..]));
+        assert_eq!(get_at(&ram, CAP6K, 2), None);
+        assert_eq!(
+            free_bytes(&ram, CAP6K).unwrap(),
+            half - end,
+            "nothing but the record moved"
+        );
     }
 
     #[test]

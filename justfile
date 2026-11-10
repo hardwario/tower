@@ -122,3 +122,42 @@ fuzz-all seconds="60":
     {{just}} fuzz kv_store {{seconds}}
     {{just}} fuzz shell_kernels {{seconds}}
     {{just}} fuzz radio_kernels {{seconds}}
+
+
+# === Mutation testing =============================================================================
+
+# cargo-mutants (`cargo install --locked cargo-mutants`) changes the code of a crate one small
+# piece at a time (an operator, a constant returned in place of a result) and runs that crate's
+# tests on each change: a mutant no test fails on is code the tests do not hold. It is slow (a
+# build and a test run per mutant: about half an hour for the three crates at 4 jobs), so it is
+# not part of `check`; `.github/workflows/mutants.yml` runs it weekly. The mutants known to change
+# nothing are listed, with the reason, in `.cargo/mutants.toml`. Results land in
+# `target/mutants/<crate>/mutants.out/` (`missed.txt`, `caught.txt`, `timeout.txt`, the diffs).
+#
+# The recipe fails when a mutant SURVIVES (or the tool itself fails). A mutant whose test run
+# hangs (an offset that stops advancing loops for ever) is killed by cargo-mutants' timeout: that
+# counts as caught, though cargo-mutants' own exit status calls it out. `CARGO_MUTANTS_JOBS`
+# sets the parallel jobs (default 4). docs/test-strategy.md, layer 6, has the last results.
+# Mutation-test the security kernels: `just mutants` (net, kv, protocol) or `just mutants kv`.
+[script("python3")]
+mutants *crates="net kv protocol":
+    import os, pathlib, subprocess, sys
+    os.environ.setdefault("CARGO_MUTANTS_JOBS", "4")
+    survived = False
+    summary = []
+    for crate in "{{crates}}".split():
+        out = pathlib.Path("target/mutants") / crate
+        out.mkdir(parents=True, exist_ok=True)
+        code = subprocess.run(["cargo", "mutants", "--package", f"tower-{crate}", "--output", str(out)]).returncode
+        # 0: every mutant caught; 2: some survived; 3: some test runs timed out (and, possibly,
+        # some survived). Anything else is the tool or the unmutated tree failing.
+        if code not in (0, 2, 3):
+            sys.exit(f"cargo mutants -p tower-{crate} failed (exit status {code})")
+        count = lambda name: len((out / "mutants.out" / name).read_text().splitlines())
+        caught, missed, timeout, unviable = (count(f"{n}.txt") for n in ("caught", "missed", "timeout", "unviable"))
+        summary.append(f"tower-{crate}: {caught + missed + timeout + unviable} mutants, {caught} caught, "
+                       f"{timeout} caught by the timeout, {unviable} unviable, {missed} MISSED")
+        survived |= missed > 0
+    print("\n" + "\n".join(summary))
+    if survived:
+        sys.exit("surviving mutants: see target/mutants/<crate>/mutants.out/missed.txt (and diff/)")

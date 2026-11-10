@@ -1,0 +1,75 @@
+# Mutation testing of the security kernels (cargo-mutants, see docs/test-strategy.md, layer 6).
+#
+# Weekly and on demand, `just mutants <crate>` for tower-net, tower-kv and tower-protocol: the
+# code of the crate is changed one small piece at a time and the crate's tests are run on each
+# change. A job fails when a mutant SURVIVES (no test noticed the change) and uploads cargo-mutants'
+# results (`missed.txt`, the diffs, the logs); the mutants known to change nothing are listed, with
+# the reason, in .cargo/mutants.toml. It is not part of the push / PR CI: a run builds and tests
+# every mutant (tower-kv alone is some 380 of them), far too slow for every push.
+#
+# Supply chain as in ci.yml: actions pinned to full commit SHAs, a read-only token, no persisted
+# credentials, cargo-mutants installed at an exact version from its own lockfile, and every mutant
+# built `--locked` to the committed Cargo.lock (.cargo/mutants.toml).
+
+name: Mutants
+
+on:
+  schedule:
+    - cron: "41 3 * * 2" # Tuesdays 03:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # The repo's pinned stable (MUST equal `channel` in rust-toolchain.toml; ci.yml's `audit` job
+  # checks every workflow).
+  RUST_TOOLCHAIN: "1.99.1"
+  CARGO_MUTANTS_VERSION: "27.1.0"
+  # Two mutants at a time on the runner's four cores: each test run is itself parallel, and the
+  # timeout that catches a hanging mutant is measured on an unloaded run.
+  CARGO_MUTANTS_JOBS: "2"
+
+jobs:
+  mutants:
+    name: mutants tower-${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [net, kv, protocol]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml pin)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: mutants-${{ matrix.crate }}
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: 1.59.0
+      - name: Install cargo-mutants
+        run: cargo install --locked --version "$CARGO_MUTANTS_VERSION" cargo-mutants
+      - name: Mutation-test tower-${{ matrix.crate }}
+        env:
+          CRATE: ${{ matrix.crate }}
+        run: just mutants "$CRATE"
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-${{ matrix.crate }}
+          path: target/mutants/${{ matrix.crate }}/mutants.out/
+          if-no-files-found: ignore
