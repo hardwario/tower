@@ -206,6 +206,8 @@ mod tests {
 
     #[test]
     fn frames_match_the_guideline() {
+        // The guideline's two periods: 16 s between measurements, 8 days between corrections.
+        assert_eq!((MIN_PERIOD_S, ABC_PERIOD_S), (16, 691_200));
         assert_eq!(WRITE_LEN, 33);
         assert_eq!(REPLY_LEN, 49);
         assert_eq!(crc16(&READ_FRAME), 0, "the constant read frame carries its CRC");

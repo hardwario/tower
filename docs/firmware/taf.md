@@ -182,7 +182,10 @@ runtime's future with the radio state is about 2.6 KB of it, the console about 3
 stack peaks (`system stack print`, 2026-11-09, after pairing, remote shell, sets and EEPROM
 writes): 4.7 KB `radio_motion`, 5.2 KB `radio_control`, 6.2 KB `radio_thermostat` headless (6.1 KB
 on the r1), 7.1 KB `radio_thermostat` with its screen (r2, opt-level "z", OTA pairing from the
-menu, 2026-11-09). So the floor is real margin, not slack. What keeps an app small:
+menu, 2026-11-09); 2026-11-10: 5.3 KB `radio_climate` with the Climate and CO2 Modules (r2, "z",
+after sets over the radio), 5.3 KB `radio_control` with the Relay Module and on the US 915 hop
+schedule (of the 8.2 KB it has left). So the floor is real margin, not slack. What keeps an app
+small:
 
 - **A task argument is stored twice** in its future (the argument and the local it moves into):
   build big things (a strip, a driver) inside the task.

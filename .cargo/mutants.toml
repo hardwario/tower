@@ -44,4 +44,16 @@ exclude_re = [
     # with `<=` the header at the planned log end is read, is in no plan entry, and is skipped.
     # `read_off` then sits past `src_end`, which only this loop reads.
     'crates/kv/src/lib\.rs:\d+:23: replace < with <= in flip_step$',
+
+    # tower-modules (`just mutants modules`): `|` and `^` of masks that share no bit are the
+    # same value. The LP8's status masks (`FATAL | ALGORITHM | MEMORY | SELF_DIAG`,
+    # `VCAP1_LOW | VCAP2_LOW`, ...: single bits each), the MPL3115A2's oversampling field next
+    # to its one-shot bit and the three bytes of its pressure shifted to their places, the
+    # relay's bridge patterns (one pin each).
+    'crates/modules/src/lp8\.rs:\d+:\d+: replace \| with \^ in Measurement::(needs_restart|vcap_low|ppm)$',
+    'crates/modules/src/mpl3115a2\.rs:\d+:\d+: replace \| with \^ in (Oversampling::one_shot|pressure_deci_hpa)$',
+    'crates/modules/src/relay\.rs:\d+:\d+: replace \| with \^( in drive)?$',
+    # `1 << 0` and `1 >> 0` are both 1: the green LED's pin (the red one's, `1 << 1`, is pinned
+    # by value).
+    'crates/modules/src/relay\.rs:\d+:29: replace << with >>$',
 ]

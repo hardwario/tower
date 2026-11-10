@@ -122,6 +122,13 @@ it is not part of `just check`: `.github/workflows/mutants.yml` runs it weekly a
 | `tower-kv`, now | 381 | 276 | 73 | 32 | 0 |
 | `tower-protocol`, first run | 392 | 276 | 0 | 72 | 44 |
 | `tower-protocol`, now | 391 | 319 | 0 | 72 | 0 |
+| `tower-modules`, first run (`just mutants modules`) | 248 | 221 | 0 | 7 | 20 |
+| `tower-modules`, now | 234 | 227 | 0 | 7 | 0 |
+
+`tower-modules` (the module drivers' arithmetic and frames, written the same day) is not one of
+the default three; its run found one constant nothing pinned (the Relay Module's red LED bit:
+`1 << 1` could have become 0), an untested period constant and error text, and 14 equivalent
+mutants (`|` against `^` of masks that share no bit), listed in `.cargo/mutants.toml`.
 
 *Unviable*: the mutant does not compile (a const assertion fails, a type does not fit). *Caught
 by the timeout*: the mutant makes the code itself loop for ever (a scan offset that stops

@@ -292,9 +292,14 @@ contract tests, radio pre-compliance, environment, production test, release qual
       the tail of an `export` clipped), and the console footer's clock leaving a letter of a
       hint behind it. The first fix turns on ratatui's `unstable-rendered-line-info` feature.
 
+- [x] `tower-modules` under the same test (`just mutants modules`): 20 survivors of 248, none
+      after three more assertions (the Relay Module's red LED bit was pinned by nothing) and
+      14 equivalent mutants listed with their reason.
+- [x] `firmware/tools/hwtest/soak.py`: soak accounting from an MQTT recording (layer 2's first
+      step).
+
 **Remaining, no hardware needed:** `cargo-llvm-cov` and Kani proofs of the counter and replay
-kernels; mutation testing of tower-radio, tower-gateway, tower-shell, tower-taf and
-tower-modules; a CI job against a real mosquitto (TLS, logins, a broker restart); the four TUI
+kernels; mutation testing of tower-radio, tower-gateway, tower-shell and tower-taf; a CI job against a real mosquitto (TLS, logins, a broker restart); the four TUI
 layout defects the snapshots record (console hints under the clock below 140 columns, the
 console prompt not scrolling, the gateway's footer chips cut at 100 columns, its node table
 below 100 columns); frames of the two wall-clock modals.

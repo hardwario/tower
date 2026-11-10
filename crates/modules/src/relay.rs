@@ -84,6 +84,8 @@ mod tests {
 
     #[test]
     fn the_leds_do_not_touch_the_bridge() {
+        // P0 and P1, as the module is wired.
+        assert_eq!((LED_GREEN, LED_RED), (0b01, 0b10));
         assert_eq!(led(true), LED_GREEN);
         assert_eq!(led(false), LED_RED);
         assert_eq!((LED_GREEN | LED_RED) & (F_H | T_L | T_H | F_L), 0);

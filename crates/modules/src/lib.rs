@@ -46,3 +46,19 @@ impl core::fmt::Display for Invalid {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Invalid;
+
+    /// The texts a driver's error ends in (a node logs `CO2 not measured: LP8 frame: CRC
+    /// mismatch`).
+    #[test]
+    fn invalid_data_says_what_is_wrong() {
+        extern crate std;
+        use std::string::ToString;
+        assert_eq!(Invalid::Crc.to_string(), "CRC mismatch");
+        assert_eq!(Invalid::Unexpected.to_string(), "unexpected data");
+        assert_eq!(Invalid::Short.to_string(), "short data");
+    }
+}
