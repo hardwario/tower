@@ -59,7 +59,7 @@ embassy-stm32 = { version = "0.6.0", features = [
 # (Spi::new_blocking): FIFO bursts are ≤96 B at ≤10 MHz (~80 µs), and SPI1's DMA
 # channel (DMA1_CH3) is already owned by the WS2812 strip.
 
-cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m = { version = "0.7.10", features = ["inline-asm", "critical-section-single-core"] }
 # `set-vtor`: the reset handler points VTOR at our vector table. After a real reset VTOR is
 # already 0 (which aliases main flash when BOOT0 is low), but an app the ROM bootloader *jumps*
 # to (AN3155 `Go`, the USB DFU "leave" of a rev 1.3 board) inherits the bootloader's mapping,

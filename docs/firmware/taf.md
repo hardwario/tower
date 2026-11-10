@@ -199,8 +199,8 @@ menu, 2026-11-09). So the floor is real margin, not slack. What keeps an app sma
   task of `radio_climate` is 344 B with both modules' drivers in it.
 
 **Flash is the other limit.** The runtime is in every app, so code added to it lands in all of
-them; the tightest are `radio_thermostat` on the r2 (3.4 KB of its 192 KB free at opt-level "z",
-with the screen, 2026-11-09) and `radio_control` on the r2 (5.3 KB). `just fw ci` prints every
+them; the tightest are `radio_thermostat` on the r2 (3.0 KB of its 192 KB free at opt-level "z",
+with the screen, 2026-11-10) and `radio_control` on the r2 (4.7 KB). `just fw ci` prints every
 bin's free flash and warns under 2 KB (`tools/check_ram_budget.py`). Lessons from winning it back:
 
 - **No checked `str` slices** (`&s[a..b]`, `split_at`, a `str` pattern's reverse search) in
