@@ -65,7 +65,13 @@ pub enum Access {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prop {
     pub id: u8,
-    /// The MQTT topic leaf and the shell setting name: lowercase, `-` between words.
+    /// The MQTT topic under `state/`, `set/` or `event/`, and the shell setting name: lowercase
+    /// letters and digits, `-` between words. A [`Access::State`] may be one of a group, named
+    /// `group/member` (`temperature/system`): the readings of one quantity from several sensors,
+    /// two topic levels, so one MQTT filter (`state/temperature/+`) takes them all. Nothing
+    /// that can be set and no event is grouped (a `set` topic and a shell setting are one
+    /// word), and no property has a group's name alone (a topic is a value or a parent, never
+    /// both).
     pub name: &'static str,
     pub ty: Type,
     pub access: Access,
@@ -137,9 +143,21 @@ const fn number(min: i32, max: i32, decimals: u8, unit: &'static str) -> Type {
     }
 }
 
+/// One of a node's thermometers, a member of the group `temperature/`: hundredths of a degree,
+/// the TMP112's range.
+const fn thermometer(id: u8, name: &'static str) -> Prop {
+    Prop {
+        id,
+        name,
+        ty: number(-4000, 12500, 2, "°C"),
+        access: Access::State,
+        default: "",
+    }
+}
+
 /// Common property ids.
 pub mod common {
-    pub const TEMPERATURE: u8 = 0;
+    pub const TEMPERATURE_SYSTEM: u8 = 0;
     pub const HEARTBEAT: u8 = 1;
     pub const REPORT_PERIOD: u8 = 2;
     pub const REPORT_DELTA: u8 = 3;
@@ -165,13 +183,10 @@ pub const BUTTON_EVENTS: &[&str] = &["press", "release", "click", "hold"];
 
 /// The properties every standard app has.
 pub const COMMON: &[Prop] = &[
-    Prop {
-        id: common::TEMPERATURE,
-        name: "temperature",
-        ty: number(-4000, 12500, 2, "°C"),
-        access: Access::State,
-        default: "",
-    },
+    // The Core Module's own thermometer (its TMP112). Named for where it sits, as every
+    // thermometer of a node is: a node has no plain `temperature`, since which sensor that
+    // meant would change with the modules fitted.
+    thermometer(common::TEMPERATURE_SYSTEM, "temperature/system"),
     Prop {
         id: common::HEARTBEAT,
         name: "heartbeat",
@@ -259,8 +274,9 @@ pub mod button {
     };
 }
 
-/// `radio_climate`: a climate sensor: the Climate Module's humidity, illuminance and pressure and
-/// the CO2 Module's concentration, each reported only while its sensor is fitted.
+/// `radio_climate`: a climate sensor: the Climate Module's temperature, humidity, illuminance
+/// and pressure and the CO2 Module's concentration, and every other thermometer the sensors
+/// have; each reported only while its sensor is fitted.
 pub mod climate {
     use super::*;
 
@@ -273,6 +289,10 @@ pub mod climate {
     pub const PRESSURE_DELTA: u8 = APP_BASE + 6;
     pub const CO2_DELTA: u8 = APP_BASE + 7;
     pub const CO2_PERIOD: u8 = APP_BASE + 8;
+    pub const TEMPERATURE_CLIMATE: u8 = APP_BASE + 9;
+    pub const TEMPERATURE_HYGROMETER: u8 = APP_BASE + 10;
+    pub const TEMPERATURE_BAROMETER: u8 = APP_BASE + 11;
+    pub const TEMPERATURE_CO2: u8 = APP_BASE + 12;
 
     pub const KIND: Kind = Kind {
         id: 2,
@@ -351,6 +371,17 @@ pub mod climate {
                 access: Access::Param,
                 default: "300",
             },
+            // The Climate Module's thermometer, the room's temperature: it sits away from the
+            // Core Module's own heat (`temperature/system`). Its TMP112 on the first revision,
+            // the SHT30 on the second. Held to `report-delta`, as every thermometer is.
+            thermometer(TEMPERATURE_CLIMATE, "temperature/climate"),
+            // The other sensors' own thermometers, there to compare and to diagnose. The
+            // humidity sensor's (an SHT20's; an SHT30's when the module has a TMP112 too) ...
+            thermometer(TEMPERATURE_HYGROMETER, "temperature/hygrometer"),
+            // ... the barometer's die ...
+            thermometer(TEMPERATURE_BAROMETER, "temperature/barometer"),
+            // ... and the LP8's, at its last measurement.
+            thermometer(TEMPERATURE_CO2, "temperature/co2"),
         ],
     };
 }

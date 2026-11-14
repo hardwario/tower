@@ -20,7 +20,7 @@ expression: "shot(&mut app, size)"
 ┌ Shell: kitchen ‹1/4› ──────────────────────────────┐┌ MQTT · 9 msgs · F7 = filter node ──────────────────────────────┐
 │ uptime = 3600 s                                    ││ :"<redacted>"}}                                                │
 │ stack = 1840 of 2048 bytes                         ││ ▲ gateway/rsp/u1 {"id":"u1","ok":true}                         │
-│ wire = console 0x1234 radio 0xabcd                 ││ ▲ nodes/0x0000cd34/state/temperature ®                         │
+│ wire = console 0x1234 radio 0xabcd                 ││ ▲ nodes/0x0000cd34/state/temperature/system ®                  │
 │ ✓                                                  ││ {"value":21.5,"ts":1700000003}                                 │
 │ > system eeprom wipe                               ││ ▼ nodes/0x0000ab12/shell/req {"id":"tui-5","line":"led on"}    │
 │ ✖ result 5                                         ││ ▲ nodes/0x0000ab12/shell/pending ®                             │
@@ -57,7 +57,7 @@ aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
 n.ooooooeeemmmmmm....................................n..emmmmmmmmmmmmee
 n.oooooeeemmmmmmmmmmmmmmmmmm.........................n..ppdddddddddddddd.eppppemmmmeppppeffffe
-n.ooooeeemmmmmmmmmmmmmmmmmmmmmmmmmmm.................n..ppddddddddddddddddddddddddddddddddddee
+n.ooooeeemmmmmmmmmmmmmmmmmmmmmmmmmmm.................n..ppdddddddddddddddddddddddddddddddddddddddddee
 n.m..................................................n..epppppppeooooeppppeooooooooooe
 n.eepppppp.pppppp.ffff...............................n..qqdddddddddddddddddddddddddd.eppppemmmmmmmeppppppemmmmmmmme
 n.rrrrrrrrrr.........................................n..ppddddddddddddddddddddddddddddddee

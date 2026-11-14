@@ -22,16 +22,16 @@ expression: "shot(&mut app, size)"
 │                                                                               ││   -8s                       -4s                     now │
 └───────────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────────────────────────┘
 ┌ Shell: kitchen ‹1/4› ───────────────────────────────────────┐┌ MQTT · 9 msgs · F7 = filter node ─────────────────────────────────────────┐
-│ > system resource print             ┌ OTA pairing ─────────────────────────────────────────────────┐                                     │
-│ uptime = 3600 s                     │ window open, 45 s left                                       │":"0x00000001","firmware":"radio_gat │
+│ > system resource print             ┌ OTA pairing ─────────────────────────────────────────────────┐":"0x00000001","firmware":"radio_gat │
+│ uptime = 3600 s                     │ window open, 45 s left                                       │                                     │
 │ stack = 1840 of 2048 bytes          │                                                              │                                     │
-│ wire = console 0x1234 radio 0xabcd  │ power the node up, hold its button 10 s,                     │                                     │
-│ ✓                                   │ release when the LED goes off;                               │:1234,"ts":1700000000}               │
-│ > system eeprom wipe                │ the window closes itself on the first join                   │                                     │
-│ ✖ result 5                          │                                                              │"addr":"0x0000cd34","key":"<redacted │
-│ > led blink                         │ Esc = cancel now                                             │                                     │
-│ ✖ queue TTL expired without a confir└──────────────────────────────────────────────────────────────┘}                                    │
-│ ⌛ system settings set report-period=30 (ref 9; p→Del       ││ ▲ nodes/0x0000cd34/state/temperature ® {"value":21.5,"ts":1700000003}     │
+│ wire = console 0x1234 radio 0xabcd  │ power the node up, hold its button 10 s,                     │:1234,"ts":1700000000}               │
+│ ✓                                   │ release when the LED goes off;                               │                                     │
+│ > system eeprom wipe                │ the window closes itself on the first join                   │"addr":"0x0000cd34","key":"<redacted │
+│ ✖ result 5                          │                                                              │                                     │
+│ > led blink                         │ Esc = cancel now                                             │}                                    │
+│ ✖ queue TTL expired without a confir└──────────────────────────────────────────────────────────────┘system ®                             │
+│ ⌛ system settings set report-period=30 (ref 9; p→Del       ││ {"value":21.5,"ts":1700000003}                                            │
 │ dequeues)                                                   ││ ▼ nodes/0x0000ab12/shell/req {"id":"tui-5","line":"led on"}               │
 │ ⌛ led on (ref 10; p→Del dequeues)                          ││ ▲ nodes/0x0000ab12/shell/pending ® [{"ref":9,"id":"tui-4","line":"system  │
 │ > system settings set heartbeat=600                         ││ settings set report-period=30"},{"ref":10,"id":"tui-5","line":"led on"}]  │
@@ -68,23 +68,23 @@ aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbddddddddddd
 .....................................................................................fff.......................fff.....................fff
 
 qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
-q.ffllllll.llllllll.ggggg.............gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
-q.rrrrrrfffssssss.....................g..............tttt............................................glfssssssssssssfllllllllllfssssssssss
-q.rrrrrfffssssssssssssssssss..........g..............................................................g
-q.rrrrfffsssssssssssssssssssssssssss..g..............................................................g
-q.s...................................g..............................................................gfrrrrfllllfrrrrrrrrrrf
-q.ffllllll.llllll.gggg................g..............................................................g
-q.uuuuuuuuuu..........................g..............................................................gllllllfssssssssssssflllllfssssssssss
-q.fflll.ggggg.........................g..............................................................g
-q.uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggf
-q.v.vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv.......q..lleeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeff.flllllllfrrrrfllllfrrrrrrrrrrf
-q.vvvvvvvvv...................................................q..wweeeeeeeeeeeeeeeeeeeeeeeeee.fllllfsssssssfllllllfssssssssf
-q.v.vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv..........................q..lleeeeeeeeeeeeeeeeeeeeeeeeeeeeeeff.fflllllfrfllllfsssssssfllllllfsssssss
-q.ll.................................x........................q..ssssssssssssssssssssssssssssssffflllllfrrfllllfsssssssfllllllfssssssssff
+q.ffllllll.llllllll.ggggg.............gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggglfrrrrrrrrrrrrfllllllllllfrrrrrrrrrr
+q.ssssssfffrrrrrr.....................g..............tttt............................................g
+q.sssssfffrrrrrrrrrrrrrrrrrr..........g..............................................................g
+q.ssssfffrrrrrrrrrrrrrrrrrrrrrrrrrrr..g..............................................................gfssssfllllfssssssssssf
+q.r...................................g..............................................................g
+q.ffllllll.llllll.gggg................g..............................................................gllllllfrrrrrrrrrrrrflllllfrrrrrrrrrr
+q.uuuuuuuuuu..........................g..............................................................g
+q.fflll.ggggg.........................g..............................................................gf
+q.uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggeeeeeeff
+q.v.vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv.......q..flllllllfssssfllllfssssssssssf
+q.vvvvvvvvv...................................................q..wweeeeeeeeeeeeeeeeeeeeeeeeee.fllllfrrrrrrrfllllllfrrrrrrrrf
+q.v.vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv..........................q..lleeeeeeeeeeeeeeeeeeeeeeeeeeeeeeff.fflllllfsfllllfrrrrrrrfllllllfrrrrrrr
+q.ll.................................x........................q..rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrffflllllfssfllllfrrrrrrrfllllllfrrrrrrrrff
 q.............................................................q..lleeeeeeeeeeeeeeeeff.yyyyyyyyy
 q.............................................................q..lleeeeeeee
-q.............................................................q..fllllllfssssssssssssfllllllfrflllllllllfsssssssssssssssfllllllllllfggggfl
-q.............................................................q..lllfrrrrrrrrrrf
+q.............................................................q..fllllllfrrrrrrrrrrrrfllllllfsflllllllllfrrrrrrrrrrrrrrrfllllllllllfggggfl
+q.............................................................q..lllfssssssssssf
 qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
 
 
@@ -113,8 +113,8 @@ n: Cyan on Cyan
 o: Blue
 p: Green on Blue
 q: LightRed BOLD
-r: Magenta
-s: Green
+r: Green
+s: Magenta
 t: Yellow BOLD
 u: Red
 v: Yellow DIM

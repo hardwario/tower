@@ -209,17 +209,17 @@ pub const fn settings<const N: usize>(kind: &Kind) -> [Setting; N] {
 struct Slot {
     id: u8,
     /// How far the value must be from the one last sent to be news (0: any change), in the
-    /// property's wire units. The temperature's is the `report-delta` setting instead. 16 bits:
-    /// it sits in the padding after `id`, so the table is no bigger for it.
+    /// property's wire units. `temperature/system`'s is the `report-delta` setting instead.
+    /// 16 bits: it sits in the padding after `id`, so the table is no bigger for it.
     delta: u16,
     value: i32,
     sent: tower_taf::report::Reporter,
 }
 
-/// Reported properties the runtime keeps (an app reports a handful: the most, `radio_control`,
-/// eight with the temperature). A slot is 20 B of RAM in every app, and `radio_control` sits at
-/// the stack floor, so there is one to spare, not more.
-const SLOTS: usize = 9;
+/// Reported properties the runtime keeps (an app reports a handful: the most, `radio_climate`
+/// with both modules, nine; `radio_control` eight). A slot is 16 B of RAM in every app, and
+/// `radio_control` sits at the stack floor, so there is one to spare, not more.
+const SLOTS: usize = 10;
 
 struct Shared {
     kind: Option<&'static Kind>,
@@ -640,7 +640,7 @@ fn due_reports(
             // The temperature moves continuously: only a change past `report-delta` is news. A
             // value the app measures carries its own delta; a discrete one has none (any change
             // is news).
-            let d = if s.id == props::common::TEMPERATURE {
+            let d = if s.id == props::common::TEMPERATURE_SYSTEM {
                 delta
             } else {
                 i32::from(s.delta)
@@ -743,9 +743,10 @@ pub async fn temperature_sampled() -> i32 {
     TEMPERATURE_SAMPLED.wait().await
 }
 
-/// A temperature sample from the sensor task: kept, reported, handed to a waiting app.
+/// A temperature sample from the sensor task: kept, reported (`temperature/system`), handed to
+/// a waiting app.
 fn sampled(centi: i32) {
     TEMPERATURE.store(centi, Ordering::Relaxed);
-    report(props::common::TEMPERATURE, centi);
+    report(props::common::TEMPERATURE_SYSTEM, centi);
     TEMPERATURE_SAMPLED.signal(centi);
 }

@@ -1,5 +1,5 @@
 //! The Core Module's sensors, the same in every taf node app: the TMP112's temperature (the
-//! common `temperature` state, sampled every `report-period`) and the LIS2DH12's tilt interrupt
+//! common `temperature/system` state, sampled every `report-period`) and the LIS2DH12's tilt interrupt
 //! (the common `tilt` event, armed per the `accel` setting). The runtime spawns [`task`]; an app
 //! that works with the temperature reads it with [`temperature`](super::temperature) or waits for
 //! the next sample with [`temperature_sampled`](super::temperature_sampled).

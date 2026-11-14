@@ -70,7 +70,7 @@ fn modules_climate_reads_every_sensor() {
     wait_for_all(
         &mut console,
         Duration::from_secs(15),
-        &["sensors: SHT20, OPT3001, MPL3115A2", "CO2 Module found"],
+        &["sensors: TMP112, SHT20, OPT3001, MPL3115A2", "CO2 Module found"],
     );
 
     // Short periods for the run: a round every 5 s, CO2 as often as the LP8 allows. The first
@@ -107,23 +107,35 @@ fn modules_climate_reads_every_sensor() {
 
     eprintln!("HIL: climate print after {co2_after:.0?}:\n{print}");
     assert!(
-        print.contains("sensors: SHT20, OPT3001, MPL3115A2, CO2 Module"),
+        print.contains("sensors: TMP112, SHT20, OPT3001, MPL3115A2, CO2 Module"),
         "{print}"
     );
     let value = |name: &str| reading(&print, name).unwrap_or_else(|| panic!("no {name} in:\n{print}"));
     // An indoor bench: generous bounds that still catch a wrong conversion or byte order.
+    // The room's temperature is the Climate Module's thermometer.
     let (t, h, lx, p, co2) = (
-        value("temperature"),
+        value("temperature/climate"),
         value("humidity"),
         value("illuminance"),
         value("pressure"),
         value("co2"),
     );
-    assert!((5.0..=45.0).contains(&t), "temperature {t} °C");
+    assert!((5.0..=45.0).contains(&t), "temperature/climate {t} °C");
     assert!((5.0..=95.0).contains(&h), "humidity {h} %");
     assert!((0.0..=83865.6).contains(&lx), "illuminance {lx} lx");
     assert!((850.0..=1085.0).contains(&p), "pressure {p} hPa");
     assert!((300.0..=5000.0).contains(&co2), "CO2 {co2} ppm");
+    // Every other thermometer of the stack, each under its own name in the group
+    // `temperature/`: within a few degrees of the module's (the Core Module's runs warm on
+    // USB, the barometer's die reads low). No plain `temperature`: a node has none.
+    for source in ["system", "hygrometer", "barometer", "co2"] {
+        let v = value(&format!("temperature/{source}"));
+        assert!((v - t).abs() <= 4.0, "temperature/{source} {v} °C against {t} °C");
+    }
+    assert!(
+        reading(&print, "temperature").is_none(),
+        "a plain temperature in:\n{print}"
+    );
     // The first charge is a minute; the measurement runs in the first round after it.
     assert!(
         co2_after >= Duration::from_secs(40),

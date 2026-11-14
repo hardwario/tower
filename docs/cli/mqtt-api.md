@@ -45,14 +45,14 @@ On every (re)connect to the broker the bridge republishes its whole retained sta
 first and keeps state and events (the oldest held events are shed only after a long outage).
 
 **Last will.** The bridge connects with a last will on `gateway/status`: retained, QoS 1,
-payload `{"state":"offline","schema":4}`. The broker publishes it when the bridge's connection
+payload `{"state":"offline","schema":5}`. The broker publishes it when the bridge's connection
 drops (the process exits or is killed, or its link stays silent for one and a half keep-alive
 periods; the bridge uses 15 s), so a subscriber sees a dead gateway without timing anything
 itself. The embedded broker lives in the bridge process and goes away with it, so the last will
 matters on an external broker.
 
 **Schema version.** `gateway/status` carries `schema`, the version of this whole topic and
-payload tree, currently **4**. It is bumped with any change a subscriber would notice: a topic
+payload tree, currently **5**. It is bumped with any change a subscriber would notice: a topic
 or key renamed, removed or retyped. Additions (a new key, a new topic) do not bump it, so ignore
 keys you do not know. A client reads the retained `gateway/status` (the last will carries
 `schema` too) and, if `schema` is not the version it was written for, refuses to interpret the
@@ -149,7 +149,7 @@ goes up or down, and when the dongle reboots or answers an identity probe.
 | Field | Type | Meaning |
 |-------|------|---------|
 | `state` | string | `online` (the dongle's serial link is up), `degraded` (the bridge runs but has lost the dongle; nothing new arrives and requests fail at once), `offline` (the last will: the bridge is gone) |
-| `schema` | number | Version of this API (section 1), currently `4` |
+| `schema` | number | Version of this API (section 1), currently `5` |
 | `gateway` | string | The dongle's radio address, `0x%08x` |
 | `firmware` | string | Firmware name the dongle reports (`radio_gateway`) |
 | `firmware_version` | string | Its version string, e.g. `v0.1.0` |
@@ -159,13 +159,13 @@ goes up or down, and when the dongle reboots or answers an identity probe.
 | `serial_up` | bool | The serial link to the dongle is up |
 
 ```json
-{"state":"online","schema":4,"gateway":"0x0000ab12","firmware":"radio_gateway","firmware_version":"v0.1.0","session_id":7,"wire":"console 0x1234 radio 0xabcd","serial_port":"/dev/ttyACM0","serial_up":true}
+{"state":"online","schema":5,"gateway":"0x0000ab12","firmware":"radio_gateway","firmware_version":"v0.1.0","session_id":7,"wire":"console 0x1234 radio 0xabcd","serial_port":"/dev/ttyACM0","serial_up":true}
 ```
 
 The last will carries only two keys, so parse every other field as optional:
 
 ```json
-{"state":"offline","schema":4}
+{"state":"offline","schema":5}
 ```
 
 ### `gateway/stats`
@@ -252,18 +252,27 @@ other like any schema change. Every property is one of:
 
 | Access | Published on | Settable with `set` | Meaning |
 |--------|--------------|---------------------|---------|
-| state | `state/{prop}`, retained | no | Measured or derived by the node (`temperature`, `demand`) |
+| state | `state/{prop}`, retained | no | Measured or derived by the node (`temperature/system`, `demand`) |
 | control | `state/{prop}`, retained | yes | A state the host may set too (`power-relay`, `setpoint`) |
 | event | `event/{prop}`, not retained | no | Something happened; the value is its detail (`button`, `motion`) |
 | setting | `state/{prop}`, retained | yes | Kept in the node's EEPROM (`heartbeat`, `sensitivity`) |
 | local setting | `state/{prop}`, retained | no (USB console only) | A setting a remote change could cut the link with (`band`) |
 
+**Names.** A property's name is one topic level of lowercase letters, digits and `-`
+(`report-period`). A state may belong to a **group**, the readings of one quantity from several
+sensors: it is then named `group/member` and published two levels deep. The thermometers are
+the group `temperature` (`temperature/system`, `temperature/climate`, ...), so the filter
+`nodes/+/state/temperature/+` takes every thermometer of every node. A group has no value of
+its own (there is no `state/temperature`), and nothing settable and no event is grouped. To
+take every state of a node, subscribe to `nodes/{addr}/state/#`: `state/+` leaves the grouped
+ones out.
+
 **Values** are JSON as the type says: a boolean (`true`), a number (fixed-point values exact:
 `21.5`, `0.3`), or an enumeration's name (`"auto"`; a value outside the names stays a number).
 
-**When values arrive.** A node reports a state when it changes (for `temperature`, by at least
-its `report-delta`; it samples every `report-period`; the `climate` kind's measured values each
-have a delta setting of their own), and everything again with each
+**When values arrive.** A node reports a state when it changes (a temperature, by at least
+`report-delta`; it samples every `report-period`; the `climate` kind's other measured values
+each have a delta setting of their own), and everything again with each
 `heartbeat`, settings included, so a subscriber has the whole picture within one heartbeat.
 A value whose sensor was unplugged is no longer sent; its retained topic keeps the last value.
 A setting changed on the node's USB console (or by a remote `system settings set`) is reported
@@ -279,10 +288,10 @@ Every kind has the **common** properties:
 
 | Property | Type | Access | Default | Meaning |
 |----------|------|--------|---------|---------|
-| `temperature` | number °C, 2 decimals | state | | The Core Module's thermometer |
+| `temperature/system` | number °C, 2 decimals | state | | The Core Module's own thermometer. A powered board warms it (0.5 °C above the room on a USB powered bench); a `climate` node with a Climate Module has the room's as `temperature/climate` |
 | `heartbeat` | number s, 60..86400 | setting | `900` | Full report period; a sleeping node also takes its downlinks then at the latest |
 | `report-period` | number s, 5..86400 | setting | `60` | How often the node samples what it reports |
-| `report-delta` | number °C, 0..10, 2 decimals | setting | `0.5` | The temperature change that is news |
+| `report-delta` | number °C, 0..10, 2 decimals | setting | `0.5` | The temperature change that is news, for each thermometer of the node |
 | `led` | bool | setting | `true` | Event feedback on the board LED |
 | `band` | `eu868`, `us915` | local setting | `eu868` | The radio band |
 | `hold-time` | number ms, 100..10000 | setting | `1000` | How long a press of the Core button is a hold |
@@ -306,6 +315,10 @@ and its own:
 | | | `pressure-delta` | number hPa, 0.1..100, 1 decimal | setting | `1.0` | The pressure change that is news |
 | | | `co2-delta` | number ppm, 1..2000 | setting | `50` | The CO2 change that is news |
 | | | `co2-period` | number s, 16..86400 | setting | `300` | The least time between two CO2 measurements (each costs the sensor's lamp pulse); one runs in the first sampling round after it, so `report-period` is the finer limit |
+| | | `temperature/climate` | number °C, 2 decimals | state | | The room's temperature: the Climate Module's thermometer (its TMP112; the SHT30 on the second revision), away from the Core Module's own heat |
+| | | `temperature/hygrometer` | number °C, 2 decimals | state | | The humidity sensor's own temperature. This and the two below are there to compare and to diagnose; `temperature/climate` is the one to read. Not published where it would be `temperature/climate` again (a second-revision module, whose thermometer is the humidity sensor's) |
+| | | `temperature/barometer` | number °C, 2 decimals | state | | The barometer's die temperature |
+| | | `temperature/co2` | number °C, 2 decimals | state | | The CO2 sensor's own temperature, at its last measurement |
 | `motion` (`radio_motion`) | sleeping | `motion` | number 1..65535 | event | | Motion: `1` when it starts; at the end of a `holdoff` that saw more, their number |
 | | | `sensitivity` | `low`, `medium`, `high`, `very-high` | setting | `high` | The PIR detection threshold |
 | | | `holdoff` | number s, 1..3600 | setting | `10` | The least time between two events |
@@ -339,7 +352,8 @@ missed it asks again with its next `NodeInfo`.
 ### `nodes/{addr}/state/{prop}`
 
 Retained, one topic per state, control and setting of the node's kind; an **empty payload**
-clears it (the node removed, or reflashed with another app).
+clears it (the node removed, or reflashed with another app). `{prop}` is the property's name:
+one level, or two for a grouped state (`state/temperature/system`; *Node properties*, *Names*).
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -368,7 +382,8 @@ Not retained. One per event the node reports.
 ### `nodes/{addr}/set/{prop}`
 
 Published by a client, QoS 1, **never retained** (a retained set would run again on every
-reconnect). Sets a control or a setting of the node; the payload is the value as JSON (`true`,
+reconnect). Sets a control or a setting of the node (`{prop}` is always one level: nothing
+settable is grouped); the payload is the value as JSON (`true`,
 `21.5`, `"auto"`), an object `{"value": ...}`, or plain text (`on`, `21.5`, `auto`; a whole
 number may be written in hex, `0xff8000`). The bridge checks it against the node's kind (the
 property exists, is settable, the value is in range) and queues it on the gateway; a refused set
@@ -957,7 +972,17 @@ mosquitto_sub -h 127.0.0.1 -t 'tower/#' -v
 
 ```sh
 mosquitto_sub -h 127.0.0.1 -t tower/gateway/status -C 1 -W 5
-# {"state":"online","schema":4,"gateway":"0x0000ab12",...}
+# {"state":"online","schema":5,"gateway":"0x0000ab12",...}
+```
+
+**Every thermometer of every node** (the group `temperature`; retained, so the latest values
+arrive at once), and every state of one node:
+
+```sh
+mosquitto_sub -h 127.0.0.1 -t 'tower/nodes/+/state/temperature/+' -v
+# tower/nodes/0x0000ab12/state/temperature/system {"value":21.5,"ts":1700000000}
+# tower/nodes/0x0000cd34/state/temperature/climate {"value":20.68,"ts":1700000003}
+mosquitto_sub -h 127.0.0.1 -t 'tower/nodes/0x0000cd34/state/#' -v
 ```
 
 **An RPC** (subscribe first, then publish the request; the response topic ends with the id):
@@ -1018,7 +1043,7 @@ mosquitto_pub -h gateway.local -p 8883 --cafile ca.pem -u ops -P "$TOWER_MQTT_PA
 mqtt:
   sensor:
     - name: "Kitchen temperature"
-      state_topic: "tower/nodes/0x0000ab12/state/temperature"
+      state_topic: "tower/nodes/0x0000ab12/state/temperature/system"
       value_template: "{{ value_json.value }}"
       unit_of_measurement: "°C"
       device_class: temperature

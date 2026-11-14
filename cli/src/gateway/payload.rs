@@ -11,7 +11,7 @@ use tower_protocol::props;
 /// Version of this topic/payload tree, carried in the retained `gateway/status`; clients
 /// refuse a mismatch. Bump it with any change an external subscriber would notice (a topic or
 /// key renamed, removed or retyped). Units live in the field docs, not in the key names.
-pub(crate) const SCHEMA: u32 = 4;
+pub(crate) const SCHEMA: u32 = 5;
 
 /// `gateway/status` (retained). The LWT publishes only `{state:"offline", schema}`
 /// (the broker can't know the rest once we're gone), so every other field is
@@ -461,7 +461,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&s).unwrap(),
-            r#"{"state":"online","schema":4,"gateway":"0x0000ab12","firmware":"radio_gateway","firmware_version":"v0.1.0","session_id":7,"wire":"console 0x1234 radio 0xabcd","serial_port":"/dev/ttyACM0","serial_up":true}"#
+            r#"{"state":"online","schema":5,"gateway":"0x0000ab12","firmware":"radio_gateway","firmware_version":"v0.1.0","session_id":7,"wire":"console 0x1234 radio 0xabcd","serial_port":"/dev/ttyACM0","serial_up":true}"#
         );
     }
 

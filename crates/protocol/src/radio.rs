@@ -38,8 +38,10 @@ pub const MAX_RADIO_PAYLOAD: usize = 74;
 /// MTU minus the worst-case envelope overhead, with margin. Pinned ≤ MTU by test.
 pub const RADIO_SHELL_CHUNK: usize = 56;
 
-/// The most property values one [`NodeMsg::Report`] carries.
-pub const MAX_REPORT: usize = 8;
+/// The most property values one [`NodeMsg::Report`] carries: what the app that reports the most
+/// has (`radio_climate` with both modules, nine) and one to spare, so a heartbeat's full report
+/// is one uplink. Ten of the widest values are 64 of the MTU's bytes.
+pub const MAX_REPORT: usize = 10;
 
 /// Node identity + health, sent at boot and every heartbeat period. The host derives the node's
 /// kind from `firmware_name` (`radio_<kind>`, see [`props::kind_of_firmware`](crate::props::kind_of_firmware)),

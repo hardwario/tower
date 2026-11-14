@@ -20,7 +20,7 @@ expression: "shot(&mut app, size)"
 ┌ Shell: kitchen ‹1/4› ─────┌ OTA pairing ─────────────────────────────────────────────────┐───────────────────────────┐
 │ uptime = 3600 s           │ window open, 45 s left                                       │                           │
 │ stack = 1840 of 2048 bytes│                                                              │e}                         │
-│ wire = console 0x1234 radi│ power the node up, hold its button 10 s,                     │ ®                         │
+│ wire = console 0x1234 radi│ power the node up, hold its button 10 s,                     │/system ®                  │
 │ ✓                         │ release when the LED goes off;                               │                           │
 │ > system eeprom wipe      │ the window closes itself on the first join                   │tui-5","line":"led on"}    │
 │ ✖ result 5                │                                                              │                           │
@@ -57,7 +57,7 @@ aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbddddddddddd
 oooooooooooooooooooooooooooogggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
 o.ppppppfffnnnnnn...........g..............qqqq............................................g
 o.pppppfffnnnnnnnnnnnnnnnnnng..............................................................ggf
-o.ppppfffnnnnnnnnnnnnnnnnnnng..............................................................gff
+o.ppppfffnnnnnnnnnnnnnnnnnnng..............................................................geeeeeeeff
 o.n.........................g..............................................................g
 o.ffrrrrrr.rrrrrr.gggg......g..............................................................gnnnnnnfrrrrrrfnnnnnnnnf
 o.ssssssssss................g..............................................................g

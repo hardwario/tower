@@ -3368,7 +3368,7 @@ mod tests {
         let mut items = heapless::Vec::new();
         items
             .extend_from_slice(&[
-                (props::common::TEMPERATURE, 2150),
+                (props::common::TEMPERATURE_SYSTEM, 2150),
                 (props::thermostat::SETPOINT, 215),
                 (props::thermostat::MODE, 1),
                 (props::thermostat::DEMAND, 1),
@@ -3383,7 +3383,8 @@ mod tests {
                 .value
                 .to_string()
         };
-        assert_eq!(value("tower/nodes/0x0000ab12/state/temperature"), "21.5");
+        // A grouped state (`temperature/system`) is two topic levels.
+        assert_eq!(value("tower/nodes/0x0000ab12/state/temperature/system"), "21.5");
         assert_eq!(value("tower/nodes/0x0000ab12/state/setpoint"), "21.5");
         assert_eq!(value("tower/nodes/0x0000ab12/state/mode"), "\"manual\"");
         assert_eq!(value("tower/nodes/0x0000ab12/state/demand"), "true");
@@ -3401,7 +3402,7 @@ mod tests {
         let (req_id, op) = removed.iter().find_map(sent_op).expect("NodeRemove goes out");
         assert!(op.contains("NodeRemove"), "{op}");
         let out = reply(&mut e, req_id, MGMT_OK, &[]);
-        for leaf in ["temperature", "setpoint", "mode", "demand"] {
+        for leaf in ["temperature/system", "setpoint", "mode", "demand"] {
             let topic = format!("tower/nodes/0x0000ab12/state/{leaf}");
             assert!(
                 out.iter().any(|o| matches!(o, Output::Publish { topic: t, payload, retain: true } if *t == topic && payload.is_empty())),
@@ -3566,7 +3567,7 @@ mod tests {
         for (prop, body) in [
             ("power-relay", "maybe"),
             ("band", "us915"),
-            ("temperature", "20"),
+            ("tilt", "1"),
             ("nonsense", "1"),
             ("brightness", "101"),
         ] {

@@ -17,28 +17,74 @@ Task status: `open`, `in progress`, `waiting (Dn)` (blocked on a decision), `don
 
 ## In progress
 
-(None.)
+### T35. Every thermometer of a climate node on MQTT
+
+Status: waiting (the bench: no board was connected when it was written and reworked,
+2026-11-10 and 2026-11-11). Committed and pushed 2026-11-14, hardware-free as it is
+
+**What.** D17 as finally answered (2026-11-10): the thermometers are a group of their own on
+MQTT, a level per source, and the plain `temperature` is gone.
+
+| Topic under `nodes/{addr}/state/` | What | When |
+|---|---|---|
+| `temperature/system` | The Core Module's TMP112: the common property of **every** kind (it was `temperature`) | Always |
+| `temperature/climate` | The Climate Module's thermometer (its TMP112; the SHT30 on the second revision) | While the module is fitted |
+| `temperature/hygrometer`, `temperature/barometer`, `temperature/co2` | The other sensors' own | While their sensor is fitted (no setting: D19) |
+
+**First version (flat names, `temperature` kept as the ambient one), superseded but its
+groundwork stays:**
+
+- [x] `tower-taf`: `Reporter` in 8 B instead of 12 (a "never sent" time in place of an
+      `Option`), so a report slot is 16 B. `just mutants taf`: no survivor
+- [x] `tower::climate_module`: the module's TMP112 converts once per round (shut down in
+      between) and is `Readings::temperature` (the SHT30's on the second revision); the
+      barometer's die temperature with every pressure; the SHT20's own with `measure(true)`
+- [x] `radio_climate`: the sources while the setting is on (they leave the reports when it
+      goes off or their sensor goes away), `climate print` with all
+
+**The rework (done 2026-11-10, hardware-free):**
+
+- [x] The name rule: a `State` property may be `group/member` (one `/`, each part of
+      lowercase letters, digits and `-`); a settable one or an event never; no property is
+      named as a group alone (a topic is a value or a parent, not both).
+      `crates/protocol/tests/props.rs` holds it
+- [x] The table: common id 0 is `temperature/system` (`common::TEMPERATURE_SYSTEM`); the
+      `climate` kind has `temperature/climate`, `temperature/hygrometer`,
+      `temperature/barometer`, `temperature/co2` (ids 25 to 28) and `temperature-sources` (29)
+- [x] The runtime: `taf::app_reports_temperature` removed (it reports the Core Module's in
+      every kind again); ten report slots (the most an app reports is nine)
+- [x] `radio_climate`: `temperature/climate` always (the TMP112's, else the SHT30's), the
+      three others with the setting; an SHT30 without a TMP112 is not reported twice
+      (`temperature/hygrometer` would be the same reading)
+- [x] The bridge: nothing but tests changed (a state topic is built from the name; a `set`
+      stays one level, `topics::classify` has a test for it); the engine and contract tests,
+      the TUI's demo feed and its snapshots; `payload::SCHEMA` 4 to 5 (topics renamed: this
+      and T34's relays); `soak.py` takes a two-level state; the HIL modules group
+- [x] Docs: mqtt-api.md (*Names*, `state/#`, the tables, the Home Assistant example),
+      taf.md, modules.md, the bench record
+- [x] `just check` green (the radio tag then: 0x5a6c)
+**D19 (2026-11-11): no `temperature-sources` setting, every thermometer always:**
+
+- [x] The `climate` kind without the setting (ids 25 to 28 stay); `radio_climate` reports
+      every thermometer it has with each round (`ClimateModule::measure(true)`: the SHT20's
+      second conversion every round); the HIL group and the docs follow
+- [x] A report of ten values (`MAX_REPORT`, 8 before), so the nine states of a full climate
+      node are one uplink with the heartbeat; ten of the widest values are 64 of the frame's
+      74 bytes (the capacity test holds it). It costs 16 B of RAM in every app, and the budget
+      passes: `radio_control` on the r2 is 32 B above the floor (48 before)
+- [x] `just check` green (the audit on a second run: the advisory database could not be
+      fetched during the first). The radio tag of this tree: 0x0e89. `radio_control` on the
+      r2: 1032 B of flash free; `radio_thermostat`: 2004 B (T32)
+- [ ] **The bench, none of it done**: the HIL modules group; the topics on MQTT through a
+      gateway; the SHT20's two conversions in a row and the TMP112's one-shot on the module;
+      one uplink per round and per heartbeat (nine values in one report);
+      `mosquitto_sub -t 'tower/nodes/+/state/temperature/+'` showing every
+      thermometer. Then the CLI reinstalled and the boards reflashed: the installed `tower`
+      and the boards as they were left are on the tag before T35 (0xbc0f)
 
 ## Decisions
 
-### D18. Push the night's work of 2026-11-10
-
-The modules work (T5, T6, T29), the bridge fix (T30), the listening node on US 915 with the
-hop-clock fix it needed (T3), the dependency sweep (T26) and the hardware-free test layers (T12)
-are committed on `main` locally and **not pushed** (AGENTS.md: push only when asked).
-
-- (a) Push it as it is. Recommended once you have read this file's *Done* entries of 2026-11-10
-  and [docs/firmware/results/2026-11-10.md](docs/firmware/results/2026-11-10.md): the gates are
-  green on the last commit, and what the bench could not check is listed in T31 and T26. After
-  a push every board needs the new firmware and the CLI a reinstall (the radio tag moved), and
-  the bench's two Core Modules a new pairing with the dongle (the record's last section).
-- (b) Review first, commit by commit (`git log origin/main..main`), and push what you keep.
-  T3 (three commits and the hop-clock fix after them), T12 (five) and T26 (seven) were written
-  by parallel agents in worktrees and merged after their gates and the bench; each group can be
-  dropped on its own. cortex-m 0.7.10 is one commit of T26's.
-
-Three choices were made for you that night (D15, D16, D17 under *Decided*): overturn any of them
-before pushing if you see it otherwise. D16 names an MQTT property, the costliest to change later.
+(None.)
 
 ## Tasks
 
@@ -111,7 +157,9 @@ paired, and the reverse (a gateway's registry survives an hour as a node).
 Status: open (found 2026-11-10)
 
 **Why.** `radio_control` on the r2 has 1.0 KB of flash left (under the 2 KB warning line of
-`tools/check_ram_budget.py`: `just fw ci` warns, and passes) and 24 B above the RAM floor. It
+`tools/check_ram_budget.py`: `just fw ci` warns, and passes) and 32 B above the RAM floor
+(T35's smaller report slots gave 24 B back and its report of ten values took 16;
+`radio_thermostat` on the r2 went 44 B under the warning line with T35, 2004 B). It
 cannot be built at "z" (its LED strip, D14). It had 5.4 KB before the night of 2026-11-10: the
 Relay Module took 2.6 KB (T6), cortex-m 0.7.10 0.7 KB (T26), the listening loop on the hop
 schedule 0.8 KB (T3), the hop-clock fix 0.2 KB. `radio_thermostat` on the r2 is at 2.0 KB (the
@@ -544,15 +592,38 @@ not, the gates and the bench pass, and the release dry run is green on that comm
   (they were `relay-module` and `relay` overnight; T34). Both follow `relay-boot`; a click of the Core button switches both (the Relay Module's
   follows the Power Module's). The option passed over was one `relay` property driving both
   relays (no new property, no independent control). 2026-11-10.
-- **D17. One temperature per node.** Decided by Claude, as above: the Climate Module's own
-  TMP112 is shut down and not reported; `temperature` stays the Core Module's, a centimetre
-  away. A second value would be the same number for more airtime. 2026-11-10.
-
 - **D6. Report the embassy-stm32 EEPROM error-flag bug upstream.** Check first that upstream
   still has it; if so, an issue with the fix (T24). 2026-11-09.
 - **D7. The next CLI release.** `cli-v1.2.0`, now, before T26 (which changes the build and its
   dependencies and gets a release of its own): the dry run passed on 0ec5ca8 (T25), nothing in
   the build changed since (T28). 2026-11-09.
+- **D17. Which thermometer a climate node reports.** Every one, each under its own name, and
+  none as the plain `temperature`: the thermometers are the group `temperature/` on MQTT with a
+  level per source. `temperature/system` is the Core Module's, in every kind (the name is the
+  maintainer's); `temperature/climate` the Climate Module's; `temperature/hygrometer`,
+  `temperature/barometer` and `temperature/co2` the other sensors' own (T35; behind a setting
+  `temperature-sources` at first, which D19 dropped). How it got there, all on 2026-11-10: the night's choice was one
+  temperature per node, the Core Module's; the bench then showed it 0.5 °C above the Climate
+  Module's on a USB powered r2 (21.18 against 20.68 °C; the SHT20 21.11 °C, the barometer's
+  die 19.7 °C); the maintainer asked for all of them on MQTT and chose flat names
+  (`temperature-system`, ...), then asked what the plain `temperature` was still for (nothing:
+  always a copy of a named one, and which one changed when a module was plugged in), then
+  chose a level per source over the flat names, for `nodes/+/state/temperature/+` (the
+  recommendation had been to stay flat: a property is no longer exactly one topic level, and
+  `state/+` no longer lists every state). 2026-11-10.
+- **D19. `temperature-sources`: keep the setting, or publish every thermometer always.** (a)
+  Drop it: a climate node always publishes every thermometer it has (T35). What the setting
+  saved a battery node was small: the SHT20's second conversion (85 ms at 0.3 mA, about 25 µC
+  per round, 36 mC a day at a 60 s round, against about 440 mC a day for a bare Core Module
+  asleep and about 1 C a day for a CO2 Module at its default period) and one more uplink per
+  heartbeat (nine values in a report of eight; a report of ten values was to be tried with
+  it). The barometer's and the CO2 sensor's temperatures cost nothing to measure. 2026-11-11.
+- **D18. Push the night's work of 2026-11-10.** (a) Pushed as it was (27 commits), with T34
+  and T35 on top as a commit each. What a push leaves to do: every board needs the new
+  firmware and the installed `tower` a reinstall (the radio tag moved; T35's bench item), and
+  the bench's two Core Modules a new pairing with the dongle (T33, and the last section of
+  [the record](docs/firmware/results/2026-11-10.md)). Two choices made that night stand until
+  the maintainer says otherwise: D15, and D16's shape. 2026-11-14.
 
 ## Done
 
@@ -565,7 +636,7 @@ not, the gates and the bench pass, and the release dry run is green on that comm
   on`), the bridge's tests, the MQTT contract test and seven TUI frames, the two HIL groups and
   the docs follow; `relay-boot` keeps its name (it is for both). The radio tag moves (0x4cf2 to
   0xbc0f): the CLI reinstalled, both bench boards reflashed. `just check` green; bench: the
-  modules HIL group passed with the new lines (315 s). 2026-11-10.
+  modules HIL group passed with the new lines (315 s). 2026-11-10 (5bc0220).
 
 - **T3. Listening node on US 915**: `radio_control` follows the gateway's hop schedule all the
   time (`Net::fhss_node_listen`: receive slices on the current slot's channel, placed around the
@@ -583,7 +654,7 @@ not, the gates and the bench pass, and the release dry run is green on that comm
   (docs/firmware/results/2026-11-10.md). Not run: `hil/tests/listening.rs` on `us915` (it
   needs the Dongle), a real LED strip on the node (T31). 2026-11-10.
 
-- **T6. Relay Module for `radio_control`** (D16): `tower::rela- **T30. Sets beyond the gateway's queue were dropped without a word**: the gateway holds two
+- **T30. Sets beyond the gateway's queue were dropped without a word**: the gateway holds two
   commands per node (four in all); the bridge logged every `set` as queued and said nothing when
   the gateway refused the third as full. Found setting the climate node's seven settings at
   once: two arrived. A refused `set` now waits in the bridge (one per property, the newest
@@ -592,7 +663,7 @@ not, the gates and the bench pass, and the release dry run is green on that comm
   Bench: seven sets at once, two queued and five waiting, all seven delivered within 8 s of the
   sleeping node's next uplink. 2026-11-10.
 
-y_module` (the latching relay's
+- **T6. Relay Module for `radio_control`** (D16): `tower::relay_module` (the latching relay's
   H-bridge on a TCA9534A: a 20 ms coil pulse per switch, the coil released whatever the bus
   does, the LEDs dark unless asked for, nothing drawn between switches), `relay-module` in the
   `control` kind. The app finds the module at start and every 10 s while it is missing, pulses

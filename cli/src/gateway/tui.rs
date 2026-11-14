@@ -2573,7 +2573,7 @@ mod tests {
             (
                 MqttDir::Out,
                 "gateway/status",
-                br#"{"state":"online","schema":4,"gateway":"0x00000001","firmware":"radio_gateway","serial_up":true}"#,
+                br#"{"state":"online","schema":5,"gateway":"0x00000001","firmware":"radio_gateway","serial_up":true}"#,
                 true,
             ),
             (
@@ -2586,7 +2586,7 @@ mod tests {
             (MqttDir::Out, "gateway/rsp/u1", br#"{"id":"u1","ok":true}"#, false),
             (
                 MqttDir::Out,
-                "nodes/0x0000cd34/state/temperature",
+                "nodes/0x0000cd34/state/temperature/system",
                 br#"{"value":21.5,"ts":1700000003}"#,
                 true,
             ),

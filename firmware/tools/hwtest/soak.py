@@ -97,8 +97,9 @@ def main():
                     node["uplinks"].append(when)
                 elif len(path) == 4 and path[2] == "event" and isinstance(data, dict):
                     node["events"][path[3]].append(data.get("count"))
-                elif len(path) == 4 and path[2] == "state" and isinstance(data, dict):
-                    node["states"][path[3]].append(data.get("value"))
+                elif len(path) >= 4 and path[2] == "state" and isinstance(data, dict):
+                    # A grouped state is two levels deep (`state/temperature/system`).
+                    node["states"]["/".join(path[3:])].append(data.get("value"))
 
     if first is None:
         sys.exit("no dated lines: record with `mosquitto_sub -v -F '%I %t %p'`")

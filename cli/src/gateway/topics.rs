@@ -261,5 +261,16 @@ mod tests {
         assert_eq!(classify(p, "tower/nodes/0x0000ab12/shell/rsp"), Inbound::Other);
         assert_eq!(classify(p, "other/gateway/cmd"), Inbound::Other);
         assert_eq!(classify(p, "tower/nodes/garbage/shell/req"), Inbound::Other);
+        assert_eq!(
+            classify(p, "tower/nodes/0x0000ab12/set/power-relay"),
+            Inbound::Set(0xAB12, "power-relay".to_string())
+        );
+        // A set is one level deep: nothing settable is grouped (`temperature/system` is a
+        // state), so a deeper topic is not a set.
+        assert_eq!(
+            classify(p, "tower/nodes/0x0000ab12/set/temperature/system"),
+            Inbound::Other
+        );
+        assert_eq!(classify(p, "tower/nodes/0x0000ab12/set/"), Inbound::Other);
     }
 }

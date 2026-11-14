@@ -26,17 +26,39 @@ fn tables_are_consistent() {
             "{}: app id below APP_BASE",
             kind.name
         );
+        // A topic is a value or a parent, never both: no property has a group's name alone.
+        for p in kind.all() {
+            if let Some((group, _)) = p.name.split_once('/') {
+                assert!(
+                    kind.prop_named(group).is_none(),
+                    "{}: {group:?} is a property and the group of {:?}",
+                    kind.name,
+                    p.name
+                );
+            }
+        }
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
         for p in kind.all() {
             assert!(ids.insert(p.id), "{}: id {} twice", kind.name, p.id);
             assert!(names.insert(p.name), "{}: name {} twice", kind.name, p.name);
+            // A name is one MQTT topic level and one shell word; a state may be a member of a
+            // group (`temperature/system`): two levels, never more.
+            let parts: Vec<&str> = p.name.split('/').collect();
             assert!(
-                !p.name.is_empty()
-                    && p.name
-                        .bytes()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                parts.iter().all(|part| {
+                    !part.is_empty()
+                        && part
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                }),
                 "{}: name {:?}",
+                kind.name,
+                p.name
+            );
+            assert!(
+                parts.len() == 1 || (parts.len() == 2 && p.access == Access::State),
+                "{}: {:?} is grouped, which only a state may be, one level deep",
                 kind.name,
                 p.name
             );
@@ -78,7 +100,15 @@ fn kinds_resolve_by_name_and_firmware() {
     assert_eq!(kind_of_firmware("radio_gateway"), None);
     assert_eq!(kind_of_firmware("button"), None);
     let b = kind("button").unwrap();
-    assert_eq!(b.prop(common::TEMPERATURE).unwrap().name, "temperature");
+    assert_eq!(
+        b.prop(common::TEMPERATURE_SYSTEM).unwrap().name,
+        "temperature/system"
+    );
+    assert_eq!(
+        b.prop_named("temperature/system").unwrap().id,
+        common::TEMPERATURE_SYSTEM
+    );
+    assert_eq!(b.prop_named("temperature"), None, "a group is not a property");
     assert_eq!(b.prop_named("click").unwrap().id, common::CLICK);
     assert_eq!(kind("control").unwrap().class, Class::Listening);
 }
@@ -110,7 +140,7 @@ fn property_ids_are_pinned() {
     assert_eq!(
         ids(COMMON),
         [
-            ("temperature", 0),
+            ("temperature/system", 0),
             ("heartbeat", 1),
             ("report-period", 2),
             ("report-delta", 3),
@@ -142,6 +172,10 @@ fn property_ids_are_pinned() {
             ("pressure-delta", 22),
             ("co2-delta", 23),
             ("co2-period", 24),
+            ("temperature/climate", 25),
+            ("temperature/hygrometer", 26),
+            ("temperature/barometer", 27),
+            ("temperature/co2", 28),
         ]
     );
     assert_eq!(
@@ -209,6 +243,15 @@ fn property_ids_are_pinned() {
     );
     assert_eq!(
         (
+            climate::TEMPERATURE_CLIMATE,
+            climate::TEMPERATURE_HYGROMETER,
+            climate::TEMPERATURE_BAROMETER,
+            climate::TEMPERATURE_CO2
+        ),
+        (25, 26, 27, 28)
+    );
+    assert_eq!(
+        (
             thermostat::SETPOINT,
             thermostat::MODE,
             thermostat::DEMAND,
@@ -217,7 +260,7 @@ fn property_ids_are_pinned() {
         (16, 17, 18, 19)
     );
     assert_eq!(
-        (common::TEMPERATURE, common::BUTTON, common::CLICK_TIMEOUT),
+        (common::TEMPERATURE_SYSTEM, common::BUTTON, common::CLICK_TIMEOUT),
         (0, 9, 14)
     );
 }
@@ -230,11 +273,16 @@ fn setting_keys_are_derived_from_ids() {
 }
 
 /// The Core Module's thermometer reads below zero: the temperature every kind reports spans the
-/// sensor's range, -40 to 125 °C in hundredths.
+/// sensor's range, -40 to 125 °C in hundredths; and so does every other thermometer of a node.
 #[test]
 fn the_temperature_spans_the_sensors_range() {
-    let temperature = COMMON[common::TEMPERATURE as usize];
-    assert_eq!(temperature.name, "temperature");
+    let temperature = COMMON[common::TEMPERATURE_SYSTEM as usize];
+    assert_eq!(temperature.name, "temperature/system");
+    for kind in KINDS {
+        for p in kind.all().filter(|p| p.name.starts_with("temperature/")) {
+            assert_eq!((p.ty, p.access), (temperature.ty, Access::State), "{}", p.name);
+        }
+    }
     let ty = temperature.ty;
     assert!(ty.accepts(-4000) && ty.accepts(-1) && ty.accepts(0) && ty.accepts(12500));
     assert!(!ty.accepts(-4001) && !ty.accepts(12501));

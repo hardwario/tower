@@ -26,7 +26,7 @@ The arithmetic, the frames and the pin patterns are in the hardware-free crate
 | Module | Part | Address | Part driver | Note |
 |--------|------|---------|-------------|------|
 | Climate (first revision) | SHT20, humidity | `0x40` | `tower::sht20` | Also the Humidity Tag |
-| Climate (first revision) | TMP112, temperature | `0x48` | `tower::tmp112` | Shut down, not read (below) |
+| Climate (first revision) | TMP112, temperature | `0x48` | `tower::tmp112` | The room's temperature, `temperature/climate` (below) |
 | Climate (second revision) | SHT30, humidity and temperature | `0x45` | `tower::sht30` | Not on the bench yet |
 | Climate | OPT3001, illuminance | `0x44` | `tower::opt3001` | Also the Lux Meter Tag |
 | Climate | MPL3115A2, pressure | `0x60` | `tower::mpl3115a2` | Also the Barometer Tag |
@@ -50,7 +50,7 @@ nothing to read before it measured), so `0x40` is probed with its "read user reg
 let mut climate = ClimateModule::new(bus);
 loop {
     climate.probe().await;            // finds parts not known yet; no traffic when all are known
-    let r = climate.measure().await;  // r.humidity, r.illuminance, r.pressure: Option, None = absent
+    let r = climate.measure(false).await;  // r.temperature, r.humidity, r.illuminance, r.pressure
     Timer::after_secs(60).await;
 }
 ```
@@ -59,6 +59,7 @@ loop {
 
 | Part | Mode | Ready after | Idle | Per measurement (datasheet) |
 |------|------|-------------|------|-----------------------------|
+| TMP112 | one shot from shutdown | 35 ms | 1 µA | about 1 µC |
 | SHT20 | "no hold master" humidity, 12 bit | 29 ms | 0.15 µA | about 9 µC |
 | SHT30 | single shot, high repeatability | 16 ms | 0.2 µA | about 13 µC |
 | MPL3115A2 | one shot from standby, 16 samples | 66 ms | 2 µA | about 38 µC |
@@ -72,10 +73,15 @@ Choices worth knowing:
 
 - **The barometer averages 16 samples**, not the part's 128: about 5 Pa RMS of noise against a
   reported unit of 10 Pa, for a seventh of the charge.
-- **The module's own TMP112 is shut down and not read.** It powers up converting four times a
-  second (about 10 µA); `probe` puts it into shutdown (1 µA). The Core Module's thermometer, a
-  centimetre away, is the `temperature` every taf node reports, so a second one would be the
-  same number for more airtime.
+- **The module's thermometer is the room's (`temperature/climate`).** Its TMP112 powers up
+  converting four times a second (about 10 µA); `probe` puts it into shutdown (1 µA) and each
+  round converts it once. `Readings::temperature` is that reading (the SHT30's on the second
+  revision). It is the better thermometer for the room: on the bench the Core Module's own
+  TMP112 (`temperature/system`), on the board with the USB bridge and the regulator, read
+  0.5 °C above it.
+- **The other thermometers.** The barometer's die temperature comes with every pressure
+  reading; an SHT20's own costs a second conversion (85 ms, about 25 µC), taken only with
+  `measure(true)` (`radio_climate` asks for it).
 - **A part that fails three rounds in a row counts as gone** and is looked for again; a
   barometer found again is set up anew (one that lost its power lost its data-ready flags).
 - **The SHT20 does not acknowledge while it converts**: a read that comes too early is a NACK
@@ -184,7 +190,14 @@ if let Some(mut relay) = RelayModule::probe(bus).await {
 ## In the apps
 
 **`radio_climate`** reads the Climate Module in the runtime's sampling round (every
-`report-period`, right after the temperature; `taf::round`), so a round's news is one uplink. A
+`report-period`; `taf::round`), so a round's news is one uplink. The thermometers are the
+group `temperature/` on MQTT, each named for where it sits, and none is a plain `temperature`:
+`temperature/climate` is the module's (the room's), next to the Core Module's
+`temperature/system` that every taf node reports. The app also reports the other sensors'
+own (`temperature/hygrometer`, `temperature/barometer`, `temperature/co2`): there to compare
+and to diagnose. Each is held to `report-delta`. There is no setting to turn them off: only
+the SHT20's costs a measurement (36 mC a day at a 60 s round), and a report holds ten values,
+so the nine states of a node with both modules are still one uplink with the heartbeat. A
 value is news once it moved by its delta since it was last sent: `humidity-delta` (2 %),
 `pressure-delta` (1 hPa), `co2-delta` (50 ppm) and `illuminance-delta` (20 % of the reading, 1 lx
 at the least); everything goes again with the heartbeat. CO2 is measured every `co2-period`

@@ -24,6 +24,29 @@ fn reporter_sends_first_on_delta_and_on_heartbeat() {
     assert!(r.due(2150, 61, 50, 900));
     assert_eq!(r.last(), None);
     assert_eq!(Reporter::new().last(), None);
+    assert_eq!(Reporter::default(), Reporter::new());
+    // One per reported property in every app's RAM: 8 bytes, not an `Option`'s 12.
+    assert_eq!(core::mem::size_of::<Reporter>(), 8);
+    // A send at the very end of the 32-bit seconds (136 years of uptime) still counts as sent.
+    let mut late = Reporter::new();
+    let end = u64::from(u32::MAX);
+    late.sent(7, end + 100);
+    assert_eq!(late.last(), Some(7));
+    assert!(
+        !late.due(7, end + 100, 0, 900),
+        "just sent: neither a change nor a heartbeat"
+    );
+    assert!(late.due(8, end + 100, 0, 900), "a change");
+    assert!(
+        late.due(7, end + 899, 0, 900),
+        "a heartbeat after the recorded second"
+    );
+    // A value of 0 sent is not "never sent".
+    let mut zero = Reporter::new();
+    assert!(zero.due(0, 0, 50, 900));
+    zero.sent(0, 0);
+    assert!(!zero.due(0, 1, 50, 900));
+    assert_eq!(zero.last(), Some(0));
 }
 
 #[test]

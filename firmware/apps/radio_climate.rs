@@ -1,9 +1,10 @@
 //! radio_climate (TOWER IoT Kit product firmware): a climate sensor on the radio, a sleeping taf
 //! node (`docs/firmware/taf.md`).
 //!
-//! It reports the Climate Module's humidity, illuminance and pressure and the CO2 Module's CO2
-//! concentration (`nodes/{addr}/state/humidity`, `illuminance`, `pressure`, `co2`), next to what
-//! every taf node reports (the Core Module's temperature, the accelerometer's `tilt` events).
+//! It reports the Climate Module's temperature, humidity, illuminance and pressure and the CO2
+//! Module's CO2 concentration (`nodes/{addr}/state/temperature/climate`, `humidity`,
+//! `illuminance`, `pressure`, `co2`), next to what every taf node reports (the Core Module's
+//! `temperature/system`, the accelerometer's `tilt` events).
 //! Neither module has to be fitted: the app looks for each sensor with every round, reports the
 //! ones it finds and stops reporting one that went away (a CO2 Module that failed three
 //! measurements in a row is looked for again ten minutes later). The sensor tags carry the Climate
@@ -21,8 +22,17 @@
 //! (a minute before the first measurement), everything on the module is off otherwise, and the
 //! reading is compensated with the barometer's pressure when there is one.
 //!
+//! **Temperatures.** Every thermometer of the node has its own name under `temperature/`, and
+//! none is the plain `temperature`. `temperature/climate` is the Climate Module's (its TMP112,
+//! or the SHT30 of the second revision): the room's, away from the Core Module's own heat,
+//! which `temperature/system` (the Core Module's, as in every app) shows. The other sensors'
+//! own are reported as well (`temperature/hygrometer`, `temperature/barometer`,
+//! `temperature/co2`): there to compare and to diagnose. Each is held to `report-delta`. Only
+//! an SHT20's costs a measurement of its own (a second conversion, about 25 µC per round); the
+//! barometer's and the LP8's come with their readings.
+//!
 //! `climate print` (on the USB console and over the remote shell) shows the sensors found and
-//! their last readings.
+//! their last readings, every thermometer included.
 //!
 //!   just run app radio_climate
 
@@ -72,18 +82,37 @@ struct Last {
     readings: Readings,
     co2_fitted: bool,
     co2: Option<u16>,
+    /// The LP8's own temperature at its last measurement.
+    co2_temperature: Option<i16>,
 }
 
 static LAST: Mutex<Cell<Last>> = Mutex::new(Cell::new(Last {
     parts: None,
     readings: Readings {
+        temperature: None,
         humidity: None,
         illuminance: None,
         pressure: None,
+        hygrometer_temperature: None,
+        barometer_temperature: None,
     },
     co2_fitted: false,
     co2: None,
+    co2_temperature: None,
 }));
+
+/// The module has a thermometer of its own (`temperature/climate`): a TMP112, else an SHT30.
+fn has_thermometer(parts: Parts) -> bool {
+    parts.thermometer || parts.humidity == Humidity::Sht30
+}
+
+/// The humidity sensor's own temperature, unless `temperature/climate` is that very reading
+/// (an SHT30 on a module without a TMP112).
+fn hygrometer(r: &Readings, parts: Parts) -> Option<i32> {
+    r.hygrometer_temperature
+        .filter(|_| parts.thermometer || parts.humidity != Humidity::Sht30)
+        .map(i32::from)
+}
 
 fn update(f: impl FnOnce(&mut Last)) {
     critical_section::with(|cs| {
@@ -112,7 +141,9 @@ fn cmd_print(ctx: &mut shell::Ctx<'_>, _args: &[&str]) -> shell::Outcome {
             let _ = writeln!(ctx, "{}: {} {}", prop.name, prop.ty.display(value), unit);
         }
     };
-    show(ctx, common::TEMPERATURE, taf::temperature());
+    let r = &last.readings;
+    show(ctx, common::TEMPERATURE_SYSTEM, taf::temperature());
+    show(ctx, climate::TEMPERATURE_CLIMATE, r.temperature.map(i32::from));
     show(ctx, climate::HUMIDITY, last.readings.humidity.map(i32::from));
     show(
         ctx,
@@ -121,6 +152,14 @@ fn cmd_print(ctx: &mut shell::Ctx<'_>, _args: &[&str]) -> shell::Outcome {
     );
     show(ctx, climate::PRESSURE, last.readings.pressure.map(i32::from));
     show(ctx, climate::CO2, last.co2.map(i32::from));
+    // The other sensors' own thermometers.
+    show(ctx, climate::TEMPERATURE_HYGROMETER, hygrometer(r, parts));
+    show(
+        ctx,
+        climate::TEMPERATURE_BAROMETER,
+        r.barometer_temperature.map(i32::from),
+    );
+    show(ctx, climate::TEMPERATURE_CO2, last.co2_temperature.map(i32::from));
     shell::Outcome::ok()
 }
 
@@ -134,7 +173,22 @@ fn delta(id: u8) -> u16 {
 }
 
 /// Report a round's readings, each with its delta.
-fn report(r: &Readings) {
+fn report(r: &Readings, parts: Parts) {
+    // The thermometers, each held to `report-delta` as the runtime holds the Core Module's
+    // (`temperature/system`): the module's, and the humidity sensor's and the barometer's own.
+    let thermometers = [
+        (climate::TEMPERATURE_CLIMATE, r.temperature.map(i32::from)),
+        (climate::TEMPERATURE_HYGROMETER, hygrometer(r, parts)),
+        (
+            climate::TEMPERATURE_BAROMETER,
+            r.barometer_temperature.map(i32::from),
+        ),
+    ];
+    for (id, value) in thermometers {
+        if let Some(value) = value {
+            taf::report_delta(id, value, delta(common::REPORT_DELTA));
+        }
+    }
     if let Some(humidity) = r.humidity {
         taf::report_delta(
             climate::HUMIDITY,
@@ -162,14 +216,19 @@ fn report(r: &Readings) {
 /// The sensors found changed: say so, and stop reporting what went away.
 fn parts_changed(before: Parts, now: Parts) {
     info!(target: "climate", "sensors: {}", now);
+    if has_thermometer(before) && !has_thermometer(now) {
+        taf::forget(climate::TEMPERATURE_CLIMATE);
+    }
     if before.humidity != Humidity::None && now.humidity == Humidity::None {
         taf::forget(climate::HUMIDITY);
+        taf::forget(climate::TEMPERATURE_HYGROMETER);
     }
     if before.light && !now.light {
         taf::forget(climate::ILLUMINANCE);
     }
     if before.barometer && !now.barometer {
         taf::forget(climate::PRESSURE);
+        taf::forget(climate::TEMPERATURE_BAROMETER);
     }
 }
 
@@ -217,12 +276,16 @@ async fn sensors(bus: I2cBus) {
                         update(|last| last.co2_fitted = true);
                     }
                 }
-                let readings = climate.measure().await;
+                // The parts this round is measured with (after the probe, before a part that
+                // failed three times is dropped).
+                let measured = climate.parts();
+                // Every thermometer: an SHT20's own too (its second conversion).
+                let readings = climate.measure(true).await;
                 if readings.pressure.is_some() {
                     pressure = readings.pressure;
                 }
-                report(&readings);
                 let parts = climate.parts();
+                report(&readings, measured);
                 if parts != before {
                     parts_changed(before, parts);
                 }
@@ -238,6 +301,12 @@ async fn sensors(bus: I2cBus) {
                         Ok(m) => {
                             co2_due =
                                 round_at + seconds(climate::CO2_PERIOD, co2_module::MIN_PERIOD_S as i32);
+                            taf::report_delta(
+                                climate::TEMPERATURE_CO2,
+                                i32::from(m.temperature),
+                                delta(common::REPORT_DELTA),
+                            );
+                            update(|last| last.co2_temperature = Some(m.temperature));
                             match m.ppm() {
                                 Some(ppm) => {
                                     taf::report_delta(
@@ -297,9 +366,11 @@ fn co2_gone(co2: &mut Option<Co2Module>, charged_at: &mut Option<Instant>) {
     *co2 = None;
     *charged_at = None;
     taf::forget(climate::CO2);
+    taf::forget(climate::TEMPERATURE_CO2);
     update(|last| {
         last.co2_fitted = false;
         last.co2 = None;
+        last.co2_temperature = None;
     });
 }
 

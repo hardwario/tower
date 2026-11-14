@@ -8,10 +8,17 @@
 //! **Low power.** Nothing runs between measurements: every part converts once when asked and
 //! falls back to its sleep by itself (SHT20 0.15 µA, OPT3001 0.3 µA, MPL3115A2 2 µA standby).
 //! The module's TMP112 powers up converting four times a second (about 10 µA); it is shut down
-//! when found (1 µA) and not read: the Core Module's own thermometer, a centimetre away, is the
-//! temperature every node reports. [`measure`](ClimateModule::measure) starts all conversions
-//! together and collects each when it is due, the MCU asleep in between: about 0.9 s per round
-//! (the light sensor's 800 ms conversion), a few milliseconds of it awake.
+//! when found (1 µA) and converts once per round like the others.
+//! [`measure`](ClimateModule::measure) starts all conversions together and collects each when
+//! it is due, the MCU asleep in between: about 0.9 s per round (the light sensor's 800 ms
+//! conversion), a few milliseconds of it awake.
+//!
+//! **Temperatures.** [`Readings::temperature`] is the module's thermometer: its TMP112 on the
+//! first revision, the SHT30's on the second. It sits away from the Core Module's own heat (on
+//! a USB powered bench the Core Module's TMP112 read 0.5 °C above it), so it is the one to
+//! report as the room's. The humidity sensor and the barometer measure a temperature of their
+//! own as well: the barometer's comes with every pressure, the SHT20's costs a second
+//! conversion (85 ms, about 25 µC) and is taken only when asked for.
 //!
 //! **Nothing has to be fitted.** [`probe`](ClimateModule::probe) looks for the parts that are not
 //! known yet (a few NACKed addresses when there are none); a part that fails three rounds in a
@@ -21,7 +28,7 @@
 //! let mut climate = ClimateModule::new(bus);
 //! loop {
 //!     climate.probe().await;
-//!     let r = climate.measure().await; // r.humidity, r.illuminance, r.pressure
+//!     let r = climate.measure(false).await; // r.temperature, r.humidity, r.illuminance, r.pressure
 //!     Timer::after_secs(60).await;
 //! }
 //! ```
@@ -50,6 +57,8 @@ pub enum Humidity {
 /// Which parts answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Parts {
+    /// The module's TMP112 (first revision; also a Temperature Tag at its address).
+    pub thermometer: bool,
     pub humidity: Humidity,
     /// The OPT3001.
     pub light: bool,
@@ -59,6 +68,7 @@ pub struct Parts {
 
 impl Parts {
     const NONE: Parts = Parts {
+        thermometer: false,
         humidity: Humidity::None,
         light: false,
         barometer: false,
@@ -69,10 +79,11 @@ impl Parts {
     }
 }
 
-/// The part names, comma separated (`SHT20, OPT3001, MPL3115A2`), or `none`.
+/// The part names, comma separated (`TMP112, SHT20, OPT3001, MPL3115A2`), or `none`.
 impl fmt::Display for Parts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let names = [
+            if self.thermometer { "TMP112" } else { "" },
             match self.humidity {
                 Humidity::None => "",
                 Humidity::Sht20 => "SHT20",
@@ -99,12 +110,20 @@ impl fmt::Display for Parts {
 /// One round's values; `None` where the part is absent or did not answer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Readings {
+    /// The module's thermometer, hundredths of a degree Celsius: its TMP112 (first revision),
+    /// else the SHT30's reading (second revision).
+    pub temperature: Option<i16>,
     /// Relative humidity, tenths of a percent.
     pub humidity: Option<u16>,
     /// Illuminance, tenths of a lux.
     pub illuminance: Option<u32>,
     /// Pressure, tenths of a hectopascal (10 Pa).
     pub pressure: Option<u16>,
+    /// The humidity sensor's own temperature, hundredths of a degree: with every SHT30 reading;
+    /// from an SHT20 only when [`measure`](ClimateModule::measure) is asked for every one.
+    pub hygrometer_temperature: Option<i16>,
+    /// The barometer's die temperature, hundredths of a degree (it comes with the pressure).
+    pub barometer_temperature: Option<i16>,
 }
 
 /// Rounds in a row without an answer after which a part counts as gone.
@@ -114,6 +133,8 @@ const MARGIN: Duration = Duration::from_millis(5);
 /// A read that came too early is tried again this much later, a few times.
 const RETRY: Duration = Duration::from_millis(10);
 const RETRIES: usize = 4;
+/// The TMP112's longest one-shot conversion (26 ms typical).
+const THERMOMETER: Duration = Duration::from_millis(35);
 /// The light sensor restarts its conversion when the light changed range meanwhile: asked again
 /// this often, up to [`LIGHT_POLLS`] times (another conversion's worth).
 const LIGHT_POLL: Duration = Duration::from_millis(100);
@@ -123,10 +144,8 @@ const LIGHT_POLLS: usize = 9;
 pub struct ClimateModule {
     bus: I2cBus,
     parts: Parts,
-    /// The module's own TMP112 was shut down (it powers up converting).
-    thermometer_parked: bool,
-    /// Rounds in a row without an answer: humidity, light, barometer.
-    fails: [u8; 3],
+    /// Rounds in a row without an answer: humidity, light, barometer, thermometer.
+    fails: [u8; 4],
 }
 
 impl ClimateModule {
@@ -134,8 +153,7 @@ impl ClimateModule {
         Self {
             bus,
             parts: Parts::NONE,
-            thermometer_parked: false,
-            fails: [0; 3],
+            fails: [0; 4],
         }
     }
 
@@ -148,13 +166,14 @@ impl ClimateModule {
     /// Whether anything new was found. Cheap when everything is known already (no bus traffic).
     pub async fn probe(&mut self) -> bool {
         let before = self.parts;
-        if before.humidity != Humidity::None && before.light && before.barometer && self.thermometer_parked {
+        if before.thermometer && before.humidity != Humidity::None && before.light && before.barometer {
             return false;
         }
-        let (mut parts, mut parked) = (self.parts, self.thermometer_parked);
+        let mut parts = self.parts;
         self.bus.raw(|b| {
-            if !parked {
-                parked = Tmp112::new(&mut *b, tmp112::ADDR_GND).shutdown().is_ok();
+            if !parts.thermometer {
+                // Found by shutting it down: it powers up converting four times a second.
+                parts.thermometer = Tmp112::new(&mut *b, tmp112::ADDR_GND).shutdown().is_ok();
             }
             if parts.humidity == Humidity::None {
                 if Sht20::new(&mut *b).present() {
@@ -174,14 +193,15 @@ impl ClimateModule {
         });
         self.bus.rest().await;
         self.parts = parts;
-        self.thermometer_parked = parked;
         parts != before
     }
 
     /// Measure once with every part found: start all conversions, collect each when it is due.
-    /// Takes about 0.9 s with a light sensor (its conversion), 0.1 s without; the MCU sleeps
-    /// through the waits. Returns at once when no part is known ([`probe`](Self::probe) first).
-    pub async fn measure(&mut self) -> Readings {
+    /// Takes about 0.9 s with a light sensor (its conversion), 0.15 s without; the MCU sleeps
+    /// through the waits. With `every_thermometer`, an SHT20's own temperature is measured too
+    /// (a second conversion, 85 ms, about 25 µC). Returns at once when no part is known
+    /// ([`probe`](Self::probe) first).
+    pub async fn measure(&mut self, every_thermometer: bool) -> Readings {
         let mut out = Readings::default();
         let parts = self.parts;
         if parts.is_empty() {
@@ -190,8 +210,9 @@ impl ClimateModule {
         let bus = self.bus;
         let start = Instant::now();
         // A part that does not take its trigger is not waited for.
-        let (humidity, light, barometer) = bus.raw(|b| {
+        let (thermometer, humidity, light, barometer) = bus.raw(|b| {
             (
+                parts.thermometer && Tmp112::new(&mut *b, tmp112::ADDR_GND).trigger_oneshot().is_ok(),
                 match parts.humidity {
                     Humidity::None => false,
                     Humidity::Sht20 => Sht20::new(&mut *b).trigger_humidity().is_ok(),
@@ -203,6 +224,8 @@ impl ClimateModule {
         });
         bus.rest().await;
 
+        // When the SHT20's temperature conversion (started after its humidity is read) is done.
+        let mut hygrometer_at: Option<Instant> = None;
         if humidity {
             let ms = match parts.humidity {
                 Humidity::Sht30 => sht30::MEASURE_MS,
@@ -213,18 +236,47 @@ impl ClimateModule {
                 // The sensor NACKs its address while it still converts: that read is tried again.
                 let read = bus.raw(|b| match parts.humidity {
                     Humidity::Sht30 => match Sht30::new(&mut *b, sht30::ADDR).read() {
-                        Ok((_, humidity)) => Some(Some(humidity)),
+                        Ok((temperature, humidity)) => Some(Some((humidity, Some(temperature)))),
                         Err(sht30::Error::Bus(_)) => None,
                         Err(sht30::Error::Data(_)) => Some(None),
                     },
                     _ => match Sht20::new(&mut *b).read_humidity() {
-                        Ok(humidity) => Some(Some(humidity)),
+                        Ok(humidity) => Some(Some((humidity, None))),
                         Err(sht20::Error::Bus(_)) => None,
                         Err(sht20::Error::Data(_)) => Some(None),
                     },
                 });
                 if let Some(value) = read {
-                    out.humidity = value;
+                    if let Some((humidity, temperature)) = value {
+                        out.humidity = Some(humidity);
+                        out.hygrometer_temperature = temperature;
+                    }
+                    break;
+                }
+                Timer::after(RETRY).await;
+            }
+            // The SHT20 measures one thing at a time: its temperature after its humidity.
+            if every_thermometer
+                && parts.humidity == Humidity::Sht20
+                && out.humidity.is_some()
+                && bus.raw(|b| Sht20::new(b).trigger_temperature().is_ok())
+            {
+                hygrometer_at = Some(Instant::now() + Duration::from_millis(sht20::TEMPERATURE_MS) + MARGIN);
+            }
+        }
+        if thermometer {
+            Timer::at(start + THERMOMETER + MARGIN).await;
+            for _ in 0..RETRIES {
+                let read = bus.raw(|b| {
+                    let mut thermometer = Tmp112::new(b, tmp112::ADDR_GND);
+                    match thermometer.conversion_ready() {
+                        Ok(true) => Some(thermometer.read_raw().ok()),
+                        Ok(false) => None,
+                        Err(_) => Some(None),
+                    }
+                });
+                if let Some(raw) = read {
+                    out.temperature = raw.map(|raw| (tmp112::raw_to_millicelsius(raw) / 10) as i16);
                     break;
                 }
                 Timer::after(RETRY).await;
@@ -237,13 +289,31 @@ impl ClimateModule {
                 let read = bus.raw(|b| {
                     let mut barometer = Mpl3115a2::new(&mut *b);
                     match barometer.ready() {
-                        Ok(true) => Some(barometer.read().ok().map(|(pressure, _)| pressure)),
+                        Ok(true) => Some(barometer.read().ok()),
                         Ok(false) => None,
                         Err(_) => Some(None),
                     }
                 });
                 if let Some(value) = read {
-                    out.pressure = value;
+                    if let Some((pressure, temperature)) = value {
+                        out.pressure = Some(pressure);
+                        out.barometer_temperature = Some(temperature);
+                    }
+                    break;
+                }
+                Timer::after(RETRY).await;
+            }
+        }
+        if let Some(at) = hygrometer_at {
+            Timer::at(at).await;
+            for _ in 0..RETRIES {
+                let read = bus.raw(|b| match Sht20::new(b).read_temperature() {
+                    Ok(temperature) => Some(Some(temperature)),
+                    Err(sht20::Error::Bus(_)) => None,
+                    Err(sht20::Error::Data(_)) => Some(None),
+                });
+                if let Some(value) = read {
+                    out.hygrometer_temperature = value;
                     break;
                 }
                 Timer::after(RETRY).await;
@@ -268,13 +338,20 @@ impl ClimateModule {
             }
         }
         bus.rest().await;
+        let thermometer_answered = out.temperature.is_some();
+        // Without a TMP112 (the second revision), the module's thermometer is the SHT30's.
+        if out.temperature.is_none() && parts.humidity == Humidity::Sht30 {
+            out.temperature = out.hygrometer_temperature;
+        }
 
         // A part silent for `GIVE_UP` rounds is forgotten, and looked for again by `probe` (which
-        // also sets a barometer up anew: one that lost its power lost its data-ready flags).
+        // also sets a barometer up anew: one that lost its power lost its data-ready flags, and
+        // shuts a thermometer down again: one that lost its power is converting on its own).
         let answered = [
             (parts.humidity != Humidity::None, out.humidity.is_some()),
             (parts.light, out.illuminance.is_some()),
             (parts.barometer, out.pressure.is_some()),
+            (parts.thermometer, thermometer_answered),
         ];
         for (i, (present, ok)) in answered.into_iter().enumerate() {
             self.fails[i] = if present && !ok { self.fails[i] + 1 } else { 0 };
@@ -283,13 +360,10 @@ impl ClimateModule {
                 match i {
                     0 => self.parts.humidity = Humidity::None,
                     1 => self.parts.light = false,
-                    _ => self.parts.barometer = false,
+                    2 => self.parts.barometer = false,
+                    _ => self.parts.thermometer = false,
                 }
             }
-        }
-        if self.parts.is_empty() {
-            // The module is gone; one plugged in later powers up with its TMP112 converting.
-            self.thermometer_parked = false;
         }
         out
     }

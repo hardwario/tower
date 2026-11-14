@@ -20,8 +20,8 @@ The MQTT side of the same properties (topics, payloads, the kinds' tables) is
 
 | App | Kind | Class | Hardware | What it does |
 |-----|------|-------|----------|--------------|
-| `radio_button` | `button` | sleeping | Core Module | The common properties only: the Core button's gestures, the temperature, tilt |
-| `radio_climate` | `climate` | sleeping | Core Module, with or without a Climate Module and a CO2 Module | Humidity, illuminance and pressure with every round, CO2 every `co2-period`; each only while its sensor is fitted ([modules.md](modules.md)) |
+| `radio_button` | `button` | sleeping | Core Module | The common properties only: the Core button's gestures, the Core Module's temperature, tilt |
+| `radio_climate` | `climate` | sleeping | Core Module, with or without a Climate Module and a CO2 Module | The Climate Module's temperature (`temperature/climate`), humidity, illuminance and pressure with every round, CO2 every `co2-period`, and the other sensors' own temperatures; each only while its sensor is fitted ([modules.md](modules.md)) |
 | `radio_motion` | `motion` | sleeping | Core Module r2 + PIR Module | Motion events with a holdoff, PIR sensitivity |
 | `radio_control` | `control` | listening | Core Module r2 + Power Module + LED strip, and/or a Relay Module | The relay (P0), the strip (every `led_strip` effect) and the Relay Module's latching relay (while it is fitted) |
 | `radio_thermostat` | `thermostat` | sleeping | Core Module (r2: + LCD Module) | Setpoint, mode, weekly program, heating demand; a screen with the LCD Module (r2), headless without it and on the r1 (see *RAM*) |
@@ -72,13 +72,16 @@ What every taf app does, so a user meets the same device whatever it measures:
   `node status`, `node pair` (console only) and `button simulate <ms>` (console only: a press of
   that length, for tests without hands; where a module owns the Core button it refuses and names
   the module's own command, `lcd press core <ms>`).
-- **Sensors**: every node reports the Core Module's temperature (`temperature`, sampled every
-  `report-period`) and raises a `tilt` event when the board moves (the face up after it settled,
+- **Sensors**: every node reports the Core Module's temperature (`temperature/system`, sampled
+  every `report-period`) and raises a `tilt` event when the board moves (the face up after it settled,
   1 to 6, or 0 while moving; at most one uplink per 10 s, the latest face coalesced). `accel`
   (`off`, `low`, `medium`, `high`; default `medium`) is the tilt threshold and takes effect at once;
   `off` powers the accelerometer down. The runtime owns both chips: `taf_base!` hands it the
   TMP112's bus and the accelerometer's interrupt line, and an app that works with the temperature
-  reads the runtime's (`taf::temperature()`).
+  reads the runtime's (`taf::temperature()`). No node has a plain `temperature`: every
+  thermometer is a member of the group `temperature/`, named for where it sits (the Climate
+  Module's is `temperature/climate`, reported by `radio_climate`), so a name never changes
+  its sensor with the modules fitted.
 - **Settings**: the common ones (`heartbeat`, `report-period`, `report-delta`, `led`, `band`,
   `hold-time`, `accel`, `press`, `release`, `click`, `hold`, `click-timeout`) plus the kind's, in `system settings` like any SDK setting, derived from the
   property table (no hand-written setting list, no key collisions). A setting other than `band`
@@ -104,8 +107,11 @@ What every taf app does, so a user meets the same device whatever it measures:
 1. **Declare the kind** in `crates/protocol/src/props.rs`: a `pub mod <kind>` with its property
    ids (from `APP_BASE`; the common ones use the ids below), its tables of enum names and a
    `KIND`, then add it to `KINDS`. Per property: a name (the MQTT topic leaf and the shell
-   setting's name), a type (`Bool`, `Number { min, max, decimals, unit }`, `Enum(names)`), an
-   access (`State`, `Control`, `Event`, `Param`, `LocalParam`) and, for a setting, a default.
+   setting's name: lowercase letters, digits and `-`), a type (`Bool`, `Number { min, max,
+   decimals, unit }`, `Enum(names)`), an access (`State`, `Control`, `Event`, `Param`,
+   `LocalParam`) and, for a setting, a default. A state that is one of several readings of
+   the same quantity joins a group, `group/member` (a new thermometer is `temperature/<where
+   it sits>`): two topic levels, for states only, and no property is named as a group alone.
    The kind's `class` (sleeping or listening) and `time` (it needs the wall clock) go with it,
    and its `id`: the next free number (the bridge stores it in the gateway's registry, so a
    number is never reused for another kind; the `kind_ids_are_pinned` test lists them).

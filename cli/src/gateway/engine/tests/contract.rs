@@ -212,10 +212,12 @@ fn topic_rows() -> Vec<TopicRow> {
 }
 
 /// Whether `topic` (without the prefix) is an instance of `pattern`: the same levels, a
-/// `{placeholder}` standing for any one.
+/// `{placeholder}` standing for any one; the `{prop}` of a state for one or two (a grouped
+/// state, `state/temperature/system`).
 fn is_instance(pattern: &str, topic: &str) -> bool {
     let (p, t): (Vec<&str>, Vec<&str>) = (pattern.split('/').collect(), topic.split('/').collect());
-    p.len() == t.len() && p.iter().zip(&t).all(|(p, t)| p.starts_with('{') || p == t)
+    let grouped = pattern.ends_with("/state/{prop}") && t.len() == p.len() + 1;
+    (p.len() == t.len() || grouped) && p.iter().zip(&t).all(|(p, t)| p.starts_with('{') || p == t)
 }
 
 /// `pattern` as a subscription filter: every placeholder a `+`.
@@ -438,7 +440,7 @@ fn session() -> Bridge {
     let mut items = heapless::Vec::new();
     items
         .extend_from_slice(&[
-            (props::common::TEMPERATURE, 2150),
+            (props::common::TEMPERATURE_SYSTEM, 2150),
             (props::thermostat::SETPOINT, 215),
             (props::thermostat::MODE, 0),
             (props::thermostat::DEMAND, 1),
@@ -1676,7 +1678,13 @@ fn the_access_table_is_what_the_bridge_does() {
     );
     // One property of each access, all of the `control` kind but the state and the event.
     let cases = [
-        ("state", "temperature", props::common::TEMPERATURE, 2150, "21.5"),
+        (
+            "state",
+            "temperature/system",
+            props::common::TEMPERATURE_SYSTEM,
+            2150,
+            "21.5",
+        ),
         ("control", "power-relay", props::control::POWER_RELAY, 1, "true"),
         ("event", "button", props::common::BUTTON, 2, "\"click\""),
         ("setting", "heartbeat", props::common::HEARTBEAT, 600, "600"),
@@ -1726,7 +1734,13 @@ fn the_access_table_is_what_the_bridge_does() {
             other => panic!("{access}: unreadable settable cell {other}"),
         };
         let out = b.mqtt(&format!("{}/set/{name}", topics::node(P, A)), json.as_bytes());
-        assert_eq!(set_queued(&out, name), settable, "{access}: set/{name}");
+        if name.contains('/') {
+            // A grouped state: a `set` topic is one level deep (the bridge subscribes to
+            // `set/+`), so there is none for it, and a deeper one is not a set at all.
+            assert!(!settable && out.is_empty(), "{access}: set/{name}: {out:?}");
+        } else {
+            assert_eq!(set_queued(&out, name), settable, "{access}: set/{name}");
+        }
     }
 }
 
@@ -1767,7 +1781,7 @@ fn a_set_takes_the_documented_payload_forms() {
     // Refused: out of range, an unknown property, one that is not settable, not a value.
     assert!(!queued("brightness", b"101"));
     assert!(!queued("volume", b"1"));
-    assert!(!queued("temperature", b"21.5"));
+    assert!(!queued("tilt", b"1"));
     assert!(!queued("effect", b"disco"));
     assert!(!queued("power-relay", b"[true]"));
 

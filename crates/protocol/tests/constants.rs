@@ -91,5 +91,5 @@ fn radio_envelope_budget() {
     assert_eq!(ENVELOPE_HDR, 2);
     assert_eq!(MAX_RADIO_PAYLOAD, 74);
     assert_eq!(RADIO_SHELL_CHUNK, 56);
-    assert_eq!(MAX_REPORT, 8);
+    assert_eq!(MAX_REPORT, 10);
 }

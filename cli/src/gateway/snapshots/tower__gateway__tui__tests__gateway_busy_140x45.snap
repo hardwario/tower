@@ -22,16 +22,16 @@ expression: "shot(&mut app, size)"
 │                                                                               ││   -8s                       -4s                     now │
 └───────────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────────────────────────┘
 ┌ Shell: kitchen ‹1/4› ───────────────────────────────────────┐┌ MQTT · 9 msgs · F7 = filter node ─────────────────────────────────────────┐
-│ > system resource print                                     ││ ▲ gateway/status ®                                                        │
-│ uptime = 3600 s                                             ││ {"state":"online","schema":4,"gateway":"0x00000001","firmware":"radio_gat │
-│ stack = 1840 of 2048 bytes                                  ││ eway","serial_up":true}                                                   │
-│ wire = console 0x1234 radio 0xabcd                          ││ ▲ nodes/0x0000ab12/event/button                                           │
-│ ✓                                                           ││ {"value":"click","count":42,"counter":1234,"ts":1700000000}               │
-│ > system eeprom wipe                                        ││ ▼ gateway/cmd                                                             │
-│ ✖ result 5                                                  ││ {"id":"u1","op":"node_add","params":{"addr":"0x0000cd34","key":"<redacted │
-│ > led blink                                                 ││ >"}}                                                                      │
-│ ✖ queue TTL expired without a confirmed delivery            ││ ▲ gateway/rsp/u1 {"id":"u1","ok":true}                                    │
-│ ⌛ system settings set report-period=30 (ref 9; p→Del       ││ ▲ nodes/0x0000cd34/state/temperature ® {"value":21.5,"ts":1700000003}     │
+│ > system resource print                                     ││ {"state":"online","schema":5,"gateway":"0x00000001","firmware":"radio_gat │
+│ uptime = 3600 s                                             ││ eway","serial_up":true}                                                   │
+│ stack = 1840 of 2048 bytes                                  ││ ▲ nodes/0x0000ab12/event/button                                           │
+│ wire = console 0x1234 radio 0xabcd                          ││ {"value":"click","count":42,"counter":1234,"ts":1700000000}               │
+│ ✓                                                           ││ ▼ gateway/cmd                                                             │
+│ > system eeprom wipe                                        ││ {"id":"u1","op":"node_add","params":{"addr":"0x0000cd34","key":"<redacted │
+│ ✖ result 5                                                  ││ >"}}                                                                      │
+│ > led blink                                                 ││ ▲ gateway/rsp/u1 {"id":"u1","ok":true}                                    │
+│ ✖ queue TTL expired without a confirmed delivery            ││ ▲ nodes/0x0000cd34/state/temperature/system ®                             │
+│ ⌛ system settings set report-period=30 (ref 9; p→Del       ││ {"value":21.5,"ts":1700000003}                                            │
 │ dequeues)                                                   ││ ▼ nodes/0x0000ab12/shell/req {"id":"tui-5","line":"led on"}               │
 │ ⌛ led on (ref 10; p→Del dequeues)                          ││ ▲ nodes/0x0000ab12/shell/pending ® [{"ref":9,"id":"tui-4","line":"system  │
 │ > system settings set heartbeat=600                         ││ settings set report-period=30"},{"ref":10,"id":"tui-5","line":"led on"}]  │
@@ -68,23 +68,23 @@ aaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbcbbbbbbbbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 .....................................................................................eee.......................eee.....................eee
 
 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-p.eekkkkkk.kkkkkkkk.fffff.....................................p..kkddddddddddddddee
-p.qqqqqqeeerrrrrr.............................................p..ekkkkkkkerrrrrrrrekkkkkkkkeqekkkkkkkkkerrrrrrrrrrrrekkkkkkkkkkerrrrrrrrrr
-p.qqqqqeeerrrrrrrrrrrrrrrrrr..................................p..rrrrrekkkkkkkkkkkeffffe
-p.qqqqeeerrrrrrrrrrrrrrrrrrrrrrrrrrr..........................p..kkddddddddddddddddddddddddddddd
-p.r...........................................................p..ekkkkkkkerrrrrrrekkkkkkkeqqekkkkkkkkkeqqqqekkkkeqqqqqqqqqqe
-p.eekkkkkk.kkkkkk.ffff........................................p..ssddddddddddd
-p.tttttttttt..................................................p..ekkkkerrrrekkkkerrrrrrrrrrekkkkkkkkeekkkkkkerrrrrrrrrrrrekkkkkerrrrrrrrrr
-p.eekkk.fffff.................................................p..rree
-p.tttttttttttttttttttttttttttttttttttttttttttttttt............p..kkdddddddddddddd.ekkkkerrrrekkkkeffffe
-p.u.uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu.......p..kkddddddddddddddddddddddddddddddddddee.ekkkkkkkeqqqqekkkkeqqqqqqqqqqe
-p.uuuuuuuuu...................................................p..ssdddddddddddddddddddddddddd.ekkkkerrrrrrrekkkkkkerrrrrrrre
-p.u.uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu..........................p..kkddddddddddddddddddddddddddddddee.eekkkkkeqekkkkerrrrrrrekkkkkkerrrrrrr
-p.kk.................................v........................p..rrrrrrrrrrrrrrrrrrrrrrrrrrrrrreeekkkkkeqqekkkkerrrrrrrekkkkkkerrrrrrrree
+p.eekkkkkk.kkkkkkkk.fffff.....................................p..ekkkkkkkeqqqqqqqqekkkkkkkkerekkkkkkkkkeqqqqqqqqqqqqekkkkkkkkkkeqqqqqqqqqq
+p.rrrrrreeeqqqqqq.............................................p..qqqqqekkkkkkkkkkkeffffe
+p.rrrrreeeqqqqqqqqqqqqqqqqqq..................................p..kkddddddddddddddddddddddddddddd
+p.rrrreeeqqqqqqqqqqqqqqqqqqqqqqqqqqq..........................p..ekkkkkkkeqqqqqqqekkkkkkkerrekkkkkkkkkerrrrekkkkerrrrrrrrrre
+p.q...........................................................p..ssddddddddddd
+p.eekkkkkk.kkkkkk.ffff........................................p..ekkkkeqqqqekkkkeqqqqqqqqqqekkkkkkkkeekkkkkkeqqqqqqqqqqqqekkkkkeqqqqqqqqqq
+p.tttttttttt..................................................p..qqee
+p.eekkk.fffff.................................................p..kkdddddddddddddd.ekkkkeqqqqekkkkeffffe
+p.tttttttttttttttttttttttttttttttttttttttttttttttt............p..kkdddddddddddddddddddddddddddddddddddddddddee
+p.u.uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu.......p..ekkkkkkkerrrrekkkkerrrrrrrrrre
+p.uuuuuuuuu...................................................p..ssdddddddddddddddddddddddddd.ekkkkeqqqqqqqekkkkkkeqqqqqqqqe
+p.u.uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu..........................p..kkddddddddddddddddddddddddddddddee.eekkkkkerekkkkeqqqqqqqekkkkkkeqqqqqqq
+p.kk.................................v........................p..qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqeeekkkkkerrekkkkeqqqqqqqekkkkkkeqqqqqqqqee
 p.............................................................p..kkddddddddddddddddee.wwwwwwwww
 p.............................................................p..kkdddddddd
-p.............................................................p..ekkkkkkerrrrrrrrrrrrekkkkkkeqekkkkkkkkkerrrrrrrrrrrrrrrekkkkkkkkkkeffffek
-p.............................................................p..kkkeqqqqqqqqqqe
+p.............................................................p..ekkkkkkeqqqqqqqqqqqqekkkkkkerekkkkkkkkkeqqqqqqqqqqqqqqqekkkkkkkkkkeffffek
+p.............................................................p..kkkerrrrrrrrrre
 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 
 
@@ -112,8 +112,8 @@ m: Cyan on Cyan
 n: Blue
 o: Green on Blue
 p: LightRed BOLD
-q: Magenta
-r: Green
+q: Green
+r: Magenta
 s: Magenta BOLD
 t: Red
 u: Yellow DIM
