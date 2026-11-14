@@ -5,6 +5,6 @@
 #   llvm-tools          : `cargo objcopy` / `cargo size` (cargo-binutils) in firmware/justfile
 #   thumbv6m-none-eabi  : the STM32L083CZ (Cortex-M0+) firmware target
 [toolchain]
-channel = "1.99.1"
+channel = "1.100.0"
 components = ["rustfmt", "clippy", "llvm-tools"]
 targets = ["thumbv6m-none-eabi"]
