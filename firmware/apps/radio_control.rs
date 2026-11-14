@@ -2,8 +2,8 @@
 //! Relay Module's relay on the radio, a **listening** taf node (`docs/firmware/taf.md`): it keeps
 //! its receiver on, so a command from MQTT takes effect within about one radio round trip.
 //!
-//! Properties (`nodes/{addr}/state/...`, set with `nodes/{addr}/set/...`): `relay` (on/off, the
-//! Power Module's), `relay-module` (on/off, the Relay Module's latching relay), `strip` (on/off),
+//! Properties (`nodes/{addr}/state/...`, set with `nodes/{addr}/set/...`): `power-relay` (on/off,
+//! the Power Module's), `signal-relay` (on/off, the Relay Module's latching relay), `strip` (on/off),
 //! `effect` (one of the [`strip_player`] effects), `brightness` (%), `color` (`0xRRGGBB` as a
 //! number), `speed` (%); the setting `relay-boot` says what both relays do after a power-up (off,
 //! on, or their last state). The `strip ...` shell commands work as in `led_strip`, locally and
@@ -15,7 +15,7 @@
 //! the accelerometer's `tilt` events are the taf runtime's, as in every taf app.
 //!
 //! **The Relay Module does not have to be fitted.** The app looks for it at start and every 10 s
-//! while it is missing; `relay-module` is reported only while the module answers. Its relay is
+//! while it is missing; `signal-relay` is reported only while the module answers. Its relay is
 //! latching: it is pulsed to its `relay-boot` state when the module is found (a latching relay
 //! cannot be read back, and it keeps whatever position it had through a power cut), and its LED
 //! shows the position while the `led` setting is on.
@@ -112,7 +112,7 @@ mod control {
     /// The values reported, in property order.
     fn snapshot(relay: &Relay) -> [(u8, i32); 6] {
         [
-            (control::RELAY, i32::from(relay.is_on())),
+            (control::POWER_RELAY, i32::from(relay.is_on())),
             (control::STRIP, i32::from(strip_player::is_on())),
             (control::EFFECT, strip_player::effect() as i32),
             (control::BRIGHTNESS, i32::from(strip_player::brightness())),
@@ -140,12 +140,12 @@ mod control {
             let mut act = Module::Nothing;
             match select3(taf::next_set(), taf::next_button(), Timer::after(POLL)).await {
                 Either3::First((id, value)) => match id {
-                    control::RELAY => relay.set(value != 0),
-                    control::RELAY_MODULE => {
+                    control::POWER_RELAY => relay.set(value != 0),
+                    control::SIGNAL_RELAY => {
                         module_on = value != 0;
                         act = Module::Switch;
                         if module.is_none() {
-                            warn!(target: "control", "relay-module set, but no Relay Module");
+                            warn!(target: "control", "signal-relay set, but no Relay Module");
                         }
                     }
                     control::STRIP => strip_player::set_on(value != 0),
@@ -189,21 +189,21 @@ mod control {
                 };
                 match m.apply(module_on, led, act == Module::Switch).await {
                     Ok(()) if act == Module::Switch => {
-                        info!(target: "control", "relay-module {}", on_off(module_on));
-                        taf::report(control::RELAY_MODULE, i32::from(module_on));
+                        info!(target: "control", "signal-relay {}", on_off(module_on));
+                        taf::report(control::SIGNAL_RELAY, i32::from(module_on));
                     }
                     Ok(()) => {}
                     Err(_) => {
                         warn!(target: "control", "Relay Module gone");
                         module = None;
-                        taf::forget(control::RELAY_MODULE);
+                        taf::forget(control::SIGNAL_RELAY);
                     }
                 }
             }
             let now = snapshot(&relay);
             if now != last {
                 if now[0] != last[0] {
-                    info!(target: "control", "relay {}", on_off(relay.is_on()));
+                    info!(target: "control", "power-relay {}", on_off(relay.is_on()));
                 }
                 for (id, value) in now {
                     taf::report(id, value);

@@ -367,7 +367,7 @@ struct TafCmd {
     seq: u64,
     /// The encoded `NodeCmd` (the queue item's data).
     data: Vec<u8>,
-    /// What the log calls it: `set relay = on`, `time sync`, `describe`.
+    /// What the log calls it: `set power-relay = on`, `time sync`, `describe`.
     label: String,
     /// The property a `Set` sets: a newer set of it replaces one still waiting.
     set: Option<u8>,
@@ -1104,7 +1104,7 @@ impl Engine {
 
     /// Queue one command for `node` on the gateway (delivered after the node's next uplink, or at
     /// once to a listening node). Its outcome is only logged: the node's reply (a `Report`, an
-    /// `Info`) is what confirms it. `label` is what the log calls it (`set relay = on`).
+    /// `Info`) is what confirms it. `label` is what the log calls it (`set power-relay = on`).
     ///
     /// The gateway holds two commands per node (four in all). A `Set` it has no room for waits
     /// on this host ([`PropMirror::waiting`]) and follows as the node takes what is queued; while
@@ -3303,7 +3303,10 @@ mod tests {
             publishes(&out, "tower/nodes/0x0000ab12/state/holdoff"),
             [&b""[..]]
         );
-        assert_eq!(publishes(&out, "tower/nodes/0x0000ab12/state/relay"), [&b""[..]]);
+        assert_eq!(
+            publishes(&out, "tower/nodes/0x0000ab12/state/power-relay"),
+            [&b""[..]]
+        );
         assert!(publishes(&out, "tower/nodes/0x0000ab12/state/setpoint").is_empty());
         drain(&mut e, out);
         // Removed: every state of every kind is cleared, published by this run or not.
@@ -3313,7 +3316,7 @@ mod tests {
         ));
         let (req_id, _) = removed.iter().find_map(sent_op).expect("NodeRemove goes out");
         let out = reply(&mut e, req_id, MGMT_OK, &[]);
-        for leaf in ["setpoint", "holdoff", "relay", "heartbeat"] {
+        for leaf in ["setpoint", "holdoff", "power-relay", "heartbeat"] {
             let topic = format!("tower/nodes/0x0000ab12/state/{leaf}");
             assert_eq!(publishes(&out, &topic), [&b""[..]], "{topic}");
         }
@@ -3558,10 +3561,10 @@ mod tests {
             ))
         };
         let mut waiting = 0;
-        let out = set(&mut e, "relay", "on");
+        let out = set(&mut e, "power-relay", "on");
         assert_eq!(pushes(&e, &out, &mut waiting), 1, "the set is queued");
         for (prop, body) in [
-            ("relay", "maybe"),
+            ("power-relay", "maybe"),
             ("band", "us915"),
             ("temperature", "20"),
             ("nonsense", "1"),
@@ -3582,7 +3585,7 @@ mod tests {
         let out = set(&mut e, "effect", "\"fire\"");
         assert_eq!(pushes(&e, &out, &mut waiting), 1);
         // An unknown node.
-        let out = e.handle(mqtt_in("tower/nodes/0x00000001/set/relay", b"on"));
+        let out = e.handle(mqtt_in("tower/nodes/0x00000001/set/power-relay", b"on"));
         assert_eq!(pushes(&e, &out, &mut waiting), 0);
     }
 
@@ -3615,9 +3618,9 @@ mod tests {
         let qid = |item: u16| postcard::to_stdvec(&QueueId { item }).unwrap();
 
         // Two sets fill the node's queue on the gateway.
-        let out = set(&mut e, "relay", "on");
+        let out = set(&mut e, "power-relay", "on");
         let (req, _) = sent_pushes(&out)[0].clone();
-        assert!(logged(&out, "set relay = on queued"));
+        assert!(logged(&out, "set power-relay = on queued"));
         let out = reply(&mut e, req, MGMT_OK, &qid(1));
         assert!(sent_pushes(&out).is_empty());
         let out = set(&mut e, "strip", "on");
@@ -3709,7 +3712,7 @@ mod tests {
             ))
         };
         // Both issued before any answer: the first is sent, the second waits for the request slot.
-        let out = set(&mut e, "relay", "on");
+        let out = set(&mut e, "power-relay", "on");
         let (first, _) = sent_pushes(&out)[0].clone();
         let out = set(&mut e, "strip", "on");
         assert!(sent_pushes(&out).is_empty(), "one request at a time");
@@ -3726,7 +3729,10 @@ mod tests {
             .iter()
             .map(|w| w.label.as_str())
             .collect();
-        assert_eq!(labels, ["set relay = on", "set strip = on", "set speed = 200"]);
+        assert_eq!(
+            labels,
+            ["set power-relay = on", "set strip = on", "set speed = 200"]
+        );
     }
 
     /// A waiting set whose queue report was lost is tried again after a while; a refusal of
@@ -3741,7 +3747,7 @@ mod tests {
                 body.as_bytes(),
             ))
         };
-        let out = set(&mut e, "relay", "on");
+        let out = set(&mut e, "power-relay", "on");
         let (req, _) = sent_pushes(&out)[0].clone();
         let _ = reply(&mut e, req, mgmt::MGMT_FULL, &[]);
         let mut retried = None;
@@ -3756,7 +3762,10 @@ mod tests {
         // The node is gone from the gateway meanwhile: logged, not kept.
         let out = reply(&mut e, req, mgmt::MGMT_NOT_FOUND, &[]);
         assert!(
-            logged(&out, "set relay = on for node 0x0000ab12 not queued: not found"),
+            logged(
+                &out,
+                "set power-relay = on for node 0x0000ab12 not queued: not found"
+            ),
             "{out:?}"
         );
         assert!(e.nodes[0].props.waiting.is_empty());
@@ -3779,7 +3788,7 @@ mod tests {
     fn waiting_sets_are_dropped_when_the_app_changes() {
         let mut e = engine();
         with_kind(&mut e, 0xAB12, "radio_control");
-        let out = e.handle(mqtt_in("tower/nodes/0x0000ab12/set/relay", b"on"));
+        let out = e.handle(mqtt_in("tower/nodes/0x0000ab12/set/power-relay", b"on"));
         let (req, _) = sent_pushes(&out)[0].clone();
         let _ = reply(&mut e, req, mgmt::MGMT_FULL, &[]);
         assert_eq!(e.nodes[0].props.waiting.len(), 1);

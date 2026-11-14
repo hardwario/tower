@@ -153,7 +153,7 @@ fn modules_relay_switches_with_the_button() {
     wait_for_all(
         &mut console,
         Duration::from_secs(15),
-        &["Relay Module found", "relay-module o"],
+        &["Relay Module found", "signal-relay o"],
     );
     let boot = shell(&mut console, 1, "system settings get relay-boot");
     assert!(
@@ -170,9 +170,9 @@ fn modules_relay_switches_with_the_button() {
         wait_for_all(
             &mut console,
             Duration::from_secs(5),
-            &[&format!("relay {state}"), &format!("relay-module {state}")],
+            &[&format!("power-relay {state}"), &format!("signal-relay {state}")],
         );
-        eprintln!("HIL: click {round}: relay-module {state}");
+        eprintln!("HIL: click {round}: signal-relay {state}");
     }
     assert_eq!(
         console.decode_errors(),

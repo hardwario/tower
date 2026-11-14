@@ -46,7 +46,7 @@ expression: "shot(&mut app, size)"
 │ WARN radio: duty budget at 80 %                                                                                                          │
 │ set setpoint = 21.5 queued for node 0x0000cd34                                                                                           │
 │ ERROR net: replay lane write failed                                                                                                      │
-│ refusing set relay on 0x0000ab12: a `button` has no property `relay`                                                                     │
+│ refusing set power-relay on 0x0000ab12: a `button` has no property `power-relay`                                                         │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
  [Shift-]F1 Focus  F2 Pair  F3 Zoom  F4 Key  F5 Pause  F6 Rename  Del Remove  p Pending  F7 Filter  F8 Clear  F9 Mouse  F10 Quit
 --- styles ---

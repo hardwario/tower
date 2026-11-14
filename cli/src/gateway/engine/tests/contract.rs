@@ -1677,7 +1677,7 @@ fn the_access_table_is_what_the_bridge_does() {
     // One property of each access, all of the `control` kind but the state and the event.
     let cases = [
         ("state", "temperature", props::common::TEMPERATURE, 2150, "21.5"),
-        ("control", "relay", props::control::RELAY, 1, "true"),
+        ("control", "power-relay", props::control::POWER_RELAY, 1, "true"),
         ("event", "button", props::common::BUTTON, 2, "\"click\""),
         ("setting", "heartbeat", props::common::HEARTBEAT, 600, "600"),
         ("local setting", "band", props::common::BAND, 1, "\"us915\""),
@@ -1757,9 +1757,9 @@ fn a_set_takes_the_documented_payload_forms() {
     ] {
         assert!(own.contains(form), "the section no longer shows {form}");
     }
-    assert!(queued("relay", b"true"));
-    assert!(queued("relay", b"on"));
-    assert!(queued("relay", br#"{"value": false}"#));
+    assert!(queued("power-relay", b"true"));
+    assert!(queued("power-relay", b"on"));
+    assert!(queued("power-relay", br#"{"value": false}"#));
     assert!(queued("brightness", b"50"));
     assert!(queued("effect", b"fire"));
     assert!(queued("effect", br#""fire""#));
@@ -1769,16 +1769,16 @@ fn a_set_takes_the_documented_payload_forms() {
     assert!(!queued("volume", b"1"));
     assert!(!queued("temperature", b"21.5"));
     assert!(!queued("effect", b"disco"));
-    assert!(!queued("relay", b"[true]"));
+    assert!(!queued("power-relay", b"[true]"));
 
     // Until the bridge knows the node's kind, it cannot check a set and refuses it (and asks
     // the node to describe itself, which is the one request that goes out).
     let mut b = Bridge::with_kitchen();
-    let out = b.mqtt(&format!("{}/set/relay", topics::node(P, A)), b"true");
+    let out = b.mqtt(&format!("{}/set/power-relay", topics::node(P, A)), b"true");
     let lines = logs(&out);
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(
-        lines[0].starts_with("refusing set relay") && lines[0].contains("kind is not known yet"),
+        lines[0].starts_with("refusing set power-relay") && lines[0].contains("kind is not known yet"),
         "{lines:?}"
     );
     // The examples of the section name real properties of real kinds.

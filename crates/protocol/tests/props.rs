@@ -151,14 +151,14 @@ fn property_ids_are_pinned() {
     assert_eq!(
         own("control"),
         [
-            ("relay", 16),
+            ("power-relay", 16),
             ("relay-boot", 17),
             ("strip", 18),
             ("effect", 19),
             ("brightness", 20),
             ("color", 21),
             ("speed", 22),
-            ("relay-module", 23),
+            ("signal-relay", 23),
         ]
     );
     assert_eq!(
@@ -172,7 +172,7 @@ fn property_ids_are_pinned() {
     );
     assert_eq!(
         (
-            control::RELAY,
+            control::POWER_RELAY,
             control::RELAY_BOOT,
             control::STRIP,
             control::EFFECT
@@ -184,7 +184,7 @@ fn property_ids_are_pinned() {
             control::BRIGHTNESS,
             control::COLOR,
             control::SPEED,
-            control::RELAY_MODULE
+            control::SIGNAL_RELAY
         ),
         (20, 21, 22, 23)
     );

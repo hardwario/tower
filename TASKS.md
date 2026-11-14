@@ -539,8 +539,9 @@ not, the gates and the bench pass, and the release dry run is green on that comm
   objection does not apply. In `z_apps` with the thermostat. The option passed over was to keep
   "s" and slim the sensors task (9.2 KB of it is one poll function). 2026-11-10.
 - **D16. The Relay Module in `radio_control`: a control of its own.** Decided by Claude, as
-  above: `relay-module`, next to the Power Module's `relay`, so a node with both switches two
-  loads. Both follow `relay-boot`; a click of the Core button switches both (the Relay Module's
+  above, so a node with both modules switches two loads; named by the maintainer the next
+  morning: `signal-relay` for the Relay Module's and `power-relay` for the Power Module's
+  (they were `relay-module` and `relay` overnight; T34). Both follow `relay-boot`; a click of the Core button switches both (the Relay Module's
   follows the Power Module's). The option passed over was one `relay` property driving both
   relays (no new property, no independent control). 2026-11-10.
 - **D17. One temperature per node.** Decided by Claude, as above: the Climate Module's own
@@ -556,6 +557,15 @@ not, the gates and the bench pass, and the release dry run is green on that comm
 ## Done
 
 (Newest first; one line each.)
+
+- **T34. The relays by their kind: `power-relay` and `signal-relay`** (the maintainer's answer
+  to D16): the Power Module's relay was `relay` and the Relay Module's `relay-module`. The
+  property names and their id constants (`control::POWER_RELAY`, `control::SIGNAL_RELAY`; the
+  ids are unchanged), the node's log lines (`control: power-relay on`, `control: signal-relay
+  on`), the bridge's tests, the MQTT contract test and seven TUI frames, the two HIL groups and
+  the docs follow; `relay-boot` keeps its name (it is for both). The radio tag moves (0x4cf2 to
+  0xbc0f): the CLI reinstalled, both bench boards reflashed. `just check` green; bench: the
+  modules HIL group passed with the new lines (315 s). 2026-11-10.
 
 - **T3. Listening node on US 915**: `radio_control` follows the gateway's hop schedule all the
   time (`Net::fhss_node_listen`: receive slices on the current slot's channel, placed around the

@@ -131,7 +131,7 @@ fn even_channel_use(gw: &mut Console, node_addr: u32) {
             100 + i,
             node_addr,
             &NodeCmd::Set {
-                id: control::RELAY,
+                id: control::POWER_RELAY,
                 value,
             },
         );
@@ -141,7 +141,7 @@ fn even_channel_use(gw: &mut Console, node_addr: u32) {
             item,
             node_addr,
             SERIES_PATIENCE,
-            |m| matches!(m, NodeMsg::Report(items) if items.contains(&(control::RELAY, value))),
+            |m| matches!(m, NodeMsg::Report(items) if items.contains(&(control::POWER_RELAY, value))),
         );
         let took = reported.unwrap_or_else(|| panic!("set {i} of the series was not confirmed"));
         late += u32::from(took > LISTEN_BUDGET);
@@ -274,7 +274,7 @@ fn listening_node_takes_downlinks_at_once() {
         assert!(Instant::now() < quiet_by, "the node never went quiet after boot");
     }
 
-    // 1. A property set (MQTT `nodes/{addr}/set/relay`): delivered at once, confirmed by the
+    // 1. A property set (MQTT `nodes/{addr}/set/power-relay`): delivered at once, confirmed by the
     //    node's report of the new value.
     let t0 = Instant::now();
     let item = queue(
@@ -282,7 +282,7 @@ fn listening_node_takes_downlinks_at_once() {
         10,
         node_addr,
         &NodeCmd::Set {
-            id: control::RELAY,
+            id: control::POWER_RELAY,
             value: 1,
         },
     );
@@ -292,9 +292,9 @@ fn listening_node_takes_downlinks_at_once() {
         item,
         node_addr,
         LISTEN_BUDGET,
-        |m| matches!(m, NodeMsg::Report(items) if items.contains(&(control::RELAY, 1))),
+        |m| matches!(m, NodeMsg::Report(items) if items.contains(&(control::POWER_RELAY, 1))),
     );
-    println!("set relay: delivered {delivered:?}, reported {reported:?}");
+    println!("set power-relay: delivered {delivered:?}, reported {reported:?}");
     assert!(
         delivered.is_some(),
         "the set was delivered within {LISTEN_BUDGET:?}"
@@ -338,7 +338,7 @@ fn listening_node_takes_downlinks_at_once() {
         12,
         node_addr,
         &NodeCmd::Set {
-            id: control::RELAY,
+            id: control::POWER_RELAY,
             value: 0,
         },
     );
@@ -348,7 +348,7 @@ fn listening_node_takes_downlinks_at_once() {
         item,
         node_addr,
         LISTEN_BUDGET,
-        |m| matches!(m, NodeMsg::Report(items) if items.contains(&(control::RELAY, 0))),
+        |m| matches!(m, NodeMsg::Report(items) if items.contains(&(control::POWER_RELAY, 0))),
     );
     assert!(off.is_some(), "the relay went off again");
 

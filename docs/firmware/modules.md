@@ -195,8 +195,9 @@ opt-level "z" (the drivers cost 14 KB at "s", which leaves the r1 board 2.4 KB; 
 
 **`radio_control`** looks for the Relay Module at start and every 10 s while it is missing. When
 it is found its relay is pulsed to the `relay-boot` state (`off`, `on`, or `last` from EEPROM),
-the same setting the Power Module's relay follows. `relay-module` is a control like `relay`
-(`nodes/{addr}/set/relay-module`), reported only while the module answers. A click of the Core
+the same setting the Power Module's relay follows. `signal-relay` is a control like
+`power-relay`, the Power Module's (`nodes/{addr}/set/signal-relay`), reported only while the
+module answers. A click of the Core
 button switches the Power Module's relay and the Relay Module's with it; the module's LED shows
 the position while the `led` setting is on.
 

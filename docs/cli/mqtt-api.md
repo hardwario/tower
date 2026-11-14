@@ -253,7 +253,7 @@ other like any schema change. Every property is one of:
 | Access | Published on | Settable with `set` | Meaning |
 |--------|--------------|---------------------|---------|
 | state | `state/{prop}`, retained | no | Measured or derived by the node (`temperature`, `demand`) |
-| control | `state/{prop}`, retained | yes | A state the host may set too (`relay`, `setpoint`) |
+| control | `state/{prop}`, retained | yes | A state the host may set too (`power-relay`, `setpoint`) |
 | event | `event/{prop}`, not retained | no | Something happened; the value is its detail (`button`, `motion`) |
 | setting | `state/{prop}`, retained | yes | Kept in the node's EEPROM (`heartbeat`, `sensitivity`) |
 | local setting | `state/{prop}`, retained | no (USB console only) | A setting a remote change could cut the link with (`band`) |
@@ -309,14 +309,14 @@ and its own:
 | `motion` (`radio_motion`) | sleeping | `motion` | number 1..65535 | event | | Motion: `1` when it starts; at the end of a `holdoff` that saw more, their number |
 | | | `sensitivity` | `low`, `medium`, `high`, `very-high` | setting | `high` | The PIR detection threshold |
 | | | `holdoff` | number s, 1..3600 | setting | `10` | The least time between two events |
-| `control` (`radio_control`) | listening | `relay` | bool | control | | The Power Module's relay |
+| `control` (`radio_control`) | listening | `power-relay` | bool | control | | The Power Module's relay |
 | | | `relay-boot` | `off`, `on`, `last` | setting | `off` | Both relays after a power-up |
 | | | `strip` | bool | control | | The LED strip on or off |
 | | | `effect` | `rainbow`, `palette`, `fire`, `twinkle`, `candle`, `plasma`, `scanner`, `balls`, `meteor`, `sparkle`, `running`, `chase`, `wipe`, `curtain`, `breathe`, `solid`, `sunrise`, `clock` | control | | The strip's effect |
 | | | `brightness` | number %, 0..100 | control | | Strip brightness |
 | | | `color` | number 0..16777215 (`0xRRGGBB`) | control | | The colour of the effects that take one |
 | | | `speed` | number %, 10..1000 | control | | Effect speed |
-| | | `relay-module` | bool | control | | The Relay Module's latching relay; published only while the module is fitted (a `set` without it is not confirmed) |
+| | | `signal-relay` | bool | control | | The Relay Module's latching relay; published only while the module is fitted (a `set` without it is not confirmed) |
 | `thermostat` (`radio_thermostat`) | sleeping | `setpoint` | number °C, 5..30, 1 decimal | control | | The setpoint in force; a set holds until the program's next switch point (`auto`) or for good (`manual`) |
 | | | `mode` | `auto`, `manual`, `off` | control | | `auto` follows the weekly program |
 | | | `demand` | bool | state | | The thermostat calls for heat |

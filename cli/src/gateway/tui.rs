@@ -2625,7 +2625,7 @@ mod tests {
             "WARN radio: duty budget at 80 %",
             "set setpoint = 21.5 queued for node 0x0000cd34",
             "ERROR net: replay lane write failed",
-            "refusing set relay on 0x0000ab12: a `button` has no property `relay`",
+            "refusing set power-relay on 0x0000ab12: a `button` has no property `power-relay`",
         ] {
             app.on_event(Event::Log(line.into()));
         }

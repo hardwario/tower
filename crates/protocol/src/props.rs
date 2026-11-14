@@ -399,19 +399,19 @@ pub mod motion {
     };
 }
 
-/// `radio_control`: the Power Module's relay and LED strip and the Relay Module's relay, a
-/// listening node.
+/// `radio_control`: the Power Module's relay (`power-relay`) and LED strip and the Relay
+/// Module's relay (`signal-relay`), a listening node.
 pub mod control {
     use super::*;
 
-    pub const RELAY: u8 = APP_BASE;
+    pub const POWER_RELAY: u8 = APP_BASE;
     pub const RELAY_BOOT: u8 = APP_BASE + 1;
     pub const STRIP: u8 = APP_BASE + 2;
     pub const EFFECT: u8 = APP_BASE + 3;
     pub const BRIGHTNESS: u8 = APP_BASE + 4;
     pub const COLOR: u8 = APP_BASE + 5;
     pub const SPEED: u8 = APP_BASE + 6;
-    pub const RELAY_MODULE: u8 = APP_BASE + 7;
+    pub const SIGNAL_RELAY: u8 = APP_BASE + 7;
 
     /// [`RELAY_BOOT`] values: the relays after a power-up.
     pub const RELAY_BOOT_STATES: &[&str] = &["off", "on", "last"];
@@ -428,7 +428,8 @@ pub mod control {
         class: Class::Listening,
         time: true,
         props: &[
-            bool_prop(RELAY, "relay", Access::Control, ""),
+            // The Power Module's relay (mains).
+            bool_prop(POWER_RELAY, "power-relay", Access::Control, ""),
             Prop {
                 id: RELAY_BOOT,
                 name: "relay-boot",
@@ -467,7 +468,7 @@ pub mod control {
                 default: "",
             },
             // The Relay Module's latching relay; reported only while the module is fitted.
-            bool_prop(RELAY_MODULE, "relay-module", Access::Control, ""),
+            bool_prop(SIGNAL_RELAY, "signal-relay", Access::Control, ""),
         ],
     };
 }
